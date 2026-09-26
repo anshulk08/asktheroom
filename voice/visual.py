@@ -717,7 +717,7 @@ class VisualQA:
         if not online:
             if k == "OTHER":
                 return Answer(OFFLINE)
-            return self._sighting(said=said[0]) if how == "pick" else None
+            return self._sighting(said=said[0]) if k == "WHERE" else None
         if self._capped():
             log.info("visual questions: hourly cap reached; answering without the camera")
             return None
