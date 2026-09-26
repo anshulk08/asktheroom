@@ -516,6 +516,7 @@ class _Scorer:
         self.anchor = {p: None for p in self.props}
         self.changes, self.placements = [], []
         self.guessed: set = set()
+        self.placed: set = set()                # entities a place / putdown step bound: placements
         k = 0
         for s in self.samples:
             while k < len(self.step_props) and self.step_props[k][0]["t"] <= s.t:
@@ -568,6 +569,8 @@ class _Scorer:
             self._bind(p, ent, t_arr, pos, f"{s['event']} at {ts:g} s", excused=s["event"] in PUT)
             w[1] = min(w[1], max(t_arr, ts) + self.bars.pre_s)
             row.update(entity=ent, t_confirm=round(t_arr, 2), delay_s=round(t_arr - ts, 2), missed=False)
+            if s["event"] in MISSABLE:
+                self.placed.add(ent)
         self.placements.append(row)
 
     def _rest(self, p: str, s: Sample) -> None:
@@ -720,7 +723,7 @@ class _Scorer:
             prop = ever.get(n) or ever.get(_survivor(n, self.tr.merged))
             row = {"entity": n, "t": round(t, 2), "pos_cm": [round(float(v), 1) for v in pos] if pos else None,
                    "kind": kind, "of": self.birth_of.get(n), "during": self._during(t), "prop": prop}
-            if kind == "initial":
+            if kind == "initial" and n not in self.placed:
                 initial.append(row)
             elif prop is not None:
                 continue

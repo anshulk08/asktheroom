@@ -149,6 +149,7 @@ def test_placement_teach_and_question_point_at_the_one_identity(tmp_path):
     (p,) = r["placements"]
     assert p["entity"] == "thing:1" and p["missed"] is False and 0 < p["delay_s"] < 3
     assert r["missed_placements"] == 0 and r["identity_changes"] == [] and r["false_births"] == []
+    assert r["initial_scene"]["count"] == 0    # put down at 2.9 s, inside the initial window: still a placement
     assert r["pass"] is True
 
 
