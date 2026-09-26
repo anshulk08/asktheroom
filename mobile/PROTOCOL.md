@@ -95,10 +95,13 @@ A 414-byte state snapshot at MTU 185 is 3 chunks: `03 00 00 …179 B`, `03 01 00
   - unparseable: `"I couldn't read that question."`; empty `q`: `"Ask me where something is, like: where are my keys?"`
   - a question while another is still in flight: `"I'm still answering your last question."`
     (one question is answered at a time, and one more can wait in the queue)
-- The bridge sends the question to `POST http://127.0.0.1:8000/ask` with `{"text": q, "source": "dashboard"}`.
-  **`dashboard` is the source that speaks and moves the laser.** `server/app.py` accepts only
-  `{"dashboard", "n8n"}`, and `main.Room.ask_and_act` treats `sms` and `n8n` as text-only. Asking from the
-  phone has the same effect as asking from the dashboard: the answer is spoken on the rig and the laser points.
+- The bridge sends the question to `POST http://127.0.0.1:8000/ask` with `{"text": q, "source": "phone"}`.
+  `phone` and `dashboard` are the sources a client may name, and both speak and move the laser
+  (`main.Room.ask_and_act` treats only `sms` and `n8n` as text-only). Asking from the phone has the same
+  effect as asking from the dashboard: the answer is spoken on the rig and the laser points.
+- **Dictating next to the rig (P1).** The always-on mic also hears a question the judge dictates into the
+  phone. The rig drops a voice question that nearly matches (same words after normalizing) a phone question
+  from the last 3 s, so it is answered once. The phone shows only the answer whose `id` matches its question.
 
 ## 6. answer (notify)
 
@@ -113,13 +116,35 @@ A 414-byte state snapshot at MTU 185 is 3 chunks: `03 00 00 …179 B`, `03 01 00
 | `ok` | bool | false = the bridge's own reply (rejected, room down, timeout, error) |
 | `text` | str | what the rig speaks; show it on the answer card |
 | `point_at` | str \| null | entity the laser aims at (`keys`, `box`, `thing:3`, …) |
-| `action` | str \| null | `point`, `circle` (lost track: circling the last-seen spot), `sweep:left\|right\|top\|bottom` (carried off that edge), or null |
+| `action` | str \| null | `point`, `circle` (lost track: circling the last-seen spot), `sweep:left\|right\|top\|bottom` (carried off that edge), or null. **An open string (P3):** later versions may add values (`trace`, `tour`, …); a client that doesn't know one pulses `point_at` at `target` if present, else shows the text only |
 | `target` | [x, y] \| null | table-cm position of `point_at`: its resolved position (a hidden object inherits its parent's), falling back to its last-seen spot; 1 decimal |
 | `ms` | int | bridge time from receiving the write to having the answer (includes `/ask` and one `/state`) |
 
 All keys are always present. `ok: false` texts: `"The room isn't running right now."` (the app's HTTP API is
 unreachable), `"Sorry, that took too long. Please ask again."` (over 12 s),
 `"Sorry, something went wrong answering that."` (HTTP error).
+
+### 6a. Answers the phone didn't ask for (P2, notices)
+
+The same characteristic also carries, with `"id": null`:
+
+- **Room answers**: every question answered by the rig from another source (spoken to the room, the dashboard,
+  SMS), with `src` = that source and `q` = the question as heard. The phone's own questions are not repeated.
+- **Notices**: a reminder or the morning report as it fires, with `src: "notice"`, `nid` (the notice id; the
+  phone acknowledges it with the dashboard's `POST /notices/{nid}/ack` when it has Wi-Fi, otherwise not at all
+  in v1) and `kind` (`reminder`, `morning`, …).
+
+```json
+{"id": null, "src": "voice", "q": "where are my keys", "ok": true, "text": "Your keys are inside the box.",
+ "point_at": "keys", "action": "point", "target": [70.4, 38.1], "ms": null}
+{"id": null, "src": "notice", "nid": 12, "kind": "reminder", "ok": true,
+ "text": "It's 9 and the pill bottle hasn't been picked up yet.", "point_at": "pill_bottle", "action": "point",
+ "target": [30.2, 12.0], "ms": null}
+```
+
+Only what happens while a phone is subscribed is sent; nothing is replayed on connect. The bridge learns of
+them from `GET /state` (`answers`, the last 10 with a `seq`; `notices`), so they arrive within ~0.25 s of the
+answer. A v1 client that ignores `src` drops them, because their `id` matches none of its questions.
 
 The laser stays on for `laser_timeout_s` (10 s). Its live state comes in `state.laser`, so the phone can
 pulse the target while `laser.on && laser.target == point_at`.
@@ -149,7 +174,7 @@ removed, or `online` or `laser` has to change. A visible object's `ls` ticking d
 | `v` | int | protocol version, 1 |
 | `t` | float | wall time of the snapshot (Unix s, 1 decimal) |
 | `table` | [w, h] | table size in cm |
-| `online` | bool | the rig has internet (only open-ended questions need it) |
+| `online` | bool | the rig has internet: the cloud voice (ElevenLabs) and Grok (questions about what the camera sees, open questions, narration). Where-is and history answers always work offline |
 | `laser` | {on, target} | laser on, and which entity it points at (`target` is present, null when none) |
 | `e` | list | every entity |
 | `e[].n` | str | name (`keys`, `pill_bottle`, …, or open-world `thing:N`). Always present |
@@ -191,7 +216,7 @@ aliases it is about 2.8 KB (16 chunks); the raw `/state` JSON for that is 5.7 KB
 
 | What | Target |
 |---|---|
-| answer | notified as soon as `/ask` returns. Offline template answers take about 10–60 ms on the rig; LLM answers take up to 4 s |
+| answer | notified as soon as `/ask` returns. Offline template answers take about 10–60 ms on the rig; Grok answers about what the camera sees take about 1–2 s; the bridge gives up at 12 s |
 | state | ≤ 2 Hz, heartbeat 5 s, 1–16 chunks |
 | status | on change, ≤ 1 Hz |
 | queueing | the bridge sends notifications in priority order answer > status > state, 4 chunks per 5 ms tick. A newer state or status replaces a queued one that hasn't started sending; a message already partly sent is always finished |

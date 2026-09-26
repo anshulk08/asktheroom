@@ -38,7 +38,7 @@ import bleproto as P  # noqa: E402
 
 log = logging.getLogger("askroom.ble")
 
-ASK_SOURCE = "dashboard"      # spoken + laser (see module docstring)
+ASK_SOURCE = "phone"          # spoken + laser, like "dashboard" (see module docstring); /state 'answers' tags it
 REPO_DEFAULT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 BUSY_TEXT = "I'm still answering your last question."
 SLOW_TEXT = "Sorry, that took too long. Please ask again."
@@ -160,6 +160,7 @@ class BridgeCore:
         self.table_cm = (float(table_cm[0]), float(table_cm[1]))
         self.table_cal, self.laser_cal = table_cal, laser_cal
         self.source = source
+        self.seen = {"answers": None, "notices": None}   # newest seq / notice id already handled (None: first poll)
         self.clock, self.mono = clock, mono
         self.state_min_s, self.heartbeat_s, self.status_min_s = state_min_s, heartbeat_s, status_min_s
         self.ask_timeout_s = ask_timeout_s
@@ -249,6 +250,7 @@ class BridgeCore:
                 if not self.app_up:
                     log.info("room app is up")
                 self.app_up, self.latest_state = True, st
+            self.room_messages(body)
         except Exception as ex:
             with self.lock:
                 self.stats["poll_fail"] += 1
@@ -256,6 +258,37 @@ class BridgeCore:
                     log.warning("room app unreachable: %s", ex)
                 self.app_up = False
         self.push_updates()
+
+    def room_messages(self, body: dict) -> None:
+        """New answers from the room (not the phone's own) and new notices, on the answer characteristic
+        with id null (PROTOCOL.md 6a). What happened before the first poll is not replayed."""
+        def rows(key, idk):
+            return [r for r in (body.get(key) or []) if isinstance(r, dict) and isinstance(r.get(idk), int)
+                    and not isinstance(r.get(idk), bool)]
+        out = []
+        for key, idk in (("answers", "seq"), ("notices", "id")):
+            rs = sorted(rows(key, idk), key=lambda r: r[idk])
+            last = self.seen[key]
+            if rs:
+                self.seen[key] = max(rs[-1][idk], last or 0)
+            if last is None:
+                self.seen[key] = self.seen[key] or 0
+                continue
+            for r in rs:
+                if r[idk] <= last or not r.get("text"):
+                    continue
+                target = P.target_of(self.latest_state, r.get("point_at"))
+                if key == "answers" and r.get("src") != self.source:
+                    out.append(P.room_msg(str(r.get("src") or "voice"), r["text"], r.get("point_at"),
+                                          r.get("action"), target, q=str(r.get("q") or "")))
+                elif key == "notices":
+                    out.append(P.room_msg("notice", r["text"], r.get("point_at"), r.get("action"), target,
+                                          nid=r["id"], kind=r.get("kind")))
+        with self.lock:
+            live = self.notifying["answer"]
+        for m in out if live else []:
+            self._send("answer", m)
+            self.stats["room_msgs"] = self.stats.get("room_msgs", 0) + 1
 
     def compact_now(self) -> dict:
         with self.lock:

@@ -345,6 +345,7 @@ class FakeHTTP:
         self.down = False
         self.ask_exc = None
         self.asked = []
+        self.meta = {}
         self.reply = {"text": "The keys are inside the box.", "point_at": "keys", "action": "point",
                       "latency_ms": 40}
 
@@ -352,7 +353,8 @@ class FakeHTTP:
         if self.down:
             raise B.RoomDown("connection refused")
         assert path == "/state"
-        return {"state": json.loads(json.dumps(self.state)), "last_answer": None, "server_t": 0}
+        return {"state": json.loads(json.dumps(self.state)), "last_answer": None, "server_t": 0,
+                **json.loads(json.dumps(self.meta))}
 
     def post_json(self, path, body, timeout=12.0):
         if self.down:
@@ -480,7 +482,7 @@ def test_question_answer_with_target_and_speaking_source():
     qid, text, t0 = core.asks.get_nowait()
     mono.t += 0.8
     msg = core.answer(qid, text, t0)
-    assert http.asked == [{"text": "where are my keys?", "source": "dashboard"}]
+    assert http.asked == [{"text": "where are my keys?", "source": "phone"}]
     assert msg == {"id": 321, "ok": True, "text": "The keys are inside the box.", "point_at": "keys",
                    "action": "point", "target": [70.4, 38.1], "ms": 800}
 
@@ -642,3 +644,84 @@ def test_bridge_questions_are_spoken_and_aimed():
                            respond=responded.append)
     main.Room.ask_and_act(room, "where are my keys?", seen[0])
     assert responded, f"source {seen[0]!r} is answered as text only"
+
+
+# ---------------------------------------------------------------- room answers and notices (P2)
+
+def room_answer(seq, src="voice", q="where are my keys", text="Your keys are inside the box.", point_at="keys"):
+    return {"seq": seq, "t": 1790000000.0 + seq, "src": src, "q": q, "text": text, "point_at": point_at,
+            "action": "point" if point_at else None}
+
+
+def notice(nid, text="It's 9 and the pill bottle hasn't been picked up.", point_at="pill_bottle"):
+    return {"id": nid, "t": 1790000000.0, "kind": "reminder", "text": text, "point_at": point_at,
+            "action": "point", "acknowledged": False}
+
+
+def test_room_answers_and_notices_reach_the_phone_once_and_only_new_ones():
+    core, http, phone, mono = make()
+    http.meta = {"answers": [room_answer(1)], "notices": [notice(4)]}
+    core.set_notifying("answer", True)
+    core.poll_once()                                   # what happened before the phone connected: not replayed
+    assert phone.msgs["answer"] == []
+    http.meta = {"answers": [room_answer(1), room_answer(2, src="phone"), room_answer(3, q="what color is it",
+                                                                                      text="Brown.", point_at=None)],
+                 "notices": [notice(5), notice(4)]}
+    core.poll_once()
+    core.poll_once()                                   # again: nothing twice
+    got = phone.msgs["answer"]
+    assert got == [
+        {"id": None, "src": "voice", "q": "what color is it", "ok": True, "text": "Brown.", "point_at": None,
+         "action": None, "target": None, "ms": None},
+        {"id": None, "src": "notice", "nid": 5, "kind": "reminder", "ok": True,
+         "text": "It's 9 and the pill bottle hasn't been picked up.", "point_at": "pill_bottle",
+         "action": "point", "target": None, "ms": None}]           # the phone's own question (src phone) is skipped
+
+
+def test_room_answer_carries_the_target_position():
+    core, http, phone, mono = make()
+    http.meta = {"answers": []}
+    core.set_notifying("answer", True)
+    core.poll_once()
+    http.meta = {"answers": [room_answer(1)]}
+    core.poll_once()
+    [m] = phone.msgs["answer"]
+    assert m["src"] == "voice" and m["q"] == "where are my keys" and m["target"] == [70.4, 38.1]
+
+
+def test_room_messages_wait_for_a_subscribed_phone_and_bad_rows_are_ignored():
+    core, http, phone, mono = make()
+    http.meta = {"answers": [], "notices": []}
+    core.poll_once()
+    http.meta = {"answers": [room_answer(1), "junk", {"seq": "x"}], "notices": [notice(1), {"id": None}]}
+    core.poll_once()                                   # not subscribed: dropped, not queued
+    core.set_notifying("answer", True)
+    core.poll_once()
+    assert phone.msgs["answer"] == []
+
+
+def test_server_logs_recent_answers_with_their_source():
+    from fastapi.testclient import TestClient
+
+    from core.config import load_config
+    from core.fakeworld import demo_world
+    from core.types import Answer
+    from server.app import create_app
+
+    world = demo_world()
+    seen = []
+    app = create_app(load_config(), world, world.events,
+                     ask_fn=lambda text, source: seen.append(source) or Answer("ok", point_at="keys", action="point"))
+    c = TestClient(app)
+    c.post("/ask", json={"text": "where are my keys?", "source": "phone"})
+    c.post("/ask", json={"text": "and my wallet?", "source": "root"})            # unknown source -> dashboard
+    app.state.record_answer("what color is it", Answer("Brown."), "voice")        # main.py's voice loop
+    assert seen == ["phone", "dashboard"]
+    rows = c.get("/state").json()["answers"]
+    assert [(r["seq"], r["src"], r["q"], r["text"]) for r in rows] == [
+        (1, "phone", "where are my keys?", "ok"), (2, "dashboard", "and my wallet?", "ok"),
+        (3, "voice", "what color is it", "Brown.")]
+    for i in range(30):
+        app.state.record_answer(f"q{i}", Answer("a"), "voice")
+    rows = c.get("/state").json()["answers"]
+    assert len(rows) == 10 and rows[-1]["seq"] == 33

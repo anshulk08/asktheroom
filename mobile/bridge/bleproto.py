@@ -155,6 +155,14 @@ def answer_msg(qid: int, ok: bool, text: str, point_at: Optional[str] = None,
             "target": target, "ms": int(ms)}
 
 
+def room_msg(src: str, text: str, point_at: Optional[str] = None, action: Optional[str] = None,
+             target: Optional[list] = None, **extra) -> dict:
+    """An answer the phone didn't ask for (id null): a question asked in the room (src 'voice',
+    'dashboard', ..., with 'q') or a reminder notice (src 'notice', with 'nid' and 'kind')."""
+    return {"id": None, "src": src, **extra, "ok": True, "text": str(text), "point_at": point_at,
+            "action": action, "target": target, "ms": None}
+
+
 def target_of(state: Optional[dict], name: Optional[str]) -> Optional[list]:
     """Resolved table-cm position of an entity in a WorldState (falls back to its last-seen spot)."""
     if not name or not isinstance(state, dict):

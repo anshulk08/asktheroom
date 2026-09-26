@@ -7,11 +7,12 @@ create_app(cfg, world, events, frames=None, ask_fn=None, table=None, care=None) 
   WS   /ws             WorldState JSON at server.push_hz plus new events since the last push
   GET  /events?since=t   events with wall >= t (oldest first), each with a snapshot_url
   GET  /snapshots/{name} one event snapshot jpg (snapshot dir only)
-  POST /ask              {"text"} -> {"text", "point_at", "action", "latency_ms"}
+  POST /ask              {"text", "source"?: "dashboard" | "phone"} -> {"text", "point_at", "action", "latency_ms"}
   POST /sms              Twilio webhook (signature checked, whitelist only)
 
 With care=voice.care.Care (reminders, reports; see voice/care.py), additively:
-  /state and /ws         also carry "notices": [{id, t, kind, text, point_at, acknowledged, ...}]
+  /state and /ws         also carry "notices": [{id, t, kind, text, point_at, acknowledged, ...}] and
+                         "answers": the last 10 answers from every source [{seq, t, src, q, text, point_at, action}]
   POST /notices/{id}/ack acknowledge a notice (the phone app's button)
   GET  /report?date=YYYY-MM-DD&format=markdown|text|json   the caregiver summary for a day
 
@@ -21,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import collections
 import json
 import logging
 import math
@@ -48,6 +50,7 @@ WEB_DIR = Path(__file__).resolve().parent / "web"
 BOUNDARY = "askroomframe"
 SNAP_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.(jpg|jpeg|png)$")
 ASK_TIMEOUT_S = 10.0          # dashboard: ask_fn has its own 4 s LLM timeout; this is a backstop
+ASK_SOURCES = {"dashboard", "phone"}       # /ask sources a client may name; both are spoken and aimed
 SMS_TIMEOUT_S = 10.0          # Twilio gives a webhook 15 s
 INITIAL_EVENTS = 200          # events sent on a fresh WS connection
 EMPTY_TWIML = '<?xml version="1.0" encoding="UTF-8"?><Response></Response>'
@@ -161,6 +164,19 @@ def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = 
 
     app = FastAPI(title="Ask the Room", docs_url=None, redoc_url=None)
     app.state.last_answer = None
+    app.state.answers = collections.deque(maxlen=10)   # recent answers from every source, for the phone
+    app.state.answer_seq = 0
+    answers_lock = threading.Lock()
+
+    def record_answer(question: str, ans: Answer, source: str) -> None:
+        """Log an answer for /state 'answers' (main.py calls this for voice questions too)."""
+        with answers_lock:
+            app.state.answer_seq += 1
+            app.state.answers.append({"seq": app.state.answer_seq, "t": time.time(), "src": source,
+                                      "q": question, "text": ans.text, "point_at": ans.point_at,
+                                      "action": ans.action})
+
+    app.state.record_answer = record_answer
     placeholder_img = overlay.placeholder()
 
     # -- snapshot urls
@@ -185,7 +201,7 @@ def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = 
         return d
 
     def meta() -> dict:
-        out = {"last_answer": app.state.last_answer, "server_t": time.time()}
+        out = {"last_answer": app.state.last_answer, "server_t": time.time(), "answers": list(app.state.answers)}
         if care is not None:                                   # care layer: additive key
             try:
                 out["notices"] = care.notices_json()
@@ -319,6 +335,7 @@ def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = 
         app.state.last_answer = {"question": text, "text": ans.text, "point_at": ans.point_at,
                                  "action": ans.action, "latency_ms": ms, "source": source,
                                  "t": time.time()}
+        record_answer(text, ans, source)
         return ans, ms
 
     @app.post("/ask")
@@ -330,7 +347,8 @@ def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = 
         text = str((body or {}).get("text", "")).strip() if isinstance(body, dict) else ""
         if not text:
             raise HTTPException(400, "text is required")
-        ans, ms = await run_ask(text[:500], "dashboard", ASK_TIMEOUT_S)
+        source = body.get("source") if body.get("source") in ASK_SOURCES else "dashboard"
+        ans, ms = await run_ask(text[:500], source, ASK_TIMEOUT_S)
         return JSONResponse({"text": ans.text, "point_at": ans.point_at, "action": ans.action,
                              "latency_ms": ms})
 
