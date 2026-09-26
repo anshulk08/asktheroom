@@ -44,7 +44,6 @@ BOUNDARY = "askroomframe"
 SNAP_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.(jpg|jpeg|png)$")
 ASK_TIMEOUT_S = 10.0          # dashboard: ask_fn has its own 4 s LLM timeout; this is a backstop
 SMS_TIMEOUT_S = 10.0          # Twilio gives a webhook 15 s
-ASK_SOURCES = {"dashboard", "n8n"}   # /ask callers; n8n (the team chat workflow) gets text-only answers
 INITIAL_EVENTS = 200          # events sent on a fresh WS connection
 EMPTY_TWIML = '<?xml version="1.0" encoding="UTF-8"?><Response></Response>'
 AskFn = Callable[[str, str], Answer]
@@ -320,10 +319,7 @@ def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = 
         text = str((body or {}).get("text", "")).strip() if isinstance(body, dict) else ""
         if not text:
             raise HTTPException(400, "text is required")
-        source = body.get("source", "dashboard")
-        if source not in ASK_SOURCES:
-            raise HTTPException(400, f"source must be one of {sorted(ASK_SOURCES)}")
-        ans, ms = await run_ask(text[:500], source, ASK_TIMEOUT_S)
+        ans, ms = await run_ask(text[:500], "dashboard", ASK_TIMEOUT_S)
         return JSONResponse({"text": ans.text, "point_at": ans.point_at, "action": ans.action,
                              "latency_ms": ms})
 

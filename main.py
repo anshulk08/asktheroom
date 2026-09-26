@@ -41,7 +41,6 @@ from voice.intents import parse
 log = logging.getLogger("askroom.main")
 
 OFF = {"on": False, "target": None, "err_cm": None}
-TEXT_ONLY = ("sms", "n8n")     # sources answered in text, without speaking or moving the laser
 
 
 class FlatTable:
@@ -99,10 +98,9 @@ class Room:
         return ans
 
     def ask_and_act(self, text: str, source: str) -> Answer:
-        """ask_fn for the server: dashboard questions are spoken and aimed; texts and n8n chat
-        questions are only answered."""
+        """ask_fn for the server: dashboard questions are spoken and aimed, texts only answered."""
         ans = self.ask(text, source)
-        if source not in TEXT_ONLY:
+        if source != "sms":
             self.respond(ans)
         return ans
 

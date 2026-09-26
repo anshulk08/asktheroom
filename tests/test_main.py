@@ -114,10 +114,9 @@ def test_answers_without_target_do_not_move_laser(tmp_path, cal_path):
     assert not rig.act.writes
 
 
-@pytest.mark.parametrize("source", ["sms", "n8n"])
-def test_text_sources_answer_without_speaking_or_aiming(tmp_path, cal_path, source):
+def test_sms_answers_without_speaking_or_aiming(tmp_path, cal_path):
     room, rig = make_room(tmp_path, cal_path)
-    ans = room.ask_and_act("where is my wallet?", source)
+    ans = room.ask_and_act("where is my wallet?", "sms")
     time.sleep(0.2)
     assert ans.point_at == "wallet" and room.tts.said == [] and not rig.act.writes
 
@@ -193,12 +192,6 @@ def test_dashboard_ask_route_moves_fake_laser(tmp_path, cal_path):
         r = c.post("/ask", json={"text": "where is my wallet?"})
         assert r.status_code == 200 and r.json()["point_at"] == "wallet"
         assert wait_for(lambda: room.world.laser.get("target") == "wallet")
-        room.world.laser = {"on": False, "target": None, "err_cm": None}
-        r = c.post("/ask", json={"text": "where is my keys?", "source": "n8n"})
-        assert r.status_code == 200 and r.json()["point_at"] == "keys"
-        time.sleep(0.2)
-        assert room.world.laser["target"] is None                    # n8n: text only
-        assert c.post("/ask", json={"text": "hi", "source": "voice"}).status_code == 400
 
 
 def test_perception_loop_feeds_world(tmp_path):
