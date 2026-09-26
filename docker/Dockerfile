@@ -18,3 +18,8 @@ RUN ldconfig \
  && pip install --no-index --find-links /tmp/wheels --no-deps piper-tts \
  && rm -rf /tmp/wheels \
  && python3 -c "import fastapi, uvicorn, sounddevice, piper, evdev, serial, adafruit_pca9685; print('askroom deps ok')"
+# espeak-ng: voice/tts.py's last-resort voice when Piper can't load. apt needs network (the phone hotspot) at
+# build time; an offline build still succeeds, without it.
+RUN (apt-get update && apt-get install -y --no-install-recommends espeak-ng && rm -rf /var/lib/apt/lists/* \
+     && espeak-ng --version) \
+ || echo "WARNING: espeak-ng not installed (no network during the build?): no fallback voice if Piper fails"
