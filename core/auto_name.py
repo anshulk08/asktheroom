@@ -75,6 +75,8 @@ class AutoNameConfig:
     crop_px: int = 384             # the close-up's long side as sent (small crops are upscaled)
     margin: float = 0.15           # frame crop fallback: the box grown by this fraction per side
     max_pending: int = 32          # queued close-ups at most (the oldest go first)
+    rename_after_s: float = 20.0   # a thing whose reply was no usable name gets a fresh close-up this much later ...
+    rename_max: int = 1            # ... at most this many times (0: never), while it is visible on the table
 
     @classmethod
     def from_dict(cls, d: Optional[dict]) -> "AutoNameConfig":
@@ -199,6 +201,7 @@ class AutoNamer:
         self._jobs: deque = deque()
         self._guesses: dict[str, dict] = {}
         self._done: set[str] = set()           # named, or given up on: never asked again
+        self._unnamed: dict[str, list] = {}    # replied with no usable name -> [clock() of that, re-asks so far]
         self._failed = 0
         self._calls: deque = deque()           # clock() of recent calls (the per-minute cap)
         self._stop = threading.Event()
@@ -278,6 +281,35 @@ class AutoNamer:
                 while len(self._jobs) > self.c.max_pending:
                     self._jobs.popleft()
             self._wake.set()
+        self._rename(dets, frame)
+
+    def _rename(self, dets, frame) -> None:
+        """One more close-up for a thing whose reply was no usable name, rename_after_s later, while it
+        is visible on the table. The first close-up is taken the moment it appears (often a hand is still
+        on it, or it is small and dark from a corner camera: spec 0009 rig run); a settled view often gets
+        a name."""
+        if not self._unnamed:
+            return
+        now = self.clock()
+        with self._lock:
+            due = [n for n, (t, k) in self._unnamed.items() if k < self.c.rename_max and now - t >= self.c.rename_after_s
+                   and not any(j.name == n for j in self._jobs)]
+        for name in due:
+            try:
+                ent = self.world.get(name)
+            except Exception:
+                continue
+            if ent.aliases or ent.status != Status.VISIBLE or getattr(ent, "zone", "table") != "table":
+                continue
+            img = self._close_up(ent, dets, frame)
+            with self._lock:
+                t, k = self._unnamed.get(name, [now, 0])
+                self._unnamed[name] = [now, k if img is None else k + 1]
+                if img is None:
+                    continue
+                self._done.discard(name)
+                self._jobs.append(Job(name, img, due=now))
+            self._wake.set()
 
     def _close_up(self, ent, dets, frame) -> Optional[np.ndarray]:
         """The crop store's confirmed view of ent, else the frame cut at ent's box (+ margin)."""
@@ -351,7 +383,13 @@ class AutoNamer:
             self._done.add(job.name)
             if keep:
                 self._guesses[job.name] = g
+                self._unnamed.pop(job.name, None)
                 log.info("%s looks like a %s (%.2f)", job.name, g["name"], g["confidence"])
+            elif g is None:
+                n = self._unnamed.get(job.name, [0.0, 0])[1]
+                self._unnamed[job.name] = [now, n]
+                log.info("naming %s: no usable name (low confidence or 'object')%s", job.name,
+                         "; a fresh close-up later" if n < self.c.rename_max else "")
         return True
 
     def _ask(self, img: np.ndarray) -> Optional[dict]:

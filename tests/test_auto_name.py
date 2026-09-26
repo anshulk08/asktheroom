@@ -339,3 +339,36 @@ def test_labels_and_phone_carry_the_guess():
     assert "g" not in P.compact_entity({"name": "thing:4", "kind": "target", "status": "VISIBLE"})
     prev = {"e": [P.compact_entity({"name": "thing:3", "kind": "target", "status": "VISIBLE"})]}
     assert P.state_changed(prev, {"e": [e]})           # a new guess is news for the phone
+
+
+def test_no_usable_name_gets_one_fresh_close_up_later(scene, world):
+    """Rig run (corner camera): the first close-up of a small dark remote got no usable name; a settled
+    view 20 s later is asked once more."""
+    clock = Clock()
+    namer, grok, _ = make(world, {"name": "object", "also": [], "confidence": 0.3}, REMOTE_REPLY, clock=clock)
+    put(scene, world, "a", (40, 30))
+    assert namer.step() is True and namer.guess("thing:1") is None
+    scene.run(world, 0.5)
+    assert namer.step() is False                         # not yet: rename_after_s
+    clock.t += 21
+    scene.run(world, 0.5)                                 # observe queues the fresh close-up
+    assert namer.step() is True
+    assert namer.guess("thing:1")["name"] == "remote control" and len(grok.calls) == 2
+    clock.t += 60
+    scene.run(world, 0.5)
+    assert namer.step() is False and len(grok.calls) == 2   # named: never again
+
+
+def test_a_second_unusable_reply_is_final(scene, world):
+    clock = Clock()
+    namer, grok, _ = make(world, {"name": "object", "also": [], "confidence": 0.3}, clock=clock)
+    put(scene, world, "a", (40, 30))
+    namer.step()
+    for _ in range(3):
+        clock.t += 21
+        scene.run(world, 0.5)
+        namer.step()
+    assert len(grok.calls) == 2 and namer.guess("thing:1") is None
+
+
+REMOTE_REPLY = {"name": "remote control", "also": ["remote"], "confidence": 0.7}
