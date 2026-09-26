@@ -4,7 +4,7 @@ Rules for teammates and coding agents working on Ask the Room. Read `CONTEXT.md`
 
 ## Project purpose
 
-An overhead camera on a Jetson tracks eight tabletop objects, including hidden ones (under the notebook, inside the box). People ask out loud where something is, and the rig answers in speech and points a laser at the spot. It is a HackGT 13 entry. Judging is a live demo at the expo, so the demo must be repeatable and reset in under a minute.
+An overhead camera on a Jetson tracks tabletop objects, including hidden ones (under the notebook, inside the box): eight known props, plus any other thing it sees as an unnamed `thing:N` that people can name by voice ("this is my charger"). The eight known props are the reliability fallback for the demo. People ask out loud where something is, and the rig answers in speech and points a laser at the spot. It is a HackGT 13 entry. Judging is a live demo at the expo, so the demo must be repeatable and reset in under a minute.
 
 ## Where things are
 
@@ -26,12 +26,12 @@ An overhead camera on a Jetson tracks eight tabletop objects, including hidden o
 - **World readers** (answers, LLM prompts, server, eval) use only `get`, `resolve`, `history` and `state_json` (`WorldAPI` in `core/world.py`).
 - **Spoken answers** are 1–2 short sentences with no markdown. Pill-bottle wording stays neutral: never say or imply that medication was "taken". The pill filter in `voice/llm.py` (`to_answer`, `PILLS_SAFE`) runs on every LLM answer.
 - **Shared types** in `core/types.py` change only as a team.
-- **Owned files.** Don't edit `core/capture.py`, `core/detect.py`, `core/hands.py`, `core/table.py`, `core/world.py`, `core/relations.py` or `core/events.py`. A teammate owns them, so propose changes to them instead.
-- **Grok** is used only on the detection side (spec 0003, not built). Nothing on the voice path calls it. `voice/llm.py` keeps `compact_state`, `to_answer` and the pill filter, which the local answerer reuses. `ask_grok` is not used on the voice path.
+- **Owned files.** Don't edit `core/capture.py`, `core/detect.py`, `core/hands.py`, `core/table.py`, `core/world.py`, `core/relations.py` or `core/events.py`. A teammate owns them, so propose changes to them instead. (Exception on record: the Friday-night open-world work changed `core/world.py`, `core/detect.py` and `core/table.py` with the lead's approval; `git log -- <file>` shows each change.)
+- **Grok does all LLM/VLM work** (team decision Fri night, for the xAI track): visual questions (`voice/visual.py`: set-of-marks look, recall over saved frames), episode narration (`core/narration.py`), and open questions. The local Qwen interpreter and answerer are being replaced by Grok; until then they stay as they are. Rules and templates always answer first, and offline the rig falls back to them. The key is `XAI_API_KEY` in `.env` (never committed, never printed). Every Grok answer passes the pill filter (`voice/llm.to_answer` or `core/narration_store.redact_meds`).
 - **Privacy.** Audio stays in memory only. Overheard speech the rig ignores is never logged or stored. Only accepted questions go to the `questions` table. Keep the privacy statement in `README.md` accurate whenever data handling changes.
 - **Jetson.** The Orin Nano has 8 GB of RAM shared with the GPU and runs out of memory easily. Ask before running anything heavy there (engine builds, llama.cpp builds, model downloads, evals with everything loaded). The limit is RAM, not disk. The Jetson is `guru@192.168.55.1` over USB-C. Build TensorRT engines inside the container that runs them (`scripts/dock.sh`).
 - **Tests.** Keep them passing: `.venv/bin/python -m pytest -q`. None need hardware. Add tests with new behaviour.
-- **Never commit** `tests/stt_audio/*.wav`, anything under `models/`, `.env`, calibration files (`table_cal.json`, `laser_cal.json`) or `data/events.db`.
+- **Never commit** `tests/stt_audio/*.wav`, anything under `models/` (small licensed data files the code needs go in `assets/`), `.env`, calibration files (`table_cal.json`, `laser_cal.json`) or `data/events.db`.
 - **Commits.** Small, one topic each, with conventional prefixes (`feat:`, `fix:`, `docs:`, `chore:`). No AI attribution lines. Dated commits are part of the hackathon record: all code was written after the Friday 8 PM start (the first commit is Fri Sep 25 20:05 EDT).
 - **Freeze.** After Sat Sep 26 6 PM EDT: only bug fixes, tuning from replays, and docs. Anything new becomes a spec or roadmap item, not half-built code.
 - **Docs in the same change.** When a feature's state changes, update `docs/FEATURE_STATUS.md`, and `CONTEXT.md` if the map or status moved. The n8n bot is only as current as `CONTEXT.md`.
@@ -46,6 +46,7 @@ scripts/qwen_server.sh                              # local Qwen on :8081
 python scripts/eval_understand.py                   # interpreter accuracy (needs llama-server)
 python scripts/overheard_test.py hall.wav           # always-on false triggers
 python demo_check.py                                # before every judge
+set -a && . ./.env && set +a && python -m voice.visual --selftest   # one real Grok look (needs XAI_API_KEY)
 ```
 
 ## Quality bar
