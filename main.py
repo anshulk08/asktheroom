@@ -747,7 +747,8 @@ def build(cfg: dict, fake: bool = False, camera: int = 0, with_voice: bool = Tru
 
     netmon = net.NetMonitor(cfg).start()
     cleanup.append(netmon.stop)
-    interpret = voice.understand.Understander(cfg, online=lambda: netmon.online)
+    interpret = voice.understand.Understander(cfg, online=lambda: netmon.online,
+                                              aliases=getattr(world, "alias_phrases", None))
     interpret.warm()                                   # logs and falls back to the rules if the model is down
     import core.xai
     llm = cfg.get("llm") or {}
@@ -780,7 +781,7 @@ def build(cfg: dict, fake: bool = False, camera: int = 0, with_voice: bool = Tru
         from voice.trigger import Clicker
         clicker = Clicker(cfg, keyboard=True if (fake and keyboard is None) else keyboard)
         cleanup.append(clicker.close)
-        stt = STT(cfg, clicker=clicker)
+        stt = STT(cfg, clicker=clicker, tts=tts)          # drops a clip the rig's own voice starts in
         stt.warm()
 
     room = Room(cfg, world, events, table, frames, laser, ask, netmon=netmon, tts=tts, stt=stt,
