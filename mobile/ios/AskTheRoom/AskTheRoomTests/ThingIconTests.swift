@@ -9,6 +9,7 @@ final class ThingIconTests: XCTestCase {
         XCTAssertEqual(ThingIcon.suggested(for: "pill_bottle"), .emoji("💊"))
         XCTAssertEqual(ThingIcon.suggested(for: "remote"), .symbol("appletvremote.gen4.fill"), "no emoji for a remote")
         XCTAssertEqual(ThingIcon.suggested(for: "thing:7", title: "my charger"), .emoji("🔌"))
+        XCTAssertEqual(ThingIcon.suggested(for: "thing:11", title: "phone charger?"), .emoji("🔌"), "a charger, not a phone")
         XCTAssertEqual(ThingIcon.suggested(for: "sunglasses"), .emoji("🕶️"))
         XCTAssertEqual(ThingIcon.suggested(for: "thing:9", title: "unnamed object 9"), .symbol("tag.fill"))
         XCTAssertEqual(ThingIcon.suggested(for: "keyboard"), .symbol("tag.fill"), "whole words only")

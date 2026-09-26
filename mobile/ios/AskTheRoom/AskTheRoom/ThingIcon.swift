@@ -10,9 +10,10 @@ enum ThingIcon: Equatable, Hashable, Codable {
     /// A Genmoji's HEIC image and Apple's description of it (iOS 18+ to make or paste one).
     case genmoji(Data, description: String)
 
-    /// Words in a thing's name, first match wins, so "my charger" gets a plug.
+    /// Words in a thing's name, first match wins, so "my charger" and "phone charger" get a plug.
     private static let byWord: [(words: [String], icon: ThingIcon)] = [
         (["key", "keys"], .emoji("🔑")),
+        (["charger", "plug", "cable"], .emoji("🔌")),
         (["phone", "iphone", "mobile"], .emoji("📱")),
         (["wallet", "purse"], .emoji("👛")),
         (["sunglasses"], .emoji("🕶️")),
@@ -21,7 +22,6 @@ enum ThingIcon: Equatable, Hashable, Codable {
         (["pill", "pills", "medicine", "medication", "tablets"], .emoji("💊")),
         (["box"], .emoji("📦")),
         (["notebook", "book", "diary"], .emoji("📓")),
-        (["charger", "plug", "cable"], .emoji("🔌")),
         (["cup", "mug", "tea", "coffee"], .emoji("☕️")),
         (["watch"], .emoji("⌚️")),
         (["headphones", "earphones", "airpods"], .emoji("🎧")),
