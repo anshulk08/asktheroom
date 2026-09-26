@@ -363,7 +363,7 @@ visual_memory:
 care:
   enabled: true
   tick_s: 10                  # scheduler: reminders checked against the event log this often
-  quiet_hours: ["22:00", "07:00"]   # local; nothing is spoken proactively in between
+  quiet_hours: []             # e.g. ["22:00", "07:00"]: reminders recorded but not spoken in between; off for the hackathon
   max_notices_per_hour: 4
   notice_expiry_min: 30       # unacknowledged notices leave /state after this
   ack_window_s: 60            # 'okay' / 'thanks' / 'done' this soon after a notice acknowledges it
