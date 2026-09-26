@@ -1,0 +1,116 @@
+"""Load config.yaml into a plain dict. Every module takes this dict as `cfg`; the world model
+reads the same file through the typed Config view at the bottom."""
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field, fields
+from pathlib import Path
+
+import yaml
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def load_config(path: str | os.PathLike | None = None) -> dict:
+    p = Path(path) if path else ROOT / "config.yaml"
+    with open(p) as f:
+        return yaml.safe_load(f)
+
+
+def display_name(cfg: dict, obj: str) -> str:
+    """How an object name is spoken: 'pill_bottle' -> 'pill bottle'."""
+    return (cfg.get("display_names") or {}).get(obj, obj.replace("_", " "))
+
+
+# ---------------------------------------------------------------------------------------------
+# Typed view for the world model. Built from the same config.yaml dict everyone else reads, so
+# there is one config file; fields not in the yaml keep the defaults below.
+
+@dataclass
+class ObjectSpec:
+    name: str
+    kind: str                   # 'target' | 'container' | 'cover'
+    prompts: list[str] = field(default_factory=list)
+
+
+@dataclass
+class Config:
+    objects: list[ObjectSpec] = field(default_factory=list)
+    table_size_cm: tuple[float, float] = (90.0, 60.0)
+    frame_size_px: tuple[int, int] = (1280, 720)
+
+    conf_threshold: float = 0.35
+    present_k: int = 6
+    present_n: int = 10
+    absent_max: int = 1
+
+    contact_overlap: float = 0.30
+    contact_window_s: float = 1.0
+    cover_overlap: float = 0.60
+    cover_moved_window_s: float = 3.0
+    cover_moved_min_cm: float = 2.0
+    container_dwell_s: float = 0.3
+    reappear_wait_s: float = 2.0
+    edge_margin: float = 0.05
+    held_timeout_s: float = 30.0
+    hand_lost_s: float = 0.5
+    moved_min_cm: float = 5.0
+    settle_s: float = 0.5
+    settle_cm: float = 1.5
+    max_nesting: int = 3
+    lifted_overlap_max: float = 0.2
+
+    conf_held: float = 0.9
+    conf_under: float = 0.85
+    conf_under_unknown: float = 0.6
+    conf_inside: float = 0.85
+    lifted_cover_penalty: float = 0.5
+    ambiguity_penalty: float = 0.7
+    decay_per_min: float = 0.99
+    answer_plain: float = 0.7
+    answer_hedge: float = 0.5
+
+    bg_frames: int = 30
+    bg_change_threshold: float = 25.0
+    appearance_match: float = 0.7
+    bg_update_every_s: float = 1.0
+
+    synonyms: dict[str, str] = field(default_factory=dict)
+    edge_drop_cm: float = 10.0
+    floor_zones: list[dict] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, raw: dict) -> "Config":
+        """Map the shared config.yaml layout onto the world's fields; other modules' keys are ignored."""
+        known = {f.name for f in fields(cls)}
+        kw = {k: v for k, v in raw.items() if k in known and k not in ("objects", "conf_threshold", "floor_zones")}
+        prompts = raw.get("prompts") or {}
+        kw["objects"] = [ObjectSpec(n, k, list(prompts.get(n, []))) for n, k in (raw.get("objects") or {}).items()]
+        ct = raw.get("conf_threshold")
+        if ct is not None:
+            kw["conf_threshold"] = ct.get("default", 0.35) if isinstance(ct, dict) else ct
+        if "present_k_of_n" in raw:
+            kw["present_k"], kw["present_n"] = raw["present_k_of_n"]
+        if "absent_k_of_n" in raw:
+            kw["absent_max"] = raw["absent_k_of_n"][0]
+        size = (raw.get("table") or {}).get("size_cm")
+        if size:
+            kw["table_size_cm"] = tuple(size)
+        if "frame_size_px" in raw:
+            kw["frame_size_px"] = tuple(raw["frame_size_px"])
+        zones = raw.get("floor_zones") or []
+        kw["floor_zones"] = [{"name": n, **z} for n, z in zones.items()] if isinstance(zones, dict) else list(zones)
+        return cls(**kw)
+
+    @classmethod
+    def load(cls, path: str | os.PathLike | None = None) -> "Config":
+        return cls.from_dict(load_config(path))
+
+    def kind_of(self, name: str) -> str:
+        for o in self.objects:
+            if o.name == name:
+                return o.kind
+        raise KeyError(name)
+
+    def names(self, kind: str | None = None) -> list[str]:
+        return [o.name for o in self.objects if kind is None or o.kind == kind]
