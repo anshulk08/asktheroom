@@ -146,7 +146,7 @@ class Rig:
     def __init__(self, cfg: dict, fake: bool = False, camera: Union[int, str] = 0, manual: bool = True,
                  ask: Callable[[str], str] = input):
         self.fake = fake
-        self.cfg = fake_cfg(cfg) if fake else cfg
+        self.cfg = fake_cfg(cfg) if fake else self._saved_table(cfg)
         self.camera, self.manual, self._ask = camera, manual, ask
         self._parts: dict[str, object] = {}
         self.building: set[str] = set()             # parts being made right now (a hung check marks them)
@@ -155,6 +155,18 @@ class Rig:
         self.home_cm = (fake_layout(self.cfg) if fake else
                         {o: tuple(v) for o, v in ((cfg.get("demo_check") or {}).get("home_cm") or {}).items()})
         self.home_tol_cm = float((cfg.get("demo_check") or {}).get("home_tol_cm", 5))
+
+    @staticmethod
+    def _saved_table(cfg: dict) -> dict:
+        """As main.build: the saved one-tag tracked area and tabletop outline, before the laser reads them."""
+        import copy
+
+        import core.table
+        import core.table_area
+        cfg = copy.deepcopy(cfg)
+        core.table.apply_saved_size(cfg)
+        core.table_area.apply_saved_area(cfg)
+        return cfg
 
     def part(self, name: str):
         got = self._parts.get(name)
@@ -402,11 +414,12 @@ def check_laser(rig: Rig) -> Result:
     laser = rig.part("laser")
     if laser.fit is None:
         return False, f"not calibrated ({laser.cal_path} missing): run python -m act.calibrate --rig"
+    from act.calibrate import Region
     fe = laser.fit.fit_error_cm or {}
     med, mx = float(fe.get("median", math.inf)), float(fe.get("max", math.inf))
-    w, h = laser.table_size
+    centre = Region.from_cfg(rig.cfg, laser.table_size).centre     # the tabletop's, if outlined
     try:
-        err = laser.aim((w / 2, h / 2))
+        err = laser.aim(centre)
     finally:
         laser.off()
     msg = f"fit {med:.2f} cm median ({mx:.2f} max, {laser.fit.n_points} pts); centre test "
