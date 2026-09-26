@@ -45,6 +45,7 @@ import cv2
 import numpy as np
 
 from core import geom
+from core.table_area import TableArea
 from core.types import BoxPx
 from core.yoloe_fast import is_reduced
 
@@ -661,14 +662,17 @@ def make_proposer(cfg: dict) -> Optional[Proposer]:
 
 
 def table_roi(table, cfg: dict) -> Optional[list[tuple[float, float]]]:
-    """The table outline in frame px, grown by proposals.roi_margin_cm, or None without a calibrated
-    table that can map cm to px (then the whole frame is used)."""
+    """The proposers' ROI in frame px: the operator's tabletop outline (table_area.polygon_cm, see
+    core/table_area.py) when one is set, else the calibrated area grown by proposals.roi_margin_cm; None
+    without a calibrated table that can map cm to px (then the whole frame is used)."""
     if table is None or not getattr(table, 'ok', False) or not hasattr(table, 'cm_to_px'):
         return None
+    area = TableArea.from_dict(cfg.get('table_area'))
     w, h = (cfg.get('table') or {}).get('size_cm', (90, 60))
     m = float((cfg.get('proposals') or {}).get('roi_margin_cm', 2.0))
     try:
-        pts = table.cm_to_px([[-m, -m], [w + m, -m], [w + m, h + m], [-m, h + m]])
+        pts = table.cm_to_px(area.polygon_cm if area.defined else
+                             [[-m, -m], [w + m, -m], [w + m, h + m], [-m, h + m]])
     except Exception:
         log.warning("proposals: table outline unavailable; using the whole frame", exc_info=True)
         return None

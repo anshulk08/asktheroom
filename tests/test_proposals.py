@@ -9,7 +9,7 @@ import pytest
 from core.config import load_config
 from core.detect import Detector
 from core.proposals import (ChangeProposer, DedupeConfig, Proposal, YOLOEProposer, dedupe,
-                            make_proposer)
+                            make_proposer, table_roi)
 from core.types import Frame
 from tests.synth import skin, texture
 
@@ -481,6 +481,60 @@ def test_a_failing_proposer_never_costs_the_known_objects():
     det = Detector(CFG, table=TenPxPerCm(), backend=FakeBackend([('keys', 0.9, (0, 0, 10, 10))]), proposer=Broken())
     d = det.detect(Frame(t=0, wall=0, img=np.zeros((H, W, 3), np.uint8), idx=0))
     assert [x.cls for x in d.items] == ['keys']
+
+
+
+# ------------------------------------------------------------------ the tabletop outline (table_area:)
+
+class Calibrated(TenPxPerCm):
+    H = np.eye(3)
+
+    def cm_to_px(self, pts):
+        return np.asarray(pts, dtype=float).reshape(-1, 2) * 10.0
+
+
+OUTLINE = [[30, 10], [110, 10], [110, 65], [30, 65]]     # the tabletop; x < 30 cm is the floor beside it
+CHAIR, MUG = (100, 300, 190, 380), (600, 300, 690, 380)  # px: centres at 14.5 cm and 64.5 cm
+
+
+def outlined(**proposals):
+    cfg = cfg_with(**proposals)
+    cfg['table_area'] = {'polygon_cm': OUTLINE, 'edge_cm': 3}
+    return cfg
+
+
+def test_the_proposal_roi_is_the_operator_outline_when_one_is_set():
+    assert table_roi(Calibrated(), outlined()) == [(300, 100), (1100, 100), (1100, 650), (300, 650)]
+    m = 10 * CFG['proposals']['roi_margin_cm']            # without one: the calibrated area, as before
+    assert table_roi(Calibrated(), CFG)[0] == pytest.approx((-m, -m))
+
+
+def test_the_change_proposer_never_proposes_beside_the_tabletop():
+    """On the rig the calibrated view took in the floor, a chair and a knee beside the table."""
+    tab = Table()
+    det = Detector(outlined(), table=Calibrated(), backend=FakeBackend(), proposer=proposer(), crops=None)
+    for i in range(6):
+        det.detect(Frame(t=i, wall=i, img=tab.frame(), idx=i))
+    tab.things['chair'], tab.things['mug'] = CHAIR, MUG
+    for i in range(6, 9):
+        d = det.detect(Frame(t=i, wall=i, img=tab.frame(), idx=i))
+    assert [x.box_px for x in d.items if x.cls == 'thing'] == [pytest.approx(MUG, abs=12)]
+
+
+def test_yoloe_never_proposes_beside_the_tabletop():
+    m = FakeYOLOE([(0, 0.6, CHAIR), (0, 0.6, MUG)])
+    det = Detector(outlined(), table=Calibrated(), backend=FakeBackend(),
+                   proposer=YOLOEProposer({}, model=m), crops=None)
+    d = det.detect(Frame(t=0, wall=0, img=np.zeros((H, W, 3), np.uint8), idx=0))
+    assert [x.box_px for x in d.items if x.cls == 'thing'] == [MUG]
+
+
+def test_ignored_regions_still_apply_inside_the_outline():
+    m = FakeYOLOE([(0, 0.6, (400, 300, 490, 380)), (0, 0.6, MUG)])
+    det = Detector(outlined(), table=Calibrated(), backend=FakeBackend(),
+                   proposer=YOLOEProposer({'ignore_px': [[300, 0, 500, 720]]}, model=m), crops=None)
+    d = det.detect(Frame(t=0, wall=0, img=np.zeros((H, W, 3), np.uint8), idx=0))
+    assert [x.box_px for x in d.items if x.cls == 'thing'] == [MUG]
 
 
 # ---------------------------------------------------------------- warm-up before the reference
