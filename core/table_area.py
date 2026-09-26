@@ -154,8 +154,10 @@ table plane (floor and chairs beside the table too); the outline is the tabletop
   1. Take a frame from the running rig:   curl -o frame.jpg http://<jetson>:8000/frame.jpg
   2. Open frame.jpg in a viewer that shows pixel coordinates and note the tabletop's corners in
      order around the table (4, or more for an odd shape; stay a little inside the real edge).
-  3. python -m core.table --outline-px 112,80 1190,64 1215,700 90,690
-     (or --outline x,y ... in table cm; add --image frame.jpg to draw it into frame_outline.jpg)
+  3. python -m core.table --outline-px 84,60 892,48 911,525 67,517 --image frame.jpg
+     --image: the corners are that image's px (the dashboard frame is 960 px wide), scaled to the
+     camera's, and the outline is drawn into frame_outline.jpg to check. Without it they are camera
+     px (frame_size_px). Or --outline x,y ... in table cm.
   4. Restart the app. Recalibrating the table invalidates the outline: set it again after.
 
 New things are only born at least table_area.edge_cm inside the outline; config.yaml table_area:."""
@@ -189,6 +191,14 @@ def outline_main(table, cfg: dict, cm_tokens: Optional[Sequence[str]], px_tokens
     except ValueError as e:
         print(f"outline not saved: {e}")
         return 2
+    img = cv2.imread(image) if image else None
+    if image and img is None:
+        print(f"outline not saved: could not read {image}")
+        return 2
+    fw, fh = cfg.get('frame_size_px') or (1280, 720)
+    scale = (fw / img.shape[1], fh / img.shape[0]) if img is not None else (1.0, 1.0)
+    if px:                                       # corners read off --image: that image's px -> camera px
+        pts = [(x * scale[0], y * scale[1]) for x, y in pts]
     try:
         cm = set_outline(table, cfg, pts, px=px)
     except RuntimeError as e:
@@ -196,16 +206,12 @@ def outline_main(table, cfg: dict, cm_tokens: Optional[Sequence[str]], px_tokens
         return 1
     corners_px = pts if px else [tuple(float(v) for v in p) for p in table.cm_to_px(cm)]
     print("tabletop outline (table cm):", cm)
-    print("               (image px):", [tuple(round(v) for v in p) for p in corners_px])
+    print("               (camera px):", [tuple(round(v) for v in p) for p in corners_px])
     print(f"saved {area_path(cfg)}; restart the app to use it")
-    if image:
-        img = cv2.imread(image)
-        if img is None:
-            print(f"could not read {image}")
-        else:
-            cv2.polylines(img, [np.round(np.array(corners_px)).astype(np.int32).reshape(-1, 1, 2)], True,
-                          (0, 255, 0), 2)
-            out = str(Path(image).with_name(Path(image).stem + '_outline.jpg'))
-            cv2.imwrite(out, img)
-            print(f"drawn into {out}")
+    if img is not None:
+        drawn = np.array(corners_px) / np.array(scale)
+        cv2.polylines(img, [np.round(drawn).astype(np.int32).reshape(-1, 1, 2)], True, (0, 255, 0), 2)
+        out = str(Path(image).with_name(Path(image).stem + '_outline.jpg'))
+        cv2.imwrite(out, img)
+        print(f"drawn into {out}")
     return 0

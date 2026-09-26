@@ -150,3 +150,14 @@ def test_cli_refuses_malformed_or_too_few_points(cli, capsys, tmp_path):
     assert table_main(['--outline', '0,0', '100']) == 2
     assert table_main(['--outline', '0,0', '100,0']) == 2
     assert not (tmp_path / 'table_area.json').exists()
+
+
+def test_cli_scales_corners_read_off_a_smaller_dashboard_frame(cli, tmp_path, capsys):
+    """The dashboard's /frame.jpg is 960 px wide; corners clicked on it are that image's px."""
+    import cv2
+    img = str(tmp_path / 'frame.jpg')
+    cv2.imwrite(img, np.zeros((360, 640, 3), np.uint8))           # half the 1280 x 720 camera frame
+    assert table_main(['--outline-px', '25,10', '525,10', '525,310', '25,310', '--image', img]) == 0
+    saved = json.loads((tmp_path / 'table_area.json').read_text())
+    assert np.allclose(saved['polygon_cm'], RECT)
+    assert (tmp_path / 'frame_outline.jpg').exists()
