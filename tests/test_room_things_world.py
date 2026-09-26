@@ -293,3 +293,15 @@ def test_handoff_hints_are_the_names_of_things_that_just_left(scene, world):
     trk = room_thing(scene, world, 'r:1', guess=dict(REMOTE))
     seen(scene, world, trk, zone='couch')
     assert world.room_handoff_hints(scene.t) == []                                   # consumed
+
+
+def test_a_carried_thing_is_handed_off_before_a_stale_room_copy_reacquires(scene, world):
+    """Trial run 1: an old couch copy of the remote (missing from the couch) took the new couch track, and
+    the carried thing's departure stayed open. The handoff wins now."""
+    trk = handed_over(scene, world)                           # thing:1 on the couch
+    missed(scene, world, trk, zone='couch')                    # it's picked up from the couch (missing there)
+    named_thing_leaves(scene, world, namer_for(world, REMOTE), key='remote2', thing='thing:2')
+    new = room_thing(scene, world, 'r:9', guess=dict(REMOTE))
+    evs = seen(scene, world, new, zone='couch')
+    assert [(e.type, e.obj) for e in evs] == [(EventType.FOUND, 'thing:2')]
+    assert 'thing:2' not in world._departures

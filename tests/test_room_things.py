@@ -567,3 +567,54 @@ def test_verify_fn_maps_a_match_to_the_hint_and_none_to_its_own_name():
     assert make_verify_fn(n)(img, [REMOTE])["name"] == "phone"
     n.provider = Provider({"match": "remote control", "name": "remote", "confidence": 0.2})
     assert make_verify_fn(n)(img, [REMOTE])["name"] == "remote"     # too unsure to call it a match
+
+
+def test_verify_needs_grok_s_own_description_to_fit():
+    import json
+
+    from core.room import make_verify_fn
+
+    class Reply:
+        def __init__(self, d):
+            self.text = json.dumps(d)
+
+    class Provider:
+        def __init__(self, d):
+            self.d = d
+
+        def narrate(self, system, parts, schema):
+            return Reply(self.d)
+
+    class N:
+        pass
+
+    n = N()
+    n.c = type("C", (), {"crop_px": 384, "min_confidence": 0.5})()
+    img = np.full((60, 60, 3), 128, np.uint8)
+    n.provider = Provider({"match": "remote control", "name": "computer keyboard", "confidence": 0.9})
+    assert make_verify_fn(n)(img, [REMOTE])["name"] == "computer keyboard"      # a yes that describes a keyboard
+    n.provider = Provider({"match": "remote control", "name": "tv remote", "confidence": 0.65})
+    assert make_verify_fn(n)(img, [REMOTE]) != REMOTE                            # under 0.7
+    n.provider = Provider({"match": "remote control", "name": "tv remote", "confidence": 0.8})
+    assert make_verify_fn(n)(img, [REMOTE]) == REMOTE
+
+
+def test_a_candidate_is_sent_boxed_in_red_with_its_surroundings():
+    from core.room import MARK_MIN_SIDE
+
+    asked = []
+
+    def verify(img, hints):
+        asked.append(img)
+        return dict(hints[0])
+
+    namer = RoomNamer(Namer(), start=False, clock=lambda: 0.0, verify_fn=verify)
+    big = rect_zone("wall", 0, 0, 1000, 500)
+    rm, _, _ = make(zones=(big,), props=[Proposal((300, 200, 320, 210), 0.5)], namer=namer, max_crop_px=1000)
+    rm.world = HintWorld([REMOTE])
+    _confirm_one(rm)
+    assert namer.step(0.0)
+    img = asked[0]
+    assert min(img.shape[:2]) >= MARK_MIN_SIDE                       # a 20x10 box gets a 240 px patch
+    red = (img[..., 2] > 200) & (img[..., 1] < 50) & (img[..., 0] < 50)
+    assert red.sum() > 0                                             # the box is drawn

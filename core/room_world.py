@@ -281,10 +281,11 @@ class RoomRules:
         while the track is younger than thing_name_wait_s (a name or the other track's fate may still
         come); after that it is given up."""
         rc = self.room_cfg
-        name = self._thing_reacquire(trk, visit)
-        if name is not None:
-            return 'reacquire', name
+        # The handoff first: a matching thing that just left the table is what arrived. Reacquire (an old
+        # copy of it missing from this zone) only otherwise; the other way round, a stale room copy took
+        # the new arrival and the carried thing's departure stayed open (rig run, Sat 26 Sep).
         cands = self._thing_candidates(trk, visit)
+        mismatch = False
         if len(cands) == 1:
             name, dep_t = cands[0]
             others = [p for tid, p in self._pending_things.items()
@@ -293,7 +294,12 @@ class RoomRules:
             if not others and mine is not None and theirs is not None:
                 if names_match(mine, theirs, rc.name_match_min):
                     return 'acquire', name
-                return 'ignored', None    # a shoe left the table; this is a remote: never that thing
+                mismatch = True           # a shoe left the table; this is a remote: never that thing
+        name = self._thing_reacquire(trk, visit)
+        if name is not None:
+            return 'reacquire', name
+        if mismatch:
+            return 'ignored', None
         if visit.t - trk.first_seen >= rc.thing_name_wait_s:
             return 'ignored', None
         return 'pending', None

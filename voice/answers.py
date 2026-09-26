@@ -505,15 +505,28 @@ def _prop_guesses(obj: str, intent: Intent, world, cfg: dict) -> list[str]:
     """Things whose automatic guess fits a configured prop: the words said, then its display name and
     its detector prompts ('remote control', 'tv remote')."""
     said = [intent.name or intent.obj, _dn(cfg, obj)] + list((cfg.get("prompts") or {}).get(obj) or [])
-    seen: set[str] = set()
-    for words in said:
-        if not words or words in seen:
+    hits: set[str] = set()
+    for words in dict.fromkeys(w for w in said if w):
+        try:
+            hits |= {n for n, sc in (world.find_guess(words) if hasattr(world, "find_guess") else []) if sc > 0}
+        except Exception:
             continue
-        seen.add(words)
-        hits = _guesses(words, world)
-        if hits:
-            return hits
-    return []
+    if not hits:
+        return []
+
+    def fresh(n: str):
+        """Seen now first, then most recently: several things can carry the prop's guess (each trip back
+        to the table starts a new thing, and a stale room copy lingers until its absence is confirmed);
+        the one just seen is the answer, whichever Grok phrase ('tv remote', 'remote control') fits best."""
+        try:
+            e = world.get(n)
+            p = world.place(n) if hasattr(world, "place") else None
+            live = e.status == Status.VISIBLE and (p is None or p.kind != "room" or p.fresh)
+            return (live, e.last_seen or 0.0)
+        except Exception:
+            return (False, 0.0)
+
+    return [max(hits, key=fresh)]
 
 
 def _guesses(said: str, world) -> list[str]:

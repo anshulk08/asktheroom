@@ -50,6 +50,7 @@ MATCH_DIAG = 0.5            # ... or a centre within 0.5 track-box diagonals
 DEDUPE_IOU = 0.5            # two boxes of one class this overlapped in one crop are one object (two prompts)
 THING = "thing"             # cls of an unnamed object (a YOLOE proposal); never matches a prop's track
 PROP_IOU = 0.5              # a proposal this overlapped with a prop observation is that prop
+MARK_MIN_SIDE = 240         # px: the context patch around a boxed object for "is it one of these?"
 NAME_MARGIN = 0.5           # a thing's close-up for Grok: its box grown by this per side (small, far objects
                             # need the surroundings to be recognisable: rig run Sat 26 Sep)
 ERR_LOG_S = 10.0            # a failing proposer is logged at most this often
@@ -460,7 +461,8 @@ class RoomMemory:
             hints = self._hints(full.t)
             for tr in visit.confirmed:
                 if tr.cls == THING and tr.guess is None and not tr.name_asked and hints != []:
-                    img = _close_up(visit.crop, tr.box_px, x1, y1)
+                    img = (_marked_close_up(visit.crop, tr.box_px, x1, y1) if hints and self.namer.verify_fn
+                           else _close_up(visit.crop, tr.box_px, x1, y1))
                     if img is not None:
                         tr.name_asked = True
                         self.namer.submit(tr, img, hints)
@@ -520,6 +522,28 @@ def _close_up(crop: np.ndarray, box: BoxPx, ox: int, oy: int) -> Optional[np.nda
     if a2 - a1 < 4 or b2 - b1 < 4:
         return None
     return crop[b1:b2, a1:a2].copy()
+
+
+def _marked_close_up(crop: np.ndarray, box: BoxPx, ox: int, oy: int, min_side: int = MARK_MIN_SIDE
+                     ) -> Optional[np.ndarray]:
+    """For "is it one of these?": the object boxed in red inside a wider patch of the zone (at least
+    min_side px, native resolution), so Grok sees its surroundings. A far, dark object cut out alone was
+    "no usable name" on the counter and side table (trial runs, Sat 26 Sep); set-of-marks with context is
+    what made visual questions work."""
+    h, w = crop.shape[:2]
+    x1, y1, x2, y2 = box[0] - ox, box[1] - oy, box[2] - ox, box[3] - oy
+    if x2 - x1 < 2 or y2 - y1 < 2:
+        return None
+    cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+    side = max(min_side, 3 * (x2 - x1), 3 * (y2 - y1))
+    a1, b1 = max(0, int(cx - side / 2)), max(0, int(cy - side / 2))
+    a2, b2 = min(w, int(cx + side / 2)), min(h, int(cy + side / 2))
+    if a2 - a1 < 8 or b2 - b1 < 8:
+        return None
+    out = crop[b1:b2, a1:a2].copy()
+    t = max(2, round(max(out.shape[:2]) / 120))
+    cv2.rectangle(out, (int(x1) - a1 - t, int(y1) - b1 - t), (int(x2) - a1 + t, int(y2) - b1 + t), (0, 0, 255), t)
+    return out
 
 
 # ---------------------------------------------------------------------------------------------
@@ -687,9 +711,11 @@ if __name__ == "__main__":
     raise SystemExit(main())
 
 
-VERIFY_SYSTEM = ("You look at a close-up of one object seen from across a room by a ceiling camera. The person "
-                 "is looking for one of the objects listed. Say which one it is, or 'none' if it is none of them "
-                 "or you can't tell. Also say what the object is in 1-3 words. Reply with strict JSON.")
+VERIFY_SYSTEM = ("You look at part of a room seen by a ceiling camera. One object is marked with a red box. The "
+                 "person is looking for one of the objects listed. Say which one the object in the red box is, "
+                 "or 'none' if it is none of them or you can't tell. Also say what the boxed object is in 1-3 "
+                 "words. Reply with strict JSON.")
+VERIFY_MIN_CONF = 0.7          # a "yes, it's the remote" below this is not a match
 VERIFY_SCHEMA = {
     "type": "object", "additionalProperties": False, "required": ["match", "name", "confidence"],
     "properties": {"match": {"type": "string"}, "name": {"type": "string"}, "confidence": {"type": "number"}},
@@ -701,7 +727,7 @@ def make_verify_fn(namer) -> Callable[[np.ndarray, list], Optional[dict]]:
     names of things that just left the table) is far more reliable than open naming for a small, far
     object: open naming called the remote on the couch a phone and an eyeglasses case (rig run). A match
     returns that hint's guess, so the World's name check passes; 'none' returns what Grok says it is."""
-    from core.auto_name import _jpeg, clean_name
+    from core.auto_name import _jpeg, clean_name, match_score
     from core.narration import _parse_json
 
     def verify(img: np.ndarray, hints: list) -> Optional[dict]:
@@ -712,18 +738,22 @@ def make_verify_fn(namer) -> Callable[[np.ndarray, list], Optional[dict]]:
                            for h in named)
         reply = namer.provider.narrate(VERIFY_SYSTEM, [("text", f"Looking for: {listed}"),
                                                        ("image", _jpeg(img, namer.c.crop_px)),
-                                                       ("text", "Which one is it, or none?")], VERIFY_SCHEMA)
+                                                       ("text", "Which one is the object in the red box, or none?")],
+                                        VERIFY_SCHEMA)
         d = _parse_json(reply.text) or {}
         try:
             conf = min(1.0, max(0.0, float(d.get("confidence", 0.0))))
         except (TypeError, ValueError):
             conf = 0.0
         match = clean_name(d.get("match")) or ""
-        if conf >= namer.c.min_confidence:
-            for h in named:
-                if match == clean_name(h["name"]):
-                    return dict(h)
         name = clean_name(d.get("name"))
+        if conf >= VERIFY_MIN_CONF:
+            for h in named:
+                # Asked "is it one of these?", Grok leans to yes (it matched a keyboard on the stove to a
+                # remote, rig run): its own description must fit the name too.
+                if match == clean_name(h["name"]) and name and (match_score(name, h) >= 1.5
+                                                                or match_score(h["name"], {"name": name}) >= 1.5):
+                    return dict(h)
         return {"name": name, "also": [], "confidence": round(conf, 3)} if name else None
 
     return verify

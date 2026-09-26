@@ -61,3 +61,14 @@ def test_guessed_thing_in_a_tentative_room_place_is_hedged_once():
                                   last_seen_wall=NOW - 1, arrival_observed=True, tentative=True))
     a = ask(w)
     assert a.text.startswith("Your remote, I think, is on the couch.") and a.text.count("I think") == 1
+
+
+def test_the_freshest_of_several_guessed_things_answers():
+    """Trial run: each trip back to the table starts a new thing, and a stale couch copy lingers; the one
+    seen just now answers, not the one whose Grok phrase scores best."""
+    w = world()
+    w.entities["thing:20"] = Entity("thing:20", "target", Status.VISIBLE, pos_cm=(10.0, 10.0), last_seen=NOW + 5)
+    w.find_guess = lambda said: [("thing:15", 3.0), ("thing:20", 1.5)] if "remote" in said else []
+    assert ask(w).point_at == "thing:20"
+    w.set("thing:20", status=Status.UNKNOWN)
+    assert ask(w).point_at == "thing:15"
