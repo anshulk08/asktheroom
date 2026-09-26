@@ -1,0 +1,516 @@
+"""Deterministic rule-based world model (spec 3.5). Owns every Entity; update() applies the rules
+in order once per detection batch and returns the events it emitted. Spatial and image helpers
+(covers, container dwell, parent chains, background / appearance) live in relations.py.
+
+Readers (answers, llm, server, eval) use only get / resolve / history / state_json (WorldAPI);
+core/fakeworld.py:FakeWorld has the same read API for tests and --fake runs."""
+from __future__ import annotations
+
+import threading
+import time
+from collections import deque
+from typing import Protocol, Union
+
+import cv2
+
+from core import geom, relations
+from core.config import Config
+from core.types import Detection, Detections, Entity, Event, EventType, Frame, Point, Status
+
+HISTORY_MAX = 1000
+
+# A rule verdict is (Status, parent, confidence, EventType[, candidates]), or NO_CHANGE: the rule
+# claims the object this update (later rules are skipped) but leaves the belief as it is and emits
+# nothing, e.g. while waiting out reappear_wait_s after a container visit.
+NO_CHANGE = ('NO_CHANGE',)
+
+# Event emitted when an object seen before is observed again after being believed hidden or lost.
+REAPPEAR_EVENT = {
+    Status.UNDER: EventType.UNCOVERED,
+    Status.INSIDE: EventType.TAKEN_OUT,
+    Status.GONE: EventType.CORRECTED,
+    Status.UNKNOWN: EventType.CORRECTED,
+}
+
+
+class WorldAPI(Protocol):
+    """What readers (answers, llm, server, eval) may call. World and FakeWorld both fit."""
+
+    def get(self, name: str) -> Entity: ...
+
+    def resolve(self, name: str) -> tuple[Point | None, list[str]]: ...
+
+    def history(self, name: str, n: int = 3) -> list[Event]: ...
+
+    def state_json(self) -> dict: ...
+
+
+class World:
+    def __init__(self, cfg: Union[Config, dict], events=None):
+        self.cfg = cfg if isinstance(cfg, Config) else Config.from_dict(cfg)
+        self.events = events
+        self.lock = threading.RLock()
+        # Set by the app, not the rules; carried in state_json for the dashboard and Grok.
+        self.online = False
+        self.fps = 0.0
+        self.laser = {'on': False, 'target': None, 'err_cm': None}
+        self.reset()
+
+    # ----- public API -------------------------------------------------------------------------
+
+    def reset(self) -> None:
+        with self.lock:
+            self.entities = {n: Entity(name=n, kind=self.cfg.kind_of(n), confidence=0.0)
+                             for n in self.cfg.names()}
+            self._seen_t: dict[str, float] = {}         # obj -> monotonic t of last detection
+            self._rest: dict[str, tuple] = {}           # obj -> where it last sat still (visible)
+            self._carry: dict[str, tuple] = {}          # obj -> (hand, origin) while moved in view
+            self._path: dict[str, deque] = {n: deque(maxlen=60) for n in self.entities}  # (t, pos)
+            self._bits = {n: deque(maxlen=self.cfg.present_n) for n in self.entities}
+            self._present = {n: False for n in self.entities}
+            self._confirmed: set[str] = set()      # names ever observed (debounced present / found)
+            self._contacts: dict[str, dict[str, float]] = {n: {} for n in self.entities}  # obj -> hand -> t
+            self._hands: dict[str, tuple[float, tuple, tuple]] = {}   # hand -> (last t, box_px, box_cm)
+            self._hands_now: set[str] = set()
+            self._now: float | None = None          # t of the latest update
+            self._wall: float | None = None
+            self._frame: Frame | None = None
+            self._history: deque[Event] = deque(maxlen=HISTORY_MAX)   # used when no EventLog
+            self._covers = relations.CoverMotion(self.cfg.cover_moved_min_cm)
+            self._dwell = relations.DwellTracker(self.cfg.container_dwell_s)
+            self._lifted_at: dict[str, float] = {}      # child -> when its cover moved off it
+            self._box_px: dict[str, tuple] = {}         # obj -> last detected box_px
+            self._bg = relations.BackgroundModel(self.cfg.bg_frames, self.cfg.bg_change_threshold)
+            self._looks = relations.AppearanceMemory()
+            self._look_px: dict[str, tuple] = {}        # obj -> box_px its remembered patch came from
+            self._bg_t: float | None = None             # last background / appearance refresh
+            self._gray_img = None                       # this update's grey frame, made on demand
+
+    def get(self, name: str) -> Entity:
+        with self.lock:
+            return self.entities[name]
+
+    def update(self, dets: Detections, frame: Frame) -> list[Event]:
+        with self.lock:
+            self._decay(dets.t)
+            self._now, self._wall, self._frame = dets.t, frame.wall if frame else dets.t, frame
+            self._gray_img = None
+            out: list[Event] = []
+            seen = self._best_detections(dets.items)
+            self._track_covers(seen)
+            fell: list[str] = []
+            for name, ent in self.entities.items():
+                was = self._present[name]
+                self._debounce(name, ent, seen.get(name))
+                if self._present[name] and (not was or ent.status != Status.VISIBLE):
+                    out += self._observe(name, ent)
+                elif was and not self._present[name]:
+                    fell.append(name)
+            self._track_hands(dets.hands)
+            self._record_contacts()
+            for name, ent in self.entities.items():
+                if name in seen and self._present[name] and ent.status == Status.VISIBLE:
+                    out += self._track_motion(name, ent)
+            for name in fell:
+                if self.entities[name].zone == 'table':    # other zones: overhead absence means nothing
+                    out += self._disappear(name, self.entities[name])
+            self._track_dwell(dets.hands)
+            for name, ent in self.entities.items():
+                if ent.status == Status.HELD and not self._reappearing(name):
+                    out += self._update_held(name, ent)
+            out += self._lifted_covers()
+            self._refresh_images(seen, dets.hands)
+            return out
+
+    def resolve(self, name: str) -> tuple[tuple[float, float] | None, list[str]]:
+        """Follow parent links through entity names (up to max_nesting). Returns the outermost
+        entity's last position and the chain, e.g. ((60, 40), ['keys', 'box', 'notebook']).
+        Children never move themselves: a carried or moved parent carries them by this lookup."""
+        with self.lock:
+            return relations.resolve_chain(name, self.entities, self.cfg.max_nesting)
+
+    def state_json(self) -> dict:
+        with self.lock:
+            return {'t': self._wall, 'online': self.online, 'fps': self.fps,
+                    'entities': [self._entity_json(ent) for ent in self.entities.values()],
+                    'edges': self._edges(), 'laser': dict(self.laser)}
+
+    def history(self, name: str, n: int = 3) -> list[Event]:
+        """Latest n events for name, newest first."""
+        with self.lock:
+            if self.events is not None:
+                return list(self.events.last(name, n))
+            return [ev for ev in reversed(self._history) if ev.obj == name][:n]
+
+    def observe_external(self, name: str, pos_cm, zone: str) -> list[Event]:
+        """Stretch: the search camera found the object off the table (or anywhere)."""
+        with self.lock:
+            if self._now is None:
+                self._now, self._wall = time.monotonic(), time.time()
+            self._frame = None
+            ent = self.entities[name]
+            ent.status, ent.parent, ent.candidates, ent.confidence, ent.edge = Status.VISIBLE, None, [], 1.0, None
+            ent.pos_cm, ent.box_cm, ent.zone, ent.last_seen = tuple(pos_cm), None, zone, self._wall
+            self._seen_t[name] = self._now
+            ent.pre_pickup_pos, ent.held_since = None, None
+            self._confirmed.add(name)
+            return [self._emit(name, EventType.FOUND, to_cm=ent.pos_cm)]
+
+    def _entity_json(self, ent: Entity) -> dict:
+        resolved, _ = self.resolve(ent.name)
+        return {'name': ent.name, 'kind': ent.kind, 'status': ent.status.value, 'parent': ent.parent,
+                'pos_cm': _list(ent.pos_cm), 'resolved_cm': _list(resolved), 'confidence': ent.confidence,
+                'candidates': list(ent.candidates), 'last_seen': ent.last_seen, 'zone': ent.zone,
+                'edge': ent.edge}
+
+    def _edges(self) -> list[list[str]]:
+        edges = []
+        for ent in self.entities.values():
+            if ent.parent in self.entities or _is_hand(ent.parent):
+                edges.append([ent.name, ent.status.value, ent.parent])
+            elif ent.status == Status.VISIBLE:
+                edges.append([ent.name, 'ON', ent.zone])
+        return edges
+
+    # ----- rule 1: debounce ---------------------------------------------------------------------
+
+    def _best_detections(self, items: list[Detection]) -> dict[str, Detection]:
+        best: dict[str, Detection] = {}
+        for d in items:
+            if d.cls in self.entities and d.conf >= self.cfg.conf_threshold:
+                if d.cls not in best or d.conf > best[d.cls].conf:
+                    best[d.cls] = d
+        return best
+
+    def _debounce(self, name: str, ent: Entity, det: Detection | None) -> None:
+        """Push this batch's presence bit; refresh position while detected (even before a flip)."""
+        bits = self._bits[name]
+        bits.append(det is not None)
+        if det is not None:
+            ent.pos_cm, ent.box_cm, ent.last_seen = det.center_cm, det.box_cm, self._wall
+            self._seen_t[name] = self._now
+            self._box_px[name] = det.box_px
+        count = sum(bits)
+        if count >= self.cfg.present_k:
+            self._present[name] = True
+        elif count <= self.cfg.absent_max:
+            self._present[name] = False
+
+    # ----- rule 2: observation wins -------------------------------------------------------------
+
+    def _observe(self, name: str, ent: Entity) -> list[Event]:
+        prev, origin, known = ent.status, ent.pre_pickup_pos, name in self._confirmed
+        ent.status, ent.parent, ent.candidates, ent.confidence, ent.edge = Status.VISIBLE, None, [], 1.0, None
+        ent.zone, ent.pre_pickup_pos, ent.held_since = 'table', None, None
+        self._confirmed.add(name)
+        self._rest[name] = ent.pos_cm
+        self._carry.pop(name, None)
+        if prev == Status.HELD:
+            moved = origin is not None and geom.dist(ent.pos_cm, origin) >= self.cfg.moved_min_cm
+            etype = EventType.MOVED if moved else EventType.PUT_BACK
+            return [self._emit(name, etype, from_cm=origin, to_cm=ent.pos_cm)]
+        if known and prev in REAPPEAR_EVENT:
+            return [self._emit(name, REAPPEAR_EVENT[prev], to_cm=ent.pos_cm)]
+        return []
+
+    # ----- per-update bookkeeping: cover motion, container dwell, background / appearance --------
+
+    def _track_covers(self, seen: dict[str, Detection]) -> None:
+        for name in self.cfg.names('cover'):
+            if name in seen:
+                self._covers.update(name, seen[name].box_cm, self._now)
+
+    def _track_dwell(self, hands: list[Detection]) -> None:
+        containers = {c: self.entities[c].box_cm for c in self.cfg.names('container')
+                      if self.entities[c].status == Status.VISIBLE and self.entities[c].box_cm is not None}
+        self._dwell.update(self._now, hands, containers)
+
+    def _gray(self):
+        """This update's frame in grayscale, converted at most once per update; None without an image."""
+        img = self._frame.img if self._frame is not None else None
+        if self._gray_img is None and img is not None:
+            self._gray_img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
+        return self._gray_img
+
+    def _refresh_images(self, seen: dict[str, Detection], hands: list[Detection]) -> None:
+        """Background and appearance refresh, at most every bg_update_every_s: a background update
+        costs up to ~25 ms at 320 px against a 5 ms per-update budget. Object and hand boxes are
+        never background; a patch is only remembered with no hand over the object."""
+        if self._frame is None or self._frame.img is None:
+            return
+        if self._bg_t is not None and self._now - self._bg_t < self.cfg.bg_update_every_s:
+            return
+        self._bg_t, gray = self._now, self._gray()
+        hand_px = [h.box_px for h in hands]
+        self._bg.update(gray, hand_px + self._object_boxes_px())
+        for name, det in seen.items():
+            hand_over = any(geom.intersection(det.box_px, h) for h in hand_px)
+            if self.entities[name].status == Status.VISIBLE and not hand_over:
+                self._looks.remember(name, gray, det.box_px)
+                self._look_px[name] = det.box_px
+
+    def _object_boxes_px(self) -> list[tuple]:
+        """Last boxes of objects believed present or detected within the debounce window."""
+        return [box for n, box in self._box_px.items() if self._present[n] or any(self._bits[n])]
+
+    # ----- rule 3: contacts ---------------------------------------------------------------------
+
+    def _track_hands(self, hands: list[Detection]) -> None:
+        self._hands_now = {h.cls for h in hands}
+        for h in hands:
+            self._hands[h.cls] = (self._now, h.box_px, h.box_cm)
+
+    def _record_contacts(self) -> None:
+        for name, ent in self.entities.items():
+            if ent.box_cm is None:
+                continue
+            for hid in self._hands_now:
+                if geom.overlap_frac(self._hands[hid][2], ent.box_cm) >= self.cfg.contact_overlap:
+                    self._contacts[name][hid] = self._now
+
+    # ----- rule 3b: moved in plain view -----------------------------------------------------------
+
+    def _track_motion(self, name: str, ent: Entity) -> list[Event]:
+        """A carried object often stays detected, so it never goes absent and rule 4 never fires.
+        Leaving its resting spot by moved_min_cm with a hand on it is a pick-up; untouched for
+        settle_s and still within settle_cm since the last touch is a set-down (MOVED / PUT_BACK)."""
+        pos = ent.pos_cm
+        self._path[name].append((self._now, pos))
+        rest = self._rest.setdefault(name, pos)
+        touches = self._contacts[name]
+        carry = self._carry.get(name)
+        if carry is None:
+            if geom.dist(pos, rest) < self.cfg.moved_min_cm:
+                return []
+            recent = sorted(((t, h) for h, t in touches.items()
+                             if t >= self._now - self.cfg.contact_window_s), reverse=True)
+            if not recent:                  # shifted with no hand (e.g. re-detected): new rest spot
+                self._rest[name] = pos
+                return []
+            self._carry[name] = (recent[0][1], rest)
+            return [self._emit(name, EventType.PICKED_UP, from_cm=rest, parent=recent[0][1])]
+        last_touch = max(touches.values(), default=-1e18)
+        if self._now - last_touch < self.cfg.settle_s:
+            return []
+        since = [p for t, p in self._path[name] if t > last_touch]
+        if not since or any(geom.dist(p, pos) > self.cfg.settle_cm for p in since):
+            return []
+        origin = self._carry.pop(name)[1]
+        self._rest[name] = pos
+        etype = EventType.MOVED if geom.dist(pos, origin) >= self.cfg.moved_min_cm else EventType.PUT_BACK
+        return [self._emit(name, etype, from_cm=origin, to_cm=pos)]
+
+    # ----- rule 4: disappearance ----------------------------------------------------------------
+
+    def _disappear(self, name: str, ent: Entity) -> list[Event]:
+        if self._still_there(name):
+            self._present[name] = True      # detector miss: re-checked each update while it lasts
+            return []
+        slid_over = self._slid_over_by_hand(name, ent)
+        if slid_over is not None:
+            return self._apply_verdict(name, ent, slid_over)
+        held = self._picked_up(name, ent)
+        if held or ent.status == Status.HELD:
+            return held
+        hidden = self._hidden_by(name, ent, ent.box_cm, self._now, self._frame)
+        if hidden is not None:
+            return self._apply_verdict(name, ent, hidden)
+        return self._lose(name, ent)
+
+    def _still_there(self, name: str) -> bool:
+        """Review fix: the pixels still match the remembered patch, so the detector just missed it.
+        Compared where the patch was taken, not at the last box: detection boxes wobble a few px and
+        a shifted crop decorrelates. Checked before the hand rule too: a touch within the contact
+        window followed by a detector miss must not read as a pick-up."""
+        gray, box = self._gray(), self._look_px.get(name)
+        return (gray is not None and box is not None
+                and self._looks.still_there(name, gray, box, self.cfg.appearance_match))
+
+    def _lose(self, name: str, ent: Entity) -> list[Event]:
+        """UNKNOWN at the last known position; confidence is left as it was."""
+        ent.status, ent.parent, ent.candidates, ent.held_since = Status.UNKNOWN, None, [], None
+        return [self._emit(name, EventType.LOST_TRACK)]
+
+    def _picked_up(self, name: str, ent: Entity) -> list[Event]:
+        # Debounce declares absence ~0.6-0.9 s late, so the window is anchored at last_seen, not now.
+        # The hand need not still be in view (grab-and-leave): if it has gone, the HELD pass later in
+        # this same update applies the hand-lost rule (edge -> EXITED_VIEW, else LOST_TRACK).
+        since = self._seen_t[name] - self.cfg.contact_window_s
+        hands = sorted(((t, h) for h, t in self._contacts[name].items() if t >= since), reverse=True)
+        carry = self._carry.pop(name, None)       # already picked up in view: no second event
+        if not hands:
+            return []
+        ent.status, ent.parent, ent.candidates = Status.HELD, hands[0][1], [h for _, h in hands[1:]]
+        ent.confidence = self.cfg.conf_held * (self.cfg.ambiguity_penalty if ent.candidates else 1.0)
+        ent.pre_pickup_pos, ent.held_since = (carry[1] if carry else ent.pos_cm), self._now
+        if carry:
+            return []
+        return [self._emit(name, EventType.PICKED_UP, from_cm=ent.pos_cm, parent=ent.parent)]
+
+    def _slid_over_by_hand(self, name: str, ent: Entity):
+        """The cover rule wins over the hand rule when every hand that touched the object is resting
+        on the cover that now lies over it: the touch was the cover being slid across, not a pick-up."""
+        since = self._seen_t[name] - self.cfg.contact_window_s
+        hands = [h for h, t in self._contacts[name].items() if t >= since]
+        if not hands:
+            return None
+        verdict = self._covered(name, ent.box_cm, self._now)
+        if verdict is None:
+            return None
+        cover = self._covers.state(verdict[1])
+        on_cover = all(geom.overlap_frac(cover.box_cm, self._hands[h][2]) >= self.cfg.contact_overlap
+                       for h in hands)
+        return verdict if on_cover else None
+
+    def _hidden_by(self, name, ent, box_cm, now, frame):
+        """Cover rule, then background-change rule. Returns a verdict (see NO_CHANGE) when the
+        object is judged hidden rather than lost, else None."""
+        return self._covered(name, box_cm, now) or self._background_changed(name)
+
+    def _covered(self, name, box_cm, now):
+        """A present cover that moved in the last cover_moved_window_s now lies over the last box."""
+        states = {c: self._covers.state(c) for c in self.cfg.names('cover') if c != name and self._present[c]}
+        covers = {c: st for c, st in states.items() if st is not None}
+        parents = relations.covering_candidates(box_cm, covers, now, self.cfg.cover_overlap,
+                                                self.cfg.cover_moved_window_s)
+        if not parents:
+            return None
+        return self._hidden_verdict(parents + self._visited_containers(name), self.cfg.conf_under)
+
+    def _background_changed(self, name: str):
+        """Something undetected now lies where the object was: the background model has seen the
+        bare table in (most of) that box and the pixels there differ from it."""
+        gray, box = self._gray(), self._box_px.get(name)
+        if gray is None or box is None or not self._bg.ready:
+            return None
+        if self._bg.known(box) and self._bg.changed(gray, box):
+            return (Status.UNDER, 'unknown', self.cfg.conf_under_unknown, EventType.COVERED)
+        return None
+
+    def _visited_containers(self, name: str) -> list[str]:
+        """Containers entered by a hand after it last touched this object: a rival parent when a
+        cover also qualifies. (A touch within contact_window_s of last_seen is a pick-up instead.)"""
+        out: list[str] = []
+        for hid, touched in self._contacts[name].items():
+            for container, _ in self._dwell.visits_since(hid, touched):
+                if container != name and container not in out:
+                    out.append(container)
+        return out
+
+    def _hidden_verdict(self, parents: list[str], confidence: float):
+        """UNDER the first parent; any others are ambiguity candidates at a confidence penalty."""
+        if len(parents) > 1:
+            confidence *= self.cfg.ambiguity_penalty
+        return (Status.UNDER, parents[0], confidence, EventType.COVERED, parents[1:])
+
+    # ----- rule 5: HELD objects ------------------------------------------------------------------
+
+    def _reappearing(self, name: str) -> bool:
+        """Present, or seen often enough lately that the debounce may still flip to present. A put-down
+        is judged by observation, so the hand rules wait rather than race it (a hand that drops an
+        object and leaves at once would otherwise read as lost before the object is confirmed)."""
+        return self._present[name] or sum(self._bits[name]) > self.cfg.absent_max
+
+    def _update_held(self, name: str, ent: Entity) -> list[Event]:
+        inside = self._check_inside(name, ent, self._now)
+        if inside is not None:
+            return self._apply_verdict(name, ent, inside)
+        hand_t, hand_px, _ = self._hands[ent.parent]
+        if self._now - hand_t > self.cfg.hand_lost_s:
+            edge = self._edge_of(hand_px)
+            if edge:
+                ent.status, ent.parent, ent.candidates, ent.edge = Status.GONE, None, [], edge
+                ent.held_since = None
+                return [self._emit(name, EventType.EXITED_VIEW, edge=edge)]
+            return self._lose(name, ent)
+        if self._now - ent.held_since > self.cfg.held_timeout_s:
+            return self._lose(name, ent)
+        return []
+
+    def _check_inside(self, name, ent, now):
+        """Container dwell -> INSIDE: the holding hand's latest completed container visit since the
+        object left the table ended reappear_wait_s ago and the object is still absent. While that
+        wait runs, NO_CHANGE holds off the hand-lost / timeout rules; with no visit, None falls
+        through to them."""
+        # Anchored at last_seen, not held_since: debounce declares HELD 0.6-0.9 s late, and a quick
+        # drop into the box can be over by then.
+        visits = [v for v in self._dwell.visits_since(ent.parent, self._seen_t[name]) if v[0] != name]
+        if not visits:
+            return None
+        container, exit_t = visits[-1]
+        if now - exit_t >= self.cfg.reappear_wait_s:
+            return (Status.INSIDE, container, self.cfg.conf_inside, EventType.PUT_INSIDE)
+        return NO_CHANGE        # likely dropped in: wait for a reappearance before the hand rules
+
+    def _apply_verdict(self, name: str, ent: Entity, verdict) -> list[Event]:
+        """verdict = (Status, parent, confidence, EventType[, candidates]) or NO_CHANGE."""
+        if verdict is NO_CHANGE:
+            return []
+        status, parent, confidence, etype, *rest = verdict
+        ent.status, ent.parent, ent.confidence = status, parent, confidence
+        ent.candidates, ent.held_since = list(rest[0]) if rest else [], None
+        return [self._emit(name, etype, parent=ent.parent)]
+
+    def _edge_of(self, box_px) -> str | None:
+        """Frame side the box lies within edge_margin of (the nearest one if several), else None."""
+        w, h = self.cfg.frame_size_px
+        mx, my = self.cfg.edge_margin * w, self.cfg.edge_margin * h
+        gaps = {'left': box_px[0], 'right': w - box_px[2], 'top': box_px[1], 'bottom': h - box_px[3]}
+        margin = {'left': mx, 'right': mx, 'top': my, 'bottom': my}
+        near = [(g, side) for side, g in gaps.items() if g <= margin[side]]
+        return min(near)[1] if near else None
+
+    # ----- rule 5b: lifted cover -------------------------------------------------------------------
+
+    def _lifted_covers(self) -> list[Event]:
+        """A child UNDER a named cover whose cover has left its last box (or left view) and that has
+        not reappeared within reappear_wait_s of that moment is lost, at a confidence penalty."""
+        out: list[Event] = []
+        for name, ent in self.entities.items():
+            cover = ent.parent if ent.status == Status.UNDER else None
+            if cover not in self.entities or not self._cover_lifted(cover, ent):
+                self._lifted_at.pop(name, None)
+                continue
+            since = self._lifted_at.setdefault(name, self._now)
+            if self._now - since >= self.cfg.reappear_wait_s and not self._reappearing(name):
+                del self._lifted_at[name]
+                ent.confidence *= self.cfg.lifted_cover_penalty
+                out += self._lose(name, ent)
+        return out
+
+    def _cover_lifted(self, cover: str, child: Entity) -> bool:
+        st = self._covers.state(cover)
+        if st is None or not self._present[cover] or child.box_cm is None:
+            return True
+        return geom.overlap_frac(st.box_cm, child.box_cm) < self.cfg.lifted_overlap_max
+
+    # ----- rule 6: decay -----------------------------------------------------------------------
+
+    def _decay(self, t: float) -> None:
+        # Applied before this batch's rules: it ages beliefs held over the elapsed interval, so a
+        # belief formed in this batch starts at its full confidence.
+        if self._now is None:
+            return
+        factor = self.cfg.decay_per_min ** ((t - self._now) / 60.0)
+        for ent in self.entities.values():
+            if ent.status != Status.VISIBLE:
+                ent.confidence *= factor
+
+    # ----- events -------------------------------------------------------------------------------
+
+    def _emit(self, name: str, etype: EventType, **fields) -> Event:
+        ev = Event(t=self._now, wall=self._wall, obj=name, type=etype,
+                   confidence=self.entities[name].confidence, **fields)
+        if self.events is not None:
+            self.events.add(ev, self._frame)
+        else:
+            self._history.append(ev)
+        return ev
+
+
+def _list(p):
+    return None if p is None else list(p)
+
+
+def _is_hand(parent: str | None) -> bool:
+    return parent is not None and parent.startswith('hand')
