@@ -69,3 +69,6 @@ experiments/**/frames/
 
 # Stray local session files
 *.ses
+data/clips/
+data/finetune/
+data/hands_public/

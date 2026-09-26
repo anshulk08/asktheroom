@@ -97,3 +97,13 @@ def test_write_split_yaml(tmp_path):
     d = yaml.safe_load(p.read_text())
     assert d["names"][8] == "hand" and d["val"] == "val.txt"
     assert (tmp_path / "val.txt").read_text().strip().endswith("images/2_000001.jpg")
+
+
+def test_public_hand_frames_always_train_and_never_validate():
+    from scripts.finetune.train import split_by_trial
+    stems = ([f"cap{g}_wallet-{k:02d}" for g in range(4) for k in range(2)] + [f"synth_{i:05d}" for i in range(10)]
+             + [f"pubhand_{i}" for i in range(30)])
+    for seed in range(8):
+        tr, va = split_by_trial(stems, seed=seed)
+        assert va and not any(s.startswith(("pubhand_", "synth_")) for s in va), seed
+        assert sum(s.startswith("pubhand_") for s in tr) == 30

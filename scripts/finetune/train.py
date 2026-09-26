@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))      # run as a script 
 from common import DEFAULT_DATA, class_names, trial_of  # noqa: E402
 
 
-TRAIN_ONLY = "synth"      # synthesize.py composites: always trained on, never validated on
+TRAIN_ONLY = {"synth", "pubhand"}   # composites and public hand frames: always trained on, never validated on
 
 
 def split_by_trial(stems: list[str], val_frac: float = 0.2, val_trials=None,
@@ -34,8 +34,8 @@ def split_by_trial(stems: list[str], val_frac: float = 0.2, val_trials=None,
     """Frame stems -> (train, val), whole trials to one side. With no val_trials, shuffles the trials
     (seeded) and moves them to val until about val_frac of the frames are there (at least one).
     Synthetic composites (trial 'synth') always go to train and don't count toward val_frac."""
-    synth = sorted(s for s in stems if trial_of(s) == TRAIN_ONLY)
-    stems = [s for s in stems if trial_of(s) != TRAIN_ONLY]
+    synth = sorted(s for s in stems if trial_of(s) in TRAIN_ONLY)
+    stems = [s for s in stems if trial_of(s) not in TRAIN_ONLY]
     by = defaultdict(list)
     for s in stems:
         by[trial_of(s)].append(s)
