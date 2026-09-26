@@ -325,6 +325,40 @@ def test_perception_loop_feeds_world(tmp_path):
     t.join(2)
 
 
+def test_perceive_is_one_perception_step_after_the_table_is_calibrated(tmp_path):
+    """Room.perceive(frame) is the perception loop's body (eval.score_clip replays clips through it):
+    no step until the table calibrates from a frame, then detect -> hand ids -> world, returning both."""
+    from core.types import Detection, Detections, Frame
+
+    class Det:
+        def detect(self, f):
+            d = Detection("wallet", 0.9, (100, 100, 150, 150), (60.0, 15.0), (58, 13, 62, 17))
+            h = Detection("hand", 0.8, (400, 400, 500, 500), (40.0, 40.0), (35, 35, 45, 45))
+            return Detections(t=f.t, frame_idx=f.idx, items=[d], hands=[h])
+
+    class Hands:
+        def update(self, hands, t):
+            return [Detection("hand:7", h.conf, h.box_px, h.center_cm, h.box_cm) for h in hands]
+
+    class Table:
+        ok = False
+
+        def calibrate(self, img):
+            self.ok = img is not None
+            return self.ok
+
+    events = EventLog(":memory:", str(tmp_path))
+    world = World(CFG, events)
+    room = main.Room(CFG, world, events, Table(), None, None, None, detector=Det(), hands=Hands())
+    assert room.perceive(Frame(t=0.0, wall=1000.0, img=None, idx=1)) is None      # calibrating
+    out = None
+    for i in range(2, 12):
+        out = room.perceive(Frame(t=i / 10, wall=1000.0 + i / 10, img=np.zeros((4, 4, 3), np.uint8), idx=i))
+    dets, evs = out
+    assert [h.cls for h in dets.hands] == ["hand:7"] and evs == []
+    assert str(world.get("wallet").status) == "VISIBLE"
+
+
 def test_build_fake_runs_without_hardware(monkeypatch, tmp_path):
     import net
     import voice.understand
