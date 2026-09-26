@@ -6,7 +6,8 @@ it is moving). The Detector feeds every frame's objects and proposals here; per 
   best    the cleanest view so far: sharp, confident, no hand on it, not overlapped by anything else
   recent  the latest view (at most every recent_every_s)
 Configured objects are keyed by name. Proposals have no identity in perception, so they are keyed by
-box position (a proposal continues the track whose last box it overlaps); the world asks by the box it
+box position (a proposal continues the track whose last box it overlaps; after renew_after_s unseen its
+crops start over, as another object may sit there now); the world asks by the box it
 knows: for_box(box_cm=entity.box_cm) or for_entity(entity). Memory is bounded: at most max_tracks
 tracks of two crops of at most size_px on the long side (~6 MB at the defaults).
 
@@ -83,8 +84,10 @@ def clean_score(img: np.ndarray, box: BoxPx, conf: float, others: list, hands: l
 
 class CropStore:
     def __init__(self, size_px: int = 128, max_tracks: int = 48, margin: float = 0.15,
-                 recent_every_s: float = 0.5, match_iou: float = 0.3, match_px: float = 30.0):
+                 recent_every_s: float = 0.5, match_iou: float = 0.3, match_px: float = 30.0,
+                 renew_after_s: float = 1.0):
         self.size_px, self.max_tracks, self.margin = int(size_px), int(max_tracks), float(margin)
+        self.renew_after_s = float(renew_after_s)
         self.recent_every_s, self.match_iou, self.match_px = float(recent_every_s), float(match_iou), float(match_px)
         self._tracks: dict[str, CropTrack] = {}
         self._next = 1
@@ -117,6 +120,8 @@ class CropStore:
                 tr = self._tracks.get(key)
                 if tr is None:
                     tr = self._tracks[key] = CropTrack(key, d.cls, d.box_px, d.box_cm, t)
+                elif d.cls == THING and t - tr.last_t > self.renew_after_s:
+                    tr.best = tr.recent = None      # gone a while: may be another object at the spot now
                 tr.box_px, tr.box_cm, tr.last_t = d.box_px, d.box_cm, t
                 better = tr.best is None or score > tr.best.score
                 due = tr.recent is None or t - tr.recent.t >= self.recent_every_s

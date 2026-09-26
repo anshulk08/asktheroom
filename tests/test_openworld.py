@@ -478,3 +478,22 @@ def test_one_of_two_hidden_things_coming_out_is_new_and_linked_to_both(cfg, scen
     for n in ('thing:1', 'thing:2'):
         assert world.get(n).status == Status.INSIDE
         assert world.get(n).confidence < cfg.conf_inside
+
+
+# ----- ids are never reused (the event log outlives the process and RESET) ---------------------
+
+def test_thing_ids_continue_after_the_event_log_and_across_reset(cfg, scene, tmp_path):
+    """A new thing:N must not inherit an unrelated old thing:N's history: numbering continues after the
+    highest thing:N in the event log (a previous run), and RESET never lowers it."""
+    from core.events import EventLog
+    from core.types import Event
+    events = EventLog(':memory:', str(tmp_path))
+    for n in (2, 10):
+        events.add(Event(t=5.0, wall=1.0, obj=f'thing:{n}', type=EventType.APPEARED, to_cm=(1.0, 1.0)))
+    world = World(cfg, events, embed=scene.embed)
+    assert [e.obj for e in appear(scene, world, 'mug', (40, 30))] == ['thing:11']
+    world.reset()
+    scene.remove('mug')
+    assert [e.obj for e in appear(scene, world, 'book', (20, 20))] == ['thing:12']
+    assert [e.type for e in world.history('thing:12', 5)] == [EventType.APPEARED]
+    events.close()

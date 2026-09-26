@@ -339,3 +339,79 @@ def test_build_fake_runs_without_hardware(monkeypatch, tmp_path):
         assert wait_for(lambda: room.tts.said)
     finally:
         room.shutdown()
+
+
+def test_reset_words_in_a_reminder_do_not_act_on_the_room(tmp_path, cal_path):
+    """RESET / RECAL act only when the router answered that intent: a reminder the care layer handled
+    ('remind me to reset the router') leaves the world alone, and costs no second interpret call."""
+    from voice.care import attach_care
+    from voice.understand import Understander
+    events = EventLog(":memory:", str(tmp_path))
+    world = World(CFG, events)
+    world.entities["keys"].pos_cm = (10.0, 10.0)
+    rules = Understander(dict(CFG, understand={"enabled": False}))
+    calls = []
+    room, _ = make_room(tmp_path, cal_path, world=world,
+                        interpret=lambda text, overheard=False: calls.append(text) or rules(text, overheard))
+    attach_care(room, CFG)
+    recal = []
+    room.recalibrate = lambda: recal.append(1)
+    for text in ("Room, remind me to reset the router at 5", "remind me to recalibrate the laser at 5"):
+        assert "remind" in room.ask(text, "voice").text.lower()
+    time.sleep(0.1)
+    assert world.entities["keys"].pos_cm == (10.0, 10.0) and recal == [] and calls == []
+    room.ask("reset the table", "voice")                  # through the care layer to the router: acts
+    assert world.entities["keys"].pos_cm is None
+    room.ask("recalibrate the laser", "voice")
+    assert wait_for(lambda: recal == [1])
+
+
+def test_reset_clears_the_detectors_proposals_and_crops_on_the_perception_thread(tmp_path):
+    """RESET recaptures the proposer's empty-table reference and forgets crops (Detector.reset_proposals),
+    on the perception thread before its next detect (the proposer isn't thread-safe)."""
+    from core.types import Detections, Frame
+    calls = []
+
+    class Frames:
+        def __init__(self):
+            self.i = 0
+
+        def wait_new(self, after, timeout=1.0):
+            time.sleep(0.01)
+            self.i += 1
+            return Frame(t=time.monotonic(), wall=time.time(), img=None, idx=self.i)
+
+    class Det:
+        def detect(self, f):
+            calls.append((threading.current_thread().name, "detect"))
+            return Detections(t=f.t, frame_idx=f.idx, items=[], hands=[])
+
+        def reset_proposals(self):
+            calls.append((threading.current_thread().name, "reset"))
+
+    class Hands:
+        def update(self, hands, t):
+            return hands
+
+        def reset(self):
+            pass
+
+    class Table:
+        ok = True
+
+    events = EventLog(":memory:", str(tmp_path))
+    world = World(CFG, events)
+    ask = make_ask(CFG, world, events, net=None, other=no_model)
+    room = main.Room(CFG, world, events, Table(), Frames(), None, ask, detector=Det(), hands=Hands())
+    t = threading.Thread(target=room.perception_loop, name="perception", daemon=True)
+    t.start()
+    assert wait_for(lambda: calls)
+    room.ask("where are my keys", "voice")
+    time.sleep(0.05)
+    assert all(c[1] == "detect" for c in calls)
+    room.ask("reset the table", "voice")
+    assert wait_for(lambda: ("perception", "reset") in calls)
+    room.stop_ev.set()
+    t.join(2)
+    i = calls.index(("perception", "reset"))
+    assert calls[i + 1:i + 2] in ([], [("perception", "detect")]) and calls.count(("perception", "reset")) == 1
