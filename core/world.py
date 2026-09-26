@@ -229,7 +229,7 @@ class World(ThingRules, RoomRules):
     def _best_detections(self, items: list[Detection], hands=()) -> dict[str, Detection]:
         best: dict[str, Detection] = {}
         for d in items:
-            if d.cls in self.entities and d.conf >= self.cfg.conf_threshold:
+            if d.cls in self.entities and d.conf >= self.cfg.threshold(d.cls):
                 if self._label_on_a_thing(d, hands) or self._label_left_behind(d):
                     continue
                 if d.cls not in best or d.conf > best[d.cls].conf:

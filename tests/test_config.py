@@ -47,6 +47,14 @@ def test_typed_view_reads_the_shared_yaml_layout(cfg):
     assert 'keys' in next(o for o in cfg.objects if o.name == 'keys').prompts
 
 
+def test_per_object_conf_thresholds_reach_the_typed_view():
+    c = Config.from_dict({'objects': {'keys': 'target', 'wallet': 'target'},
+                          'conf_threshold': {'default': 0.35, 'wallet': 0.2}})
+    assert c.threshold('wallet') == pytest.approx(0.2)
+    assert c.threshold('keys') == pytest.approx(0.35)
+    assert Config.from_dict({'objects': {'keys': 'target'}, 'conf_threshold': 0.4}).threshold('keys') == 0.4
+
+
 def test_from_dict_ignores_other_modules_keys():
     c = Config.from_dict({'objects': {'keys': 'target'}, 'llm': {'model': 'x'}, 'present_k_of_n': [4, 8]})
     assert c.names() == ['keys'] and (c.present_k, c.present_n) == (4, 8)

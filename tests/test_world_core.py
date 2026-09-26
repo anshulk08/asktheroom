@@ -41,6 +41,19 @@ def test_first_sighting_becomes_visible_without_event(scene, world):
     assert events == []
 
 
+@pytest.mark.parametrize('wallet_cut, visible', [(None, False), (0.2, True)])
+def test_the_world_applies_the_per_object_threshold_not_only_the_default(cfg, wallet_cut, visible):
+    """conf_threshold.wallet below the default: the detector keeps a 0.25 wallet, so must the World."""
+    from core.types import Detection, Detections
+    if wallet_cut is not None:
+        cfg.conf_thresholds['wallet'] = wallet_cut
+    world = World(cfg)
+    d = Detection(cls='wallet', conf=0.25, box_px=(400, 300, 480, 350), center_cm=(40, 30), box_cm=(36, 28, 44, 32))
+    for i in range(12):
+        world.update(Detections(t=1000 + i / 10, frame_idx=i, items=[d], hands=[]), None)
+    assert (world.get('wallet').status == Status.VISIBLE) is visible
+
+
 @pytest.mark.parametrize('missed', [2, 3])
 def test_visible_object_survives_a_few_missed_batches(scene, world, missed):
     scene.place('keys', 40, 30)
