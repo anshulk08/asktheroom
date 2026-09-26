@@ -195,6 +195,35 @@ def _xy(p: Any) -> Optional[list]:
     return [x, y]
 
 
+def _conf2(v: Any) -> Optional[float]:
+    """A confidence rounded to 2 dp, or None when it isn't a finite number."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    if math.isnan(v) or math.isinf(v):
+        return None
+    return round(float(v), 2)
+
+
+NOT_OBJECT = "not an object"          # core/grok_check.py NOT_OBJECT: the belief's clutter label
+
+
+def _best_guess(e: dict) -> tuple[Optional[str], Optional[float]]:
+    """(g, gc): the automatic guess (core/auto_name.py 'guess') or Grok's fused belief (its top real label); with both,
+    the one with the higher confidence (a missing confidence loses; a tie keeps the guess)."""
+    opts = []
+    g = e.get("guess")
+    if isinstance(g, dict) and g.get("name"):
+        opts.append((str(g["name"]), _conf2(g.get("confidence"))))
+    b = e.get("belief")
+    top = next((x for x in (b if isinstance(b, list) else []) if isinstance(x, (list, tuple)) and x and x[0]
+                and x[0] != NOT_OBJECT), None)        # the top real label: clutter is never a guess
+    if top is not None:
+        opts.append((str(top[0]), _conf2(top[1]) if len(top) > 1 else None))
+    if not opts:
+        return None, None
+    return max(opts, key=lambda o: -1.0 if o[1] is None else o[1])   # max keeps the first on a tie
+
+
 def compact_entity(e: dict) -> dict:
     """One WorldState entity -> the compact phone form. Unknown extra fields are ignored."""
     status = str(e.get("status") or "UNKNOWN")
@@ -217,7 +246,8 @@ def compact_entity(e: dict) -> dict:
         pass
     if e.get("edge"):
         out["edge"] = str(e["edge"])
-    if str(e.get("name")).startswith("thing:"):            # open-world things only
+    is_thing = str(e.get("name")).startswith("thing:")
+    if is_thing:                                           # open-world things only
         aliases = e.get("aliases")
         out["a"] = [str(a) for a in aliases] if isinstance(aliases, list) else []
     m = e.get("maybe_same_as")
@@ -231,13 +261,31 @@ def compact_entity(e: dict) -> dict:
                     continue
         if mm:
             out["m"] = mm
-    g = e.get("guess")
-    if isinstance(g, dict) and g.get("name"):              # automatic name guess (core/auto_name.py)
-        out["g"] = str(g["name"])
+    g, gc = _best_guess(e)
+    if g:
+        out["g"] = g
+        if gc is not None:
+            out["gc"] = gc
+    if is_thing and e.get("named_by") == "grok":            # aliases[0] bound by the Grok settle check
+        out["as"] = "grok"
     ls = _r1(e.get("last_seen"))
     if ls is not None:
         out["ls"] = ls
     return out
+
+
+STALE_THING_S = 600.0
+
+
+def _stale_thing(e: dict, now: float) -> bool:
+    """An unnamed thing:N that is GONE / UNKNOWN and was last seen over STALE_THING_S ago: clutter on
+    the phone, so it is left out. Named things and configured objects are always sent."""
+    if not str(e.get("name")).startswith("thing:") or e.get("aliases"):
+        return False
+    if str(e.get("status") or "UNKNOWN") not in ("GONE", "UNKNOWN"):
+        return False
+    ls = _r1(e.get("last_seen"))
+    return ls is not None and now - ls > STALE_THING_S
 
 
 def compact_state(state: Optional[dict], table_cm: tuple, now: float) -> dict:
@@ -245,7 +293,8 @@ def compact_state(state: Optional[dict], table_cm: tuple, now: float) -> dict:
     st = state if isinstance(state, dict) else {}
     laser = st.get("laser") if isinstance(st.get("laser"), dict) else {}
     las = {"on": bool(laser.get("on")), "target": str(laser["target"]) if laser.get("target") else None}
-    ents = [compact_entity(e) for e in (st.get("entities") or []) if isinstance(e, dict) and e.get("name")]
+    ents = [compact_entity(e) for e in (st.get("entities") or [])
+            if isinstance(e, dict) and e.get("name") and not _stale_thing(e, now)]
     return {"v": 1, "t": round(now, 1), "table": [_r1(table_cm[0]), _r1(table_cm[1])],
             "online": bool(st.get("online")), "laser": las, "e": ents}
 
@@ -264,7 +313,8 @@ def _moved(a: Optional[list], b: Optional[list]) -> bool:
 
 def state_changed(prev: Optional[dict], cur: dict) -> bool:
     """True when cur differs from the last SENT state in a way the phone should see. Ignores the
-    timestamps and detector jitter (positions within 0.5 cm, confidence within 0.05)."""
+    timestamps and detector jitter (positions within 0.5 cm, confidence and guess confidence within
+    0.05)."""
     if prev is None:
         return True
     for k in ("table", "online", "laser"):
@@ -276,12 +326,14 @@ def state_changed(prev: Optional[dict], cur: dict) -> bool:
         return True
     for n, c in ce.items():
         p = pe[n]
-        for k in ("k", "s", "p", "edge", "a", "m", "g"):
+        for k in ("k", "s", "p", "edge", "a", "m", "g", "as"):
             if p.get(k) != c.get(k):
                 return True
         if _moved(p.get("xy"), c.get("xy")) or _moved(p.get("r"), c.get("r")):
             return True
         if abs(float(p.get("c", 0)) - float(c.get("c", 0))) > CONF_DEADBAND:
+            return True
+        if ("gc" in p) != ("gc" in c) or abs(float(p.get("gc", 0)) - float(c.get("gc", 0))) > CONF_DEADBAND:
             return True
         if c.get("s") != "V" and p.get("ls") != c.get("ls"):
             return True       # a hidden object's last-seen time changing is news; a visible one's isn't
@@ -293,15 +345,17 @@ def state_changed(prev: Optional[dict], cur: dict) -> bool:
 def status_msg(app_up: bool, state: Optional[dict], cal: bool, laser_cal: bool) -> dict:
     st = state if isinstance(state, dict) else {}
     fps = _r1(st.get("fps")) if app_up else 0.0
-    return {"app": "up" if app_up else "down", "fps": fps or 0.0,
-            "online": bool(st.get("online")) if app_up else False,
-            "cal": bool(cal), "laser_cal": bool(laser_cal)}
+    online = bool(st.get("online")) if app_up else False
+    gc = st.get("grok_check")                 # GrokCheck.status(); only present when the check is on
+    gk = online and isinstance(gc, dict) and bool(gc.get("enabled", True))
+    return {"app": "up" if app_up else "down", "fps": fps or 0.0, "online": online,
+            "cal": bool(cal), "laser_cal": bool(laser_cal), "gk": gk}
 
 
 def status_changed(prev: Optional[dict], cur: dict, fps_step: float = 1.0) -> bool:
     if prev is None:
         return True
-    for k in ("app", "online", "cal", "laser_cal"):
+    for k in ("app", "online", "cal", "laser_cal", "gk"):
         if prev.get(k) != cur.get(k):
             return True
     return abs(float(prev.get("fps") or 0) - float(cur.get("fps") or 0)) >= fps_step

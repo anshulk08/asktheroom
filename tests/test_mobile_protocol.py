@@ -283,7 +283,7 @@ def test_state_changed_detects_real_changes(mutate):
 
 def test_status_msg_and_changes():
     s = P.status_msg(True, {"fps": 12.34, "online": True}, True, False)
-    assert s == {"app": "up", "fps": 12.3, "online": True, "cal": True, "laser_cal": False}
+    assert s == {"app": "up", "fps": 12.3, "online": True, "cal": True, "laser_cal": False, "gk": False}
     assert len(P.dumps(s)) < 180
     down = P.status_msg(False, {"fps": 12.34, "online": True}, False, False)
     assert down["app"] == "down" and down["fps"] == 0.0 and down["online"] is False
@@ -291,6 +291,90 @@ def test_status_msg_and_changes():
     assert P.status_changed(s, dict(s, fps=11.2))
     assert P.status_changed(s, dict(s, app="down"))
     assert P.status_changed(None, s)
+
+
+def test_status_gk_is_grok_check_on_and_online():
+    gcs = {"enabled": True, "provider": "grok", "model": "grok-4", "calls_last_hour": 3, "last": None,
+           "disclosure": "Grok check is on: ..."}
+    s = P.status_msg(True, {"fps": 12.0, "online": True, "grok_check": gcs}, True, True)
+    assert s["gk"] is True and len(P.dumps(s)) < 180
+    assert P.status_msg(True, {"fps": 12.0, "online": False, "grok_check": gcs}, True, True)["gk"] is False
+    assert P.status_msg(True, {"fps": 12.0, "online": True}, True, True)["gk"] is False     # older server / off
+    assert P.status_msg(False, {"online": True, "grok_check": gcs}, True, True)["gk"] is False
+    assert P.status_changed(s, dict(s, gk=False))
+
+
+# ---------------------------------------------------------------- guesses, Grok names, stale things
+
+def thing(n=1, **kw) -> dict:
+    return dict({"name": f"thing:{n}", "kind": "target", "status": "VISIBLE", "pos_cm": [10, 10],
+                 "confidence": 0.9, "last_seen": 1000.0, "aliases": []}, **kw)
+
+
+def test_guess_preferred_over_belief_and_gc_rounded():
+    t = P.compact_entity(thing(guess={"name": "mug", "confidence": 0.8765, "also": ["cup"]},
+                               belief=[["cup", 0.6], ["bowl", 0.2]]))
+    assert t["g"] == "mug" and t["gc"] == 0.88
+    t = P.compact_entity(thing(guess={"name": "mug", "confidence": 0.5}, belief=[["cup", 0.7123]]))
+    assert t["g"] == "cup" and t["gc"] == 0.71                    # higher-confidence belief wins
+    t = P.compact_entity(thing(guess={"name": "mug", "confidence": 0.7}, belief=[["cup", 0.7]]))
+    assert t["g"] == "mug"                                         # a tie keeps the guess
+    t = P.compact_entity(thing(guess={"name": "mug"}))
+    assert t["g"] == "mug" and "gc" not in t                       # no numeric confidence: no gc
+    t = P.compact_entity(thing(guess={"name": "mug", "confidence": "high"}))
+    assert t["g"] == "mug" and "gc" not in t
+
+
+def test_belief_fallback_when_no_guess():
+    t = P.compact_entity(thing(belief=[["water bottle", 0.456], ["thermos", 0.3]]))
+    assert t["g"] == "water bottle" and t["gc"] == 0.46
+    for b in ([], None, [[]], [["", 0.9]], "junk"):
+        t = P.compact_entity(thing(belief=b))
+        assert "g" not in t and "gc" not in t
+    assert "belief" not in P.compact_entity(thing(belief=[["cup", 0.5]]))
+
+
+def test_named_by_grok_sets_as():
+    t = P.compact_entity(thing(aliases=["stapler"], label="stapler", named_by="grok"))
+    assert t["a"] == ["stapler"] and t["as"] == "grok" and "named_by" not in t
+    assert "as" not in P.compact_entity(thing(aliases=["stapler"], label="stapler"))          # taught
+    assert "as" not in P.compact_entity(thing(aliases=["stapler"], named_by=None))
+    assert "as" not in P.compact_entity({"name": "keys", "kind": "target", "status": "VISIBLE",
+                                         "named_by": "grok"})                                  # things only
+
+
+def test_stale_unnamed_things_are_dropped_named_and_configured_kept():
+    now = 1000.0 + P.STALE_THING_S + 1
+    ents = [thing(1, status="GONE"),                                   # stale unnamed: dropped
+            thing(2, status="UNKNOWN"),                                # stale unnamed: dropped
+            thing(3, status="GONE", aliases=["charger"]),              # named: kept
+            thing(4, status="GONE", last_seen=now - 60),               # recent: kept
+            thing(5, status="GONE", last_seen=None),                   # never seen: kept
+            thing(6, status="UNDER"),                                  # hidden, not gone: kept
+            thing(7, status="VISIBLE"),
+            {"name": "wallet", "kind": "target", "status": "GONE", "last_seen": 1.0}]   # configured: kept
+    c = P.compact_state({"online": True, "entities": ents}, (90, 60), now)
+    assert [e["n"] for e in c["e"]] == ["thing:3", "thing:4", "thing:5", "thing:6", "thing:7", "wallet"]
+    assert [e["n"] for e in P.compact_state({"entities": ents}, (90, 60), 1000.0)["e"]][:2] == \
+        ["thing:1", "thing:2"]                                         # not stale yet
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda s: s["e"][-1].update(g="cup"),
+    lambda s: s["e"][-1].update(gc=0.2),
+    lambda s: s["e"][-1].pop("gc"),
+    lambda s: s["e"][-1].update(**{"as": "grok"}),
+])
+def test_state_changed_on_guess_and_grok_name(mutate):
+    st = big_state(2)
+    st["entities"][-1].update(guess={"name": "mug", "confidence": 0.6}, aliases=[])
+    a = P.compact_state(st, (90, 60), 1790000000.0)
+    assert a["e"][-1]["g"] == "mug" and a["e"][-1]["gc"] == 0.6
+    b = json.loads(json.dumps(a))
+    b["e"][-1]["gc"] = 0.64                                           # within the deadband
+    assert not P.state_changed(a, b)
+    mutate(b)
+    assert P.state_changed(a, b)
 
 
 # ---------------------------------------------------------------- outbox
@@ -446,7 +530,8 @@ def test_status_notify_read_and_app_down(tmp_path):
     core, http, phone, mono = make(tmp_path)
     core.set_notifying("status", True)
     core.poll_once()
-    assert phone.msgs["status"][-1] == {"app": "up", "fps": 13.1, "online": True, "cal": True, "laser_cal": False}
+    assert phone.msgs["status"][-1] == {"app": "up", "fps": 13.1, "online": True, "cal": True, "laser_cal": False,
+                                        "gk": False}
     assert json.loads(core.status_read()) == phone.msgs["status"][-1]
     assert len(core.status_read()) < 180
     n = len(phone.msgs["status"])
@@ -462,7 +547,8 @@ def test_status_notify_read_and_app_down(tmp_path):
     http.down = False
     mono.t += 1.1
     core.poll_once()
-    assert phone.msgs["status"][-1] == {"app": "up", "fps": 13.4, "online": True, "cal": True, "laser_cal": True}
+    assert phone.msgs["status"][-1] == {"app": "up", "fps": 13.4, "online": True, "cal": True, "laser_cal": True,
+                                        "gk": False}
 
 
 def test_cal_from_file_or_live_world(tmp_path):
@@ -727,3 +813,11 @@ def test_server_logs_recent_answers_with_their_source():
         app.state.record_answer(f"q{i}", Answer("a"), "voice")
     rows = c.get("/state").json()["answers"]
     assert len(rows) == 10 and rows[-1]["seq"] == 33
+
+
+def test_clutter_belief_is_never_a_guess():
+    e = {"name": "thing:4", "kind": "thing", "status": "VISIBLE", "aliases": [],
+         "belief": [["not an object", 0.5], ["cable", 0.3]]}
+    out = P.compact_entity(e)
+    assert out["g"] == "cable" and out["gc"] == 0.3
+    assert "g" not in P.compact_entity({**e, "belief": [["not an object", 0.9]]})

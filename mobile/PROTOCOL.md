@@ -157,16 +157,24 @@ A full snapshot every time; there are no diffs. It is sent:
 2. when something changed, at most **2 Hz** (the bridge polls `GET /state` at 4 Hz)
 3. at least every **5 s**, as a heartbeat
 
-"Changed" ignores detector jitter: a position has to move more than 0.5 cm, or confidence more than 0.05,
-or a status, parent, edge, alias, `maybe_same_as` or guess value has to change, or an entity has to be added or
-removed, or `online` or `laser` has to change. A visible object's `ls` ticking does not count.
+"Changed" ignores detector jitter: a position has to move more than 0.5 cm, or confidence (`c`) or guess
+confidence (`gc`) more than 0.05 (`gc` appearing or disappearing counts), or a status, parent, edge, alias,
+`maybe_same_as`, guess (`g`) or `as` value has to change, or an entity has to be added or removed, or `online`
+or `laser` has to change. A visible object's `ls` ticking does not count.
+
+Stale things are left out: an unnamed `thing:N` (no aliases) whose status is GONE or UNKNOWN and whose
+last-seen time is more than **600 s** before the snapshot's `t` is not in `e` (one with no last-seen time
+is kept). Named things and the configured objects are always sent. When a stale thing drops out, that is an
+"entity removed" change.
 
 ```json
 {"v": 1, "t": 1790389843.0, "table": [90.0, 60.0], "online": false,
  "laser": {"on": true, "target": "box"},
  "e": [{"n": "keys", "k": "t", "s": "I", "p": "box", "xy": [41.2, 29.0], "r": [70.4, 38.1], "c": 0.85, "ls": 1790389800.4},
        {"n": "box", "k": "c", "s": "V", "xy": [70.4, 38.1], "r": [70.4, 38.1], "c": 1.0, "ls": 1790389843.0},
-       {"n": "thing:3", "k": "t", "s": "V", "xy": [20.0, 12.5], "r": [20.0, 12.5], "c": 0.9, "a": ["charger"], "m": [["thing:1", 0.74]]}]}
+       {"n": "thing:3", "k": "t", "s": "V", "xy": [20.0, 12.5], "r": [20.0, 12.5], "c": 0.9, "a": ["charger"], "m": [["thing:1", 0.74]]},
+       {"n": "thing:5", "k": "t", "s": "V", "xy": [60.1, 45.0], "r": [60.1, 45.0], "c": 0.8, "a": ["stapler"], "as": "grok"},
+       {"n": "thing:6", "k": "t", "s": "V", "xy": [8.0, 50.2], "r": [8.0, 50.2], "c": 0.9, "a": [], "g": "deodorant stick", "gc": 0.82}]}
 ```
 
 | Key | Type | Meaning |
@@ -187,18 +195,22 @@ removed, or `online` or `laser` has to change. A visible object's `ls` ticking d
 | `e[].edge` | str | `left`/`right`/`top`/`bottom`: the edge a GONE object left by |
 | `e[].a` | [str] | taught names (aliases), newest first. **Things only**, and present for every thing (may be `[]`) |
 | `e[].m` | [[name, score]] | "maybe the same as" an earlier thing (score 2 decimals). Optional |
-| `e[].g` | str | an automatic guess of what an unnamed thing is (`deodorant stick`; `core/auto_name.py`). Not a taught name: show it hedged ("deodorant stick?"). Things only, optional |
+| `e[].g` | str | an automatic guess of what an unnamed thing is (`deodorant stick`): the server's `guess.name` (`core/auto_name.py`) or, failing that, `belief[0]` (Grok's fused guess across settle checks); with both, whichever has the higher confidence. Not a taught name: show it hedged ("deodorant stick?"). Optional |
+| `e[].gc` | float | the confidence of `g`, 0–1, 2 decimals. Only with `g`, and only when the server gave a number |
+| `e[].as` | `grok` | `a[0]` was bound automatically by the Grok settle check, not taught by a person. Show it, but as the rig's name ("stapler (named by Grok)"). Absent: taught. Things only, optional |
 | `e[].ls` | float | last-seen wall time (Unix s, 1 decimal) |
 
 Keys whose value is null are **omitted**, except `n`, `k` and `s`. Unknown extra keys may appear in later
 versions and must be ignored. Measured sizes: the live rig with 8 untracked objects is 414 B (3 chunks at
 MTU 185). With all 8 objects tracked it is about 870 B (5 chunks). With 8 objects and 12 things with
-aliases it is about 2.8 KB (16 chunks); the raw `/state` JSON for that is 5.7 KB.
+aliases it is about 2.8 KB (16 chunks); the raw `/state` JSON for that is 5.7 KB. With the 12 things unnamed
+and each carrying `g` and `gc` it is about 2.9 KB (17 chunks). Dropping stale things keeps a long session from
+growing past that.
 
 ## 8. status (read + notify)
 
 ```json
-{"app": "up", "fps": 13.1, "online": true, "cal": true, "laser_cal": false}
+{"app": "up", "fps": 13.1, "online": true, "cal": true, "laser_cal": false, "gk": true}
 ```
 
 | Key | Type | Meaning |
@@ -208,10 +220,11 @@ aliases it is about 2.8 KB (16 chunks); the raw `/state` JSON for that is 5.7 KB
 | `online` | bool | the rig has internet |
 | `cal` | bool | table calibrated: `table_cal.json` exists, or the world is being updated |
 | `laser_cal` | bool | `laser_cal.json` exists (false: answers are spoken, but the laser can't aim) |
+| `gk` | bool | the Grok settle check can run: it is enabled (`GET /state` carries `grok_check`) and the rig is online. False from older servers. When true, a still frame of the table goes to Grok each time the table settles |
 
-- **Read** returns this JSON **unframed**. It is about 66 bytes, and always under 180.
+- **Read** returns this JSON **unframed**. It is about 76 bytes, and always under 180.
 - **Notify** is framed (section 4). It is sent right after subscribing and then on change, at most 1 Hz,
-  except that an `app` change goes out at once. An fps change under 1.0 doesn't count.
+  except that an `app` change goes out at once. An fps change under 1.0 doesn't count; a `gk` change does.
 
 ## 9. Timing budget
 
