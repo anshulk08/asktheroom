@@ -60,6 +60,10 @@ class ThingsConfig:
     dup_iou: float = 0.5               # IoU with a known object / hand / kept proposal: a duplicate
     hand_contain: float = 0.8          # a proposal covering this much of a hand box is hand or arm
     new_hand_overlap_max: float = 0.1  # a candidate is decided only once hands cover less of it
+    still_cm: float = 2.0              # ... and its centre stayed within this ...
+    still_s: float = 0.5               # ... for this long: objects people put down stay put, an arm the
+                                       # hand detector missed keeps moving (on the rig, every pass of a
+                                       # hand left phantom things behind)
     gate_cm: float = 8.0               # visible thing: nearest proposal within this per batch
     size_ratio_max: float = 4.0        # ... and no more than this many times larger or smaller
     hand_gate_cm: float = 4.0          # HELD thing: proposal centre within this of its hand's box
@@ -97,6 +101,7 @@ class Candidate:
     det: Detection
     bits: deque
     born: float = 0.0
+    trail: deque = field(default_factory=lambda: deque(maxlen=64))   # (t, centre cm) while matched
 
 
 class ExemplarBank:
@@ -451,22 +456,36 @@ class ThingRules:
                 used_c.add(j)
                 self._cands[j].det = props[i]
                 self._cands[j].bits.append(True)
+                self._cands[j].trail.append((self._now, props[i].center_cm))
         for j, c in enumerate(self._cands):
             if j not in used_c:
                 c.bits.append(False)
         self._cands = [c for c in self._cands if any(c.bits)]
         for i, d in enumerate(props):
             if i not in used_p:
-                self._cands.append(Candidate(d, deque([True], maxlen=n), self._now))
+                c = Candidate(d, deque([True], maxlen=n), self._now)
+                c.trail.append((self._now, d.center_cm))
+                self._cands.append(c)
         out = []
         for c in list(self._cands):
             if sum(c.bits) < k or not c.bits[-1]:
                 continue
             if any(geom.overlap_frac(h.box_cm, c.det.box_cm) > tc.new_hand_overlap_max for h in hands):
                 continue                       # still being put down: decide once the hand is off it
+            if not self._still(c):
+                continue                       # moving: an arm, or an object still being slid
             self._cands.remove(c)
             out += self._decide(c, seen)
         return out
+
+    def _still(self, c: Candidate) -> bool:
+        """The candidate has been matched for still_s and its centre stayed within still_cm of where it
+        is now over that time."""
+        tc = self._tcfg
+        if self._now - c.born < tc.still_s - 1e-9:
+            return False
+        recent = [p for t, p in c.trail if t >= self._now - tc.still_s - 1e-9]
+        return bool(recent) and all(geom.dist(p, c.det.center_cm) <= tc.still_cm for p in recent)
 
     def _decide(self, c: Candidate, seen) -> list:
         """A persistent, unexplained proposal: an existing identity (its debounce is seeded with the
