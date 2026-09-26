@@ -49,6 +49,9 @@ class RoomConfig:
     thing_name_wait_s: float = 15.0                # a confirmed thing track waits this long for its Grok name
     name_match_min: float = 2.0                    # core.auto_name.match_score two guesses need (head noun shared)
     names_per_minute: int = 6                      # Grok calls for room crops, at most
+    arrival_evidence: bool = True                  # a departed prop is taken only by a track whose spot changed
+    arrival_window_s: float = 15.0                 # ... (a hand or changed pixels there) this long before it began
+    evidence_thr: int = 20                         # grey-level change between visits that counts as arrival evidence
 
     @classmethod
     def from_dict(cls, d: Optional[dict]) -> "RoomConfig":
@@ -92,6 +95,8 @@ class RoomTrack:
     entity: Optional[str] = None
     guess: Optional[dict] = None   # cls 'thing' only: Grok's {name, also, confidence} for its crop, once named
     name_asked: bool = False       # its crop was queued for Grok (at most once)
+    arrival_evidence: Optional[bool] = None   # something moved at its spot when it began: True / False;
+                                              # None = not measured (no activity data), which never blocks
 
 
 @dataclass

@@ -3,8 +3,10 @@ World.room_update one ZoneVisit per processed zone; these rules decide what its 
 the entities. Every change to a room entity is exactly one operation:
 
   Acquire    the entity has an unconsumed table departure within handoff_s, is GONE / UNKNOWN on the
-             table, and the track was first seen after that departure: zone = the track's zone, VISIBLE,
-             FOUND. The departure is consumed: it authorises at most one acquisition.
+             table, the track was first seen after that departure, and something moved at the track's spot
+             when it began (arrival evidence: a hand or changed pixels, core/room.py; not measured never
+             blocks): zone = the track's zone, VISIBLE, FOUND. The departure is consumed: it authorises at
+             most one acquisition.
   Refresh    the entity's own associated track matched again: room timestamps only, no event.
   Absence    its own track missed absent_visits valid visits: UNKNOWN, zone kept, LOST_TRACK.
   Reacquire  UNKNOWN in zone Z; a track in Z at its last spot (IoU >= 0.3), first seen after the
@@ -222,7 +224,7 @@ class RoomRules:
                 return 'ignored'
             dep = self._departures.get(name)
             if (_off_table(ent) and dep is not None and visit.t - dep[0] <= rc.handoff_s
-                    and trk.first_seen > dep[0]):
+                    and trk.first_seen > dep[0] and self._arrival_ok(trk)):
                 return 'acquire'
             return 'conflict'
         st = self._room.get(name)
@@ -275,7 +277,7 @@ class RoomRules:
                       if tid != trk.tid and p.role == 'pending' and p.first_seen > dep_t]
             mine, theirs = trk.guess, self.thing_guess(name)
             if not others and mine is not None and theirs is not None:
-                if names_match(mine, theirs, rc.name_match_min):
+                if names_match(mine, theirs, rc.name_match_min) and self._arrival_ok(trk):
                     return 'acquire', name
                 return 'ignored', None    # a shoe left the table; this is a remote: never that thing
         if visit.t - trk.first_seen >= rc.thing_name_wait_s:
@@ -314,6 +316,12 @@ class RoomRules:
                 continue
             hits.append(name)
         return hits[0] if len(hits) == 1 else None
+
+    def _arrival_ok(self, trk: RoomTrack) -> bool:
+        """Handoff guard: the track began where something moved (a hand or changed pixels, core/room.py).
+        Someone has to carry the prop there; a detector that starts calling a static cushion 'phone' while
+        the phone is away shows no motion, so that track stays a conflict. Not measured (None) never blocks."""
+        return not self.room_cfg.arrival_evidence or trk.arrival_evidence is not False
 
     def _room_acquire(self, name: str, trk: RoomTrack, visit: ZoneVisit, tentative: bool = False) -> list[Event]:
         del self._departures[name]            # consumed: one departure, one acquisition

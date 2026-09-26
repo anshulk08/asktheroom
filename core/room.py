@@ -63,6 +63,7 @@ class RoomTracker:
     def __init__(self, cfg: RoomConfig):
         self.cfg = cfg
         self._tracks: dict[str, list[RoomTrack]] = {}
+        self._activity: dict[str, list[tuple[float, BoxPx]]] = {}   # zone -> (t, box) where something moved
         self._n = 0
 
     def tracks(self, zone: Optional[str] = None) -> list[RoomTrack]:
@@ -72,11 +73,17 @@ class RoomTracker:
 
     def visit(self, zone: str, say: str, obs: list[RoomObservation], blockers: list[BoxPx],
               changes: list[BoxPx], t: float, wall: float, frame_idx: int,
-              lum: Optional[Callable[[BoxPx], float]] = None, crop=None) -> ZoneVisit:
+              lum: Optional[Callable[[BoxPx], float]] = None, crop=None,
+              activity: Optional[list[BoxPx]] = None) -> ZoneVisit:
         """Apply one processed visit of `zone`. `obs` are its known-prop detections (full px); `blockers`
         hand/person boxes; `changes` frame-difference boxes since the zone's previous visit; `lum(box)` the
-        mean grey level in a box of this frame."""
+        mean grey level in a box of this frame. `activity`: boxes where something moved this visit (hands,
+        and pixels changed by evidence_thr since the previous visit); None when not measured."""
         v = ZoneVisit(zone=zone, say=say, t=t, wall=wall, frame_idx=frame_idx, crop=crop)
+        if activity is not None:
+            log_ = self._activity.setdefault(zone, [])
+            log_ += [(t, tuple(int(c) for c in b)) for b in activity]
+            self._activity[zone] = [(ta, b) for ta, b in log_ if t - ta <= self.cfg.arrival_window_s][-256:]
         tracks = self._tracks.setdefault(zone, [])
         matched = self._match(tracks, obs)
         keep: list[RoomTrack] = []
@@ -114,12 +121,20 @@ class RoomTracker:
             self._n += 1
             tr = RoomTrack(tid=f"r:{self._n}", zone=zone, cls=o.cls, box_px=tuple(int(c) for c in o.box_px),
                            first_seen=t, first_wall=wall, last_seen=t, last_wall=wall, hits=1)
+            if activity is not None:
+                tr.arrival_evidence = self._arrived(zone, tr.box_px, t)
             tr.confirmed = tr.hits >= self.cfg.confirm_visits
             if tr.confirmed:
                 v.confirmed.append(tr)
             keep.append(tr)
         self._tracks[zone] = keep
         return v
+
+    def _arrived(self, zone: str, box: BoxPx, t: float) -> bool:
+        """Something moved at box (a hand, or changed pixels) within arrival_window_s up to now: a real
+        arrival. A detector that starts calling unchanged scenery by a prop's name has none."""
+        return any(t - ta <= self.cfg.arrival_window_s and geom.intersection(b, box)
+                   for ta, b in self._activity.get(zone, []))
 
     @staticmethod
     def _match(tracks: list[RoomTrack], obs: list[RoomObservation]) -> dict[str, RoomObservation]:
@@ -404,6 +419,15 @@ class RoomMemory:
             for cnt in contours:
                 cx, cy, cw, ch = cv2.boundingRect(cnt)
                 changes.append(to_full((cx, cy, cx + cw, cy + ch)))
+        activity = list(hands)
+        measured = prev is not None and prev.shape == grey.shape
+        if measured:
+            ev = (cv2.absdiff(grey, prev) > self.cfg.evidence_thr).astype(np.uint8) * 255
+            ev = cv2.morphologyEx(ev, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))   # sensor noise out
+            contours, _ = cv2.findContours(cv2.dilate(ev, DILATE), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for cnt in contours:
+                cx, cy, cw, ch = cv2.boundingRect(cnt)
+                activity.append(to_full((cx, cy, cx + cw, cy + ch)))
         self._prev[zone.name] = grey
 
         def lum(box: BoxPx) -> float:
@@ -415,7 +439,8 @@ class RoomMemory:
             return float(grey[b1:b2, a1:a2].mean())
 
         visit = self.tracker.visit(zone.name, zone.say, obs, hands, changes, full.t, full.wall, full.idx,
-                                   lum=lum, crop=crop.copy())
+                                   lum=lum, crop=crop.copy(),
+                                   activity=activity if measured else None)   # a first visit can't tell
         if self.namer is not None:
             for tr in visit.confirmed:
                 if tr.cls == THING and tr.guess is None and not tr.name_asked:

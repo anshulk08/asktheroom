@@ -888,6 +888,8 @@ def build(cfg: dict, fake: bool = False, camera: int = 0, with_voice: bool = Tru
         room.room_memory = make_room_memory(cfg, world, detector, room_rect)
         if room.room_memory is not None:
             cleanup.append(room.room_memory.stop)          # its Grok naming worker
+        if room.room_memory is not None and visual is not None:     # room questions: Grok sees the whole view
+            visual.room_zones = [(z.name, z.say) for z in room.room_memory.zones.zones.values()]
         if room.room_enabled:      # 0006 room pointing reads frames.latest(), now the table view (spec 0009 M5)
             log.error("room pointing (room.enabled) does not work with room_memory yet: room pointing is off")
             room.room_enabled = False
