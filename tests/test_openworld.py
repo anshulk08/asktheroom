@@ -701,3 +701,22 @@ def test_a_big_thing_partly_hidden_by_an_arm_keeps_its_identity_when_it_shows_wh
     assert things(world) == ['thing:1']
     tub = world.get('thing:1')
     assert tub.status == Status.VISIBLE and tub.pos_cm == pytest.approx((40, 30))
+
+
+def test_a_thing_left_still_appears_as_soon_as_still_s_has_passed(cfg):
+    """Latency budget (shell_1 on the rig, 15 fps): a thing is admitted on the first batch at least
+    still_s after its first sighting (present_k is reached earlier), ~0.53 s. Shorter waits were scored
+    on the rig: 0.33-0.4 s saved 0.13-0.2 s on shell_1 and cost it an identity change (a resting phone
+    reborn as a new thing). Anything slower is a regression."""
+    scene = Scene(cfg, fps=15, t0=1000.0)
+    world = World(cfg, embed=scene.embed)
+    scene.thing('case', 40, 30)
+    first, appeared = None, None
+    for _ in range(30):
+        dets, frame = scene.step()
+        first = dets.t if first is None else first
+        if EventType.APPEARED in types(world.update(dets, frame)):
+            appeared = dets.t
+            break
+    still_s = world._tcfg.still_s
+    assert appeared is not None and still_s - 1e-6 <= appeared - first <= still_s + scene.dt + 1e-6

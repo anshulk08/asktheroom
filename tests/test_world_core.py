@@ -424,3 +424,17 @@ def test_history_of_a_merged_thing_is_ordered_by_wall_time(cfg, tmp_path):
     log.add(Event(t=50.0, wall=2000.0, obj='thing:1', type=EventType.MOVED))         # this run
     assert types(world.history('thing:1')) == [EventType.MOVED, EventType.APPEARED]
     log.close()
+
+
+def test_a_put_down_object_is_confirmed_on_its_present_k_th_sighting(cfg):
+    """Latency budget (place_1 on the rig, 15 fps): the world adds only the debounce to a put-down,
+    (present_k - 1) batches, ~0.33 s. A hand still on the object does not hold a configured object back
+    (the wallet was confirmed while the hand still rested on it). Anything slower is a regression."""
+    scene, world = Scene(cfg, fps=15, t0=1000.0), World(cfg)
+    scene.place('wallet', 40, 30)
+    scene.hand(1, 40, 30)
+    for n in range(1, cfg.present_k + 1):
+        if n == 3:
+            scene.hand_off(1)
+        world.update(*scene.step())
+        assert (world.get('wallet').status == Status.VISIBLE) == (n == cfg.present_k), n
