@@ -1,8 +1,8 @@
 # 0009: Room product: room memory and room pointing from one fixed camera
 
 Status: proposed Sat 26 Sep 2026, revision 2. Design agreed in chat with Anshul (sections 1-5), revised after
-three external critiques, then after a code-verified spec review (16 findings, all folded in; the reviewer's
-code claims were re-checked). Nothing here is built. This spec supersedes the ordering of spec 0005 (tags
+three external critiques, then after a code-verified spec review (16 findings; the reviewer's code claims were
+re-checked). Four items stay open as milestone blockers, listed in Open blockers below. Nothing here is built. This spec supersedes the ordering of spec 0005 (tags
 first, laser-guided placement) and spec 0006 (dot map first) and reuses their parts: 0006's `aim_px`,
 `find_dot_px`, gates and zones, 0005's planner ideas and verification. Anshul dropped the Sat 6 PM freeze for
 this work; the freeze line in `AGENTS.md` needs updating to match.
@@ -63,8 +63,9 @@ when room memory is on: the default 10 s ring of decoded 1080p frames would be a
 laser latency reads the ring, and it needs well under a second). `table_view_rect` is measured once by
 aligning a 1080p zoom-100 frame to a zoom-160 reference frame (ECC), stored in `config.local.yaml`.
 
-The table view at 1080p is about 1200 px of sensor width resized to 1280, roughly 7% softer than today's
-zoom-160 image. D17 (teach, hide, move box, ask, at least 4/5) must pass on the table view before room
+The table view at 1080p is about 1200 px of output width resized to 1280. That is a sampling estimate only: it
+says nothing about how the camera's own processing at zoom 160 compares, so the evidence is the ECC alignment
+and D17 below, not this number. D17 (teach, hide, move box, ask, at least 4/5) must pass on the table view before room
 memory is turned on for the demo; if it doesn't, the camera goes back to zoom 160 and M0 is off.
 
 **Zones.** `python -m core.room --zone bookshelf --say "the bookshelf" --poly x,y x,y x,y ...` writes
@@ -80,11 +81,16 @@ backend directly and keeps `box_px` in full-frame pixels. Detections whose centr
 or inside the table-view rectangle, are dropped. Blocker evidence: hand boxes from the same model, plus, when
 YOLOE is loaded, its person boxes.
 
-**Association (props only; the full rules are in section 3).** A zone track of class C confirmed on 2
-consecutive visits of its zone associates to prop C only if C left the table (EXITED_VIEW, LOST_TRACK, or lost
-from a hand) within `handoff_s`, while `zone == 'table'`, and the track was **first seen after** that departure.
-Otherwise it is recorded as a conflict sighting on the dashboard and never upgrades. A table observation of C
-drops the room association at once.
+**Association (props only; the transition rules are in section 3).** A zone track of class C confirmed on 2
+consecutive visits of its zone **acquires** prop C only if C has an unconsumed table departure (EXITED_VIEW,
+LOST_TRACK, or lost from a hand, emitted while `zone == 'table'`) within `handoff_s`, and the track was **first
+seen after** that departure; acquisition consumes the departure. Otherwise it is a conflict sighting on the
+dashboard and never upgrades. **Confirmed** table presence of C (the table's presence flip, not a single
+detection) triggers return and drops the room association.
+
+**M0 is a controlled demo.** One instance per prop class is assumed: a different wallet that first appears in a
+zone after your wallet leaves the table inherits your wallet's identity. M0 demos keep one of each prop in the
+room, and the decoy tests below show the rules hold, not that the rig recognises instances.
 
 **Absence.** After 3 valid visits of the zone with no matching detection (a visit is invalid if a hand or
 person box, or a frame-difference blob larger than the object, covers the spot), C becomes UNKNOWN with zone and
@@ -120,7 +126,10 @@ table view. The real 1280x720 assumptions to keep satisfied are `core/capture.py
 covering the zones, overlapping by 64 px, `tiles_per_frame` (1) per perception frame, round-robin. The number of
 tiles is capped so every tile is revisited within the target: `max_tiles = room_revisit_s (3) x 15 fps x
 tiles_per_frame`. A box cut by a tile edge is merged with the neighbour's box; a merged box's visit is valid
-only when both tiles were visited within one revisit period.
+only when both tiles were visited within one revisit period. **Tracks are per zone in full-frame coordinates,
+not per tile:** each tile's detections are mapped to full-frame pixels and de-duplicated across overlapping
+tiles (class-agnostic NMS at IoU 0.5 plus the edge merge) before they reach `RoomTracker`, so one object seen
+by two tiles is one observation and one track.
 
 **View version.** Hash of device, capture size, zoom, focus and `table_view_rect` only. Table calibration is
 not in it: a spoken RECAL (`main.py:186`) rewrites `table_cal.json` and must not wipe room memory. A mismatch
@@ -174,21 +183,34 @@ tuned from M0 replays) on both confirming visits:
 |---|---|
 | VISIBLE on the table, table observation within `table_fresh_s` (2 s) | Not C. Unnamed-thing candidate (M3) or ignored (M0). |
 | Believed hidden on the table (UNDER, INSIDE, HELD) | Keep the belief. Conflict sighting. |
-| VISIBLE in a room zone (same or other zone) | Keep it. Conflict sighting; never re-association. |
-| Departed within `handoff_s` (120 s) **and** track `first_seen` after the departure | Associate: FOUND, `arrival_observed: true`. |
+| VISIBLE in a room zone, and this is a **different** track from its `assoc_track` | Keep it. Conflict sighting; never re-association. (Its own track only refreshes.) |
+| Has an unconsumed table departure within `handoff_s` (120 s) **and** track `first_seen` after it | Acquire: FOUND, `arrival_observed: true`; the departure is consumed. |
 | Departed, but the track was first seen before the departure | Conflict sighting (it was already there: a decoy). |
-| UNKNOWN in a room zone, same zone, track at its last spot (IoU at least 0.3) | Reacquire: FOUND, same zone. |
+| UNKNOWN in a room zone, same zone, track at its last spot (IoU at least 0.3), first seen after the absence | Reacquire: FOUND, same zone. |
 | Anything else (UNKNOWN on the table, startup, departure too old) | Conflict sighting. |
 
 A conflict sighting **never upgrades** by repetition or by a later departure. It resolves only through table
 evidence (the existing table rules revealing the belief was wrong, after which a *new* track must form) or the
 user.
 
-**Table return.** When the table sees C again, `_observe()` resets `zone` to 'table' (world.py:255-258) but emits
-no event when the previous status was VISIBLE (world.py:267). `observe_room` side state is dropped at that
-moment: `World` clears `room[C]` and notifies the tracker, which releases the track (`assoc_track = None`), and
-a room-to-table MOVED event is emitted. The room tracker may apply absence, conflict or association to an entity
-only while its `zone` equals the track's zone.
+**Transitions.** Every change to a room entity is one of these operations, with its precondition:
+
+| Operation | Precondition | Effect |
+|---|---|---|
+| **Acquire** | Entity has an unconsumed table departure within `handoff_s`; track first seen after it | zone = track's zone, VISIBLE, `assoc_track` = track, departure consumed, FOUND |
+| **Refresh** | Observation matches the entity's `assoc_track` (same zone, same track) | room timestamps updated; no event (a `confirm` row from M3) |
+| **Absence** | `assoc_track` matches; `absent_visits` valid empty visits | UNKNOWN, zone kept, LOST_TRACK |
+| **Reacquire** | Entity UNKNOWN in zone Z; a track in Z at its last spot (IoU at least 0.3), first seen after the absence | VISIBLE, `assoc_track` = new track, FOUND |
+| **Return** | Confirmed table presence (`_observe()` after the presence flip, not a single detection) | room side state cleared, track released, zone 'table', room-to-table MOVED |
+| **Conflict** | Any other confirmed track of the entity's class, including a *different* track while the entity is VISIBLE in a room zone | conflict sighting only; the entity is unchanged; the track never upgrades |
+
+A departure authorises at most one acquisition. Observations from the entity's own `assoc_track` are always
+Refresh, never Conflict.
+
+**Table return detail.** `_observe()` resets `zone` to 'table' (world.py:255-258) but emits no event when the
+previous status was VISIBLE (world.py:267), so Return adds the MOVED event and notifies the tracker. A single
+table detection without the presence flip only writes `pos_cm`/`last_seen` through `_debounce` and does not
+trigger Return (see Freshness).
 
 **Identity: unnamed things (M3).** A departure makes a thing a **candidate**. Association is one-to-one across
 all departures and new room tracks in the window. Automatic association requires all of: exactly one open
@@ -199,8 +221,8 @@ the embedder off, never automatic); no contradicting observation. A category mat
 
 **Births (M3).** A confirmed track becomes a new `thing:N` only with a persistent proposal and change evidence
 (at least `birth_change_frac` (0.3) of the box's pixels differ from the tile background), no blocker box over it,
-inside a room zone. Objects present at calibration are reachable by teaching and, once the Grok look covers the
-full frame, at question time (both open questions).
+inside a room zone. **M3 does not discover unnamed objects that were already in the room at calibration.** That
+needs room teaching or a full-frame Grok look, both open questions; until one is specced, no milestone claims it.
 
 **Background update (M3).** Per tile, a running average (`bg_alpha` 0.02) on pixels outside every tracked,
 blocker and recent-change box, only after `bg_stable_visits` (5) stable visits. Tracked objects are never
@@ -261,6 +283,12 @@ phone gets the zone string in the state it already receives.
 
 ### 5. Room pointing (M4-M5, gated)
 
+**Dot colour.** The dot finder is red-only today: `dot_score` is the red rise minus half the green/blue rise, and
+`dot_px_hsv` looks for red hues (act/laser.py), so a green dot scores negative and is never found. M4 adds
+`laser.color: red | green` (config, default red): for green, the score is the green rise minus half the red/blue
+rise and the HSV fallback uses green hues (about 40-85 in OpenCV). This also applies to the table laser if it
+uses the green module.
+
 **Gate to start.** A documented laser module (Safety) and a passed M4 dot test. Until then `room.enabled: false`
 and room answers highlight the box on the dashboard and phone.
 
@@ -319,9 +347,11 @@ in the search region, a step through the model's Jacobian with the Broyden updat
   pointing therefore requires YOLOE loaded) runs. The laser is off if the last pass is older than
   `person_fresh_s` (0.5 s), or a person or hand box overlaps the target box grown by `blocker_grow_px` (40 px at
   1080p). This is a check, not proof of a clear beam: near the rig the beam and the camera's line of sight
-  separate by up to about 10 cm.
-- **Mounting.** Out of reach and away from walkways: the only part of the beam outside the camera's view is
-  within about 30 cm of the rig.
+  separate by up to about 10 cm. The 40 px margin is a starting value; M5 validates it with scripted walk-ins,
+  including an arm reaching in near the rig.
+- **Mounting.** Out of reach and away from walkways. Assumption to measure in M5, not a fact: the part of the
+  beam outside the camera's view should be short (estimated under about 30 cm from the rig, from the head offset
+  and the camera's view cone); M5 computes it from the measured head offset and intrinsics.
 - **No-fire zones** for mirrors, TVs, windows and glossy surfaces. Laser off during servo moves. `room_dwell_s`
   cap. Hardware kill switch (demo_check check 8).
 
@@ -375,7 +405,7 @@ shows the zone string.
 | M1 | Decode measurement, 4K decision, tiles, view version | Jetson | M1 numbers |
 | M2 | Backgrounds, dashboard room view, zone editor, container chains in `place()` | Rig | Zones redrawn in the editor; view version recorded |
 | M3 | Unnamed handoff and births, `room_sightings`, remaining templates, Grok world state | M1, M2 | M3 numbers |
-| M4 | Dot visibility test (search area, on/off pairs, 6 spots, two exposures) | Documented laser, room empty | Per-spot dot SNR and size; decides sweep vs jog-only |
+| M4 | Green-dot detection (`laser.color`), then the dot visibility test (search area, on/off pairs, 6 spots, two exposures) | Documented laser, room empty | Green dot found in the unit test; per-spot dot SNR and size; decides sweep vs jog-only |
 | M5 | Intrinsics, floor and zone planes, aim fit, held-out validation, confirmation, safety | M2, M4, documented laser | M5 numbers, per zone |
 
 Room memory ships whatever happens to M4-M5.
@@ -405,6 +435,10 @@ M0:
 - A room place never reaches `aim_object` or any table-cm path.
 - Events from `observe_room` carry the observation's capture time, not the table frame's.
 - Out-of-order observations are rejected. `FakeWorld.place()` exists; `_where` works on a world without `place`.
+- **Own track is not a conflict:** the associated shelf track keeps confirming: Refresh only, no conflict rows.
+- **Departure consumed:** after one acquisition, a second new keys track elsewhere within `handoff_s` is a conflict.
+- **Return needs the presence flip:** one table detection of a room entity does not trigger Return; a confirmed
+  table presence does (MOVED emitted, room state cleared).
 - RECAL does not change the view version.
 
 M1-M3:
@@ -415,6 +449,10 @@ M1-M3:
 - Calibration clutter and a lighting step with no persistent proposal produce no births.
 - Box with keys: table to shelf to table round trip; losing the box's room observation gives "last saw the box".
 - `room_sightings` rows for acquire, confirm (rate-limited), absent, conflict, return.
+
+M4:
+- With `laser.color: green`, a synthetic green dot on off/on frames is found within 1 px; a red dot is not found
+  as green; a lighting change (all channels rise) scores below threshold. Red behaviour is unchanged.
 
 M5:
 - The 6-parameter model recovers a known head pose **with a nonzero tilt offset** from noisy synthetic samples at
@@ -476,11 +514,21 @@ M5 (per pointable zone):
 - **Owned files.** `core/world.py`, `core/relations.py`, `voice/answers.py`, `core/proposals.py`,
   `core/capture.py` and `act/laser.py` need their owners.
 
+## Open blockers (from the reviews, not yet resolved)
+
+| Blocker | Resolve before |
+|---|---|
+| Green-dot detection (`laser.color`, section 5) is specified but not built | M4 |
+| The 40 px blocker margin and the short out-of-view beam segment are assumptions | M5 (measured) |
+| Discovering unnamed objects present at calibration needs room teaching or a full-frame Grok look | Any claim that M3 discovers them |
+| One instance per prop class is a demo assumption, not instance recognition | Any demo beyond M0's controlled setup |
+
 ## Open questions
 
 - Teaching in room zones: which object does "this is my X" bind to (proposal: the most recently confirmed room
   track, confirmed back by name)?
 - Grok look (set-of-marks) on the full frame with room entities marked: M3 or later?
-- Does the table demo use the same green laser? If so, the documented-module rule applies to the table too.
+- Does the table demo use the same green laser? If so, the documented-module rule applies to the table too, and
+  the table's closed-loop dot finding is red-only today (section 5, Dot colour): it cannot see a green dot.
 - Floor zones that touch the table edge: where does the table rectangle end for handoff?
 - Phone zone map: after M3.
