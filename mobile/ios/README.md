@@ -53,7 +53,7 @@ Each answer is matched to the audio output:
 
 If headphones or a Bluetooth speaker disconnect mid-answer, speech stops rather than carrying on out loud, per Apple's route-change guidance. Without a key, offline, or if the voice takes over 3 s, the iPhone's built-in voice reads the answer (it adapts its speed too), like the rig's Piper fallback. "Try the voice" plays a sample. Details and trade-offs are in `RESEARCH.md`.
 
-**Privacy.** The xAI and ElevenLabs keys are typed into helper settings and kept only in this phone's Keychain (this device only), never in the repo or the app. When read aloud is on with a cloud voice, the text of each answer is sent to that service (xAI for Grok, ElevenLabs for "Same as the rig") to be spoken; nothing else is sent, and no audio is saved. With the iPhone voice, or no key, speech stays on the phone.
+**Privacy.** The xAI and ElevenLabs keys are typed into helper settings and kept only in this phone's Keychain (this device only), never in the repo or the app. When read aloud is on with a cloud voice, the text of each answer is sent to that service (xAI for Grok, ElevenLabs for "Same as the rig") to be spoken; nothing else is sent, and no audio is saved. With the iPhone voice, or no key, speech stays on the phone. The last map the rig sent (object names and positions, no images) is kept on the phone so the app opens on it; it never leaves the phone.
 
 ## Receiving from the Jetson
 
@@ -63,6 +63,8 @@ Everything reaches the phone over Bluetooth from `mobile/bridge/ble_bridge.py` o
 - **Nothing dropped.** Answers the phone didn't ask for (`id: null`) are no longer thrown away. Reminders and morning reports (`src: "notice"`) always show on Home. Questions asked out loud, on the dashboard or by SMS show as a card on the Table tab when the helper setting is on.
 - **Back quickly.** When a working link drops, the phone asks to connect to the remembered rig straight away. The system finishes that as soon as the rig advertises again. Only failed attempts back off, up to 5 s.
 - **Silent links.** The bridge sends state at least every 5 s. If nothing arrives for 15 s on a link that still looks connected (the bridge hung, or lost the subscription), the phone disconnects and reconnects.
+- **Always connected.** The app keeps the Bluetooth link in the background (`bluetooth-central` background mode, in `AskTheRoom-Info.plist`). Its connect to the remembered rig never times out, so it links up as soon as the rig is switched on. With state restoration, iOS relaunches the app for the rig if it was closed to save memory. That doesn't apply if someone swipes the app away; opening it again reconnects.
+- **Last map at launch.** Each live snapshot is saved on the phone (`Application Support/last-map.json`, at most every 10 s, never in demo mode). The app opens on it, greyed, with "This is the map from 1:05 PM", until the rig sends a live one. The same note shows whenever the link is down. Changes against a saved map don't go on Recent, because their times are unknown.
 - **Torn messages** are dropped and logged (`RoomLink`, in Console). The next snapshot replaces them within 0.5 s.
 
 ## Tests
@@ -92,7 +94,7 @@ If `xcode-select` points at the Command Line Tools, prefix the command with `DEV
 | `AnswerSheet.swift` | The answer sheet over Home and Recent |
 | `HelperSettings.swift`, `Speaker.swift` | Helper settings; reading answers aloud with Grok, the rig's ElevenLabs voice or the iPhone's, matched to the audio output |
 | `RoomView.swift` | Connect and Table screens, status pill, banners, detail sheet |
-| `RoomLink.swift` | CoreBluetooth: scan, connect to the strongest rig, read status then subscribe, reconnect at once after a drop, reconnect if nothing arrives for 15 s |
+| `RoomLink.swift` | CoreBluetooth: scan, connect to the strongest rig, read status then subscribe, reconnect at once after a drop, reconnect if nothing arrives for 15 s, keep going in the background, state restoration |
 | `Dictation.swift` | Hold-to-talk, on-device speech recognition only |
 | `tools/make_icon.swift` | Draws `AppIcon.png` (`swift tools/make_icon.swift <out.png>`) |
 

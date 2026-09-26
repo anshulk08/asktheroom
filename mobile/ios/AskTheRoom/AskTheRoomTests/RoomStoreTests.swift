@@ -203,3 +203,77 @@ final class RoomStoreTests: XCTestCase {
         XCTAssertNil(store.snapshot)
     }
 }
+
+/// The last live map is kept on the phone, so the app opens on it while it finds the rig.
+@MainActor
+final class SavedMapTests: XCTestCase {
+    private var url: URL!
+
+    override func setUp() async throws {
+        url = FileManager.default.temporaryDirectory.appending(path: "saved-map-\(UUID().uuidString).json")
+    }
+
+    override func tearDown() async throws {
+        try? FileManager.default.removeItem(at: url)
+    }
+
+    private func liveStore() -> RoomStore {
+        RoomStore(mock: false, liveTransport: { _ in FakeTransport() }, savedMap: url)
+    }
+
+    func testNoSavedMapOpensEmpty() {
+        let store = liveStore()
+        XCTAssertNil(store.snapshot)
+        XCTAssertFalse(store.isSavedMap)
+        XCTAssertFalse(store.isMapStale)
+    }
+
+    func testLiveMapIsSavedAndOpensNextTime() {
+        liveStore().receive(state: MockData.sampleSnapshot)
+        let next = liveStore()
+        XCTAssertEqual(next.snapshot, MockData.sampleSnapshot)
+        XCTAssertTrue(next.isSavedMap)
+        XCTAssertTrue(next.isMapStale)
+        XCTAssertTrue(next.activity.isEmpty)
+    }
+
+    func testFirstLiveMapReplacesTheSavedOneWithoutRecentLines() {
+        liveStore().receive(state: MockData.sampleSnapshot)
+        let store = liveStore()
+        var moved = MockData.sampleSnapshot
+        moved.e = moved.e.map { e in var e = e; if e.n == "keys" { e.s = .visible; e.p = nil }; return e }
+        store.linkChanged(.connected)
+        store.receive(state: moved)
+        XCTAssertEqual(store.snapshot, moved)
+        XCTAssertFalse(store.isSavedMap)
+        XCTAssertFalse(store.isMapStale)
+        // What changed while the app was closed happened at unknown times.
+        XCTAssertTrue(store.activity.isEmpty)
+    }
+
+    func testDroppedLinkMarksTheMapStale() {
+        let store = liveStore()
+        store.linkChanged(.connected)
+        store.receive(state: MockData.sampleSnapshot)
+        XCTAssertFalse(store.isMapStale)
+        store.linkChanged(.searching)
+        XCTAssertTrue(store.isMapStale)
+    }
+
+    func testDemoModeNeitherSavesNorShowsTheSavedMap() {
+        let mock = RoomStore(mock: true, savedMap: url)
+        mock.receive(state: MockData.sampleSnapshot)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path()))
+        liveStore().receive(state: MockData.sampleSnapshot)
+        let store = RoomStore(mock: true, savedMap: url)
+        XCTAssertFalse(store.isSavedMap)
+        XCTAssertFalse(store.isMapStale)
+    }
+
+    func testBannerTimeSaysTheDayWhenNotToday() {
+        let now = Date(timeIntervalSince1970: 1_790_420_000)
+        XCTAssertFalse(Banners.when(now.addingTimeInterval(-60), now: now).isEmpty)
+        let yesterday = Banners.when(now.addingTimeInterval(-86_400), now: now)
+        XCTAssertNotEqual(yesterday, Banners.when(now.addingTimeInterval(-60), now: now))
+    }
+}
