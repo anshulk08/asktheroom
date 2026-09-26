@@ -50,3 +50,14 @@ def test_the_prop_prompts_are_tried_too():
     w.find_guess = lambda said: [("thing:15", 0.8)] if said == "tv remote" else []
     a = ask(w)
     assert "I think" in a.text and a.point_at == "thing:15"
+
+
+def test_guessed_thing_in_a_tentative_room_place_is_hedged_once():
+    from core.room_types import Place
+    w = world()
+    w.set("thing:15", zone="couch", pos_cm=None)
+    w.set_place("thing:15", Place(kind="room", zone="couch", say="the couch", status=Status.VISIBLE,
+                                  chain=["thing:15"], via="thing:15", fresh=True, arrived_wall=NOW - 60,
+                                  last_seen_wall=NOW - 1, arrival_observed=True, tentative=True))
+    a = ask(w)
+    assert a.text.startswith("Your remote, I think, is on the couch.") and a.text.count("I think") == 1

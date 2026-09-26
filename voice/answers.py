@@ -202,7 +202,7 @@ def _where(obj: str, world, events, cfg: dict, now: float) -> Answer:
     except Exception:
         place = None
     if place is not None and place.kind == "room":
-        ans = _where_room(obj, place, cfg, now, world)
+        ans = _tentative(_where_room(obj, place, cfg, now, world), place, cfg, obj)
     else:
         ans = _where_table(obj, world, events, cfg, now)
     if place is not None and place.conflicts:
@@ -236,6 +236,13 @@ def _where_room(obj: str, place, cfg: dict, now: float, world=None) -> Answer:
     elif arrived is not None or last is not None:
         text += f" I've seen {it} there since {clock(arrived if arrived is not None else last)}."
     return Answer(text)
+
+
+def _tentative(ans: Answer, place, cfg: dict, obj: str) -> Answer:
+    """A room place reached by a Grok name match, not a known class (spec 0009): never asserted."""
+    if not getattr(place, "tentative", False) or "I think" in ans.text:
+        return ans
+    return Answer(_hedge(ans.text, _dn(cfg, obj)), ans.point_at, ans.action)
 
 
 def _conflict_tail(c, cfg: dict) -> str:
@@ -613,7 +620,8 @@ def _guessed_answer(k: str, intent: Intent, guessed: list[str], world, events, c
         ans = _history(obj, world, cfg, now)
     else:
         ans = _handled(obj, world, events, cfg, now)
-    return Answer(_hedge(ans.text, said), ans.point_at, ans.action)
+    text = ans.text if "I think" in ans.text else _hedge(ans.text, said)   # a tentative room place hedged already
+    return Answer(text, ans.point_at, ans.action)
 
 
 def _maybe_back(obj: str, ans: Answer, world, cfg: dict) -> Answer:

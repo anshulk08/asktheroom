@@ -223,3 +223,17 @@ def test_under_a_cover_carried_to_a_room_zone_says_under(w):
     a = ask(w, "keys")
     spoken_ok(a)
     assert a.text == "Your keys are under the notebook. The notebook is on the bookshelf."
+
+
+def test_tentative_room_place_is_hedged_once(w):
+    p = room_place("wallet")
+    p.tentative = True
+    w.set_place("wallet", p)
+    a = ask(w, "wallet")
+    spoken_ok(a)
+    assert a.text.startswith("Your wallet, I think, is on the bookshelf.") and a.text.count("I think") == 1
+    p2 = room_place("wallet", fresh=False, absent=True)
+    p2.tentative = True
+    w.set_place("wallet", p2)
+    a = ask(w, "wallet")
+    assert "what I think is your wallet" in a.text and a.text.count("I think") == 1
