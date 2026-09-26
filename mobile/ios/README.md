@@ -28,6 +28,8 @@ The map reads like Find My: each thing is a round pin with its own picture and i
 
 **Pictures.** Things get an emoji where a good one exists (🔑 👛 👓 📱 💊 📦 📓, and 🔌 for "my charger") or an SF Symbol where none does (the remote). A helper can change any of them under "More about it" → "Change picture": one tap for common emoji and symbols, or the emoji keyboard for anything else, including a Genmoji on iPhones with Apple Intelligence (iOS 18+). The same picture is used on the map, Home, Recent and the cards. Picks are saved on this phone (`thing-icons.json` in Application Support). `RESEARCH.md` compares emoji, SF Symbols, Genmoji, Image Playground and custom art.
 
+**Names the room guessed.** The rig can send a guess for an unnamed thing (`g`, with confidence `gc`, 0.6 if missing) and marks a name Grok gave with `as: "grok"`. The app shows these hedged everywhere: "tape roll?" on the map and cards, "what looks like a tape roll" in sentences, never "your". They stay under "The room noticed" rather than "Your things", and the card and detail sheet keep the object number. Guesses below 0.5 are ignored, so the thing stays "unnamed". The rules live in one place, `Entity.displayName` / `phrase` in `Models.swift`.
+
 The map was also decluttered: no grid, one faint edge on plain things and a strong dashed edge only on hidden or held ones, a short "unnamed" label instead of "unnamed object 9 ? link", and no status words on the map. The words are one tap away (the card, and VoiceOver reads them on every chip), and a key under the map explains only the marks in use. Suggestions wrap instead of scrolling off the edge. At accessibility text sizes the key and suggestions scroll with the card so the map keeps its size. Sources: W3C COGA [Avoid too much content](https://www.w3.org/WAI/WCAG2/supplemental/patterns/o5p03-manageable-quantity/), Apple's [map decluttering](https://developer.apple.com/documentation/MapKit/decluttering-a-map-with-mapkit-annotation-clustering), and progressive disclosure (labels on demand) from map labelling practice.
 
 **Helper settings** (the gear next to the status pill) are for a family member or carer: demo mode, "Read answers aloud" (off by default, since the rig already speaks), "Show answers to questions asked in the room" (off by default: questions asked out loud, on the dashboard or by text, PROTOCOL.md 6a), the rig's status, and "Show them again" for notices put away with "Got it".
@@ -77,7 +79,7 @@ If `xcode-select` points at the Command Line Tools, prefix the command with `DEV
 | --- | --- |
 | `Framing.swift` | Chunk reassembly per characteristic (spec section 3) |
 | `Models.swift` | Wire types; optional keys, open-string `action` |
-| `MockData.swift` | The spec's sample snapshot |
+| `MockData.swift` | The spec's sample snapshot, plus a guessed, a Grok-named and a weakly guessed thing |
 | `MockRoom.swift` | Mock mode: the sample snapshot, a looping story, faked answers |
 | `RoomStore.swift` | App state: snapshot, status, questions and answers, highlight, timeouts |
 | `MapLayout.swift` | What to draw per entity (section 5 table), where without overlaps, and the key |
