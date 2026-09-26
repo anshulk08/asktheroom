@@ -650,3 +650,30 @@ def test_a_held_thing_seen_again_in_the_hand_inside_a_person_box_is_matched(scen
     scene.run(world, 1.0)
     assert world.get('thing:1').pos_cm == pytest.approx((72, 30))
     assert things(world) == ['thing:1']
+
+
+# ----- a known class read on an established thing ----------------------------------------------------
+
+def test_a_configured_label_on_an_established_thing_does_not_pull_the_object_across(scene, world):
+    """The phone is carried off unseen by the hand detector; the detector then calls a mug that has
+    been on the table all along 'phone'. The phone does not jump onto the mug: it is missing, and the
+    mug stays a thing."""
+    scene.place('phone', 30, 20)
+    appear(scene, world, 'mug', (100, 30), seconds=3.0)
+    assert world.get('phone').status == Status.VISIBLE
+    scene.remove('phone')
+    scene.place('phone', 100, 30, w=6.0, h=4.0)     # the mug, labelled phone
+    scene.run(world, 2.0)
+    phone = world.get('phone')
+    assert phone.pos_cm is not None and abs(phone.pos_cm[0] - 30) < 5, phone.pos_cm
+    assert phone.status != Status.VISIBLE
+    assert world.get('thing:1').status == Status.VISIBLE
+
+
+def test_a_configured_object_moved_to_an_empty_spot_follows_the_detector(scene, world):
+    scene.place('phone', 30, 20)
+    scene.run(world, 2.0)
+    scene.place('phone', 90, 30)
+    scene.run(world, 2.0)
+    phone = world.get('phone')
+    assert phone.status == Status.VISIBLE and abs(phone.pos_cm[0] - 90) < 3

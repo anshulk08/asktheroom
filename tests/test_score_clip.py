@@ -201,6 +201,24 @@ def test_a_prop_picked_up_again_after_its_step_is_followed_not_handed_to_a_neigh
     assert r["identity_changes"] == []
 
 
+def test_an_undeclared_object_found_again_in_place_is_not_the_placed_prop(tmp_path):
+    """A phone nobody declared flickers out and back at its spot just as A is put down (the hand
+    unseen): the placement is A's new thing, not the phone's re-sighting."""
+    take = Take(tmp_path)
+    take.scene.place("box", *BOX_AT)
+    take.scene.place("phone", 100, 20)
+    take.run(2)
+    take.scene.miss("phone")
+    take.run(3)
+    t_place = take.now
+    take.scene.miss("phone", False)
+    take.scene.thing("A", 40, 30)
+    take.run(4)
+    r = score(take, {"props": {"A": "charger", "BOX": "box"},
+                     "steps": [{"t": t_place, "event": "place", "obj": "A", "parent": None, "note": ""}]})
+    assert [m["entity"] for m in r["mapping"]["A"]] == ["thing:1"], r["mapping"]["A"]
+
+
 def test_a_phantom_thing_while_a_hand_waves_is_a_false_birth(tmp_path):
     take = Take(tmp_path)
     take.scene.place("box", *BOX_AT)

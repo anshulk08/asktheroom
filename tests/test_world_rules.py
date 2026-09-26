@@ -539,3 +539,44 @@ def test_object_carried_in_view_off_the_left_edge_is_one_pick_up_then_exited_vie
     events += scene.run(world, 1.5)
     assert types(events) == [EventType.PICKED_UP, EventType.EXITED_VIEW]
     assert world.get('keys').status == Status.GONE and world.get('keys').edge == 'left'
+
+
+# ----- a hand over an object hides it: decide when the hand has left the spot ------------------------
+
+def wave(scene, world, xs, y=30, hid=1):
+    """The hand sweeps through xs, one position per batch."""
+    events = []
+    for x in xs:
+        scene.hand(hid, x, y)
+        events += world.update(*scene.step())
+    return events
+
+
+def test_hand_waving_over_keys_that_the_detector_misses_logs_nothing(rscene, world):
+    """A slow wave back and forth over the keys: the detector misses them the whole time (a moving arm
+    nearby), long enough to count as absence. Uncovered, their pixels show they are there; covered,
+    the spot cannot be seen until the hand moves on, and then they are there."""
+    rscene.place('keys', 60, 30)
+    rscene.run(world, 2.0)
+    rscene.miss('keys')
+    events = wave(rscene, world, [52, 56, 60, 64, 68, 64, 60, 56, 52, 56, 60, 64, 68, 64, 60])
+    events += wave(rscene, world, [75, 85, 95])
+    rscene.miss('keys', False)
+    events += wave(rscene, world, [105, 115])
+    rscene.hand_off(1)
+    events += rscene.run(world, 1.0)
+    assert events == []
+    assert world.get('keys').status == Status.VISIBLE
+
+
+def test_keys_gone_when_the_waving_hand_moves_on_are_picked_up_by_it(scene, world):
+    scene.place('keys', 60, 30)
+    scene.run(world, 1.0)
+    scene.hand(1, 60, 30)
+    scene.run(world, 0.2)
+    scene.remove('keys')                            # grabbed, and the hand is already moving on
+    events = wave(scene, world, [57, 63, 57, 63, 57, 63, 57, 63])
+    assert events == []                             # the moving hand still covers the spot: undecided
+    events += wave(scene, world, [75, 85, 90, 90, 90])
+    assert types(events) == [EventType.PICKED_UP]
+    assert (world.get('keys').status, world.get('keys').parent) == (Status.HELD, 'hand:1')

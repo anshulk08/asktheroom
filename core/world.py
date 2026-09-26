@@ -23,6 +23,9 @@ from core.things import ThingRules
 from core.types import Detection, Detections, Entity, Event, EventType, Frame, Point, Status
 
 HISTORY_MAX = 1000
+TRANSIT_S, TRANSIT_CM = 0.5, 4.0   # a hand whose centre moved this far this recently is passing over
+LABEL_ON_THING_IOU = 0.5    # a configured label on a thing's box overlapping this much ...
+ESTABLISHED_S = 2.0         # ... in place this long before the object was last seen elsewhere: the thing
 
 # A rule verdict is (Status, parent, confidence, EventType[, candidates]), or NO_CHANGE: the rule
 # claims the object this update (later rules are skipped) but leaves the belief as it is and emits
@@ -105,7 +108,7 @@ class World(ThingRules):
             self._now, self._wall, self._frame = dets.t, frame.wall if frame else dets.t, frame
             self._gray_img = None
             out: list[Event] = []
-            seen = self._best_detections(dets.items)
+            seen = self._best_detections(dets.items, dets.hands)
             self._track_covers(seen)
             out += self._associate_things(dets, seen)     # adds thing:N -> proposal to seen
             fell: list[str] = []
@@ -193,13 +196,29 @@ class World(ThingRules):
 
     # ----- rule 1: debounce ---------------------------------------------------------------------
 
-    def _best_detections(self, items: list[Detection]) -> dict[str, Detection]:
+    def _best_detections(self, items: list[Detection], hands=()) -> dict[str, Detection]:
         best: dict[str, Detection] = {}
         for d in items:
             if d.cls in self.entities and d.conf >= self.cfg.conf_threshold:
+                if self._label_on_a_thing(d, hands):
+                    continue
                 if d.cls not in best or d.conf > best[d.cls].conf:
                     best[d.cls] = d
         return best
+
+    def _label_on_a_thing(self, d: Detection, hands) -> bool:
+        """A configured label read on a thing that was already in place while that object was seen
+        elsewhere, with no hand at the spot: two objects side by side, so the detector is misnaming the
+        thing (a fine-tuned detector calls unknown things by its few classes), not the object moving
+        onto it. A thing that appeared only after the object was last seen may be the object itself."""
+        ent, seen = self.entities[d.cls], self._seen_t.get(d.cls)
+        if (seen is None or ent.pos_cm is None or not hasattr(self, '_placed_t')
+                or geom.dist(ent.pos_cm, d.center_cm) < self.cfg.moved_min_cm
+                or any(geom.overlap_frac(h.box_cm, d.box_cm) > 0 for h in hands)):
+            return False
+        return any(geom.iou(self.entities[n].box_cm, d.box_cm) >= LABEL_ON_THING_IOU
+                   and self._placed_t.get(n, seen) + ESTABLISHED_S <= seen
+                   for n in self._visible_things())
 
     def _debounce(self, name: str, ent: Entity, det: Detection | None) -> None:
         """Push this batch's presence bit; refresh position while detected (even before a flip)."""
@@ -325,6 +344,9 @@ class World(ThingRules):
         if self._still_there(name):
             self._present[name] = True      # detector miss: re-checked each update while it lasts
             return []
+        if self._hand_over(ent):            # the hand hides the spot (a wave, or a grab in progress):
+            self._present[name] = True      # decided once it moves on, by the rules below
+            return []
         slid_over = self._slid_over_by_hand(name, ent)
         if slid_over is not None:
             return self._apply_verdict(name, ent, slid_over)
@@ -349,6 +371,18 @@ class World(ThingRules):
         """UNKNOWN at the last known position; confidence is left as it was."""
         ent.status, ent.parent, ent.candidates, ent.held_since = Status.UNKNOWN, None, [], None
         return [self._emit(name, EventType.LOST_TRACK)]
+
+    def _hand_over(self, ent: Entity) -> bool:
+        """A hand in view, still moving (a wave passing over, or a grab already on its way out), covers
+        any of the object's last box: the spot cannot be seen (nor its pixels checked) yet. A hand at
+        rest on it is a grasp: the pick-up rule decides at once."""
+        return ent.box_cm is not None and any(
+            geom.overlap_frac(self._hands[h][2], ent.box_cm) > 0 and self._in_transit(h) for h in self._hands_now)
+
+    def _in_transit(self, hid: str) -> bool:
+        trail = getattr(self, '_trail', {}).get(hid) or ()
+        now_c = geom.center(self._hands[hid][2])
+        return any(self._now - t <= TRANSIT_S and geom.dist(geom.center(b), now_c) >= TRANSIT_CM for t, b in trail)
 
     def _picked_up(self, name: str, ent: Entity) -> list[Event]:
         # Debounce declares absence ~0.6-0.9 s late, so the window is anchored at last_seen, not now.
