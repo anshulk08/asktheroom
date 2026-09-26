@@ -1,0 +1,1313 @@
+[
+ {
+  "t": 43578.382269653,
+  "wall": 1790418671.656372,
+  "obj": "keys",
+  "type": "PICKED_UP",
+  "from_cm": [
+   45.16,
+   11.74
+  ],
+  "to_cm": null,
+  "parent": "hand:1",
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418671656_keys_PICKED_UP.jpg",
+  "id": "1790418671.6564:keys:PICKED_UP"
+ },
+ {
+  "t": 43581.882269653,
+  "wall": 1790418675.1563632,
+  "obj": "keys",
+  "type": "PUT_INSIDE",
+  "from_cm": null,
+  "to_cm": null,
+  "parent": "box",
+  "edge": null,
+  "confidence": 0.85,
+  "snapshot_url": "/snapshots/1790418675156_keys_PUT_INSIDE.jpg",
+  "id": "1790418675.1564:keys:PUT_INSIDE"
+ },
+ {
+  "t": 43586.082269653,
+  "wall": 1790418679.356364,
+  "obj": "box",
+  "type": "PICKED_UP",
+  "from_cm": [
+   19.57,
+   29.8
+  ],
+  "to_cm": null,
+  "parent": "hand:2",
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418679356_box_PICKED_UP.jpg",
+  "id": "1790418679.3564:box:PICKED_UP"
+ },
+ {
+  "t": 43587.782269653,
+  "wall": 1790418681.0563653,
+  "obj": "box",
+  "type": "MOVED",
+  "from_cm": [
+   19.57,
+   29.8
+  ],
+  "to_cm": [
+   37.96,
+   23.65
+  ],
+  "parent": null,
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418681056_box_MOVED.jpg",
+  "id": "1790418681.0564:box:MOVED"
+ },
+ {
+  "t": 43593.082269653,
+  "wall": 1790418686.3563552,
+  "obj": "notebook",
+  "type": "PICKED_UP",
+  "from_cm": [
+   75.75,
+   43.7
+  ],
+  "to_cm": null,
+  "parent": "hand:3",
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418686356_notebook_PICKED_UP.jpg",
+  "id": "1790418686.3564:notebook:PICKED_UP"
+ },
+ {
+  "t": 43593.782269653,
+  "wall": 1790418687.0563684,
+  "obj": "pill_bottle",
+  "type": "COVERED",
+  "from_cm": null,
+  "to_cm": null,
+  "parent": "notebook",
+  "edge": null,
+  "confidence": 0.85,
+  "snapshot_url": "/snapshots/1790418687056_pill_bottle_COVERED.jpg",
+  "id": "1790418687.0564:pill_bottle:COVERED"
+ },
+ {
+  "t": 43594.382269653,
+  "wall": 1790418687.6563687,
+  "obj": "notebook",
+  "type": "MOVED",
+  "from_cm": [
+   75.75,
+   43.7
+  ],
+  "to_cm": [
+   59.71,
+   38.42
+  ],
+  "parent": null,
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418687656_notebook_MOVED.jpg",
+  "id": "1790418687.6564:notebook:MOVED"
+ },
+ {
+  "t": 43599.882269653,
+  "wall": 1790418693.1563692,
+  "obj": "wallet",
+  "type": "PICKED_UP",
+  "from_cm": [
+   59.98,
+   11.64
+  ],
+  "to_cm": null,
+  "parent": "hand:4",
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418693156_wallet_PICKED_UP.jpg",
+  "id": "1790418693.1564:wallet:PICKED_UP"
+ },
+ {
+  "t": 43602.382269653,
+  "wall": 1790418695.65637,
+  "obj": "wallet",
+  "type": "PUT_BACK",
+  "from_cm": [
+   59.98,
+   11.64
+  ],
+  "to_cm": [
+   60.41,
+   12.44
+  ],
+  "parent": null,
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418695656_wallet_PUT_BACK.jpg",
+  "id": "1790418695.6564:wallet:PUT_BACK"
+ },
+ {
+  "t": 43606.382269653,
+  "wall": 1790418699.656371,
+  "obj": "remote",
+  "type": "PICKED_UP",
+  "from_cm": [
+   37.92,
+   49.61
+  ],
+  "to_cm": null,
+  "parent": "hand:5",
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418699656_remote_PICKED_UP.jpg",
+  "id": "1790418699.6564:remote:PICKED_UP"
+ },
+ {
+  "t": 43608.182269653,
+  "wall": 1790418701.456373,
+  "obj": "remote",
+  "type": "MOVED",
+  "from_cm": [
+   37.92,
+   49.61
+  ],
+  "to_cm": [
+   12.26,
+   34.5
+  ],
+  "parent": null,
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418701456_remote_MOVED.jpg",
+  "id": "1790418701.4564:remote:MOVED"
+ },
+ {
+  "t": 43612.282269653,
+  "wall": 1790418705.5563636,
+  "obj": "phone",
+  "type": "PICKED_UP",
+  "from_cm": [
+   78.06,
+   14.99
+  ],
+  "to_cm": null,
+  "parent": "hand:6",
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418705556_phone_PICKED_UP.jpg",
+  "id": "1790418705.5564:phone:PICKED_UP"
+ },
+ {
+  "t": 43613.282269653,
+  "wall": 1790418706.5563653,
+  "obj": "phone",
+  "type": "EXITED_VIEW",
+  "from_cm": null,
+  "to_cm": null,
+  "parent": null,
+  "edge": "right",
+  "confidence": 0.9,
+  "snapshot_url": "/snapshots/1790418706556_phone_EXITED_VIEW.jpg",
+  "id": "1790418706.5564:phone:EXITED_VIEW"
+ },
+ {
+  "t": 43647.688667044,
+  "wall": 1790418740.9627643,
+  "obj": "keys",
+  "type": "PICKED_UP",
+  "from_cm": [
+   45.1,
+   12.57
+  ],
+  "to_cm": null,
+  "parent": "hand:1",
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418740962_keys_PICKED_UP.jpg",
+  "id": "1790418740.9628:keys:PICKED_UP"
+ },
+ {
+  "t": 43651.288667044,
+  "wall": 1790418744.5627618,
+  "obj": "keys",
+  "type": "PUT_INSIDE",
+  "from_cm": null,
+  "to_cm": null,
+  "parent": "box",
+  "edge": null,
+  "confidence": 0.85,
+  "snapshot_url": "/snapshots/1790418744562_keys_PUT_INSIDE.jpg",
+  "id": "1790418744.5628:keys:PUT_INSIDE"
+ },
+ {
+  "t": 43655.488667044,
+  "wall": 1790418748.7627602,
+  "obj": "box",
+  "type": "PICKED_UP",
+  "from_cm": [
+   19.73,
+   30.26
+  ],
+  "to_cm": null,
+  "parent": "hand:2",
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418748762_box_PICKED_UP.jpg",
+  "id": "1790418748.7628:box:PICKED_UP"
+ },
+ {
+  "t": 43657.188667044,
+  "wall": 1790418750.4627783,
+  "obj": "box",
+  "type": "MOVED",
+  "from_cm": [
+   19.73,
+   30.26
+  ],
+  "to_cm": [
+   37.38,
+   23.85
+  ],
+  "parent": null,
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418750462_box_MOVED.jpg",
+  "id": "1790418750.4628:box:MOVED"
+ },
+ {
+  "t": 43662.388667044004,
+  "wall": 1790418755.6627786,
+  "obj": "notebook",
+  "type": "PICKED_UP",
+  "from_cm": [
+   76.73,
+   43.2
+  ],
+  "to_cm": null,
+  "parent": "hand:3",
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418755662_notebook_PICKED_UP.jpg",
+  "id": "1790418755.6628:notebook:PICKED_UP"
+ },
+ {
+  "t": 43663.188667044,
+  "wall": 1790418756.4627748,
+  "obj": "pill_bottle",
+  "type": "COVERED",
+  "from_cm": null,
+  "to_cm": null,
+  "parent": "notebook",
+  "edge": null,
+  "confidence": 0.85,
+  "snapshot_url": "/snapshots/1790418756462_pill_bottle_COVERED.jpg",
+  "id": "1790418756.4628:pill_bottle:COVERED"
+ },
+ {
+  "t": 43663.688667044,
+  "wall": 1790418756.9627717,
+  "obj": "notebook",
+  "type": "MOVED",
+  "from_cm": [
+   76.73,
+   43.2
+  ],
+  "to_cm": [
+   60.48,
+   38.86
+  ],
+  "parent": null,
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418756962_notebook_MOVED.jpg",
+  "id": "1790418756.9628:notebook:MOVED"
+ },
+ {
+  "t": 43669.288667044,
+  "wall": 1790418762.5627656,
+  "obj": "wallet",
+  "type": "PICKED_UP",
+  "from_cm": [
+   59.76,
+   12.51
+  ],
+  "to_cm": null,
+  "parent": "hand:4",
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418762562_wallet_PICKED_UP.jpg",
+  "id": "1790418762.5628:wallet:PICKED_UP"
+ },
+ {
+  "t": 43671.788667044,
+  "wall": 1790418765.0627756,
+  "obj": "wallet",
+  "type": "PUT_BACK",
+  "from_cm": [
+   59.76,
+   12.51
+  ],
+  "to_cm": [
+   60.57,
+   12.31
+  ],
+  "parent": null,
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418765062_wallet_PUT_BACK.jpg",
+  "id": "1790418765.0628:wallet:PUT_BACK"
+ },
+ {
+  "t": 43675.788667044,
+  "wall": 1790418769.0627737,
+  "obj": "remote",
+  "type": "PICKED_UP",
+  "from_cm": [
+   37.65,
+   49.32
+  ],
+  "to_cm": null,
+  "parent": "hand:5",
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418769062_remote_PICKED_UP.jpg",
+  "id": "1790418769.0628:remote:PICKED_UP"
+ },
+ {
+  "t": 43677.588667044,
+  "wall": 1790418770.8627732,
+  "obj": "remote",
+  "type": "MOVED",
+  "from_cm": [
+   37.65,
+   49.32
+  ],
+  "to_cm": [
+   12.34,
+   34.53
+  ],
+  "parent": null,
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418770862_remote_MOVED.jpg",
+  "id": "1790418770.8628:remote:MOVED"
+ },
+ {
+  "t": 43681.688667044,
+  "wall": 1790418774.9627717,
+  "obj": "phone",
+  "type": "PICKED_UP",
+  "from_cm": [
+   78.06,
+   13.95
+  ],
+  "to_cm": null,
+  "parent": "hand:6",
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418774962_phone_PICKED_UP.jpg",
+  "id": "1790418774.9628:phone:PICKED_UP"
+ },
+ {
+  "t": 43682.688667044,
+  "wall": 1790418775.9627702,
+  "obj": "phone",
+  "type": "EXITED_VIEW",
+  "from_cm": null,
+  "to_cm": null,
+  "parent": null,
+  "edge": "right",
+  "confidence": 0.9,
+  "snapshot_url": "/snapshots/1790418775962_phone_EXITED_VIEW.jpg",
+  "id": "1790418775.9628:phone:EXITED_VIEW"
+ },
+ {
+  "t": 43717.143343243995,
+  "wall": 1790418810.417449,
+  "obj": "keys",
+  "type": "PICKED_UP",
+  "from_cm": [
+   44.89,
+   11.94
+  ],
+  "to_cm": null,
+  "parent": "hand:1",
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418810417_keys_PICKED_UP.jpg",
+  "id": "1790418810.4174:keys:PICKED_UP"
+ },
+ {
+  "t": 43720.643343243995,
+  "wall": 1790418813.9174538,
+  "obj": "keys",
+  "type": "PUT_INSIDE",
+  "from_cm": null,
+  "to_cm": null,
+  "parent": "box",
+  "edge": null,
+  "confidence": 0.85,
+  "snapshot_url": "/snapshots/1790418813917_keys_PUT_INSIDE.jpg",
+  "id": "1790418813.9175:keys:PUT_INSIDE"
+ },
+ {
+  "t": 43725.143343243995,
+  "wall": 1790418818.4174445,
+  "obj": "box",
+  "type": "PICKED_UP",
+  "from_cm": [
+   20.63,
+   29.85
+  ],
+  "to_cm": null,
+  "parent": "hand:2",
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418818417_box_PICKED_UP.jpg",
+  "id": "1790418818.4174:box:PICKED_UP"
+ },
+ {
+  "t": 43726.543343244,
+  "wall": 1790418819.8174512,
+  "obj": "box",
+  "type": "MOVED",
+  "from_cm": [
+   20.63,
+   29.85
+  ],
+  "to_cm": [
+   37.86,
+   24.47
+  ],
+  "parent": null,
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418819817_box_MOVED.jpg",
+  "id": "1790418819.8175:box:MOVED"
+ },
+ {
+  "t": 43731.843343244,
+  "wall": 1790418825.1174467,
+  "obj": "notebook",
+  "type": "PICKED_UP",
+  "from_cm": [
+   75.79,
+   44.53
+  ],
+  "to_cm": null,
+  "parent": "hand:3",
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418825117_notebook_PICKED_UP.jpg",
+  "id": "1790418825.1174:notebook:PICKED_UP"
+ },
+ {
+  "t": 43732.543343244,
+  "wall": 1790418825.8174484,
+  "obj": "pill_bottle",
+  "type": "COVERED",
+  "from_cm": null,
+  "to_cm": null,
+  "parent": "notebook",
+  "edge": null,
+  "confidence": 0.85,
+  "snapshot_url": "/snapshots/1790418825817_pill_bottle_COVERED.jpg",
+  "id": "1790418825.8174:pill_bottle:COVERED"
+ },
+ {
+  "t": 43733.243343244,
+  "wall": 1790418826.517461,
+  "obj": "notebook",
+  "type": "MOVED",
+  "from_cm": [
+   75.79,
+   44.53
+  ],
+  "to_cm": [
+   60.11,
+   38.34
+  ],
+  "parent": null,
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418826517_notebook_MOVED.jpg",
+  "id": "1790418826.5175:notebook:MOVED"
+ },
+ {
+  "t": 43738.643343243995,
+  "wall": 1790418831.9174497,
+  "obj": "wallet",
+  "type": "PICKED_UP",
+  "from_cm": [
+   60.0,
+   12.54
+  ],
+  "to_cm": null,
+  "parent": "hand:4",
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418831917_wallet_PICKED_UP.jpg",
+  "id": "1790418831.9174:wallet:PICKED_UP"
+ },
+ {
+  "t": 43741.043343244,
+  "wall": 1790418834.317447,
+  "obj": "wallet",
+  "type": "PUT_BACK",
+  "from_cm": [
+   60.0,
+   12.54
+  ],
+  "to_cm": [
+   60.67,
+   12.66
+  ],
+  "parent": null,
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418834317_wallet_PUT_BACK.jpg",
+  "id": "1790418834.3174:wallet:PUT_BACK"
+ },
+ {
+  "t": 43745.143343243995,
+  "wall": 1790418838.4174476,
+  "obj": "remote",
+  "type": "PICKED_UP",
+  "from_cm": [
+   37.95,
+   49.71
+  ],
+  "to_cm": null,
+  "parent": "hand:5",
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418838417_remote_PICKED_UP.jpg",
+  "id": "1790418838.4174:remote:PICKED_UP"
+ },
+ {
+  "t": 43746.943343244,
+  "wall": 1790418840.217461,
+  "obj": "remote",
+  "type": "MOVED",
+  "from_cm": [
+   37.95,
+   49.71
+  ],
+  "to_cm": [
+   12.18,
+   35.04
+  ],
+  "parent": null,
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418840217_remote_MOVED.jpg",
+  "id": "1790418840.2175:remote:MOVED"
+ },
+ {
+  "t": 43751.043343244,
+  "wall": 1790418844.3174515,
+  "obj": "phone",
+  "type": "PICKED_UP",
+  "from_cm": [
+   77.14,
+   15.0
+  ],
+  "to_cm": null,
+  "parent": "hand:6",
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418844317_phone_PICKED_UP.jpg",
+  "id": "1790418844.3175:phone:PICKED_UP"
+ },
+ {
+  "t": 43752.043343244,
+  "wall": 1790418845.317439,
+  "obj": "phone",
+  "type": "EXITED_VIEW",
+  "from_cm": null,
+  "to_cm": null,
+  "parent": null,
+  "edge": "right",
+  "confidence": 0.9,
+  "snapshot_url": "/snapshots/1790418845317_phone_EXITED_VIEW.jpg",
+  "id": "1790418845.3174:phone:EXITED_VIEW"
+ },
+ {
+  "t": 43786.39709673,
+  "wall": 1790418879.6711965,
+  "obj": "keys",
+  "type": "PICKED_UP",
+  "from_cm": [
+   44.99,
+   12.8
+  ],
+  "to_cm": null,
+  "parent": "hand:1",
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418879671_keys_PICKED_UP.jpg",
+  "id": "1790418879.6712:keys:PICKED_UP"
+ },
+ {
+  "t": 43789.997096729996,
+  "wall": 1790418883.2712176,
+  "obj": "keys",
+  "type": "PUT_INSIDE",
+  "from_cm": null,
+  "to_cm": null,
+  "parent": "box",
+  "edge": null,
+  "confidence": 0.85,
+  "snapshot_url": "/snapshots/1790418883271_keys_PUT_INSIDE.jpg",
+  "id": "1790418883.2712:keys:PUT_INSIDE"
+ },
+ {
+  "t": 43794.19709673,
+  "wall": 1790418887.4712036,
+  "obj": "box",
+  "type": "PICKED_UP",
+  "from_cm": [
+   19.19,
+   30.49
+  ],
+  "to_cm": null,
+  "parent": "hand:2",
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418887471_box_PICKED_UP.jpg",
+  "id": "1790418887.4712:box:PICKED_UP"
+ },
+ {
+  "t": 43795.89709673,
+  "wall": 1790418889.1712067,
+  "obj": "box",
+  "type": "MOVED",
+  "from_cm": [
+   19.19,
+   30.49
+  ],
+  "to_cm": [
+   37.32,
+   23.56
+  ],
+  "parent": null,
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418889171_box_MOVED.jpg",
+  "id": "1790418889.1712:box:MOVED"
+ },
+ {
+  "t": 43801.09709673,
+  "wall": 1790418894.3711934,
+  "obj": "notebook",
+  "type": "PICKED_UP",
+  "from_cm": [
+   76.96,
+   44.03
+  ],
+  "to_cm": null,
+  "parent": "hand:3",
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418894371_notebook_PICKED_UP.jpg",
+  "id": "1790418894.3712:notebook:PICKED_UP"
+ },
+ {
+  "t": 43801.89709673,
+  "wall": 1790418895.1712008,
+  "obj": "pill_bottle",
+  "type": "COVERED",
+  "from_cm": null,
+  "to_cm": null,
+  "parent": "notebook",
+  "edge": null,
+  "confidence": 0.85,
+  "snapshot_url": "/snapshots/1790418895171_pill_bottle_COVERED.jpg",
+  "id": "1790418895.1712:pill_bottle:COVERED"
+ },
+ {
+  "t": 43802.497096729996,
+  "wall": 1790418895.7711942,
+  "obj": "notebook",
+  "type": "MOVED",
+  "from_cm": [
+   76.96,
+   44.03
+  ],
+  "to_cm": [
+   60.82,
+   38.18
+  ],
+  "parent": null,
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418895771_notebook_MOVED.jpg",
+  "id": "1790418895.7712:notebook:MOVED"
+ },
+ {
+  "t": 43807.997096729996,
+  "wall": 1790418901.2711916,
+  "obj": "wallet",
+  "type": "PICKED_UP",
+  "from_cm": [
+   59.74,
+   11.95
+  ],
+  "to_cm": null,
+  "parent": "hand:4",
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418901271_wallet_PICKED_UP.jpg",
+  "id": "1790418901.2712:wallet:PICKED_UP"
+ },
+ {
+  "t": 43810.497096729996,
+  "wall": 1790418903.7712028,
+  "obj": "wallet",
+  "type": "PUT_BACK",
+  "from_cm": [
+   59.74,
+   11.95
+  ],
+  "to_cm": [
+   60.52,
+   12.8
+  ],
+  "parent": null,
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418903771_wallet_PUT_BACK.jpg",
+  "id": "1790418903.7712:wallet:PUT_BACK"
+ },
+ {
+  "t": 43814.497096729996,
+  "wall": 1790418907.7711961,
+  "obj": "remote",
+  "type": "PICKED_UP",
+  "from_cm": [
+   38.51,
+   49.65
+  ],
+  "to_cm": null,
+  "parent": "hand:5",
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418907771_remote_PICKED_UP.jpg",
+  "id": "1790418907.7712:remote:PICKED_UP"
+ },
+ {
+  "t": 43816.29709673,
+  "wall": 1790418909.5711975,
+  "obj": "remote",
+  "type": "MOVED",
+  "from_cm": [
+   38.51,
+   49.65
+  ],
+  "to_cm": [
+   12.29,
+   34.47
+  ],
+  "parent": null,
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418909571_remote_MOVED.jpg",
+  "id": "1790418909.5712:remote:MOVED"
+ },
+ {
+  "t": 43820.497096729996,
+  "wall": 1790418913.771196,
+  "obj": "phone",
+  "type": "PICKED_UP",
+  "from_cm": [
+   78.13,
+   14.3
+  ],
+  "to_cm": null,
+  "parent": "hand:6",
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418913771_phone_PICKED_UP.jpg",
+  "id": "1790418913.7712:phone:PICKED_UP"
+ },
+ {
+  "t": 43821.29709673,
+  "wall": 1790418914.571215,
+  "obj": "phone",
+  "type": "EXITED_VIEW",
+  "from_cm": null,
+  "to_cm": null,
+  "parent": null,
+  "edge": "right",
+  "confidence": 0.9,
+  "snapshot_url": "/snapshots/1790418914571_phone_EXITED_VIEW.jpg",
+  "id": "1790418914.5712:phone:EXITED_VIEW"
+ },
+ {
+  "t": 43855.749948641,
+  "wall": 1790418949.0240595,
+  "obj": "keys",
+  "type": "PICKED_UP",
+  "from_cm": [
+   45.1,
+   12.02
+  ],
+  "to_cm": null,
+  "parent": "hand:1",
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418949024_keys_PICKED_UP.jpg",
+  "id": "1790418949.0241:keys:PICKED_UP"
+ },
+ {
+  "t": 43859.349948641,
+  "wall": 1790418952.6240482,
+  "obj": "keys",
+  "type": "PUT_INSIDE",
+  "from_cm": null,
+  "to_cm": null,
+  "parent": "box",
+  "edge": null,
+  "confidence": 0.85,
+  "snapshot_url": "/snapshots/1790418952624_keys_PUT_INSIDE.jpg",
+  "id": "1790418952.6240:keys:PUT_INSIDE"
+ },
+ {
+  "t": 43863.649948641,
+  "wall": 1790418956.9240515,
+  "obj": "box",
+  "type": "PICKED_UP",
+  "from_cm": [
+   20.15,
+   29.96
+  ],
+  "to_cm": null,
+  "parent": "hand:2",
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418956924_box_PICKED_UP.jpg",
+  "id": "1790418956.9241:box:PICKED_UP"
+ },
+ {
+  "t": 43865.249948641,
+  "wall": 1790418958.5240703,
+  "obj": "box",
+  "type": "MOVED",
+  "from_cm": [
+   20.15,
+   29.96
+  ],
+  "to_cm": [
+   37.51,
+   24.07
+  ],
+  "parent": null,
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418958524_box_MOVED.jpg",
+  "id": "1790418958.5241:box:MOVED"
+ },
+ {
+  "t": 43870.449948641006,
+  "wall": 1790418963.7240539,
+  "obj": "notebook",
+  "type": "PICKED_UP",
+  "from_cm": [
+   76.36,
+   43.68
+  ],
+  "to_cm": null,
+  "parent": "hand:3",
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418963724_notebook_PICKED_UP.jpg",
+  "id": "1790418963.7241:notebook:PICKED_UP"
+ },
+ {
+  "t": 43871.249948641,
+  "wall": 1790418964.5240724,
+  "obj": "pill_bottle",
+  "type": "COVERED",
+  "from_cm": null,
+  "to_cm": null,
+  "parent": "notebook",
+  "edge": null,
+  "confidence": 0.85,
+  "snapshot_url": "/snapshots/1790418964524_pill_bottle_COVERED.jpg",
+  "id": "1790418964.5241:pill_bottle:COVERED"
+ },
+ {
+  "t": 43871.849948641,
+  "wall": 1790418965.1240575,
+  "obj": "notebook",
+  "type": "MOVED",
+  "from_cm": [
+   76.36,
+   43.68
+  ],
+  "to_cm": [
+   60.46,
+   38.43
+  ],
+  "parent": null,
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418965124_notebook_MOVED.jpg",
+  "id": "1790418965.1241:notebook:MOVED"
+ },
+ {
+  "t": 43877.349948641,
+  "wall": 1790418970.624044,
+  "obj": "wallet",
+  "type": "PICKED_UP",
+  "from_cm": [
+   60.17,
+   11.88
+  ],
+  "to_cm": null,
+  "parent": "hand:4",
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418970624_wallet_PICKED_UP.jpg",
+  "id": "1790418970.6240:wallet:PICKED_UP"
+ },
+ {
+  "t": 43879.849948641,
+  "wall": 1790418973.1240468,
+  "obj": "wallet",
+  "type": "PUT_BACK",
+  "from_cm": [
+   60.17,
+   11.88
+  ],
+  "to_cm": [
+   60.67,
+   12.13
+  ],
+  "parent": null,
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418973124_wallet_PUT_BACK.jpg",
+  "id": "1790418973.1240:wallet:PUT_BACK"
+ },
+ {
+  "t": 43883.849948641,
+  "wall": 1790418977.1240509,
+  "obj": "remote",
+  "type": "PICKED_UP",
+  "from_cm": [
+   38.06,
+   49.97
+  ],
+  "to_cm": null,
+  "parent": "hand:5",
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418977124_remote_PICKED_UP.jpg",
+  "id": "1790418977.1241:remote:PICKED_UP"
+ },
+ {
+  "t": 43885.649948641,
+  "wall": 1790418978.9240565,
+  "obj": "remote",
+  "type": "MOVED",
+  "from_cm": [
+   38.06,
+   49.97
+  ],
+  "to_cm": [
+   12.14,
+   34.61
+  ],
+  "parent": null,
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418978924_remote_MOVED.jpg",
+  "id": "1790418978.9241:remote:MOVED"
+ },
+ {
+  "t": 43889.749948641,
+  "wall": 1790418983.02406,
+  "obj": "phone",
+  "type": "PICKED_UP",
+  "from_cm": [
+   78.05,
+   13.52
+  ],
+  "to_cm": null,
+  "parent": "hand:6",
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790418983024_phone_PICKED_UP.jpg",
+  "id": "1790418983.0241:phone:PICKED_UP"
+ },
+ {
+  "t": 43890.649948641,
+  "wall": 1790418983.9240513,
+  "obj": "phone",
+  "type": "EXITED_VIEW",
+  "from_cm": null,
+  "to_cm": null,
+  "parent": null,
+  "edge": "right",
+  "confidence": 0.9,
+  "snapshot_url": "/snapshots/1790418983924_phone_EXITED_VIEW.jpg",
+  "id": "1790418983.9241:phone:EXITED_VIEW"
+ },
+ {
+  "t": 43925.103367313,
+  "wall": 1790419018.3774598,
+  "obj": "keys",
+  "type": "PICKED_UP",
+  "from_cm": [
+   44.92,
+   12.08
+  ],
+  "to_cm": null,
+  "parent": "hand:1",
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790419018377_keys_PICKED_UP.jpg",
+  "id": "1790419018.3775:keys:PICKED_UP"
+ },
+ {
+  "t": 43928.703367313,
+  "wall": 1790419021.9774692,
+  "obj": "keys",
+  "type": "PUT_INSIDE",
+  "from_cm": null,
+  "to_cm": null,
+  "parent": "box",
+  "edge": null,
+  "confidence": 0.85,
+  "snapshot_url": "/snapshots/1790419021977_keys_PUT_INSIDE.jpg",
+  "id": "1790419021.9775:keys:PUT_INSIDE"
+ },
+ {
+  "t": 43932.903367313,
+  "wall": 1790419026.1774726,
+  "obj": "box",
+  "type": "PICKED_UP",
+  "from_cm": [
+   19.69,
+   29.57
+  ],
+  "to_cm": null,
+  "parent": "hand:2",
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790419026177_box_PICKED_UP.jpg",
+  "id": "1790419026.1775:box:PICKED_UP"
+ },
+ {
+  "t": 43934.603367313,
+  "wall": 1790419027.8774683,
+  "obj": "box",
+  "type": "MOVED",
+  "from_cm": [
+   19.69,
+   29.57
+  ],
+  "to_cm": [
+   37.57,
+   24.17
+  ],
+  "parent": null,
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790419027877_box_MOVED.jpg",
+  "id": "1790419027.8775:box:MOVED"
+ },
+ {
+  "t": 43939.903367313,
+  "wall": 1790419033.1774774,
+  "obj": "notebook",
+  "type": "PICKED_UP",
+  "from_cm": [
+   75.77,
+   43.4
+  ],
+  "to_cm": null,
+  "parent": "hand:3",
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790419033177_notebook_PICKED_UP.jpg",
+  "id": "1790419033.1775:notebook:PICKED_UP"
+ },
+ {
+  "t": 43940.603367313,
+  "wall": 1790419033.8774705,
+  "obj": "pill_bottle",
+  "type": "COVERED",
+  "from_cm": null,
+  "to_cm": null,
+  "parent": "notebook",
+  "edge": null,
+  "confidence": 0.85,
+  "snapshot_url": "/snapshots/1790419033877_pill_bottle_COVERED.jpg",
+  "id": "1790419033.8775:pill_bottle:COVERED"
+ },
+ {
+  "t": 43941.203367313,
+  "wall": 1790419034.4774628,
+  "obj": "notebook",
+  "type": "MOVED",
+  "from_cm": [
+   75.77,
+   43.4
+  ],
+  "to_cm": [
+   60.51,
+   38.61
+  ],
+  "parent": null,
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790419034477_notebook_MOVED.jpg",
+  "id": "1790419034.4775:notebook:MOVED"
+ },
+ {
+  "t": 43946.803367313005,
+  "wall": 1790419040.07746,
+  "obj": "wallet",
+  "type": "PICKED_UP",
+  "from_cm": [
+   60.23,
+   12.04
+  ],
+  "to_cm": null,
+  "parent": "hand:4",
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790419040077_wallet_PICKED_UP.jpg",
+  "id": "1790419040.0775:wallet:PICKED_UP"
+ },
+ {
+  "t": 43949.303367313005,
+  "wall": 1790419042.577475,
+  "obj": "wallet",
+  "type": "PUT_BACK",
+  "from_cm": [
+   60.23,
+   12.04
+  ],
+  "to_cm": [
+   59.96,
+   12.45
+  ],
+  "parent": null,
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790419042577_wallet_PUT_BACK.jpg",
+  "id": "1790419042.5775:wallet:PUT_BACK"
+ },
+ {
+  "t": 43953.203367313,
+  "wall": 1790419046.4774613,
+  "obj": "remote",
+  "type": "PICKED_UP",
+  "from_cm": [
+   37.9,
+   50.23
+  ],
+  "to_cm": null,
+  "parent": "hand:5",
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790419046477_remote_PICKED_UP.jpg",
+  "id": "1790419046.4775:remote:PICKED_UP"
+ },
+ {
+  "t": 43955.003367313,
+  "wall": 1790419048.2774727,
+  "obj": "remote",
+  "type": "MOVED",
+  "from_cm": [
+   37.9,
+   50.23
+  ],
+  "to_cm": [
+   11.96,
+   35.3
+  ],
+  "parent": null,
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790419048277_remote_MOVED.jpg",
+  "id": "1790419048.2775:remote:MOVED"
+ },
+ {
+  "t": 43959.103367313,
+  "wall": 1790419052.3774629,
+  "obj": "phone",
+  "type": "PICKED_UP",
+  "from_cm": [
+   77.94,
+   13.25
+  ],
+  "to_cm": null,
+  "parent": "hand:6",
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790419052377_phone_PICKED_UP.jpg",
+  "id": "1790419052.3775:phone:PICKED_UP"
+ },
+ {
+  "t": 43960.103367313,
+  "wall": 1790419053.377491,
+  "obj": "phone",
+  "type": "EXITED_VIEW",
+  "from_cm": null,
+  "to_cm": null,
+  "parent": null,
+  "edge": "right",
+  "confidence": 0.9,
+  "snapshot_url": "/snapshots/1790419053377_phone_EXITED_VIEW.jpg",
+  "id": "1790419053.3775:phone:EXITED_VIEW"
+ },
+ {
+  "t": 43994.557954747,
+  "wall": 1790419087.8320603,
+  "obj": "keys",
+  "type": "PICKED_UP",
+  "from_cm": [
+   44.76,
+   11.34
+  ],
+  "to_cm": null,
+  "parent": "hand:1",
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790419087832_keys_PICKED_UP.jpg",
+  "id": "1790419087.8321:keys:PICKED_UP"
+ },
+ {
+  "t": 43998.057954747,
+  "wall": 1790419091.3320649,
+  "obj": "keys",
+  "type": "PUT_INSIDE",
+  "from_cm": null,
+  "to_cm": null,
+  "parent": "box",
+  "edge": null,
+  "confidence": 0.85,
+  "snapshot_url": "/snapshots/1790419091332_keys_PUT_INSIDE.jpg",
+  "id": "1790419091.3321:keys:PUT_INSIDE"
+ },
+ {
+  "t": 44002.457954747,
+  "wall": 1790419095.7320955,
+  "obj": "box",
+  "type": "PICKED_UP",
+  "from_cm": [
+   20.74,
+   29.54
+  ],
+  "to_cm": null,
+  "parent": "hand:2",
+  "edge": null,
+  "confidence": 1.0,
+  "snapshot_url": "/snapshots/1790419095732_box_PICKED_UP.jpg",
+  "id": "1790419095.7321:box:PICKED_UP"
+ }
+]
