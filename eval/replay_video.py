@@ -11,7 +11,9 @@ Passes with no false disappearances at --min-fps (10) or more. By default "untou
 at least once and never overlapped by a hand box (contact_overlap of its last box); --untouched names
 them instead, for a clip where you know what you left alone. --fps N processes at most N frames per
 second of video, dropping the rest as the live loop does when the detector is slower than the camera;
-the world's timers run on video time either way.
+the world's timers run on video time either way. Frame times come from frames.json beside the video
+(a guided clip, eval/clip.py) when there is one, else timestamps.json (eval/record.py), else the fps.
+For a guided clip with truth.json, eval/score_clip.py replays the whole production pipeline and scores it.
 """
 from __future__ import annotations
 
@@ -28,6 +30,7 @@ from collections import Counter, defaultdict
 from statistics import median
 from typing import Callable, Iterable, Optional, Union
 
+from core.embed import make_embedder
 from core.geom import overlap_frac
 from core.hands import HandTracker
 from core.types import Detections, EventType, Frame
@@ -50,7 +53,7 @@ def replay(frames: Iterable[Frame], detector: Union[Callable[[Frame], Detections
            min_fps: float = 10.0) -> dict:
     """Run every frame through detector, hand ids and the world; return the report dict."""
     detect = getattr(detector, "detect", detector)
-    world = World(cfg)
+    world = World(cfg, embed=make_embedder(cfg))          # as main.build: None unless reid.enabled
     hands = HandTracker(frame_size=tuple(cfg.get("frame_size_px") or (1280, 720)))
     contact = float(cfg.get("contact_overlap", 0.3))
     objects = list(cfg.get("objects") or {})
@@ -111,6 +114,7 @@ def main(argv=None) -> int:
     from core.config import load_config
     from core.detect import Detector, UltralyticsBackend, _FlatTable
     from core.table import Table
+    from eval.clip import clip_frames, load_times
     from eval.record import _fit
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--video", required=True)
@@ -121,8 +125,11 @@ def main(argv=None) -> int:
     ap.add_argument("--json", help="also write the report here")
     a = ap.parse_args(argv)
     cfg = load_config()
-    frames = (Frame(t=f.t, wall=f.wall, img=_fit(f.img), idx=f.idx)
-              for f in VideoFileSource(a.video, start=False).frames())
+    if load_times(a.video) is not None:         # a guided clip: the camera's own frame times (frames.json)
+        src = clip_frames(a.video)
+    else:
+        src = VideoFileSource(a.video, start=False).frames()
+    frames = (Frame(t=f.t, wall=f.wall, img=_fit(f.img), idx=f.idx) for f in src)
     first = next(frames, None)
     if first is None:
         print(f"no frames in {a.video}")

@@ -125,6 +125,7 @@ class Room:
         self.stop_ev = threading.Event()
         self._acted = threading.local()            # .kind: RESET / RECAL if the router answered one
         self._clear_ev = threading.Event()         # RESET: the perception thread resets proposals + crops
+        self._cal_warned = False
         self._aim_lock = threading.Lock()
         self._aim_gen = 0
         self._off_timer: Optional[threading.Timer] = None
@@ -258,32 +259,38 @@ class Room:
 
     # -- threads
 
+    def perceive(self, frame):
+        """One perception step: detect -> hand ids -> world.update. Returns (detections, world events),
+        or None while the table is not calibrated (each frame is tried for the markers / tag until it is).
+        perception_loop calls this for every new frame; eval.score_clip replays recordings through it."""
+        if not self.table.ok:
+            if not self._cal_warned:
+                what = ("the table tag" if getattr(self.table, "tag_mode", False) else "markers 0-3")
+                log.warning("table not calibrated; looking for %s every frame (python -m core.table)", what)
+                self._cal_warned = True
+            if self.table.calibrate(frame.img) and getattr(self.table, "tag_mode", False):
+                log.warning("table calibrated: tracked area %.0f x %.0f cm; restart the app so every part "
+                            "uses that size", *self.table.size_cm)
+            return None
+        if self._clear_ev.is_set():        # here, not in ask: the proposer isn't thread-safe
+            self._clear_ev.clear()
+            self.detector.reset_proposals()
+        dets = self.detector.detect(frame)
+        dets.hands = self.hands.update(dets.hands, dets.t)
+        return dets, self.world.update(dets, frame)
+
     def perception_loop(self) -> None:
         last_idx, n, t_win = 0, 0, time.monotonic()
         period = 1.0 / self.max_fps if self.max_fps > 0 else 0.0
-        warned = False
         while not self.stop_ev.is_set():
             t0 = time.monotonic()
             frame = self.frames.wait_new(last_idx, timeout=1.0)
             if frame is None:
                 continue
             last_idx = frame.idx
-            if not self.table.ok:
-                if not warned:
-                    what = ("the table tag" if getattr(self.table, "tag_mode", False) else "markers 0-3")
-                    log.warning("table not calibrated; looking for %s every frame (python -m core.table)", what)
-                    warned = True
-                if self.table.calibrate(frame.img) and getattr(self.table, "tag_mode", False):
-                    log.warning("table calibrated: tracked area %.0f x %.0f cm; restart the app so every part "
-                                "uses that size", *self.table.size_cm)
-                continue
             try:
-                if self._clear_ev.is_set():        # here, not in ask: the proposer isn't thread-safe
-                    self._clear_ev.clear()
-                    self.detector.reset_proposals()
-                dets = self.detector.detect(frame)
-                dets.hands = self.hands.update(dets.hands, dets.t)
-                self.world.update(dets, frame)
+                if self.perceive(frame) is None:
+                    continue
             except Exception:
                 log.exception("perception step failed")
                 self.stop_ev.wait(0.1)

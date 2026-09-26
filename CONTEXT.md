@@ -93,7 +93,7 @@ rules can't read and of open questions (with a compact world state).
 | `voice/` | `visual` (Grok look/recall, routing), `teach` ("this is my X"), `care` + `conversation` (reminders, profile, follow-ups), `intents` (rule parser), `answers` (spoken templates), `understand` (overheard filter + Qwen reads what the rules can't), `local_llm` (open questions, local), `pipeline` (router), `tts`, `stt` (Silero VAD + whisper.cpp), `trigger` (clicker), `llm` (world-state helpers and pill filter; its Grok call is off the voice path). |
 | `act/` | `actuator` (servo drivers + fake), `laser` (poly2 fit + closed-loop aim), `calibrate`, `sim` (simulated rig). |
 | `server/` | FastAPI dashboard (`app.py`), frame overlay, `sim.py` (full demo on a synthetic camera). |
-| `eval/` | Trial recording, synthetic trials, replay against baselines (last-seen, nearest-object, current-frame) and the report. |
+| `eval/` | Trial recording, synthetic trials, replay against baselines (last-seen, nearest-object, current-frame) and the report. `score_clip`: replay a guided clip (`data/clips/<id>`) through the production pipeline and score it (false births, identity changes, checkpoints, questions); on the Jetson `scripts/dock.sh python3 -m eval.score_clip data/clips/<id>`. |
 | `net.py` | Online/offline monitor. Readers check `.online`, which never blocks. |
 | `scripts/` | `dock.sh` (run inside the Jetson Ultralytics container), camera setup, markers PDF, servo sweep, `qwen_server.sh`, `eval_understand.py` (interpreter accuracy per model), `overheard_test.py` (false triggers on a hall recording), `gen_n8n_workflow.py`. |
 | `tests/` | About 1,300 tests. None need hardware. `understand_eval.json`: 64 spoken-style commands for the interpreter. |
