@@ -117,6 +117,8 @@ class Config:
     thing_containers: dict = field(default_factory=dict)
     # Fewer duplicate things (core/things.py IdentityConfig, thing_identity: section).
     thing_identity: dict = field(default_factory=dict)
+    # A cover with no detector class laid over objects (core/surround.py UnknownCoverConfig, unknown_cover:).
+    unknown_cover: dict = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, raw: dict) -> "Config":
