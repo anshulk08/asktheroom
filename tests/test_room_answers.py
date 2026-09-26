@@ -215,3 +215,11 @@ def test_absent_room_object_gets_no_look_alike_sentence(w):
     spoken_ok(a)
     assert a.text.endswith("I can't see it there now.") and "similar" not in a.text
     assert a.point_at is None
+
+
+def test_under_a_cover_carried_to_a_room_zone_says_under(w):
+    w.set("keys", status=Status.UNDER, parent="notebook")
+    w.set_place("keys", room_place("keys", via="notebook"))
+    a = ask(w, "keys")
+    spoken_ok(a)
+    assert a.text == "Your keys are under the notebook. The notebook is on the bookshelf."

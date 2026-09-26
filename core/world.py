@@ -409,6 +409,7 @@ class World(ThingRules, RoomRules):
             self._present[name] = True      # re-checked each update; seen again meanwhile: nothing logged
             return []
         self._waiting.pop(name, None)
+        self._depart_anchor = self._last_evidence(name)   # room memory: last seen, not the grace's end
         return self._lose(name, ent)
 
     def _still_there(self, name: str) -> bool:
@@ -533,6 +534,7 @@ class World(ThingRules, RoomRules):
             return self._apply_verdict(name, ent, inside)
         hand_t, hand_px, _ = self._hands[ent.parent]
         if self._now - hand_t > self.cfg.hand_lost_s:
+            self._depart_anchor = hand_t    # room memory: it left when its hand was last seen, not now
             edge = self._edge_of(hand_px)
             if edge:
                 ent.status, ent.parent, ent.candidates, ent.edge = Status.GONE, None, [], edge

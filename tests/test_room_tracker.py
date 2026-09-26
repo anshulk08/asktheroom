@@ -217,3 +217,35 @@ def test_another_object_on_the_spot_is_not_a_miss():
         v = r.visit(("wallet", (95, 95, 145, 135)))
         assert v.missed == [] and keys.misses == 0
     assert keys in r.tr.tracks()
+
+
+def test_partial_box_track_is_dropped_as_a_duplicate():
+    """Review finding: a partial box while a hand is still placing the keys, then the settled box (IoU 0.15)
+    starts a second track; the first must not linger (it could later confirm as a false conflict)."""
+    r = Run()
+    r.visit(("keys", (100, 100, 130, 130)))
+    v = r.visit(("keys", (100, 100, 200, 160)))
+    assert [x.box_px for x in r.tr.tracks()] == [(100, 100, 200, 160)] and len(v.dropped) == 1
+    v = r.visit(("keys", (100, 100, 200, 160)))
+    assert [x.box_px for x in v.confirmed] == [(100, 100, 200, 160)]
+
+
+def test_confirmed_track_is_kept_until_absent_min_s_even_after_absent_visits():
+    """Zones are visited ~3x a second: three quick misses are not absence (absent_min_s)."""
+    tr = RoomTracker(RoomConfig())
+    t = 0.0
+
+    def go(*o):
+        nonlocal t
+        t += 0.33
+        return tr.visit("shelf", "the shelf", [obs(c, b, t) for c, b in o], [], [], t, 1000.0 + t, int(t * 100))
+
+    go(("keys", KEYS))
+    go(("keys", KEYS))
+    [k] = tr.tracks()
+    for _ in range(8):                                     # 8 misses in 2.64 s
+        v = go()
+        assert v.dropped == [] and k in tr.tracks()
+    for _ in range(2):                                     # past 3 s since the last match
+        v = go()
+    assert v.dropped == [k] and tr.tracks() == []

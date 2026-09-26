@@ -526,8 +526,10 @@ room_memory:
   table_fresh_s: 2.0          # a prop seen VISIBLE on the table this recently is on the table
   room_prop_conf: 0.45        # class score a room detection needs
   absent_visits: 3            # valid empty visits of its zone before a room prop is UNKNOWN
+  absent_min_s: 3.0           # ... and this long since its last match (a zone is visited ~3x a second)
   fresh_visits: 2             # present tense ("is on") needs fewer valid misses than this ...
   fresh_s: 10.0               # ... and a match this recent; else "I last saw"
+  stale_min_s: 2.0            # fresh_visits misses only make it stale once it is this long unmatched
   lum_lo: 25                  # a box darker than this mean grey is not a valid visit
   lum_hi: 235                 # ... or brighter than this
   hand_iou: 0.6               # a prop box this much on a hand box is the hand

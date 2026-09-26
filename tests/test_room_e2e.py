@@ -122,3 +122,43 @@ def test_decoy_already_on_the_shelf_never_becomes_the_keys(rig):
     rig.room_visit(KEYS_IN_CROP)
     assert rig.world.get("keys").zone == "table"                      # still GONE off the table edge
     assert "I also see keys on the bookshelf." in rig.where()
+
+
+def _pick_up_and_hold(rig):
+    s, w = rig.scene, rig.world
+    s.place("keys", 40, 30)
+    s.run(w, 1.0)
+    s.hand(1, 40, 30)
+    s.run(w, 0.3)
+    s.remove("keys")
+    s.run(w, 1.0)
+    assert w.get("keys").status == Status.HELD
+
+
+def test_zone_sees_the_keys_before_the_table_decides_they_left(rig):
+    """Review finding: the table emits EXITED_VIEW ~0.5-2 s after the keys really left. A shelf next to the
+    table sees them inside that window; the departure is dated at the holding hand's last sighting."""
+    _pick_up_and_hold(rig)
+    s, w = rig.scene, rig.world
+    s.hand(1, 5, 30)
+    s.run(w, 0.3)
+    s.hand_off(1)                                                      # the hand leaves the table view
+    assert rig.room_visit(KEYS_IN_CROP, dt=0.1) == []                  # the shelf sees them first
+    assert EventType.EXITED_VIEW in [e.type for e in s.run(w, 1.0)]    # then the table decides
+    assert [e.type for e in rig.room_visit(KEYS_IN_CROP)] == [EventType.FOUND]
+    assert rig.world.get("keys").zone == "shelf"
+    assert rig.where().startswith("Your keys are on the bookshelf.")
+
+
+def test_a_key_ring_seen_on_the_shelf_while_the_keys_are_in_hand_stays_a_conflict(rig):
+    _pick_up_and_hold(rig)
+    rig.room_visit(KEYS_IN_CROP)                                       # while the keys are still held
+    s, w = rig.scene, rig.world
+    s.hand(1, 5, 30)
+    s.run(w, 0.3)
+    s.hand_off(1)
+    s.run(w, 1.0)
+    rig.room_visit(KEYS_IN_CROP)
+    rig.room_visit(KEYS_IN_CROP)
+    assert rig.world.get("keys").zone == "table"
+    assert "I also see keys on the bookshelf." in rig.where()

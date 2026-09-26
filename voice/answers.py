@@ -202,7 +202,7 @@ def _where(obj: str, world, events, cfg: dict, now: float) -> Answer:
     except Exception:
         place = None
     if place is not None and place.kind == "room":
-        ans = _where_room(obj, place, cfg, now)
+        ans = _where_room(obj, place, cfg, now, world)
     else:
         ans = _where_table(obj, world, events, cfg, now)
     if place is not None and place.conflicts:
@@ -210,7 +210,7 @@ def _where(obj: str, world, events, cfg: dict, now: float) -> Answer:
     return ans
 
 
-def _where_room(obj: str, place, cfg: dict, now: float) -> Answer:
+def _where_room(obj: str, place, cfg: dict, now: float, world=None) -> Answer:
     """Spoken room place (spec 0009 section 4). Room answers never point the laser and never say who put
     the thing there: the camera saw it arrive, not whose hand it was."""
     pk = _pk(cfg, obj)
@@ -219,9 +219,13 @@ def _where_room(obj: str, place, cfg: dict, now: float) -> Answer:
     at = f" at {clock(last)}" if last is not None else ""
     if place.via and place.via != obj:               # seen only through its outermost container
         pn = _pn(cfg, place.via)
+        try:
+            prep = "under" if world is not None and world.get(obj).status == Status.UNDER else "in"
+        except Exception:
+            prep = "in"
         if place.fresh:
-            return Answer(f"{Y} {n} {be} in {pn}. {pn[:1].upper()}{pn[1:]} is on {say}.")
-        return Answer(f"{Y} {n} {be} in {pn}, which I last saw on {say}{at}.")
+            return Answer(f"{Y} {n} {be} {prep} {pn}. {pn[:1].upper()}{pn[1:]} is on {say}.")
+        return Answer(f"{Y} {n} {be} {prep} {pn}, which I last saw on {say}{at}.")
     if place.absent:
         return Answer(f"I last saw {Y.lower()} {n} on {say}{at}. I can't see {it} there now.")
     if not place.fresh:

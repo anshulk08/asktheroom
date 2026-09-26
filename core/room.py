@@ -78,6 +78,10 @@ class RoomTracker:
                 if tr.confirmed:
                     v.confirmed.append(tr)
                 keep.append(tr)
+            elif not tr.confirmed and any(o.cls == tr.cls and geom.overlap_frac(o.box_px, tr.box_px) > 0
+                                          for o in obs):
+                v.dropped.append(tr)              # a same-class box on it went to another track: a duplicate
+                                                  # (e.g. a partial box while a hand was still placing it)
             elif not self._valid(tr.box_px, blockers + [o.box_px for o in obs], changes, lum):
                 keep.append(tr)                   # an invalid visit counts for nothing (another object
                                                   # on its spot is a blocker too: spec 0009, Absence)
@@ -86,7 +90,7 @@ class RoomTracker:
             else:
                 tr.misses += 1
                 v.missed.append(tr)
-                if tr.misses >= self.cfg.absent_visits:
+                if tr.misses >= self.cfg.absent_visits and t - tr.last_seen >= self.cfg.absent_min_s:
                     v.dropped.append(tr)
                 else:
                     keep.append(tr)

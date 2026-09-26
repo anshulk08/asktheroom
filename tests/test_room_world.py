@@ -102,13 +102,15 @@ def seen(scene, world, *tracks, zone='bookshelf', crop=None, dt=0.5):
     return world.room_update(ZoneVisit(zone, SAY[zone], t, t, scene.idx, confirmed=list(tracks), crop=crop))
 
 
-def missed(scene, world, *tracks, zone='bookshelf'):
-    """One valid zone visit in which these confirmed tracks were not matched; dropped at absent_visits."""
-    scene.run(world, 0.5)
+def missed(scene, world, *tracks, zone='bookshelf', dt=1.2):
+    """One valid zone visit in which these confirmed tracks were not matched; dropped, like the tracker
+    does, at absent_visits misses and absent_min_s since the last match (3 misses 1.2 s apart)."""
+    scene.run(world, dt)
     t = scene.t
     for trk in tracks:
         trk.misses += 1
-    dropped = [trk for trk in tracks if trk.misses >= world.room_cfg.absent_visits]
+    rc = world.room_cfg
+    dropped = [trk for trk in tracks if trk.misses >= rc.absent_visits and t - trk.last_seen >= rc.absent_min_s]
     return world.room_update(ZoneVisit(zone, SAY[zone], t, t, scene.idx, missed=list(tracks), dropped=dropped))
 
 
@@ -421,26 +423,42 @@ def test_reacquire_at_the_last_spot(scene, world):
     assert p.fresh and not p.arrival_observed
 
 
-def test_no_reacquire_away_from_the_last_spot_or_in_another_zone(scene, world):
+def test_moved_along_its_zone_reacquires_but_another_zone_does_not(scene, world):
+    """Nudged along the shelf: a new track in the same zone after its own track went missing is the keys
+    (one instance per class, the M0 demo assumption); the same keys class on the couch is a conflict."""
     trk = acquired(scene, world)
     for _ in range(3):
         missed(scene, world, trk)
-    far = appear(scene, world, 'r:2', box=(1000, 200, 1060, 240))
     couch = appear(scene, world, 'r:3', zone='couch', box=SHELF_BOX)
-    assert seen(scene, world, far) == []
     assert seen(scene, world, couch, zone='couch') == []
-    assert (far.role, couch.role) == ('conflict', 'conflict')
-    assert world.get('keys').status == Status.UNKNOWN
+    assert couch.role == 'conflict' and world.get('keys').status == Status.UNKNOWN
+    far = appear(scene, world, 'r:2', box=(1000, 200, 1060, 240))
+    assert types(seen(scene, world, far)) == [EventType.FOUND]
+    keys = world.get('keys')
+    assert (keys.status, keys.zone, far.role) == (Status.VISIBLE, 'bookshelf', 'assoc')
+    assert world.place('keys', now=scene.t).box_px == (1000, 200, 1060, 240)
 
 
-def test_no_reacquire_by_a_track_first_seen_before_the_absence(scene, world):
+def test_moved_along_its_zone_before_absence_reacquires(scene, world):
+    """Nudged while its old track has only started missing: no absence first, no permanent conflict."""
     trk = acquired(scene, world)
-    early = appear(scene, world, 'r:2')   # a second track at the same spot, before the keys went absent
+    missed(scene, world, trk)
+    moved = appear(scene, world, 'r:2', box=(1000, 200, 1060, 240))
+    assert types(seen(scene, world, moved)) == [EventType.FOUND]
+    assert world._room['keys'].track == 'r:2' and world.get('keys').status == Status.VISIBLE
+
+
+def test_a_track_confirmed_while_the_own_track_matches_stays_a_conflict(scene, world):
+    """Two key rings on the shelf at once: the second is a conflict and never takes over, even after the
+    keys' own track goes missing."""
+    trk = acquired(scene, world)
+    other = appear(scene, world, 'r:2', box=(1000, 200, 1060, 240))
+    assert seen(scene, world, trk, other) == []          # both seen: the keys' own track still matches
+    assert other.role == 'conflict'
     for _ in range(3):
         missed(scene, world, trk)
-    assert seen(scene, world, early) == []
-    assert early.role == 'conflict'
-    assert world.get('keys').status == Status.UNKNOWN
+    assert seen(scene, world, other) == []
+    assert other.role == 'conflict' and world.get('keys').status == Status.UNKNOWN
 
 
 def test_dropped_tracks_take_their_conflicts_with_them(scene, world):
@@ -591,3 +609,11 @@ def test_room_config_comes_from_the_raw_dict_or_defaults(cfg):
     assert (rc.enabled, rc.absent_visits, rc.handoff_s) == (True, 5, 30)
     assert World(cfg).room_cfg == RoomConfig()
 
+
+
+def test_own_track_refreshes_first_whatever_the_visit_order(scene, world):
+    trk = acquired(scene, world)
+    missed(scene, world, trk)                               # the own track missed once (misses 1)
+    other = appear(scene, world, 'r:2', box=(1000, 200, 1060, 240))
+    assert seen(scene, world, other, trk) == []             # other listed first; both matched this visit
+    assert other.role == 'conflict' and world._room['keys'].track == trk.tid

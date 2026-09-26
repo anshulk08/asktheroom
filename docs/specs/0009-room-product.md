@@ -173,7 +173,9 @@ observation's capture time and its crop as the snapshot, not the last table fram
 
 **Departures.** A departure is an event that took entity E off the table: EXITED_VIEW, LOST_TRACK, or loss from
 a hand (`held_timeout_s`, `hand_lost_s`), **emitted while `E.zone == 'table'`**. Room absence (LOST_TRACK in a
-room zone) is not a departure.
+room zone) is not a departure. The table decides a departure up to ~2 s after the object left, so its time is
+the last table evidence (the holding hand's last sighting, or the object's own last sighting), at most 5 s
+before the event (revised after the M0 code review: a zone next to the table can see the object first).
 
 **Identity: known props.** One instance per class. **This is a demo assumption, not identity evidence**; the
 dashboard and this spec say so. For a confirmed track whose class-C score is at least `room_prop_conf` (0.45,
@@ -199,8 +201,8 @@ user.
 |---|---|---|
 | **Acquire** | Entity has an unconsumed table departure within `handoff_s`; track first seen after it | zone = track's zone, VISIBLE, `assoc_track` = track, departure consumed, FOUND |
 | **Refresh** | Observation matches the entity's `assoc_track` (same zone, same track) | room timestamps updated; no event (a `confirm` row from M3) |
-| **Absence** | `assoc_track` matches; `absent_visits` valid empty visits | UNKNOWN, zone kept, LOST_TRACK |
-| **Reacquire** | Entity UNKNOWN in zone Z; a track in Z at its last spot (IoU at least 0.3), first seen after the absence | VISIBLE, `assoc_track` = new track, FOUND |
+| **Absence** | `assoc_track` matches; `absent_visits` valid empty visits **and** `absent_min_s` (3 s) since its last match (a zone is visited ~3 times a second) | UNKNOWN, zone kept, LOST_TRACK |
+| **Reacquire** | Entity in room zone Z whose own track is missing (valid empty visits) or absent; a track in Z first seen after the own track's last match (anywhere in Z: moved along the shelf; revised after the M0 code review) | VISIBLE, `assoc_track` = new track, FOUND |
 | **Return** | Confirmed table presence (`_observe()` after the presence flip, not a single detection) | room side state cleared, track released, zone 'table', room-to-table MOVED |
 | **Conflict** | Any other confirmed track of the entity's class, including a *different* track while the entity is VISIBLE in a room zone | conflict sighting only; the entity is unchanged; the track never upgrades |
 
@@ -239,7 +241,7 @@ valid views", never "gone".
 detection above threshold, before the presence flip (world.py:243-246), so one table flicker would refresh
 `ent.last_seen` for an entity whose zone is 'bookshelf'. Room freshness and every room answer read
 `room_seen_t` / `room_seen_wall`, never `ent.last_seen`. A room entity is **currently verified** when its last
-match is within `fresh_visits` (2) valid visits and `fresh_s` (10 s).
+match is within `fresh_s` (10 s) and it has not had `fresh_visits` (2) valid misses lasting `stale_min_s` (2 s).
 
 **`world.place(name) -> Place`** (dataclass in `core/room.py`; `core/types.py` does not change): `kind`
 ('table' | 'room' | 'none'), `zone`, `pos_cm` (table only), `box_px` and `point_m` (room; `point_m` only with a

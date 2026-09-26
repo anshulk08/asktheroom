@@ -108,13 +108,20 @@ def compact_state(world, cfg: dict) -> list[dict]:
     out = []
     st = world.state_json()
     labels = thing_labels(st)
+    room = st.get("room") or {}                # spec 0009: entities in a room zone (none when it's off)
     for e in st.get("entities", []):
         d: dict[str, Any] = {"name": labels.get(e["name"], e["name"]), "status": e["status"]}
         if e.get("parent") and e["status"] != Status.VISIBLE.value:
             d["parent"] = labels.get(e["parent"], e["parent"])
-        area = _area(cfg, e.get("resolved_cm") or e.get("pos_cm"))
-        if area:
-            d["area"] = area
+        r = room.get(e["name"]) if e["name"] != "conflicts" else None
+        if isinstance(r, dict) and r.get("say"):
+            d["room_zone"] = r["say"]          # 'the bookshelf': no table area (pos_cm may be a flicker)
+            if r.get("absent"):
+                d["not_seen_there_now"] = True
+        else:
+            area = _area(cfg, e.get("resolved_cm") or e.get("pos_cm"))
+            if area:
+                d["area"] = area
         d["confidence"] = round(float(e.get("confidence", 1.0)), 2)
         if e.get("candidates"):
             d["candidates"] = [labels.get(c, c) for c in e["candidates"]]

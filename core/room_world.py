@@ -31,11 +31,11 @@ from __future__ import annotations
 import time
 from typing import Optional
 
-from core import geom, relations
+from core import relations
 from core.room_types import TABLE, Conflict, Place, RoomConfig, RoomState, RoomTrack, ZoneVisit
 from core.types import Entity, Event, EventType, Status
 
-REACQUIRE_IOU = 0.3          # a new track this much over the last room box is the object at its spot
+DEPART_BACKDATE_MAX_S = 5.0  # a departure is dated back to the last table evidence at most this far
 DEPARTURES = (EventType.EXITED_VIEW, EventType.LOST_TRACK)
 TABLE_HIDDEN = (Status.UNDER, Status.INSIDE, Status.HELD)
 OFF_TABLE = (Status.GONE, Status.UNKNOWN)
@@ -57,7 +57,10 @@ class RoomRules:
         """Apply one zone visit. Tracks of a class that is not an entity are ignored."""
         with self.lock:
             out: list[Event] = []
-            for trk in visit.confirmed:
+            # Each entity's own track first: its refresh this visit must be seen by the other tracks'
+            # decisions (a same-class track while the own one still matches stays a conflict).
+            own = [t for t in visit.confirmed if (st := self._room.get(t.cls)) is not None and st.track == t.tid]
+            for trk in own + [t for t in visit.confirmed if t not in own]:
                 if trk.cls in self.entities:
                     out += self._room_confirmed(trk.cls, trk, visit)
             for trk in visit.missed:
@@ -80,8 +83,9 @@ class RoomRules:
             conflicts = [c for c in self._conflicts.get(name, {}).values() if now - c.seen_wall <= fresh_s]
             st = self._room.get(via)
             if vent.zone != TABLE and st is not None:
-                fresh = (not st.absent and st.misses < self.room_cfg.fresh_visits
-                         and now - st.seen_wall <= fresh_s)
+                rc = self.room_cfg
+                stale = st.misses >= rc.fresh_visits and now - st.seen_wall >= rc.stale_min_s
+                fresh = not st.absent and not stale and now - st.seen_wall <= fresh_s
                 return Place(kind='room', zone=st.zone, say=st.say, status=vent.status, chain=chain, via=via,
                              box_px=st.box_px, observed_directly=via == name, fresh=fresh, absent=st.absent,
                              arrived_wall=st.arrived_wall, last_seen_wall=st.seen_wall,
@@ -105,8 +109,16 @@ class RoomRules:
     def _room_departure(self, ev: Event) -> None:
         """_emit hook: an EXITED_VIEW / LOST_TRACK while the entity is on the table is its latest
         departure (a newer one replaces an unconsumed older one)."""
+        anchor = self.__dict__.pop('_depart_anchor', None)
         if ev.type in DEPARTURES and self.entities[ev.obj].zone == TABLE:
-            self._departures[ev.obj] = (ev.t, ev.wall)
+            # The table decides a departure up to ~2 s after the object left (absence debounce, hand_lost_s,
+            # lost_grace_s); a room zone near the table can see it before that. Date the departure at the
+            # last table evidence the rule set just before emitting (the holding hand's last sighting, or the
+            # object's own), so a zone sighting in between is still 'first seen after the departure'.
+            t = ev.t
+            if anchor is not None and 0.0 <= ev.t - anchor <= DEPART_BACKDATE_MAX_S:
+                t = anchor
+            self._departures[ev.obj] = (t, ev.wall - (ev.t - t))
 
     def _room_return(self, name: str, ent: Entity) -> list[Event]:
         """_observe hook, after it reset the zone to 'table': confirmed table presence of a room entity.
@@ -153,8 +165,12 @@ class RoomRules:
                 return 'acquire'
             return 'conflict'
         st = self._room.get(name)
-        if (st is not None and st.absent and visit.zone == st.zone and st.absent_t is not None
-                and trk.first_seen > st.absent_t and geom.iou(trk.box_px, st.box_px) >= REACQUIRE_IOU):
+        # Same zone, first seen after the entity's own track was last matched, while that track is missing
+        # (valid empty visits) or already absent: the object moved within its zone (nudged along the shelf).
+        # A same-class track while its own track still matches stays a conflict. Relies on the M0 demo
+        # assumption of one instance per prop class, like Acquire (spec 0009, M0).
+        if (st is not None and visit.zone == st.zone and trk.first_seen > st.seen_t
+                and (st.absent or st.misses > 0)):
             return 'reacquire'
         return 'conflict'
 
@@ -179,6 +195,9 @@ class RoomRules:
         ent.status, ent.zone, ent.parent, ent.candidates, ent.confidence, ent.edge = \
             Status.VISIBLE, visit.zone, None, [], 1.0, None
         ent.pos_cm, ent.box_cm, ent.held_since, ent.pre_pickup_pos = None, None, None, None
+        ent.last_seen = trk.last_wall
+        self._box_px.pop(name, None)          # table-view pixels: meaningless for a room entity
+        self._look_px.pop(name, None)
         self._bits[name].clear()
         self._present[name] = False
         self._confirmed.add(name)
@@ -190,6 +209,9 @@ class RoomRules:
         if trk.last_seen < st.seen_t:
             return
         st.box_px, st.seen_t, st.seen_wall, st.misses = trk.box_px, trk.last_seen, trk.last_wall, 0
+        ent = self.entities.get(trk.cls)
+        if ent is not None:
+            ent.last_seen = trk.last_wall
 
     def _room_conflict(self, name: str, trk: RoomTrack, visit: ZoneVisit) -> None:
         trk.role = 'conflict'
@@ -205,8 +227,9 @@ class RoomRules:
         if st is None or st.track != trk.tid:
             return []
         st.misses = trk.misses
-        if st.misses < self.room_cfg.absent_visits or st.absent:
-            return []
+        rc = self.room_cfg
+        if st.misses < rc.absent_visits or visit.t - st.seen_t < rc.absent_min_s or st.absent:
+            return []           # a zone is visited ~3x a second: a few detector misses are not absence
         st.absent, st.absent_t = True, visit.t
         ent = self.entities[name]
         ent.status, ent.parent, ent.candidates, ent.held_since = Status.UNKNOWN, None, [], None

@@ -241,3 +241,22 @@ def test_world_error_never_raises(monkeypatch, key):
 def test_status_values_match_prompt():
     for s in Status:
         assert s.value in llm.SYSTEM_TEMPLATE
+
+
+def test_compact_state_uses_the_room_zone_not_a_table_area():
+    """Spec 0009: a room entity goes to Grok with its zone; a table flicker's pos_cm is not a table area."""
+    from voice.llm import compact_state
+
+    class W:
+        def state_json(self):
+            return {"entities": [
+                {"name": "keys", "status": "VISIBLE", "pos_cm": [10.0, 10.0], "confidence": 1.0},
+                {"name": "wallet", "status": "UNKNOWN", "pos_cm": None, "confidence": 0.5},
+                {"name": "remote", "status": "VISIBLE", "pos_cm": [45.0, 30.0], "confidence": 1.0}],
+                "room": {"keys": {"say": "the bookshelf", "absent": False},
+                         "wallet": {"say": "the couch", "absent": True}, "conflicts": []}}
+
+    by = {d["name"]: d for d in compact_state(W(), {})}
+    assert by["keys"]["room_zone"] == "the bookshelf" and "area" not in by["keys"]
+    assert by["wallet"]["room_zone"] == "the couch" and by["wallet"]["not_seen_there_now"] is True
+    assert "room_zone" not in by["remote"]

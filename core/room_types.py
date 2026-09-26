@@ -33,9 +33,11 @@ class RoomConfig:
     handoff_s: float = 120.0                       # a table departure authorises one acquisition this long
     table_fresh_s: float = 2.0                     # a table-VISIBLE prop seen this recently is on the table
     room_prop_conf: float = 0.45                   # class score a room detection needs
-    absent_visits: int = 3                         # valid empty visits before UNKNOWN
+    absent_visits: int = 3                         # valid empty visits before UNKNOWN ...
+    absent_min_s: float = 3.0                      # ... and at least this long since the last match
     fresh_visits: int = 2                          # present tense needs fewer valid misses than this ...
     fresh_s: float = 10.0                          # ... and a match this recent
+    stale_min_s: float = 2.0                       # fresh_visits misses only count once this long unmatched
     lum_lo: int = 25                               # a box darker or brighter than this: not a valid visit
     lum_hi: int = 235
     hand_iou: float = 0.6                          # a prop box this much on a hand box is the hand
