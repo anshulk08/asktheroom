@@ -18,7 +18,7 @@ A judge runs the shell game on the real table (keys under the notebook, notebook
 ## Decisions (settled)
 
 - The mic is always listening (`listen.mode: always`). The clicker is a "listen now" override and interrupts an answer (barge-in).
-- A local Qwen on the Jetson turns speech into commands. Grok is used only on the detection side.
+- Grok does all LLM/VLM work (team decision, Fri night): spoken questions the rules can't read, open questions, visual questions and narration. Rules and templates answer first and are the offline fallback. Local Qwen is optional and not installed on the Jetson.
 - YOLO stays Stage 1 (Sat research, spec 0007): a VLM can't give hand and object boxes at 10 fps, place boxes well, or work offline. Fix YOLO with the fine-tune fast path; Grok only checks the table when it settles.
 - Audio and transcripts that aren't used are deleted: audio lives only in RAM, and ignored speech is never logged.
 - The world model stays rule-based and deterministic.
