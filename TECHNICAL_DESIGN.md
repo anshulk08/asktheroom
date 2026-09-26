@@ -1,6 +1,6 @@
 # Ask the Room: Technical Design
 
-> This describes the code as it is on branch `teammate-tasks`. Planned work is marked as such and linked to its spec. Thresholds named here are keys in `config.yaml`.
+> This describes the code as it is on `main`, as run on the rig (Logitech Brio, one AprilTag, Grok for the LLM work). Planned work is marked as such and linked to its spec. Thresholds named here are keys in `config.yaml`.
 
 ## Architecture summary
 
@@ -8,7 +8,7 @@ One process (`main.py`) runs five threads:
 
 1. **Capture** (30 fps): `core/capture.FrameBuffer` keeps the newest frame plus a short ring of recent frames.
 2. **Perception** (10–15 fps, `main.perception_max_fps`): detector → hand tracker → `World.update()`. The world writes events to `core/events.EventLog`.
-3. **Voice** (always on): mic → VAD → Whisper → overheard filter → rules/Qwen → answer → speech and laser.
+3. **Voice** (always on): mic → VAD → Whisper → overheard filter → rules/Grok → answer → speech and laser.
 4. **Net** (every 5 s): `net.NetMonitor` probes the network. Readers check `.online`, which never blocks.
 5. **Server** (5 Hz push): `server/app.py` (FastAPI) serves the dashboard, `/ask`, `/state` and `/sms`.
 
@@ -28,9 +28,9 @@ All answers are worked out on the Jetson. The network only changes the voice (El
 
 ## Perception
 
-- **Camera.** icSpring USB, MJPG 1280x720 at 30 fps. `CAP_PROP_BUFFERSIZE=2` (a value of 1 halves the fps). Exposure is manual, locked by `scripts/camera_setup.sh`.
-- **Table frame.** `core/table.py` finds ArUco markers 0–3 (DICT_4X4_50) and fits a pixel→cm homography (`table_cal.json`). Everything is assumed to lie on the table plane.
-- **Detector.** `core/detect.py`. Path A is YOLO-World v2 with the text prompts from `config.yaml` baked in, exported to TensorRT (about 14 ms per frame on the Orin Nano). Path B, the plan, is a YOLO11 fine-tuned on our own overhead frames (`scripts/finetune/`). Both keep the best box per object and every hand box, and convert them to table cm.
+- **Camera.** Logitech Brio, opened by its by-id path (`/dev/v4l/by-id/usb-046d_Logitech_BRIO_3675F8D2-video-index0`; `video-index2` is the IR node), MJPG 1280x720 at 30 fps. `CAP_PROP_BUFFERSIZE=2` (a value of 1 halves the fps). Exposure, gain, focus, zoom and white balance are manual, locked by `scripts/camera_setup.sh 166 <device> 80 10 160 3200`. `core/capture.py` reopens a camera that drops off USB and writes its snapshotted controls back (`core/v4l2ctl.py`).
+- **Table frame.** `core/table.py` in one-tag mode (`table_tag.enabled`, the rig's setting): a single printed AprilTag 36h11 (id 0, `table_tag.size_cm` as printed) averaged over 15 frames gives the pixel→cm homography (`table_cal.json`), and the tracked area is the camera's footprint on the table plane. The four-ArUco mode (markers 0–3, DICT_4X4_50) remains for `table_tag.enabled: false`. The tabletop outline (`python -m core.table --outline`, `core/table_area.py`) limits births to the table. Everything is assumed to lie on the table plane.
+- **Detector.** `core/detect.py`. The rig runs path B: `models/askroom-yolo26s-brio.engine`, a YOLO26s fine-tuned on Brio captures of the demo table (26 Sep; `scripts/finetune/`), set in the rig's gitignored `config.local.yaml`, with YOLOE-26s prompt-free proposals (`proposals.kind: yoloe`) for things it has no class for. Path A, the committed default in `config.yaml`, is YOLO-World v2 with the text prompts baked in, exported to TensorRT (about 14 ms per frame on the Orin Nano). Both keep the best box per object and every hand box, and convert them to table cm.
 - **Hands.** The detector's `hand` class, tracked by `core/hands.HandTracker`. It matches by IoU, then by the nearest centre, and drops a track unseen for 0.5 s. MediaPipe was dropped: it runs CPU-only on the Jetson and misses hands holding objects.
 
 ## World model rules
@@ -80,7 +80,7 @@ The rules are covered by `tests/test_world_rules.py`, `tests/test_world_core.py`
 ## Voice pipeline
 
 ```
-mic ─▶ Silero VAD ─▶ whisper.cpp base.en ─▶ overheard filter ─▶ rules │ Qwen ─▶ router ─▶ answer ─▶ TTS + laser
+mic ─▶ Silero VAD ─▶ whisper.cpp base.en ─▶ overheard filter ─▶ rules │ Grok ─▶ router ─▶ answer ─▶ TTS + laser
 ```
 
 1. **Listening** (`main.Room.voice_loop`, `listen` config).
