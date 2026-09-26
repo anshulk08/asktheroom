@@ -1,6 +1,9 @@
 """scripts/finetune/synthesize.py box bookkeeping, and capture -> synthesize -> split end to end with a fake camera."""
+import json
+import re
 import shutil
 
+import cv2
 import numpy as np
 import pytest
 
@@ -194,3 +197,173 @@ def test_synthetic_images_never_land_in_validation(captured, tmp_path):
     for seed in range(5):
         tr, va = train.split_by_trial(stems, seed=seed)
         assert not any(s.startswith("synth_") for s in va) and len(tr) + len(va) == len(stems)
+
+
+# ---------------------------------------------------------------- distractors: unknown objects as negatives
+
+PROMPT_RE = re.compile(r"\[(\w+) (\d+)/(\d+)\] Place the (.+?) alone on the table, (.+?); hands away")
+DISTRACTOR_POSES = {"mug": ((200, 220, 250, 270), (200, 60, 60)), "cup": ((420, 60, 470, 100), (60, 200, 200))}
+
+
+def scripted_with_distractors(cam, prompts):
+    base = scripted(cam)
+
+    def ask(prompt):
+        prompts.append(prompt)
+        m = PROMPT_RE.match(prompt)
+        if m and m.group(1) in DISTRACTOR_POSES:
+            k = int(m.group(2)) - 1
+            (x1, y1, x2, y2), color = DISTRACTOR_POSES[m.group(1)]
+            cam.arm_x, cam.items = None, [((x1 + 40 * k, y1 + 15 * k, x2 + 40 * k, y2 + 15 * k), color)]
+            return ""
+        return base(prompt)
+    return ask
+
+
+@pytest.fixture(scope="module")
+def captured_neg(tmp_path_factory):
+    data = tmp_path_factory.mktemp("ftneg")
+    cam, said, prompts = Table(), [], []
+    cap = capture.Capture(cam, data, NAMES, poses=4, params=Params(hand_len_px=120),
+                          ask=scripted_with_distractors(cam, prompts), say=said.append,
+                          distractors=["mug"], distractor_poses=4)
+    got = cap.run(only=["keys", "hand", "mug"], hand_seconds=3)
+    return data, got, prompts
+
+
+def test_distractors_are_captured_as_negatives_with_marked_cutouts(captured_neg):
+    data, got, prompts = captured_neg
+    assert got["keys"] == 4 and got["mug"] == 4 and got["hand"] >= 5
+    for k in range(4):
+        st = capture.stem("mug", k)
+        assert (data / "images" / f"{st}.jpg").exists()
+        assert (data / "labels" / f"{st}.txt").read_text() == ""          # a negative for every class
+        meta = json.loads((data / "cutouts" / f"{st}.json").read_text())
+        assert meta["name"] == "mug" and meta["distractor"] is True
+    assert "distractor" not in json.loads((data / "cutouts" / "cap0_keys-00.json").read_text())
+    mug = [PROMPT_RE.match(p) for p in prompts if p.startswith("[mug")]
+    assert [m.group(2, 3, 4) for m in mug] == [(str(k), "4", "mug") for k in range(1, 5)]
+
+
+def test_held_out_distractor_images_validate_as_negatives(captured_neg):
+    data = captured_neg[0]
+    stems = sorted(p.stem for p in (data / "labels").glob("*.txt"))
+    tr, va = train.split_by_trial(stems, val_trials=[capture.HOLDOUT])
+    assert capture.stem("mug", 3) in va and capture.stem("mug", 0) in tr
+    assert train.count_negatives(data, va) == 2                            # the empty table and the mug
+
+
+def test_distractor_names_must_be_new_words(tmp_path):
+    for bad in (["keys"], ["hand"], ["empty"], ["air pods"], ["mug", "mug"], ["mug-2"]):
+        with pytest.raises(ValueError):
+            capture.Capture(Table(), tmp_path, NAMES, distractors=bad)
+    assert capture.main(["--data", str(tmp_path), "--distractors", "wallet"]) == 2
+    assert capture.main(["--data", str(tmp_path), "--only", "mug"]) == 2    # not a distractor this run
+
+
+def test_only_can_pick_one_distractor(tmp_path):
+    cam, prompts = Table(), []
+    cap = capture.Capture(cam, tmp_path, NAMES, ask=scripted_with_distractors(cam, prompts), say=lambda s: None,
+                          distractors=["mug", "cup"], distractor_poses=2)
+    assert cap.run(only=["mug"]) == {"mug": 2}
+    assert not any(p.startswith("[cup") for p in prompts)
+
+
+def test_clearing_a_name_leaves_longer_names_alone(tmp_path):
+    for sub, ext in (("images", "jpg"), ("labels", "txt")):
+        (tmp_path / sub).mkdir()
+        for st in ("cap0_pill-bottle-00", "cap0_pill-00", "cap1_pill-01"):
+            (tmp_path / sub / f"{st}.{ext}").write_text("")
+    (tmp_path / "cutouts").mkdir()
+    for st in ("cap0_hand-00-0", "cap0_hand-00-1", "cap1_hand-101", "cap0_hand-x-00"):
+        (tmp_path / "cutouts" / f"{st}.json").write_text("{}")
+    capture._clear(tmp_path, "pill")
+    capture._clear(tmp_path, "hand")
+    assert sorted(p.stem for p in (tmp_path / "images").glob("*")) == ["cap0_pill-bottle-00"]
+    assert sorted(p.stem for p in (tmp_path / "cutouts").glob("*")) == ["cap0_hand-x-00"]
+
+
+def cut(name, color, size=(40, 30), distractor=False):
+    bgra, _ = square(size, color=color)
+    return synthesize.Cut(name, bgra, (0, 0, size[0], size[1]), (100, 100), None, f"cap0_{name}-00", distractor)
+
+
+def test_distractor_paste_occludes_but_gets_no_box():
+    p = synthesize.place_object(np.random.default_rng(0), cut("mug", (255, 0, 0), distractor=True),
+                                synthesize.NO_BOX, (0, 0, W, H))
+    assert p.cls == synthesize.NO_BOX and not p.label.any() and (p.bgra[:, :, 3] > 0).any()
+    mug = Paste(synthesize.NO_BOX, *square((20, 20), color=(255, 0, 0)), 20, 10)
+    mug.label[:] = False
+    _, boxes = compose(np.zeros((100, 100, 3), np.uint8), [paste(0, 10, 10), mug])
+    assert boxes == [(0, (10, 10, 20, 30))]                              # half the object shows; no mug box
+
+
+def blue(img):
+    return int(((img[:, :, 0] > 170) & (img[:, :, 1] < 60) & (img[:, :, 2] < 60)).sum())
+
+
+def test_p_distractor_mixes_distractors_in_and_zero_leaves_them_out():
+    bg = [np.full((H, W, 3), 120, np.uint8)]
+    cuts = {"keys": [cut("keys", (0, 0, 255))], "mug": [cut("mug", (255, 0, 0), distractor=True)]}
+    region = (0, 0, W, H)
+    run = lambda p: [synthesize.make_image(np.random.default_rng([7, i]), bg, cuts, NAMES, region, p_hand=0,
+                                           p_distractor=p) for i in range(60)]
+    assert not any(blue(img) for img, _ in run(0.0))
+    mixed = run(0.6)
+    with_mug = [boxes for img, boxes in mixed if blue(img) > 200]
+    assert 15 <= len(with_mug) <= 50
+    assert any(b == [] for b in with_mug)                                # distractor-only scenes
+    assert any(b for b in with_mug)                                      # next to a labelled object
+    assert all(c == NAMES.index("keys") for _, boxes in mixed for c, _ in boxes)
+    img, boxes = synthesize.make_image(np.random.default_rng(1), bg, {"mug": cuts["mug"]}, NAMES, region, p_hand=0)
+    assert boxes == [] and blue(img) > 200                               # distractors alone still paste
+
+
+def test_distractors_synthesize_seeded_without_boxes(captured_neg, tmp_path):
+    a, b = tmp_path / "a", tmp_path / "b"
+    for d in (a, b):
+        shutil.copytree(captured_neg[0], d)
+    for d in (a, b):
+        synthesize.synthesize(d, NAMES, n=12, seed=5, p_distractor=0.7)
+    for i in range(12):
+        s = f"synth_{i:05d}"
+        assert (a / "images" / f"{s}.jpg").read_bytes() == (b / "images" / f"{s}.jpg").read_bytes()
+    labels = [read_yolo(a / "labels" / f"synth_{i:05d}.txt", W, H) for i in range(12)]
+    assert {c for x in labels for c, _ in x} <= {NAMES.index("keys"), NAMES.index("hand")}
+    cuts = synthesize.load_cuts(a)
+    assert len(cuts["mug"]) == 3 and all(c.distractor for c in cuts["mug"])
+    assert not any(c.distractor for c in cuts["keys"])
+
+
+def test_without_distractors_the_mix_knob_changes_nothing(captured, tmp_path):
+    a, b = tmp_path / "a", tmp_path / "b"
+    for d in (a, b):
+        shutil.copytree(captured[0], d)
+    synthesize.synthesize(a, NAMES, n=6, seed=2, p_distractor=0.0)
+    synthesize.synthesize(b, NAMES, n=6, seed=2, p_distractor=0.9)
+    for i in range(6):
+        s = f"synth_{i:05d}.jpg"
+        assert (a / "images" / s).read_bytes() == (b / "images" / s).read_bytes()
+
+
+def write_cut(data, name, distractor=None):
+    (data / "cutouts").mkdir(parents=True, exist_ok=True)
+    (data / "backgrounds").mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(data / "backgrounds" / "empty-00.jpg"), np.full((H, W, 3), 120, np.uint8))
+    st = f"cap0_{name}-00"
+    cv2.imwrite(str(data / "cutouts" / f"{st}.png"), square((20, 20))[0])
+    meta = {"name": name, "stem": st, "origin": [100, 100], "frame": [W, H], "edge": None, "box": [0, 0, 20, 20]}
+    if distractor is not None:
+        meta["distractor"] = distractor
+    (data / "cutouts" / f"{st}.json").write_text(json.dumps(meta))
+
+
+def test_unknown_cutouts_still_fail_unless_marked_distractor(tmp_path):
+    write_cut(tmp_path / "ok", "mug", distractor=True)
+    assert synthesize.synthesize(tmp_path / "ok", NAMES, n=2) == 2
+    write_cut(tmp_path / "unknown", "mug")
+    with pytest.raises(ValueError):
+        synthesize.synthesize(tmp_path / "unknown", NAMES, n=2)
+    write_cut(tmp_path / "clash", "phone", distractor=True)             # a distractor can't be a class
+    with pytest.raises(ValueError):
+        synthesize.synthesize(tmp_path / "clash", NAMES, n=2)

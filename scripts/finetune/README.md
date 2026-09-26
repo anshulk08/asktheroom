@@ -12,25 +12,49 @@ quarter of the hand frames), which is never pasted. Synthetic `synth_*` images a
 ```
 docker ps --filter ancestor=askroom:latest --format '{{.ID}} {{.Command}}' | grep main.py | cut -d' ' -f1 | xargs -r docker stop
 scripts/camera_setup.sh                          # lamp on: labels need a lit, still table
-.venv/bin/python scripts/finetune/capture.py     # ~15 min: empty table, 8 objects x 8 poses, 40 s of hands
+mv data/finetune data/finetune-oldcam            # new camera only: no old-camera captures mixed in
+.venv/bin/python scripts/finetune/capture.py --distractors airpods deodorant mug charger lipbalm
+                                                 # ~18 min: empty table, 8 objects x 8 poses,
+                                                 # 5 distractors x 4 poses, 40 s of hands
 nohup scripts/dock.sh python3 -u main.py --no-voice > main.log 2>&1 &    # app back up (old model)
 ```
 Capture prompts for each pose, waits until the view has been still for 0.7 s (hand gone), and retakes
 the shot with a reason if the change is missing, split in pieces, too big/small, or touches the frame
-edge (arm in view). Redo objects with `--only glasses keys`. Look at `data/finetune/qa_capture.jpg`.
+edge (arm in view). Redo objects with `--only glasses keys`, a distractor with
+`--distractors airpods --only airpods` (a distractor named in `--only` must also be in `--distractors`).
+Look at `data/finetune/qa_capture.jpg`: objects boxed, distractors and the empty table unboxed.
+
+**Distractors (negatives).** A model trained only on our eight props and an empty table has never seen
+anything else, so it calls an unknown thing its nearest class: the first model scored an AirPods case
+0.53 `phone`, a small thing at the table edge up to 0.72 `phone`, against 0.87-0.97 for real props.
+`--distractors` captures other everyday things exactly like objects (alone on the empty table,
+`--distractor-poses 4` by default, same prompt `[airpods 1/4] Place the airpods alone on the table, ...`),
+but their real images get an **empty label** (a negative for every class) and their cutouts are marked
+`"distractor": true`. `synthesize.py` pastes them into scenes like objects (they cover and are
+covered, and near a prop they teach "this one, not that one") but never boxes them; `--p-distractor`
+(default 0.5) is the share of scenes that draw from objects and distractors together, so some scenes
+are distractors only. Their held-out group (`cap3`) lands in validation, so validation precision now
+counts false positives on unknown things; `train.py` prints how many negatives each split has.
+Names are one word (`\w+`), not a class, `hand` or `empty`. Pick five or more things of different
+shapes and colours that a judge might put down (earbud case, mug, deodorant, charger brick, lip balm,
+a coaster, a snack bar); **don't** pick another thing of a class (someone else's keys, sunglasses,
+another phone), or the model learns that the class's own look is "not it".
 
 **Mac** (`cd ~/askroom`):
 ```
+mv data/finetune data/finetune-oldcam                                      # new camera only (as on the Jetson)
 rsync -a guru@192.168.55.1:askroom/data/finetune/ data/finetune/           # ~1 min
+cp data/hands_public/images/pubhand_* data/finetune/images/ && \
+    cp data/hands_public/labels/pubhand_* data/finetune/labels/            # optional: EgoHands hands (public_hands.py)
 open data/finetune/qa_capture.jpg                                          # every box right?
-.venv/bin/python scripts/finetune/synthesize.py --n 400                    # ~15 s; check qa_synth.jpg
+.venv/bin/python scripts/finetune/synthesize.py --n 500                    # ~20 s; check qa_synth.jpg
 PYTORCH_ENABLE_MPS_FALLBACK=1 .venv/bin/python scripts/finetune/train.py \
     --model models/yolo26s.pt --device mps --batch 8 --epochs 30 --val-trials cap3 --name askroom-yolo26s
 cp <the "best weights:" path it prints> models/askroom-yolo26s.pt          # usually ~/runs/detect/runs/askroom/askroom-yolo26s/weights/best.pt
 scp models/askroom-yolo26s.pt guru@192.168.55.1:askroom/models/
 ```
 Training on the M-series Mac runs ~1.4 s/iteration at 640 px, batch 8 (batch 16 swaps on 16 GB), so
-30 epochs of ~550 images is roughly 50-60 min; a cloud GPU is much faster. If YOLO26 gives any trouble,
+30 epochs of ~650 images is roughly 60-70 min; a cloud GPU is much faster. If YOLO26 gives any trouble,
 use `--model yolo11s.pt`.
 
 **Jetson** again:

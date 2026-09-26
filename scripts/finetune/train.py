@@ -10,6 +10,9 @@ Colab: upload data/finetune (images/, labels/) and this folder, then
 
 Validation holds out whole videos, never random frames: neighbouring frames of one video are near
 copies, so a random split would score the model on frames it has effectively trained on.
+Frames with an empty label file are negatives (YOLO trains on them as background images): the empty
+table and capture.py's distractors. The held-out group's negatives make validation count false
+positives on unknown things; the summary line says how many negatives each split has.
 Output: runs/askroom/<name>/weights/best.pt. Copy it to models/ on the Jetson and build the engine in
 the container (see README.md: `core.detect --export` calls YOLO-World's set_classes, which a YOLO11
 model doesn't have), then point detect.model at the .engine.
@@ -61,6 +64,12 @@ def split_by_trial(stems: list[str], val_frac: float = 0.2, val_trials=None,
     return tr + synth, va
 
 
+def count_negatives(data: Path, stems: list[str]) -> int:
+    """How many of these frames are negatives: an empty (or blank) label file, no boxes at all."""
+    labels = Path(data) / "labels"
+    return sum(1 for s in stems if (labels / f"{s}.txt").exists() and not (labels / f"{s}.txt").read_text().strip())
+
+
 def write_split(data: Path, names: list[str], train: list[str], val: list[str]) -> Path:
     import yaml
     data = Path(data).resolve()
@@ -97,8 +106,9 @@ def main(argv=None) -> int:
     train, val = split_by_trial(stems, a.val_frac, a.val_trials, a.seed)
     names = class_names(load_config())
     ds = write_split(data, names, train, val)
-    print(f"train {len(train)} frames / {len({trial_of(s) for s in train})} videos, "
-          f"val {len(val)} frames / videos {sorted({trial_of(s) for s in val})}  -> {ds}")
+    print(f"train {len(train)} frames ({count_negatives(data, train)} negatives) / "
+          f"{len({trial_of(s) for s in train})} videos, val {len(val)} frames ({count_negatives(data, val)} "
+          f"negatives) / videos {sorted({trial_of(s) for s in val})}  -> {ds}")
     if a.split_only:
         return 0
 

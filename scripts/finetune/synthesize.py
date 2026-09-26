@@ -3,6 +3,7 @@ training images with exact boxes and no hand labelling (fast path, see README.md
 
     python scripts/finetune/synthesize.py                   # 400 images, seed 0
     python scripts/finetune/synthesize.py --n 600 --seed 1
+    python scripts/finetune/synthesize.py --p-distractor 0.6   # more scenes with unknown things in them
 
 Backgrounds are the raw empty-table frames capture.py saved, not their median: pasted objects carry
 the camera's grain, so the table must too or the grain itself would give them away. Objects get a
@@ -13,6 +14,12 @@ what is still visible, and objects less than 30% visible are dropped (unlabelled
 can't be blamed for missing). Output is images/synth_<i>.jpg + labels/synth_<i>.txt: train.py always
 trains on the "synth" trial, and cutouts from the held-out capture group are never pasted, so the
 validation set stays real and unseen. Seeded: the same seed and inputs give the same images.
+
+Distractors (capture.py --distractors: things that are none of the classes, cutout meta
+"distractor": true) are pasted like objects, covering and covered like them, but never boxed: the
+detector learns that an unknown thing on the table is not a phone. With probability --p-distractor an
+image draws its items from objects and distractors together (some scenes end up distractors only);
+otherwise from objects alone. With no distractor cutouts the images are exactly what they were before.
 """
 from __future__ import annotations
 
@@ -33,6 +40,7 @@ from capture import HOLDOUT, write_qa  # noqa: E402
 from common import DEFAULT_DATA, class_names, trial_of, write_data_yaml  # noqa: E402
 
 PREFIX = "synth"
+NO_BOX = -1                          # Paste.cls of a distractor: it paints and covers, but gets no box
 
 
 @dataclass
@@ -43,6 +51,7 @@ class Cut:
     origin: tuple[int, int]          # top-left in the frame it was cut from
     edge: Optional[str] = None       # hands: the frame edge the arm enters from
     stem: str = ""                   # the capture it came from
+    distractor: bool = False         # none of the classes: pasted, never boxed
 
 
 @dataclass
@@ -75,7 +84,7 @@ def compose(bg: np.ndarray, pastes: Sequence[Paste], min_visible: float = 0.3) -
     boxes = []
     for i, (p, (x1, y1, x2, y2)) in enumerate(zip(pastes, clips)):
         total = int(p.label.sum())
-        if total == 0 or x2 <= x1 or y2 <= y1:
+        if p.cls == NO_BOX or total == 0 or x2 <= x1 or y2 <= y1:
             continue
         vis = p.label[y1 - p.y:y2 - p.y, x1 - p.x:x2 - p.x] & (owner[y1:y2, x1:x2] == i)
         if vis.sum() < min_visible * total:
@@ -122,12 +131,15 @@ def rotate(bgra: np.ndarray, label: np.ndarray, angle: float, scale: float = 1.0
 
 
 def place_object(rng: np.random.Generator, cut: Cut, cls: int, region: Box) -> Paste:
+    """A random pose inside region. A distractor's paste has cls NO_BOX and no label pixels."""
     bgra, lab = rotate(cut.bgra, _label(cut.bgra, cut.box), rng.uniform(0, 360), rng.uniform(0.9, 1.1),
                        bool(rng.random() < 0.5))
     h, w = bgra.shape[:2]
     rx1, ry1, rx2, ry2 = region
     x = int(rng.integers(rx1, max(rx1, rx2 - w) + 1))
     y = int(rng.integers(ry1, max(ry1, ry2 - h) + 1))
+    if cut.distractor:
+        cls, lab = NO_BOX, np.zeros_like(lab)
     return Paste(cls, _feather(_gain(bgra, rng.uniform(0.85, 1.15))), lab, x, y)
 
 
@@ -167,16 +179,21 @@ def place_hand(rng: np.random.Generator, cut: Cut, cls: int, frame: tuple[int, i
 
 def make_image(rng: np.random.Generator, backgrounds: Sequence[np.ndarray], cuts: dict[str, list[Cut]],
                names: list[str], region: Box, max_objects: int = 6, p_hand: float = 0.6,
-               min_visible: float = 0.3) -> tuple[np.ndarray, list[tuple[int, Box]]]:
+               min_visible: float = 0.3, p_distractor: float = 0.5) -> tuple[np.ndarray, list[tuple[int, Box]]]:
+    """One composite. max_objects bounds the pasted items (objects and distractors together)."""
     bg = backgrounds[int(rng.integers(len(backgrounds)))]
     bg = np.clip(bg.astype(np.float32) * rng.uniform(0.92, 1.08), 0, 255).astype(np.uint8)
     H, W = bg.shape[:2]
-    objs = sorted(n for n in cuts if n != "hand")
+    dists = sorted(n for n, cs in cuts.items() if any(c.distractor for c in cs))
+    objs = sorted(n for n in cuts if n != "hand" and n not in dists)
+    if dists and (not objs or rng.random() < p_distractor):   # no draw without distractors: old images stay
+        objs = sorted(objs + dists)
     k = int(rng.integers(1, min(max_objects, len(objs)) + 1)) if objs else 0
     pastes = []
     for name in rng.choice(objs, k, replace=False) if k else []:
         group = cuts[name]
-        pastes.append(place_object(rng, group[int(rng.integers(len(group)))], names.index(name), region))
+        cls = NO_BOX if name in dists else names.index(name)
+        pastes.append(place_object(rng, group[int(rng.integers(len(group)))], cls, region))
     if cuts.get("hand") and rng.random() < p_hand:
         for _ in range(2 if rng.random() < 0.25 else 1):
             toward = None
@@ -189,7 +206,8 @@ def make_image(rng: np.random.Generator, backgrounds: Sequence[np.ndarray], cuts
 
 
 def load_cuts(data: Path, holdout: Optional[str] = HOLDOUT) -> dict[str, list[Cut]]:
-    """Cutouts by class name, leaving out the held-out capture group so validation stays unseen."""
+    """Cutouts by name (classes and distractors), leaving out the held-out capture group so validation
+    stays unseen. Cutouts without a "distractor" field (older captures) are class objects."""
     out: dict[str, list[Cut]] = {}
     for meta_p in sorted((Path(data) / "cutouts").glob("*.json")):
         meta = json.loads(meta_p.read_text())
@@ -199,7 +217,8 @@ def load_cuts(data: Path, holdout: Optional[str] = HOLDOUT) -> dict[str, list[Cu
         if bgra is None or bgra.ndim != 3 or bgra.shape[2] != 4:
             continue
         out.setdefault(meta["name"], []).append(
-            Cut(meta["name"], bgra, tuple(meta["box"]), tuple(meta["origin"]), meta.get("edge"), meta["stem"]))
+            Cut(meta["name"], bgra, tuple(meta["box"]), tuple(meta["origin"]), meta.get("edge"), meta["stem"],
+                bool(meta.get("distractor", False))))
     return out
 
 
@@ -223,9 +242,12 @@ def synthesize(data: Path, names: list[str], n: int = 400, seed: int = 0, holdou
     if not backgrounds:
         raise FileNotFoundError(f"no empty-table frames in {data / 'backgrounds'}: run capture.py first")
     cuts = load_cuts(data, holdout)
-    unknown = set(cuts) - set(names)
+    unknown = {n for n, cs in cuts.items() if not any(c.distractor for c in cs)} - set(names)
     if unknown:
-        raise ValueError(f"cutouts for {sorted(unknown)}, which are not classes {names}")
+        raise ValueError(f"cutouts for {sorted(unknown)}, which are not classes {names} (nor distractors)")
+    clash = {n for n, cs in cuts.items() if any(c.distractor for c in cs)} & set(names)
+    if clash:
+        raise ValueError(f"distractor cutouts named like classes {sorted(clash)}: recapture them under another name")
     if not cuts:
         raise FileNotFoundError(f"no cutouts in {data / 'cutouts'}: run capture.py first")
     H, W = backgrounds[0].shape[:2]
@@ -247,11 +269,15 @@ def main(argv=None) -> int:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--max-objects", type=int, default=6)
     ap.add_argument("--p-hand", type=float, default=0.6, help="share of images with a hand (a quarter of those get two)")
+    ap.add_argument("--p-distractor", type=float, default=0.5,
+                    help="share of images whose items are drawn from objects and distractors together "
+                         "(only matters when capture.py --distractors saved some)")
     ap.add_argument("--holdout", default=HOLDOUT, help="capture group never pasted ('' pastes every cutout)")
     a = ap.parse_args(argv)
     names = class_names(load_config())
     data = Path(a.data)
-    n = synthesize(data, names, a.n, a.seed, a.holdout or None, max_objects=a.max_objects, p_hand=a.p_hand)
+    n = synthesize(data, names, a.n, a.seed, a.holdout or None, max_objects=a.max_objects, p_hand=a.p_hand,
+                   p_distractor=a.p_distractor)
     write_data_yaml(data, names)
     print(f"wrote {n} composites to {data / 'images'}/{PREFIX}_*.jpg; "
           f"sample sheet: {write_qa(data, names, PREFIX, 'qa_synth.jpg', limit=48)}")

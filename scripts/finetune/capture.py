@@ -5,6 +5,8 @@ Run on the Jetson host venv (cv2 + numpy only) with the app stopped, since it ho
     python scripts/finetune/capture.py                          # empty table, 8 objects x 8 poses, hands
     python scripts/finetune/capture.py --only glasses keys      # redo some objects (same empty table)
     python scripts/finetune/capture.py --qa                     # rebuild the contact sheet only
+    python scripts/finetune/capture.py --distractors airpods mug charger    # objects + hands + other things
+    python scripts/finetune/capture.py --distractors airpods mug --only airpods   # redo one distractor
 
 Each object lies alone on the empty table, so bglabel.py's difference against the empty table is its
 box. Writes into --data (default data/finetune), the layout the other scripts use:
@@ -12,7 +14,8 @@ box. Writes into --data (default data/finetune), the layout the other scripts us
     images/cap<g>_<object>-<k>.jpg, labels/...txt   g = k % 4 is the "trial" train.py splits on;
                                                     cap3 is held out (train.py --val-trials cap3)
     images/cap<g>_empty-<k>.jpg, empty labels       negatives
-    cutouts/<stem>.png (BGRA) + <stem>.json         for synthesize.py
+    images/cap<g>_<distractor>-<k>.jpg, empty labels  things that are none of the classes: negatives
+    cutouts/<stem>.png (BGRA) + <stem>.json         for synthesize.py ("distractor": true on distractors)
     backgrounds/empty-<k>.jpg                       raw empty-table frames for synthesize.py
     qa_capture.jpg                                  every capture with its box: look at it
 """
@@ -20,9 +23,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence
 
 import cv2
 import numpy as np
@@ -37,6 +41,7 @@ HOLDOUT = f"cap{GROUPS - 1}"
 POSE_HINTS = ["in the middle", "near a corner, not touching the edge", "rotated about 90 degrees",
               "flipped over or on its other side", "near another edge", "rotated about 45 degrees",
               "in another corner", "anywhere new, any angle"]
+RESERVED = {"empty", "hand"}        # stems capture.py already uses for other things
 
 
 class Quit(Exception):
@@ -49,15 +54,34 @@ def stem(name: str, k: int) -> str:
 
 
 def _clear(data: Path, name: str) -> None:
-    pat = f"cap*_{name.replace('_', '-')}-*"
+    """Delete one name's captures: cap<g>_<name>-<kk>[-<i>], not those of a longer name ('pill' keeps
+    'pill_bottle')."""
+    n = name.replace("_", "-")
+    own = re.compile(rf"cap\d+_{re.escape(n)}-\d{{2,}}(-\d)?")
     for sub, ext in (("images", "jpg"), ("labels", "txt"), ("cutouts", "png"), ("cutouts", "json")):
-        for p in (data / sub).glob(f"{pat}.{ext}"):
-            p.unlink()
+        for p in (data / sub).glob(f"cap*_{n}-*.{ext}"):
+            if own.fullmatch(p.stem):
+                p.unlink()
 
 
-def save_cutouts(data: Path, st: str, img: np.ndarray, name: str, labels) -> None:
+def check_distractors(distractors: Sequence[str], names: Sequence[str]) -> list[str]:
+    """Problems with distractor names: each must be one word (letters, digits, _) that is not a class,
+    'hand' or 'empty', and not repeated."""
+    bad = []
+    for d in distractors:
+        if not re.fullmatch(r"\w+", d):
+            bad.append(f"'{d}' is not one word (use letters, digits and _)")
+        elif d in names or d in RESERVED:
+            bad.append(f"'{d}' is a class or reserved name, so it can't be a distractor")
+    if len(set(distractors)) != len(distractors):
+        bad.append("a distractor is listed twice")
+    return bad
+
+
+def save_cutouts(data: Path, st: str, img: np.ndarray, name: str, labels, distractor: bool = False) -> None:
     """One BGRA cutout per label, with its label box relative to the cutout (a hand's box is only the
-    hand end of the arm) and the edge an arm comes in from, which synthesize.py keeps it attached to."""
+    hand end of the arm) and the edge an arm comes in from, which synthesize.py keeps it attached to.
+    A distractor's meta says "distractor": true: synthesize.py pastes it but never boxes it."""
     (data / "cutouts").mkdir(parents=True, exist_ok=True)
     h, w = img.shape[:2]
     for i, lab in enumerate(labels):
@@ -67,6 +91,8 @@ def save_cutouts(data: Path, st: str, img: np.ndarray, name: str, labels) -> Non
         x1, y1, x2, y2 = lab.box
         meta = {"name": name, "stem": st, "origin": [x0, y0], "frame": [w, h], "edge": lab.edge,
                 "box": [x1 - x0, y1 - y0, x2 - x0, y2 - y0]}
+        if distractor:
+            meta["distractor"] = True
         (data / "cutouts" / f"{s}.json").write_text(json.dumps(meta))
 
 
@@ -75,8 +101,13 @@ class Capture:
 
     def __init__(self, source, data: Path, names: list[str], *, poses: int = 8, params: Optional[Params] = None,
                  ask: Callable[[str], str] = input, say: Callable[[str], None] = print,
-                 settle_timeout_s: float = 15.0, display: Optional[dict] = None):
+                 settle_timeout_s: float = 15.0, display: Optional[dict] = None,
+                 distractors: Sequence[str] = (), distractor_poses: int = 4):
+        bad = check_distractors(distractors, names)
+        if bad:
+            raise ValueError("; ".join(bad))
         self.src, self.data, self.names, self.poses = source, Path(data), names, poses
+        self.distractors, self.distractor_poses = list(distractors), distractor_poses
         self.p = params or Params()
         self.ask, self.say = ask, say
         self.settle_timeout_s = settle_timeout_s
@@ -122,12 +153,15 @@ class Capture:
             f = self._next()
         return [self._next().img for _ in range(n)]
 
-    def capture_object(self, cls_id: int, name: str) -> int:
+    def capture_object(self, cls_id: Optional[int], name: str, poses: Optional[int] = None) -> int:
+        """Poses of one thing alone on the table. cls_id None: a distractor, saved with an empty label
+        (a negative for every class); its cutout is still cut from the background difference."""
         _clear(self.data, name)
         spoken = self.display.get(name, name.replace("_", " "))
+        poses = poses or self.poses
         k = 0
-        while k < self.poses:
-            r = self._prompt(f"[{name} {k + 1}/{self.poses}] Place the {spoken} alone on the table, "
+        while k < poses:
+            r = self._prompt(f"[{name} {k + 1}/{poses}] Place the {spoken} alone on the table, "
                              f"{POSE_HINTS[k % len(POSE_HINTS)]}; hands away; Enter (s = skip object, q = quit): ")
             if r == "s":
                 break
@@ -140,8 +174,8 @@ class Capture:
                 self.say(f"  retake: {lab.reason}")
                 continue
             img, st = shots[-1], stem(name, k)       # one real frame keeps real grain; the mask came from 5
-            save_sample(self.data, st, img, [(cls_id, lab.box)])
-            save_cutouts(self.data, st, img, name, [lab])
+            save_sample(self.data, st, img, [] if cls_id is None else [(cls_id, lab.box)])
+            save_cutouts(self.data, st, img, name, [lab], distractor=cls_id is None)
             x1, y1, x2, y2 = lab.box
             self.say(f"  ok: {st}  box {x2 - x1}x{y2 - y1} px at ({x1}, {y1})")
             k += 1
@@ -173,6 +207,9 @@ class Capture:
                 if name == "hand" or (only and name not in only):
                     continue
                 got[name] = self.capture_object(i, name)
+            for name in self.distractors:
+                if not only or name in only:
+                    got[name] = self.capture_object(None, name, self.distractor_poses)
             if hands and (not only or "hand" in only):
                 got["hand"] = self.capture_hands(self.names.index("hand"), hand_seconds)
         except Quit:
@@ -206,7 +243,11 @@ def main(argv=None) -> int:
     ap.add_argument("--data", default=str(DEFAULT_DATA))
     ap.add_argument("--device", default="0", help="camera index or /dev/videoN")
     ap.add_argument("--poses", type=int, default=8)
-    ap.add_argument("--only", nargs="*", help="object names (and/or 'hand') to (re)capture")
+    ap.add_argument("--only", nargs="*", help="object names (and/or 'hand', or --distractors names) to (re)capture")
+    ap.add_argument("--distractors", nargs="*", default=[],
+                    help="other things (one word each, not classes) to capture as negatives: pasted into "
+                         "composites without a box, and their real images are labelled empty")
+    ap.add_argument("--distractor-poses", type=int, default=4)
     ap.add_argument("--no-hands", action="store_true")
     ap.add_argument("--roi", help="x1,y1,x2,y2: the tabletop in camera px; changes outside it (floor, chair, "
                                   "the person capturing) are ignored")
@@ -220,16 +261,21 @@ def main(argv=None) -> int:
     if a.qa:
         print(write_qa(Path(a.data), names))
         return 0
-    bad = set(a.only or []) - set(names)
+    problems = check_distractors(a.distractors, names)
+    if problems:
+        print("; ".join(problems), file=sys.stderr)
+        return 2
+    bad = set(a.only or []) - set(names) - set(a.distractors)
     if bad:
-        print(f"unknown names {sorted(bad)}; choose from {names}", file=sys.stderr)
+        print(f"unknown names {sorted(bad)}; choose from {names} or --distractors", file=sys.stderr)
         return 2
     from core.capture import FrameBuffer
     fb = FrameBuffer(int(a.device) if a.device.isdigit() else a.device)
     try:
         cap = Capture(fb, Path(a.data), names, poses=a.poses, params=Params(hand_len_px=a.hand_len,
                                   roi_px=tuple(int(v) for v in a.roi.split(",")) if a.roi else None),
-                      display=cfg.get("display_names") or {})
+                      display=cfg.get("display_names") or {}, distractors=a.distractors,
+                      distractor_poses=a.distractor_poses)
         cap.run(a.only, hands=not a.no_hands, hand_seconds=a.hand_seconds)
     finally:
         fb.stop()
