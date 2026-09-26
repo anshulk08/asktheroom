@@ -58,6 +58,7 @@ always-on mic ─▶ voice/stt (Silero VAD + whisper.cpp; audio only in memory; 
           ─▶ Answer(speech, point_at, action)
                      ├─ voice/tts: ElevenLabs when online, Piper offline
                      └─ act/laser.Laser.aim_object: closed-loop aim, corrects on the camera's view of the dot
+                        (`room:u,v` actions off the table: Laser.aim_px on the room dot map, spec 0006)
 server/app.py (FastAPI): dashboard, MJPEG overlay, WebSocket state, POST /ask, /sms (Twilio)
 mobile/bridge (BLE GATT on the Jetson) ◀─▶ iPhone app (mobile/ios): ask, state, answers, notices; no cloud
 main.py ─▶ n8n webhook (laptop): a log of every spoken question, plus a 5-minute health check
@@ -93,7 +94,7 @@ rules can't read and of open questions (with a compact world state).
 | `mobile/` | BLE bridge (`bridge/`), wire protocol (`PROTOCOL.md`), iPhone app (`ios/`). |
 | `assets/` | Small licensed data files the code needs (CLIP BPE vocabulary). `models/` is never committed. |
 | `voice/` | `visual` (Grok look/recall, routing), `teach` ("this is my X"), `care` + `conversation` (reminders, profile, follow-ups), `intents` (rule parser), `answers` (spoken templates), `understand` (overheard filter + Grok reads what the rules can't), `local_llm` (optional local Qwen answers, not deployed), `pipeline` (router), `tts`, `stt` (Silero VAD + whisper.cpp), `trigger` (clicker), `llm` (Grok open answers, world-state helpers, pill filter). |
-| `act/` | `actuator` (servo drivers + fake), `laser` (poly2 fit + closed-loop aim), `calibrate`, `sim` (simulated rig). |
+| `act/` | `actuator` (servo drivers + fake), `laser` (poly2 fit + closed-loop aim; `aim_px` for room pointing), `calibrate`, `room_map` (room dot map, zones, beam gate; spec 0006, off by default), `sim` (simulated rig and room). |
 | `server/` | FastAPI dashboard (`app.py`), frame overlay, `sim.py` (full demo on a synthetic camera). |
 | `eval/` | Trial recording, synthetic trials, replay against baselines (last-seen, nearest-object, current-frame) and the report. |
 | `net.py` | Online/offline monitor. Readers check `.online`, which never blocks. |
@@ -145,6 +146,11 @@ recall over saved frames), Grok narration, reminders, morning report, profile fa
 follow-ups, and the BLE bridge + iPhone app. Not yet on the real table: the D17 open-world check (teach,
 hide, move the box, ask; at least 4/5 or the eight-object demo is the headline), real eval trials, and
 laser calibration. Stretch goals (floor search camera, room map) are deprioritized.
+
+Room pointing (spec 0006, branch `room-pointing`, after the freeze): the laser can point at visible
+things off the table without depth, using a swept dot map and a pixel-space loop that stops once the camera
+sees the dot inside the object's box. It's off by default (`room.enabled: false`) and tested in a sim
+room only, not on the rig.
 
 ## Decisions worth knowing
 
