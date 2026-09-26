@@ -246,9 +246,9 @@ def look_reply(answer="Your mug is on the right.", conf=0.9, mark=None, point=No
 def qa(log, reply, world=None, im="default", online=True, **kw):
     from server.sim import SimTable
     world = world or FakeWorld([Entity("keys", "target", Status.VISIBLE, pos_cm=(20.0, 15.0),
-                                       box_cm=(17.0, 13.0, 23.0, 17.0)),
+                                       box_cm=(17.0, 13.0, 23.0, 17.0), last_seen=T0),
                                 Entity("box", "container", Status.VISIBLE, pos_cm=(70.0, 40.0),
-                                       box_cm=(62.0, 34.0, 78.0, 46.0))], log)
+                                       box_cm=(62.0, 34.0, 78.0, 46.0), last_seen=T0)], log)
     prov = FakeProvider(reply)
     q = VisualQA(CFG, world, log, Frames(img() if im == "default" else im), SimTable(CFG), provider=prov,
                  online=lambda: online, c=vcfg(**kw), clock=Clock(T0 + 3600))
@@ -281,12 +281,48 @@ def test_marks_skip_hidden_and_unboxed_entities(log):
     assert "1 = box" in texts and "keys" not in texts.split("Marks:")[1].split("\n")[0] and "2 =" not in texts
 
 
-def test_look_points_at_a_raw_spot_when_no_mark_fits(log):
+def test_look_never_points_at_an_untracked_spot(log):
+    """Behaviour change: the laser points only at a verified tracked entity. A VLM point on no tracked
+    thing (here (9, 30) cm, an untracked note) gets the spoken answer, a brief 'not sure exactly
+    where', and no laser target (it used to aim at the raw table position)."""
     # (0.1, 0.5) of the 1280x720 sim frame = (128, 360) px = (9, 30) cm
-    q, _ = qa(log, look_reply("There is a note on the left.", point={"x": 0.1, "y": 0.5}))
-    a = q.look("what does the note say?")
-    assert a.point_at is None and a.action == "point"
-    assert a.target_cm == pytest.approx((9.0, 30.0), abs=0.2)
+    spot = {"x": 0.1, "y": 0.5}
+    q, _ = qa(log, look_reply("Your note is on the left, by the edge. It's yellow.", point=spot))
+    a = q.look("where is my note?")
+    assert a.point_at is None and a.action is None and a.target_cm is None
+    assert a.text == "Your note is on the left, by the edge. I'm not sure exactly where, so I won't point."
+    q, _ = qa(log, look_reply("There is a note on the left.", point=spot))
+    a = q.look("what's on the table?")
+    assert a.action is None and a.text == "There is a note on the left. I'm not sure exactly where, so I won't point."
+    q, _ = qa(log, look_reply("There is a note on the left. It says milk.", point=spot))
+    a = q.look("what does the note say?")                       # two sentences of content: both kept
+    assert a.action is None and a.target_cm is None and a.text == "There is a note on the left. It says milk."
+
+
+def test_look_point_near_but_not_on_a_tracked_entity_is_not_attached_to_it(log):
+    """A point 5.5 cm from the keys' centre but outside their box is not silently taken to mean the
+    keys (it used to be, within 6 cm)."""
+    # (20, 20.5) cm = (284.4, 246) px = (0.2222, 0.3417) of the frame; keys box (17, 13, 23, 17)
+    q, _ = qa(log, look_reply("Something small is there.", point={"x": 0.2222, "y": 0.3417}))
+    a = q.look("what is that small thing?")
+    assert a.point_at is None and a.action is None and a.target_cm is None
+
+
+def test_look_point_on_nested_or_overlapping_entities(log):
+    """A point on keys lying on the notebook is the keys (the smallest box, inside the other); a point
+    where two boxes merely overlap is ambiguous: no laser target."""
+    world = FakeWorld([Entity("keys", "target", Status.VISIBLE, pos_cm=(20.0, 15.0), box_cm=(17.0, 13.0, 23.0, 17.0),
+                              last_seen=T0),
+                       Entity("notebook", "cover", Status.VISIBLE, pos_cm=(20.0, 15.0),
+                              box_cm=(10.0, 8.0, 30.0, 22.0), last_seen=T0),
+                       Entity("wallet", "target", Status.VISIBLE, pos_cm=(31.0, 20.0),
+                              box_cm=(28.0, 18.0, 34.0, 22.0), last_seen=T0)], log)
+    q, _ = qa(log, look_reply("Your keys are there.", point={"x": 0.222, "y": 0.25}), world=world)
+    assert q.look("where are the shiny things?").point_at == "keys"
+    # (29, 20) cm = (412.4, 240) px: inside both the notebook and the wallet, neither inside the other
+    q, _ = qa(log, look_reply("It's there.", point={"x": 412.4 / 1280, "y": 240 / 720}), world=world)
+    a = q.look("where is the brown thing?")
+    assert a.point_at is None and a.action is None and a.target_cm is None
 
 
 def test_look_point_on_a_tracked_entity_follows_it(log):

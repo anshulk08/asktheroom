@@ -19,9 +19,10 @@ labelled with when it was taken; attach() binds views to things after every worl
 world state and the question go to
 the VLM, which replies with strict JSON {answer, confidence, mark: null | number, point: null | {x, y}
 fractions of image 1}. A mark points at its entity (the laser then follows it through world.resolve); a
-point (for something no mark covers) is mapped to table cm (frame px -> table homography), attached to a
-tracked entity it lands on, else carried as the raw table position in target_cm. Low confidence abstains:
-"I can't tell from here."
+point is mapped to table cm (frame px -> table homography) and points only when it lands inside a marked
+entity's box (the smallest, when that one lies inside the others). The laser never aims at a raw table
+position: a point on no tracked entity, or on an ambiguous overlap, gets the spoken answer and a brief
+"not sure exactly where". Low confidence abstains: "I can't tell from here."
 
 Why marks: measured with grok-4.3 on a 5-object desk photo, asking for boxes (Project Memoria's Gemini
 box_2d convention, [ymin, xmin, ymax, xmax] 0-1000) scored 0/5 (mean IoU 0.14; pixel and fraction boxes
@@ -42,6 +43,7 @@ import logging
 import re
 import time
 from collections import deque
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Optional
 
 import numpy as np
@@ -63,7 +65,8 @@ CANT_SEE = "I can't see the table right now."
 ABSTAIN = "I can't tell from here."
 PILLS_SAFE = ("I can't tell whether medication was taken; I can only tell you where the pill bottle is "
               "and when it was moved.")
-POINT_NEAR_CM = 6.0
+UNSURE_WHERE = "I'm not sure exactly where, so I won't point."
+POINT_MARGIN_CM = 2.0      # a VLM point this close outside a marked box still lands on it
 
 PAST = re.compile(r"\b(?:was|were|did|had|earlier|before|ago|yesterday|used to|show(?:ed|n)? up|appeared"
                   r"|last time|when i left|before i left|while i was)\b")
@@ -227,6 +230,25 @@ def _taken(dt: float) -> str:
     return f"taken {n} before image 1 (it may have changed since)"
 
 
+def _with_note(text: str, note: str, where: bool = True) -> str:
+    """The answer plus a short note, still at most two spoken sentences: a one-sentence answer keeps
+    all of it; of two, a 'where' answer keeps its first (the place) and any other keeps both and
+    drops the note (what the note says matters more than where it is)."""
+    said = [x for x in re.split(r"(?<=[.!?])\s+", (text or "").strip()) if x]
+    if len(said) < 2:
+        return f"{' '.join(said)} {note}".strip()
+    return f"{said[0]} {note}" if where else " ".join(said[:2])
+
+
+@dataclass
+class Mark:
+    """A numbered box drawn on image 1: the tracked entity it stands for, as the world had it then."""
+    name: str
+    box_px: tuple
+    box_cm: tuple
+    pos_cm: Optional[tuple] = None
+
+
 def _spoken(text: str) -> str:
     """Plain spoken text, at most two sentences, with the medication rule applied."""
     t = re.sub(r"[*_#`>\[\]]+", "", text or "").replace("\n", " ")
@@ -376,7 +398,7 @@ class VisualQA:
         oh, ow = f.img.shape[:2]
         names = self._names()
         marks = self._marks()
-        full, _ = _jpeg(draw_marks(f.img, [b for _, b in marks]) if marks else f.img, self.c.look_px)
+        full, _ = _jpeg(draw_marks(f.img, [mk.box_px for mk in marks]) if marks else f.img, self.c.look_px)
         parts: list = [("text", "Image 1: the whole table now, from above."), ("image", full)]
         focus = self._focus(intent, question)
         crops = self._crops(focus)
@@ -384,7 +406,7 @@ class VisualQA:
             parts += [("text", f"Image {i}: close-up of the {names.get(n) or 'unnamed object'}, "
                                f"{_taken(f.t - crop.t)}."),
                       ("image", _jpeg(crop.img, self.c.crop_px, upscale=True)[0])]
-        listed = ", ".join(f"{i} = {names.get(n) or 'unnamed object'}" for i, (n, _) in enumerate(marks, 1))
+        listed = ", ".join(f"{i} = {names.get(mk.name) or 'unnamed object'}" for i, mk in enumerate(marks, 1))
         parts.append(("text", f"Marks: {listed or 'none'}.\nTracker: {self._state_text()}.\n"
                               f"Question: {question}"))
         try:
@@ -397,10 +419,11 @@ class VisualQA:
             return Answer(ABSTAIN)
         m = d.get("mark")
         if isinstance(m, int) and not isinstance(m, bool) and 1 <= m <= len(marks):
-            return Answer(text, point_at=marks[m - 1][0], action="point")
-        return self._pointed(text, d.get("point"), (ow, oh))
+            return Answer(text, point_at=marks[m - 1].name, action="point")
+        where = (intent is not None and intent.kind == "WHERE") or "where" in question.lower()
+        return self._pointed(text, d.get("point"), (ow, oh), marks, where)
 
-    def _marks(self) -> list[tuple[str, tuple]]:
+    def _marks(self) -> list[Mark]:
         """(entity, frame px box) for every VISIBLE tracked entity with a box, in world order: the
         candidates the VLM picks from."""
         if self.table is None or getattr(self.table, "ok", True) is False:
@@ -414,12 +437,13 @@ class VisualQA:
             if d.get("status") != "VISIBLE":
                 continue
             try:
-                box = self.world.get(d["name"]).box_cm
+                ent = self.world.get(d["name"])
+                box, pos = ent.box_cm, ent.pos_cm
             except Exception:
-                box = None
+                continue
             px = cm_box_to_px(self.table, box) if box is not None else None
             if px is not None:
-                out.append((d["name"], px))
+                out.append(Mark(d["name"], px, tuple(box), tuple(pos) if pos is not None else None))
         return out
 
     def _crops(self, focus: list[str]) -> list[tuple[str, Crop]]:
@@ -449,45 +473,35 @@ class VisualQA:
         except Exception:
             log.debug("binding crops to things failed", exc_info=True)
 
-    def _pointed(self, text: str, point, orig_wh: tuple) -> Answer:
-        """The answer, pointing where the VLM pointed: a tracked entity it lands on, else the spot."""
-        if not isinstance(point, dict) or getattr(self.table, "ok", True) is False:
+    def _pointed(self, text: str, point, orig_wh: tuple, marks: list[Mark], where: bool = True) -> Answer:
+        """The answer, pointing where the VLM pointed only when that is a marked (tracked) entity; a
+        point on nothing tracked, or on an ambiguous overlap, is spoken as unsure and not aimed at."""
+        if point is None:
             return Answer(text)
-        px = point_to_px(point, orig_wh)
-        if px is None:
-            return Answer(text)
-        c = px_to_cm(self.table, [px])
-        if c is None:
-            return Answer(text)
-        x, y = float(c[0][0]), float(c[0][1])
-        w, h = ((self.cfg.get("table") or {}).get("size_cm") or [90, 60])
-        if not (-5 <= x <= w + 5 and -5 <= y <= h + 5):
-            return Answer(text)
-        ent = self._entity_at(x, y)
-        if ent is not None:
-            return Answer(text, point_at=ent, action="point")
-        return Answer(text, action="point", target_cm=(round(x, 1), round(y, 1)))
+        px = point_to_px(point, orig_wh) if isinstance(point, dict) else None
+        c = px_to_cm(self.table, [px]) if px is not None and getattr(self.table, "ok", True) is not False else None
+        hit = self._mark_at(float(c[0][0]), float(c[0][1]), marks) if c is not None else None
+        if hit is None:
+            return Answer(_with_note(text, UNSURE_WHERE, where))
+        return Answer(text, point_at=hit.name, action="point")
 
-    def _entity_at(self, x: float, y: float) -> Optional[str]:
-        best, bd = None, POINT_NEAR_CM
-        try:
-            ents = self.world.state_json().get("entities", [])
-        except Exception:
+    @staticmethod
+    def _mark_at(x: float, y: float, marks: list[Mark]) -> Optional[Mark]:
+        """The mark whose box holds (x, y) cm (else within POINT_MARGIN_CM); of several, the smallest
+        when it lies inside all the others (keys on the notebook), else None (ambiguous)."""
+        from core import geom
+        hits: list[Mark] = []
+        for margin in (0.0, POINT_MARGIN_CM):
+            hits = [mk for mk in marks if mk.box_cm[0] - margin <= x <= mk.box_cm[2] + margin
+                    and mk.box_cm[1] - margin <= y <= mk.box_cm[3] + margin]
+            if hits:
+                break
+        if not hits:
             return None
-        for d in ents:
-            if d.get("status") != "VISIBLE" or not d.get("pos_cm"):
-                continue
-            try:
-                box = self.world.get(d["name"]).box_cm
-            except Exception:
-                box = None
-            if box is not None and box[0] - 2 <= x <= box[2] + 2 and box[1] - 2 <= y <= box[3] + 2:
-                dist = 0.0
-            else:
-                dist = float(np.hypot(d["pos_cm"][0] - x, d["pos_cm"][1] - y))
-            if dist <= bd:
-                best, bd = d["name"], dist
-        return best
+        small = min(hits, key=lambda mk: geom.area(mk.box_cm))
+        if all(mk is small or geom.overlap_frac(mk.box_cm, small.box_cm) >= 0.9 for mk in hits):
+            return small
+        return None
 
     # -- B: the table before
 
