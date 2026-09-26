@@ -14,6 +14,8 @@ from core.reminders import ReminderStore, Reminders, parse_request, parse_when
 from core.types import Entity, Event, Status
 
 CFG = load_config()
+# The tests pin their own quiet hours so they don't depend on the repo's setting (off for the hackathon).
+CFG = {**CFG, "care": {**(CFG.get("care") or {}), "quiet_hours": ["22:00", "07:00"]}}
 SAID: list[str] = []            # every sentence the tests saw generated; checked against the pill rule
 
 
