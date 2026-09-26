@@ -7,6 +7,12 @@ frame: every `room_every_n`-th call it crops the next zone (round-robin) from th
 already-loaded prop model backend on the crop, and hands the tracker's ZoneVisit to `world.room_update`,
 which applies the association rules (core/room_world.py). Positions here are full-frame px, never table cm.
 
+Unnamed things (`room_memory.things`): the props model does not know most objects from a high corner, so
+the same zone crop also goes through a class-agnostic YOLOE proposer (sharing the table's loaded model);
+its boxes that are not a prop, a hand or someone carrying something become cls 'thing' observations and
+are tracked like any class. Each confirmed thing track has one close-up named by Grok in the background
+(RoomNamer), so the World can hand a table thing that left off to a zone thing with a matching name.
+
     python -m core.room --zone bookshelf --say "the bookshelf" --poly 100,80 600,80 600,400 100,400
     python -m core.room --list
     python -m core.room --delete-zone bookshelf
@@ -22,6 +28,9 @@ import argparse
 import logging
 import math
 import sys
+import threading
+import time
+from collections import deque
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
@@ -38,6 +47,10 @@ log = logging.getLogger(__name__)
 MATCH_IOU = 0.3             # spec 0009 section 3: a track match needs IoU >= 0.3 ...
 MATCH_DIAG = 0.5            # ... or a centre within 0.5 track-box diagonals
 DEDUPE_IOU = 0.5            # two boxes of one class this overlapped in one crop are one object (two prompts)
+THING = "thing"             # cls of an unnamed object (a YOLOE proposal); never matches a prop's track
+PROP_IOU = 0.5              # a proposal this overlapped with a prop observation is that prop
+NAME_MARGIN = 0.15          # a thing's close-up for Grok: its box grown by this per side
+ERR_LOG_S = 10.0            # a failing proposer is logged at most this often
 DILATE = np.ones((5, 5), np.uint8)
 
 
@@ -148,13 +161,103 @@ class RoomTracker:
 
 
 # ---------------------------------------------------------------------------------------------
+# Grok names for thing tracks
+
+class _Job:
+    __slots__ = ("track", "img", "attempts", "due")
+
+    def __init__(self, track: RoomTrack, img: np.ndarray, due: float):
+        self.track, self.img, self.attempts, self.due = track, img, 0, due
+
+
+class RoomNamer:
+    """Names confirmed thing tracks in the background: one close-up per track to `name_fn` (Grok, via
+    core.auto_name.AutoNamer._ask), the result set as `track.guess`. The perception thread only queues a
+    copied crop. Calls only while `online()` (offline, jobs wait), at most `per_minute`; a failure (an
+    exception or None) is retried once `retry_s` later, then given up. The queue keeps the newest
+    `max_pending` jobs: a burst of junk boxes must not hold memory or starve later tracks."""
+
+    def __init__(self, name_fn: Callable[[np.ndarray], Optional[dict]], per_minute: int = 6,
+                 online: Optional[Callable[[], bool]] = None, clock: Callable[[], float] = time.monotonic,
+                 retry_s: float = 5.0, max_pending: int = 8, start: bool = True):
+        self.name_fn = name_fn
+        self.per_minute = int(per_minute)
+        self.online = online or (lambda: True)
+        self.clock = clock
+        self.retry_s = float(retry_s)
+        self._lock = threading.Lock()
+        self._jobs: deque = deque(maxlen=max(1, int(max_pending)))   # full: appending drops the oldest
+        self._calls: deque = deque()       # clock() of recent calls (the per-minute cap)
+        self._stop = threading.Event()
+        self._wake = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        if start:
+            self._thread = threading.Thread(target=self._run, name="room-name", daemon=True)
+            self._thread.start()
+
+    def submit(self, track: RoomTrack, img: np.ndarray) -> None:
+        with self._lock:
+            self._jobs.append(_Job(track, img, self.clock()))
+        self._wake.set()
+
+    def pending(self) -> int:
+        with self._lock:
+            return len(self._jobs)
+
+    def step(self, now: Optional[float] = None) -> bool:
+        """Try the next due job. True when a call was made."""
+        now = self.clock() if now is None else now
+        with self._lock:
+            job = next((j for j in self._jobs if j.due <= now), None)
+            if job is None or not self.online():
+                return False
+            while self._calls and self._calls[0] <= now - 60.0:
+                self._calls.popleft()
+            if len(self._calls) >= self.per_minute:
+                return False
+            self._jobs.remove(job)
+            self._calls.append(now)
+        job.attempts += 1
+        try:
+            g = self.name_fn(job.img)
+        except Exception as e:
+            log.info("naming room track %s failed (attempt %d): %s", job.track.tid, job.attempts, e)
+            g = None
+        if g:
+            job.track.guess = g
+            log.info("room track %s in %s looks like a %s", job.track.tid, job.track.zone, g.get("name"))
+        elif job.attempts < 2:
+            job.due = now + self.retry_s
+            with self._lock:
+                self._jobs.append(job)
+        return True
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                made = self.step()
+            except Exception:
+                log.exception("room naming step failed")
+                made = False
+            if not made:
+                self._wake.wait(0.2)
+                self._wake.clear()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._wake.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+
+
+# ---------------------------------------------------------------------------------------------
 # Driver
 
 class RoomMemory:
     """Called once per perception frame with the full camera frame; processes one zone every room_every_n calls."""
 
     def __init__(self, cfg: RoomConfig, zones: Zones, backend, to_obj: dict[str, str], world,
-                 table_rect: BoxPx, hand_conf: float = 0.35):
+                 table_rect: BoxPx, hand_conf: float = 0.35, proposer=None, namer: Optional[RoomNamer] = None):
         self.cfg = cfg
         self.zones = zones
         self.backend = backend                 # the table detector's backend: shared, never a second load
@@ -162,14 +265,21 @@ class RoomMemory:
         self.world = world
         self.table_rect = tuple(int(v) for v in table_rect)
         self.hand_conf = hand_conf             # a hand box needs this score to block (the table's hand cut-off)
+        self.proposer = proposer               # propose(img, known, hands) -> [Proposal], or None: props only
+        self.namer = namer                     # RoomNamer for confirmed thing tracks, or None: never named
         self.tracker = RoomTracker(cfg)
+        self._prop_err_t = float("-inf")
         self._calls = 0
         self._next = 0
         self._prev: dict[str, np.ndarray] = {}  # zone -> grey crop of its previous visit (change evidence)
 
     @classmethod
-    def from_config(cls, cfg: dict, world, backend, table_rect: Optional[BoxPx]) -> Optional["RoomMemory"]:
-        """RoomMemory from config.yaml's room_memory: section, or None (logged) when it can't run."""
+    def from_config(cls, cfg: dict, world, backend, table_rect: Optional[BoxPx], proposer=None,
+                    name_fn: Optional[Callable[[np.ndarray], Optional[dict]]] = None,
+                    online: Optional[Callable[[], bool]] = None) -> Optional["RoomMemory"]:
+        """RoomMemory from config.yaml's room_memory: section, or None (logged) when it can't run. With a
+        `proposer` (and room_memory.things) zones also track unnamed things; with a `name_fn` too, their
+        confirmed tracks are named by it in the background (names_per_minute, only while `online()`)."""
         rc = RoomConfig.from_dict(cfg.get("room_memory"))
         if not rc.enabled:
             log.info("room memory off: room_memory.enabled is false")
@@ -199,8 +309,19 @@ class RoomMemory:
         _, to_obj = class_list(cfg)
         ct = cfg.get("conf_threshold", 0.35)
         hand_conf = float(ct.get("hand", ct.get("default", 0.35))) if isinstance(ct, dict) else float(ct)
-        log.info("room memory on: zones %s", ", ".join(f"{z.name} ({z.say})" for z in zones.zones.values()))
-        return cls(rc, zones, backend, to_obj, world, table_rect, hand_conf=hand_conf)
+        if not rc.things:
+            proposer = None
+        namer = RoomNamer(name_fn, per_minute=rc.names_per_minute, online=online) \
+            if proposer is not None and name_fn is not None else None
+        log.info("room memory on: zones %s; things %s", ", ".join(f"{z.name} ({z.say})" for z in zones.zones.values()),
+                 "off" if proposer is None else ("named by Grok" if namer is not None else "unnamed"))
+        return cls(rc, zones, backend, to_obj, world, table_rect, hand_conf=hand_conf, proposer=proposer,
+                   namer=namer)
+
+    def stop(self) -> None:
+        """Stops the naming worker (build's cleanup)."""
+        if self.namer is not None:
+            self.namer.stop()
 
     def step(self, full: Optional[Frame]) -> list[Event]:
         """One perception frame. Every room_every_n-th call processes the next zone and returns
@@ -245,7 +366,8 @@ class RoomMemory:
                     int(math.ceil((b[2] - x1) * s)), int(math.ceil((b[3] - y1) * s)))
 
         hands: list[BoxPx] = []
-        props: list[tuple[str, float, BoxPx]] = []
+        hands_small: list[BoxPx] = []
+        props: list[tuple[str, float, BoxPx, BoxPx]] = []
         for label, conf, box in self.backend.infer(small):
             obj = self.to_obj.get(label)
             if obj is None:
@@ -253,10 +375,12 @@ class RoomMemory:
             if obj == "hand":
                 if conf >= self.hand_conf:
                     hands.append(to_full(box))
+                    hands_small.append(tuple(int(round(v)) for v in box))
             elif conf >= self.cfg.room_prop_conf:
-                props.append((obj, float(conf), to_full(box)))
+                props.append((obj, float(conf), to_full(box), tuple(int(round(v)) for v in box)))
         obs: list[RoomObservation] = []
-        for obj, conf, box in sorted(props, key=lambda p: -p[1]):
+        known_small: list[BoxPx] = []
+        for obj, conf, box, sbox in sorted(props, key=lambda p: -p[1]):
             if any(geom.iou(box, hb) >= self.cfg.hand_iou for hb in hands):
                 continue                           # the hand itself, called a prop
             c = geom.center(box)
@@ -266,6 +390,9 @@ class RoomMemory:
                 continue                           # the same object under a second prompt
             obs.append(RoomObservation(zone=zone.name, cls=obj, conf=round(conf, 3), box_px=box,
                                        t=full.t, wall=full.wall, frame_idx=full.idx))
+            known_small.append(sbox)
+        if self.cfg.things and self.proposer is not None:
+            obs += self._things(zone, full, small, known_small, hands_small, hands, obs, to_full)
 
         grey = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY) if small.ndim == 3 else small
         changes: list[BoxPx] = []
@@ -287,8 +414,58 @@ class RoomMemory:
                 return float("nan")                # off this crop: no valid view of it
             return float(grey[b1:b2, a1:a2].mean())
 
-        return self.tracker.visit(zone.name, zone.say, obs, hands, changes, full.t, full.wall, full.idx,
-                                  lum=lum, crop=crop.copy())
+        visit = self.tracker.visit(zone.name, zone.say, obs, hands, changes, full.t, full.wall, full.idx,
+                                   lum=lum, crop=crop.copy())
+        if self.namer is not None:
+            for tr in visit.confirmed:
+                if tr.cls == THING and tr.guess is None and not tr.name_asked:
+                    img = _close_up(visit.crop, tr.box_px, x1, y1)
+                    if img is not None:
+                        tr.name_asked = True
+                        self.namer.submit(tr, img)
+        return visit
+
+    def _things(self, zone: Zone, full: Frame, small: np.ndarray, known: list[BoxPx], hands_small: list[BoxPx],
+                hands: list[BoxPx], props: list[RoomObservation], to_full) -> list[RoomObservation]:
+        """Thing observations of this visit: proposer boxes on the (possibly resized) zone crop that are not
+        carried (occluded: inside a person box), not a hand, not a prop of this visit, inside the zone and
+        off the table view. A failing proposer costs the things of this visit, never the props."""
+        try:
+            proposals = list(self.proposer.propose(small, known, hands_small) or [])
+        except Exception:
+            now = time.monotonic()
+            if now - self._prop_err_t >= ERR_LOG_S:
+                log.warning("room proposer failed on zone %s; props only this visit", zone.name, exc_info=True)
+                self._prop_err_t = now
+            return []
+        out: list[RoomObservation] = []
+        for p in proposals:
+            if getattr(p, "occluded", False):
+                continue
+            box = to_full(p.box_px)
+            if any(geom.iou(box, hb) >= self.cfg.hand_iou for hb in hands):
+                continue                           # the hand itself
+            c = geom.center(box)
+            if not zone.contains(c) or geom.contains_point(self.table_rect, c):
+                continue
+            if any(geom.iou(box, o.box_px) >= PROP_IOU for o in props):
+                continue                           # the prop, boxed again
+            out.append(RoomObservation(zone=zone.name, cls=THING, conf=round(float(p.conf), 3), box_px=box,
+                                       t=full.t, wall=full.wall, frame_idx=full.idx))
+        return out
+
+
+def _close_up(crop: np.ndarray, box: BoxPx, ox: int, oy: int) -> Optional[np.ndarray]:
+    """A copy of `box` (full px) cut from the native-resolution zone crop at (ox, oy), grown by NAME_MARGIN
+    per side and clipped to the crop; None when too small to name."""
+    h, w = crop.shape[:2]
+    x1, y1, x2, y2 = box[0] - ox, box[1] - oy, box[2] - ox, box[3] - oy
+    mx, my = NAME_MARGIN * (x2 - x1), NAME_MARGIN * (y2 - y1)
+    a1, b1 = max(0, int(x1 - mx)), max(0, int(y1 - my))
+    a2, b2 = min(w, int(math.ceil(x2 + mx))), min(h, int(math.ceil(y2 + my)))
+    if a2 - a1 < 4 or b2 - b1 < 4:
+        return None
+    return crop[b1:b2, a1:a2].copy()
 
 
 # ---------------------------------------------------------------------------------------------

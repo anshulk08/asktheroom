@@ -711,13 +711,45 @@ def open_frames(cfg: dict, camera) -> tuple[object, Optional[tuple[int, int, int
 def make_room_memory(cfg: dict, world, detector, rect):
     """core.room.RoomMemory on the detector's already-loaded prop model, or None (RoomMemory.from_config logs
     why: no zones file, no zones, zones drawn at another view). A failure to start is logged and the table
-    runs without it."""
+    runs without it. Unnamed things in zones need the detector's YOLOE proposer (see room_things)."""
     try:
         from core.room import RoomMemory
-        return RoomMemory.from_config(cfg, world, detector.backend, rect)
+        return RoomMemory.from_config(cfg, world, detector.backend, rect, **room_things(cfg, world, detector))
     except Exception:
         log.exception("room memory failed to start; the table runs without it")
         return None
+
+
+def room_things(cfg: dict, world, detector) -> dict:
+    """RoomMemory.from_config's thing arguments: a zone YOLOE proposer on the detector's already-loaded
+    YOLOE model (a second load does not fit the 8 GB Jetson), and a Grok name_fn when auto_name is enabled.
+    {} (props only, logged) when room_memory is off or things are off, when the detector has no YOLOE
+    proposer (proposals.kind is not yoloe), or when building either fails."""
+    from core.room_types import RoomConfig
+    rc = RoomConfig.from_dict(cfg.get("room_memory"))
+    if not (rc.enabled and rc.things):
+        return {}
+    try:
+        from core.proposals import YOLOEProposer
+        shared = getattr(detector, "proposer", None)
+        if not isinstance(shared, YOLOEProposer):
+            log.info("room things off: the detector has no YOLOE proposer to share (proposals.kind: yoloe)")
+            return {}
+        ycfg = dict((cfg.get("proposals") or {}).get("yoloe") or {})
+        ycfg["ignore_px"] = []                 # table-view px: meaningless on a zone crop
+        proposer = YOLOEProposer(ycfg, model=shared.model)
+        proposer.set_roi(None)                 # the zone polygon filters, not the table outline
+        online = lambda: bool(getattr(world, "online", False))   # noqa: E731 (world.online follows NetMonitor)
+        kw = {"proposer": proposer, "online": online}
+        from core.auto_name import AutoNameConfig, AutoNamer
+        if AutoNameConfig.from_dict(cfg.get("auto_name")).enabled:
+            kw["name_fn"] = AutoNamer(cfg, world, online=online, start=False)._ask
+        else:
+            log.info("room things are not named: auto_name.enabled is false")
+        return kw
+    except Exception:
+        log.exception("room things failed to start; room memory tracks props only")
+        return {}
 
 
 def build(cfg: dict, fake: bool = False, camera: int = 0, with_voice: bool = True,
@@ -854,6 +886,8 @@ def build(cfg: dict, fake: bool = False, camera: int = 0, with_voice: bool = Tru
     room.cleanup = cleanup
     if room_rect is not None:
         room.room_memory = make_room_memory(cfg, world, detector, room_rect)
+        if room.room_memory is not None:
+            cleanup.append(room.room_memory.stop)          # its Grok naming worker
         if room.room_enabled:      # 0006 room pointing reads frames.latest(), now the table view (spec 0009 M5)
             log.error("room pointing (room.enabled) does not work with room_memory yet: room pointing is off")
             room.room_enabled = False
