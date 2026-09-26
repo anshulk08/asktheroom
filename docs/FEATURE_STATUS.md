@@ -75,6 +75,7 @@ Test suite at time of writing (Sat 26 Sep, after the overnight merge): `.venv/bi
 |---|---|---|---|
 | — | Trial format, record, replay vs 3 baselines, report (`eval/`) | validated | `tests/test_eval.py` |
 | — | Synthetic trials (`eval.synth`) | validated | `tests/test_synth.py`. The synthetic score is a regression check, never a claim of real accuracy |
+| — | Guided-clip replay and scorer (`eval.score_clip`): replays a recorded clip through `Room.perceive` and the ask pipeline, maps props to entities by position, PASS/FAIL per metric | implemented | `tests/test_score_clip.py` (synthetic clips, stub detector); runs end to end on `data/clips/still_1` on the laptop. No real-detector score yet (the engines run on the Jetson) |
 | 0004 | Real-trial accuracy numbers | planned | No real trials recorded yet (F5) |
 | 0004 | Live scoreboard on the dashboard | planned | Spec 0004 |
 
