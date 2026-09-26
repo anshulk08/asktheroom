@@ -172,3 +172,39 @@ def test_a_test_source_without_a_device_is_never_reopened():
         assert fb.reconnects == 0 and fb.failures > 0
     finally:
         fb.stop()
+
+
+class RaisingCam(FakeCam):
+    """cv2.error-like exceptions on some reads (a corrupt MJPG frame, a driver hiccup)."""
+    def read(self):
+        ok, img = super().read()
+        if self.n % 4 == 0:
+            raise cv2.error("corrupt frame")
+        return ok, img
+
+
+def test_a_read_that_raises_never_ends_the_capture_thread():
+    fb = FrameBuffer(RaisingCam(fps=200))
+    try:
+        assert wait_for(lambda: fb.failures >= 5 and fb.latest() is not None and fb.latest().idx >= 30)
+        assert fb._thread.is_alive() and fb.age() < 0.5
+    finally:
+        fb.stop()
+
+
+def test_an_error_outside_the_read_is_survived_too(monkeypatch):
+    fb = FrameBuffer(FakeCam(fps=200))
+    try:
+        assert wait_for(lambda: fb.latest() is not None)
+        real, calls = fb._fresh.notify_all, []
+
+        def boom():
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError("boom")
+            real()
+        monkeypatch.setattr(fb._fresh, "notify_all", boom)
+        n = fb.latest().idx
+        assert wait_for(lambda: fb.latest().idx > n + 10) and fb._thread.is_alive()
+    finally:
+        fb.stop()
