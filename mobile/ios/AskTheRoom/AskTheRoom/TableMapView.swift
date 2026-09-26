@@ -27,6 +27,10 @@ struct TableMapView: View {
     var snapshot: Snapshot
     var highlight: Highlight?
     var greyed = false
+    /// Keep a ring on the highlight after the pulses, until it's cleared (the answer sheet).
+    var steady = false
+    /// Where the real laser dot is. Off in the answer sheet, so only one thing is lit up there.
+    var showsLaser = true
     var onSelect: (String) -> Void = { _ in }
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -59,13 +63,14 @@ struct TableMapView: View {
                 }
 
                 if let highlight {
-                    HighlightView(highlight: highlight, geo: geo, at: highlightPoint(highlight, places: places, geo: geo))
+                    HighlightView(highlight: highlight, geo: geo, at: highlightPoint(highlight, places: places, geo: geo),
+                                  steady: steady)
                         .id(highlight.id)
                         .zIndex(90)
                         .allowsHitTesting(false)
                 }
 
-                if let laser = snapshot.laser, laser.on, let target = laser.target, let point = places[target] {
+                if showsLaser, let laser = snapshot.laser, laser.on, let target = laser.target, let point = places[target] {
                     Reticle()
                         .position(point)
                         .zIndex(100)
@@ -232,10 +237,12 @@ private struct Reticle: View {
 }
 
 /// The answer's highlight: a 1 s pulse on the target, plus a sweep along an edge or a circle.
+/// `steady` leaves a still ring (and the sweep) behind once the pulses finish.
 private struct HighlightView: View {
     let highlight: Highlight
     let geo: MapGeometry
     let at: CGPoint?
+    var steady = false
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var progress: CGFloat = 0
@@ -243,6 +250,12 @@ private struct HighlightView: View {
     var body: some View {
         ZStack {
             if let at {
+                if steady {
+                    Circle()
+                        .stroke(Theme.laser, lineWidth: 3)
+                        .frame(width: 52, height: 52)
+                        .position(at)
+                }
                 Circle()
                     .stroke(Theme.laser, lineWidth: 3)
                     .frame(width: 36, height: 36)

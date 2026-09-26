@@ -1,32 +1,46 @@
 import SwiftUI
 
-/// Home, the Table map and Recent as tabs. Asking from Home, or tapping "Show me", jumps to the map.
+/// Home, the Table map and Recent as tabs. Asking from Home, or tapping something on Recent,
+/// opens the answer over that screen; only "Show the whole table" switches tabs.
 struct MainView: View {
     enum Tab: String { case home, table, recent }
 
     let store: RoomStore
-    /// `-mockTab table` opens on the map, for screenshots.
+    /// `-mockTab table` or `-mockTab recent` opens on that tab, for screenshots.
     @State private var tab = Tab(rawValue: UserDefaults.standard.string(forKey: "mockTab") ?? "") ?? .home
+    /// What's open over Home or Recent; nil when nothing is.
+    @State private var focus: Focus?
 
     var body: some View {
         TabView(selection: $tab) {
-            HomeView(store: store,
-                     ask: { q in
-                         store.ask(q)
-                         tab = .table
-                     },
-                     show: { name in
-                         store.showOnMap(name)
-                         tab = .table
-                     })
+            HomeView(store: store, ask: store.ask, show: { focus = .thing($0) })
                 .tabItem { Label("Home", systemImage: "house.fill") }
                 .tag(Tab.home)
             RoomView(store: store)
                 .tabItem { Label("Table", systemImage: "square.grid.3x2.fill") }
                 .tag(Tab.table)
-            RecentView(store: store)
+            RecentView(store: store) { entry in
+                switch entry {
+                case .change(let event): focus = .thing(event.entity)
+                case .question(let exchange): focus = .answer(exchange.id)
+                }
+            }
                 .tabItem { Label("Recent", systemImage: "clock") }
                 .tag(Tab.recent)
+        }
+        // The Table tab shows answers in place; elsewhere a new question opens its answer.
+        .onChange(of: store.current?.id) { _, id in
+            if id != nil, tab != .table { focus = .answer(nil) }
+        }
+        .task {
+            if store.isMock, let name = UserDefaults.standard.string(forKey: "mockFocus") { focus = .thing(name) }
+        }
+        .sheet(isPresented: Binding(get: { focus != nil }, set: { if !$0 { focus = nil } })) {
+            FocusSheet(store: store, focus: $focus) { name in
+                focus = nil
+                if let name { store.showOnMap(name) }
+                tab = .table
+            }
         }
     }
 }
@@ -38,6 +52,12 @@ struct HomeView: View {
     var ask: (String) -> Void
     var show: (String) -> Void
     @State private var selected: String?
+    @Environment(\.dynamicTypeSize) private var typeSize
+
+    private var columns: [GridItem] {
+        // One column at the largest text sizes, so names never squeeze.
+        typeSize.isAccessibilitySize ? [GridItem(.flexible())] : [GridItem(.adaptive(minimum: 150), spacing: 12)]
+    }
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -49,7 +69,7 @@ struct HomeView: View {
                 if !store.notices.isEmpty {
                     HomeSection(title: "The room noticed") {
                         ForEach(store.notices) { notice in
-                            NoticeCard(notice: notice,
+                            NoticeCard(notice: notice, now: store.snapshot?.time ?? Date(),
                                        onShow: { notice.question.map(ask) ?? show(notice.entity) },
                                        onDismiss: { withAnimation { store.dismiss(notice) } })
                         }
@@ -58,7 +78,7 @@ struct HomeView: View {
 
                 HomeSection(title: "Your things") {
                     if let snapshot = store.snapshot {
-                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 12)], spacing: 12) {
+                        LazyVGrid(columns: columns, spacing: 12) {
                             ForEach(Dashboard.things(in: snapshot)) { thing in
                                 ThingTile(thing: thing, snapshot: snapshot,
                                           onTap: { ask(Dashboard.question(for: thing)) },
@@ -116,7 +136,7 @@ private struct HomeSection<Content: View>: View {
     }
 }
 
-/// Greeting and today's date, for orientation, with the connection pill.
+/// Greeting, today's date and the time, for orientation, with the connection pill.
 private struct DayHeader: View {
     let store: RoomStore
 
@@ -130,6 +150,10 @@ private struct DayHeader: View {
                     Text(context.date.formatted(.dateTime.weekday(.wide).month(.wide).day()))
                         .font(.title3)
                         .foregroundStyle(.secondary)
+                    Text(context.date.formatted(date: .omitted, time: .shortened))
+                        .font(.title.weight(.semibold))
+                        .monospacedDigit()
+                        .padding(.top, 2)
                 }
                 .lineLimit(1)
                 .accessibilityElement(children: .combine)
@@ -143,6 +167,7 @@ private struct DayHeader: View {
 
 private struct NoticeCard: View {
     let notice: Notice
+    let now: Date
     let onShow: () -> Void
     let onDismiss: () -> Void
 
@@ -161,9 +186,14 @@ private struct NoticeCard: View {
                     .font(.title2)
                     .foregroundStyle(icon.1)
                     .accessibilityHidden(true)
-                Text(notice.text)
-                    .font(.title3.weight(.semibold))
-                    .fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(notice.text)
+                        .font(.title3.weight(.semibold))
+                    if let detail = notice.detail(now: now) {
+                        Text(detail).font(.body)
+                    }
+                }
+                .fixedSize(horizontal: false, vertical: true)
             }
             HStack(spacing: 10) {
                 Button(action: onShow) {
@@ -173,8 +203,9 @@ private struct NoticeCard: View {
                 .buttonStyle(.borderedProminent)
                 Button("Got it", action: onDismiss)
                     .buttonStyle(.bordered)
+                    .tint(.primary)
             }
-            .controlSize(.large)
+            .controlSize(.extraLarge)
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -182,12 +213,16 @@ private struct NoticeCard: View {
     }
 }
 
-/// One of the person's things: tap to ask where it is (the map lights it up), long-press for details.
+/// One of the person's things: tap to ask where it is. Details are in the answer sheet
+/// ("More about it"); the context menu is only a shortcut.
 private struct ThingTile: View {
     let thing: Entity
     let snapshot: Snapshot
     let onTap: () -> Void
     let onDetails: () -> Void
+
+    /// Grows with the text so big icons stay inside their circle.
+    @ScaledMetric(relativeTo: .title2) private var well: CGFloat = 44
 
     private var isAway: Bool { [.gone, .lost].contains(thing.status) }
     private var isHidden: Bool { [.inside, .under, .held].contains(thing.status) }
@@ -198,7 +233,7 @@ private struct ThingTile: View {
                 HStack {
                     Image(systemName: Dashboard.symbol(for: thing.name))
                         .font(.title2)
-                        .frame(width: 44, height: 44)
+                        .frame(width: well, height: well)
                         .background(Circle().fill(Theme.iconWell))
                         .foregroundStyle(.primary)
                     Spacer()
@@ -208,22 +243,22 @@ private struct ThingTile: View {
                     }
                 }
                 Text(Dashboard.capitalized(thing.displayName))
-                    .font(.headline)
+                    .font(.title3.bold())
                     .foregroundStyle(.primary)
                     .lineLimit(2)
                 Text(Dashboard.whereabouts(thing, in: snapshot))
-                    .font(.subheadline)
+                    .font(.body)
                     .foregroundStyle(.primary)
                     .fixedSize(horizontal: false, vertical: true)
-                if isAway, let seen = thing.lastSeen {
-                    Text("Seen \(Dashboard.ago(seen, now: snapshot.time ?? Date()).lowercased())")
-                        .font(.footnote)
+                if let seen = Dashboard.lastSeen(thing, now: snapshot.time ?? Date()) {
+                    Text(seen)
+                        .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
             }
             .multilineTextAlignment(.leading)
             .padding(14)
-            .frame(maxWidth: .infinity, minHeight: 140, alignment: .topLeading)
+            .frame(maxWidth: .infinity, minHeight: 150, alignment: .topLeading)
             .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 18))
             .opacity(thing.isUncertain ? 0.8 : 1)
         }
@@ -233,7 +268,7 @@ private struct ThingTile: View {
             Button("Details", systemImage: "info.circle", action: onDetails)
         }
         .accessibilityElement(children: .combine)
-        .accessibilityHint("Asks the room and shows it on the table")
+        .accessibilityHint("Asks the room where it is")
         .accessibilityAction(named: "Details", onDetails)
     }
 }

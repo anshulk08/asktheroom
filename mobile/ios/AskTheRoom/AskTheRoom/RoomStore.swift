@@ -191,7 +191,8 @@ final class RoomStore {
         setHighlight(Highlight(entity: name, target: target, action: .point))
     }
 
-    private func highlight(for answer: Answer) -> Highlight? {
+    /// Where an answer points on the map, if anywhere. The answer sheet keeps its own copy.
+    func highlight(for answer: Answer) -> Highlight? {
         let entity = answer.pointAt.flatMap { snapshot?.entity(named: $0) }
         let target = answer.target ?? entity.flatMap(MapLayout.position(of:))
         let action = answer.laserAction

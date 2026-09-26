@@ -24,6 +24,16 @@ struct Notice: Identifiable, Equatable {
     var text: String
     /// What "Help me find it" asks the room; nil means just show it on the map.
     var question: String?
+    /// For "can't see": when it was last seen, shown under the text. Kept out of `text`
+    /// so the notice doesn't change (and come back after "Got it") every minute.
+    var lastSeen: Date? = nil
+    var seenWords: String? = nil
+
+    /// "They were last seen on the table, 5 minutes ago."
+    func detail(now: Date) -> String? {
+        guard let seenWords else { return nil }
+        return seenWords + (lastSeen.map { ", \(Dashboard.ago($0, now: now).lowercased())" } ?? "") + "."
+    }
 
     /// Changes when the situation changes, so a dismissed notice comes back if it happens again.
     var id: String { "\(entity)|\(text)" }
@@ -61,21 +71,28 @@ enum Dashboard {
         snapshot.entities.filter { $0.kind == .target && (!$0.isThing || !$0.aliases.isEmpty) }
     }
 
-    /// "On the table", "Inside the box", "Left the table (left side)"… Sentence case.
+    /// "On the table", "Inside the box", "Off the table, on the left side"… Sentence case.
     static func whereabouts(_ e: Entity, in snapshot: Snapshot) -> String {
         let parent = e.parent.map { snapshot.entity(named: $0)?.displayName ?? Entity.displayName(for: $0) }
+        let it = isPlural(e.displayName) ? "them" : "it"
         let words: String
         switch e.status {
         case .visible: words = "On the table"
-        case .held: words = "In someone's hand"
+        case .held: words = "Someone is holding \(it)"
         case .inside: words = parent.map { "Inside \(the($0))" } ?? "Inside something"
         case .under: words = parent.map { "Under \(the($0))" } ?? "Under something"
-        case .gone: words = e.edge.map { "Left the table (\($0.rawValue) side)" } ?? "Left the table"
-        case .lost: words = "Not sure where"
+        case .gone: words = e.edge.map { "Off the table, on the \($0.rawValue) side" } ?? "Off the table"
+        case .lost: words = "Can't see \(it) right now"
         case .unrecognized: words = "Unknown"
         }
         guard e.isUncertain, e.status != .lost else { return words }
         return "Probably " + words.prefix(1).lowercased() + words.dropFirst()
+    }
+
+    /// "Last seen 5 minutes ago", for things off the table or out of sight.
+    static func lastSeen(_ e: Entity, now: Date) -> String? {
+        guard [.gone, .lost].contains(e.status), let seen = e.lastSeen else { return nil }
+        return "Last seen \(ago(seen, now: now).lowercased())"
     }
 
     /// The question a tap on a thing asks.
@@ -90,14 +107,16 @@ enum Dashboard {
             let name = e.displayName
             switch e.status {
             case .gone where !e.isThing || !e.aliases.isEmpty:
-                let side = e.edge.map { " on the \($0.rawValue)" } ?? ""
+                let side = e.edge.map { ", on the \($0.rawValue) side" } ?? ""
                 out.append(Notice(kind: .leftTable, entity: e.name,
-                                  text: "\(capitalized(name)) left the table\(side).",
+                                  text: "\(capitalized(your(e))) \(was(name)) moved off the table\(side).",
                                   question: question(for: e)))
             case .lost where !e.isThing:
                 out.append(Notice(kind: .lostTrack, entity: e.name,
-                                  text: "Lost track of \(the(name)). It was last seen on the table.",
-                                  question: question(for: e)))
+                                  text: "The room can't see \(your(e)) right now.",
+                                  question: question(for: e),
+                                  lastSeen: e.lastSeen,
+                                  seenWords: "\(isPlural(name) ? "They" : "It") \(was(name)) last seen on the table"))
             default:
                 break
             }
@@ -105,7 +124,7 @@ enum Dashboard {
                 // Only guess a name the person would recognise.
                 let known = e.maybeSameAs.lazy.compactMap { snapshot.entity(named: $0.name) }
                     .first { !$0.isThing || !$0.aliases.isEmpty }
-                let guess = known.map { " It might be \(the($0.displayName))." } ?? ""
+                let guess = known.map { " It might be \(your($0))." } ?? ""
                 out.append(Notice(kind: .unnamed, entity: e.name,
                                   text: "Something new is on the table.\(guess)",
                                   question: nil))
@@ -177,6 +196,14 @@ enum Dashboard {
     /// "the box", but "my charger" stays as the person named it.
     static func the(_ name: String) -> String {
         name.hasPrefix("my ") || name == "something" ? name : "the \(name)"
+    }
+
+    /// "your keys" for the person's things, "the box" for furniture and nameless things,
+    /// "my charger" as the person named it.
+    static func your(_ e: Entity) -> String {
+        let name = e.displayName
+        if name.hasPrefix("my ") { return name }
+        return e.kind == .target && (!e.isThing || !e.aliases.isEmpty) ? "your \(name)" : "the \(name)"
     }
 
     /// Names that take "are": "Where are my keys?", "Keys were picked up".

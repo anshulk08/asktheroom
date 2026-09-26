@@ -14,9 +14,9 @@ final class DashboardTests: XCTestCase {
         XCTAssertEqual(words("keys"), "Inside the box")
         XCTAssertEqual(words("pill_bottle"), "Under the notebook")
         XCTAssertEqual(words("wallet"), "On the table")
-        XCTAssertEqual(words("phone"), "Left the table (left side)")
-        XCTAssertEqual(words("glasses"), "Not sure where")
-        XCTAssertEqual(words("remote"), "In someone's hand")
+        XCTAssertEqual(words("phone"), "Off the table, on the left side")
+        XCTAssertEqual(words("glasses"), "Can't see them right now")
+        XCTAssertEqual(words("remote"), "Someone is holding it")
         XCTAssertEqual(words("thing:9"), "Probably on the table")
     }
 
@@ -29,10 +29,45 @@ final class DashboardTests: XCTestCase {
     func testNoticesOrderedGoneLostNew() {
         let notices = Dashboard.notices(in: sample)
         XCTAssertEqual(notices.map(\.kind), [.leftTable, .lostTrack, .unnamed])
-        XCTAssertEqual(notices[0].text, "Phone left the table on the left.")
-        XCTAssertEqual(notices[1].text, "Lost track of the glasses. It was last seen on the table.")
+        XCTAssertEqual(notices[0].text, "Your phone was moved off the table, on the left side.")
+        XCTAssertEqual(notices[1].text, "The room can't see your glasses right now.")
         // thing:9 might be thing:4, which has no name: don't guess.
         XCTAssertEqual(notices[2].text, "Something new is on the table.")
+    }
+
+    func testCantSeeNoticeSaysWhenLastSeen() {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        var s = sample
+        s.update("glasses") { $0.ls = nil }
+        var notice = Dashboard.notices(in: s).first { $0.kind == .lostTrack }!
+        XCTAssertEqual(notice.detail(now: now), "They were last seen on the table.")
+
+        s.update("glasses") { $0.ls = now.addingTimeInterval(-5 * 60).timeIntervalSince1970 }
+        s.update("wallet") { $0.s = .lost; $0.ls = now.timeIntervalSince1970 }
+        let notices = Dashboard.notices(in: s).filter { $0.kind == .lostTrack }
+        notice = notices.first { $0.entity == "glasses" }!
+        XCTAssertEqual(notice.detail(now: now), "They were last seen on the table, 5 minutes ago.")
+        XCTAssertEqual(notices.first { $0.entity == "wallet" }?.detail(now: now), "It was last seen on the table, just now.")
+        // The time lives outside the text, so "Got it" sticks as the minutes tick by.
+        XCTAssertEqual(notice.id, "glasses|The room can't see your glasses right now.")
+    }
+
+    func testYourForThePersonsThingsOnly() {
+        func your(_ n: String) -> String { Dashboard.your(sample.entity(named: n)!) }
+        XCTAssertEqual(your("keys"), "your keys")
+        XCTAssertEqual(your("pill_bottle"), "your pill bottle")
+        XCTAssertEqual(your("thing:7"), "my charger")
+        XCTAssertEqual(your("box"), "the box")
+        XCTAssertEqual(your("thing:9"), "the unnamed object 9")
+    }
+
+    func testLastSeenOnlyForThingsOutOfSight() {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        var s = sample
+        s.update("phone") { $0.ls = now.addingTimeInterval(-120).timeIntervalSince1970 }
+        s.update("wallet") { $0.ls = now.timeIntervalSince1970 }
+        XCTAssertEqual(Dashboard.lastSeen(s.entity(named: "phone")!, now: now), "Last seen 2 minutes ago")
+        XCTAssertNil(Dashboard.lastSeen(s.entity(named: "wallet")!, now: now))
     }
 
     func testNoticeGuessesOnlyNamesThePersonKnows() {
@@ -65,9 +100,14 @@ final class DashboardTests: XCTestCase {
 
     func testPillWordingStaysNeutral() {
         var new = sample
-        for status in [EntityStatus.held, .visible, .gone, .inside] {
-            new.update("pill_bottle") { $0.s = status }
-            for line in Dashboard.changes(from: sample, to: new).map(\.text) {
+        for status in [EntityStatus.held, .visible, .gone, .inside, .under, .lost] {
+            new.update("pill_bottle") { $0.s = status; $0.edge = status == .gone ? .left : nil }
+            let pill = new.entity(named: "pill_bottle")!
+            let notices = Dashboard.notices(in: new).filter { $0.entity == "pill_bottle" }
+            let lines = Dashboard.changes(from: sample, to: new).map(\.text)
+                + notices.map(\.text) + notices.compactMap { $0.detail(now: Date()) }
+                + [Dashboard.whereabouts(pill, in: new)]
+            for line in lines {
                 XCTAssertFalse(line.lowercased().contains("taken"), line)
                 XCTAssertFalse(line.lowercased().contains("took"), line)
             }
