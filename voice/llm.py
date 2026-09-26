@@ -1,4 +1,6 @@
-"""Grok fallback for open-ended (OTHER) questions (spec V10).
+"""Grok for open-ended (OTHER) questions (spec V10). Off the voice path: the team decided Grok only
+helps the detector, so voice/pipeline.py uses voice/local_llm.py, which reuses compact_state,
+to_answer and the pill filter from here. ask_grok stays for scripts/grok_smoke.py.
 
 Only question text and a compact world-state JSON leave the device. The model gets the state in
 the system prompt, may call locate / history / changes_since, and must finish with respond().

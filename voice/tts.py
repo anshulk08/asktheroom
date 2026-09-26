@@ -174,6 +174,11 @@ class TTS:
             except Exception:
                 log.exception("Piper failed; nothing spoken")
 
+    @property
+    def speaking(self) -> bool:
+        """True while an answer plays (the always-on mic waits, or it would answer itself)."""
+        return self._lock.locked()
+
     def stop(self) -> None:
         """Cut off current speech (safe from any thread)."""
         self._stop.set()

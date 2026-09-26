@@ -11,26 +11,25 @@ def _setup(online):
     w = demo_world()
     calls = []
 
-    def fake_grok(text, world, events, cfg, online=True):
+    def fake_local(text, world, events, cfg, online=True):
         calls.append(text)
-        return Answer("from grok", "box", "point")
+        return Answer("from qwen", "box", "point")
 
-    ask = make_ask(cfg, w, w.events, net=SimpleNamespace(online=online), grok=fake_grok)
+    ask = make_ask(cfg, w, w.events, net=SimpleNamespace(online=online), other=fake_local)
     return ask, calls, w
 
 
-def test_known_intents_never_reach_grok():
+def test_known_intents_never_reach_the_model():
     ask, calls, _ = _setup(online=True)
     ans = ask("where are my keys", "voice")
     assert calls == [] and "box" in ans.text and ans.point_at == "keys"
 
 
-def test_other_goes_to_grok_only_when_online():
-    ask, calls, _ = _setup(online=True)
-    assert ask("which things are hidden right now?", "voice").text == "from grok"
-    ask_off, calls_off, _ = _setup(online=False)
-    ans = ask_off("which things are hidden right now?", "voice")
-    assert calls_off == [] and ans.text != "from grok"
+def test_other_is_answered_locally_online_or_not():
+    for online in (True, False):
+        ask, calls, _ = _setup(online=online)
+        assert ask("which things are hidden right now?", "voice").text == "from qwen"
+        assert calls == ["which things are hidden right now?"]
 
 
 def test_questions_are_logged_with_latency():

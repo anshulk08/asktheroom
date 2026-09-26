@@ -160,7 +160,8 @@ class PyWhisperCppBackend:
 
 
 class WhisperCliBackend:
-    """whisper-cli from a whisper.cpp build. Writes the clip to a temp WAV and reads stdout."""
+    """whisper-cli from a whisper.cpp build. Writes the clip to a temp WAV and reads stdout. The WAV
+    goes in /dev/shm (RAM) where there is one (the Jetson), so audio never touches the disk."""
 
     def __init__(self, model: str = "base.en", binary: str = "whisper-cli",
                  models_dir: Path = WHISPER_DIR, threads: int = 4):
@@ -175,7 +176,8 @@ class WhisperCliBackend:
         self.model, self.exe, self.threads = str(path), exe, threads
 
     def transcribe(self, audio: np.ndarray, prompt: str, audio_ctx: int) -> str:
-        with tempfile.NamedTemporaryFile(suffix=".wav") as f:
+        ram = "/dev/shm" if os.path.isdir("/dev/shm") else None
+        with tempfile.NamedTemporaryFile(suffix=".wav", dir=ram) as f:
             write_wav(f.name, audio)
             r = subprocess.run([self.exe, "-m", self.model, "-f", f.name, "-l", "en", "-nt", "-np",
                                 "-t", str(self.threads), "-ac", str(audio_ctx), "--prompt", prompt],
@@ -239,6 +241,8 @@ class STT:
         self.prompt = initial_prompt(cfg or {})
         self._backend, self._vad = backend, vad
         self.last_speech = False            # did the last recording contain speech?
+        self.last_stop = ""                 # why it ended: silence | max_s | click | no speech | no audio
+        self.log_text = True                # always-on mic: main.py turns this off, so chatter isn't logged
         self.last_ms: dict[str, float] = {}
 
     @property
@@ -260,12 +264,14 @@ class STT:
         self.transcribe(np.zeros(RATE, dtype=np.float32), force=True)
 
     def record_until_silence(self, max_s: Optional[float] = None,
-                             silence_ms: Optional[float] = None) -> np.ndarray:
+                             silence_ms: Optional[float] = None,
+                             no_speech_s: Optional[float] = None) -> np.ndarray:
         """Record 16 kHz mono float32 until silence_ms of non-speech follows speech, max_s passes,
         a clicker press, or no_speech_s with no speech at all. Returns the speech plus a little
         padding, or an empty array if nobody spoke."""
         max_s = self.max_s if max_s is None else max_s
         silence_ms = self.silence_ms if silence_ms is None else silence_ms
+        no_speech_s = self.no_speech_s if no_speech_s is None else no_speech_s
         vad = self.vad
         vad.reset()
         off_thr = max(0.0, self.threshold - 0.15)
@@ -290,7 +296,7 @@ class STT:
                 if first is None:
                     if p >= self.threshold:
                         first = last = i
-                    elif i * block_s >= self.no_speech_s:
+                    elif i * block_s >= no_speech_s:
                         stop = "no speech"
                         break
                 elif p >= off_thr:
@@ -307,6 +313,7 @@ class STT:
             src.close()
         self.last_ms["record"] = 1000 * (time.monotonic() - t0)
         self.last_speech = first is not None
+        self.last_stop = stop
         log.info("recorded %.2f s, stopped by %s, speech=%s", len(blocks) * block_s, stop, self.last_speech)
         if first is None:
             return np.zeros(0, dtype=np.float32)
@@ -326,12 +333,18 @@ class STT:
         t0 = time.monotonic()
         text = clean(self.backend.transcribe(audio, self.prompt, audio_ctx_for(len(audio))))
         self.last_ms["transcribe"] = 1000 * (time.monotonic() - t0)
-        log.info("transcribed %.1f s in %.0f ms: %r", len(audio) / RATE, self.last_ms["transcribe"], text)
+        log.info("transcribed %.1f s in %.0f ms%s", len(audio) / RATE, self.last_ms["transcribe"],
+                 f": {text!r}" if self.log_text else "")
         return text
 
     def listen(self) -> str:
         """record_until_silence() then transcribe()."""
         return self.transcribe(self.record_until_silence())
+
+    def hear(self, idle_s: float = 8.0) -> str:
+        """Always-on mic: wait up to idle_s for someone to speak, then record until they stop and
+        transcribe. The audio lives only in memory and is dropped here. '' if nobody spoke."""
+        return self.transcribe(self.record_until_silence(no_speech_s=idle_s))
 
 
 def main(argv=None) -> int:

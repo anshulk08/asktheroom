@@ -1,17 +1,19 @@
-"""Qwen interprets the spoken question, on the Jetson: transcript -> Intent (same as voice.intents.parse).
+"""Qwen interprets spoken questions, on the Jetson: transcript -> Intent (same as voice.intents.parse).
 
 The rule parser knows the phrasings it was written for. People at a demo talk however they like
 ("has anybody messed with my meds", "can you point at the pill bottle") and Whisper mishears, and
-every "I can tell you where things are..." breaks the illusion. Qwen2.5 1.5B Instruct, served by
-llama.cpp's llama-server on the Jetson (scripts/qwen_server.sh), reads what the rules can't and
-returns {kind, object}. A JSON schema limits it to a valid kind and one of the known objects.
-Nothing leaves the device.
+every "I can tell you where things are..." breaks the illusion. A small Qwen, served by llama.cpp's
+llama-server on the Jetson (scripts/qwen_server.sh), reads what the rules can't and returns
+{kind, object}. A JSON schema limits it to a valid kind and one of the known objects. Nothing
+leaves the device. Scores per model: scripts/eval_understand.py on tests/understand_eval.json.
 
-Rules first, then Qwen (on the laptop, 24 loosely worded questions not in the prompt: rules alone
-13/24, rules then Qwen 18/24, no invented objects; tests/stt_questions.json stays 20/20. Qwen takes
-~135 ms on an M-series GPU; time it on the Jetson):
+Two ways speech arrives (listen.mode in config.yaml):
+  asked      the visitor pressed the clicker, so the speech is meant for the rig.
+  overheard  the mic is always on; most speech near the table is people talking to each other.
+
+Asked: rules first, then Qwen.
   - The rules answer when they found a question word and the object it needs. They are exact on
-    the phrasings they know and on synonyms ("clicker" is the remote), where the 1.5B model slips.
+    the phrasings they know and on synonyms ("clicker" is the remote), where a small model slips.
     RESET and RECAL act on the room, so only the explicit words count: a misheard "reset"
     mid-demo would wipe the world model.
   - Otherwise (rules say OTHER, or found no object) Qwen decides the kind. An object the rules
@@ -20,7 +22,21 @@ Rules first, then Qwen (on the laptop, 24 loosely worded questions not in the pr
     doesn't become the glasses.
   - Qwen down, slower than understand.timeout_s, or bad output: the rules' answer stands.
 
+Overheard: decide "was that for me?" without the model, then read it like an asked question.
+  - listen.mode wake: only speech with the wake word counts (a loud hall defeats the rest).
+  - Keyword gate: no object, command word or wake word ("we built this in twenty hours") -> IGNORE.
+  - Addressed: the wake word ("room, ...") or a question/request opening ("where", "did", "can",
+    "show", after fillers like "okay so"). "I'll grab my keys on the way out" and "put the wallet
+    in the box" aren't -> IGNORE.
+  - Then the asked path (rules, then Qwen). Two more guards, because a wrong answer to people
+    talking to each other breaks the illusion more than silence: RESET/RECAL need the wake word
+    ("let's reset after this" must not wipe the world), and OTHER needs the wake word or an
+    object ("where are you guys from" is for the team, "what's in the box" is for the rig).
+  - Qwen isn't asked to judge IGNORE: on tests/understand_eval.json it got 8/16 overheard lines
+    right, the checks above 14/16 with nothing to load.
+
     python -m voice.understand "ugh where did I put my specs"      # try a transcript
+    python -m voice.understand --overheard "I'll grab my keys later"   # always-on mic
 """
 from __future__ import annotations
 
@@ -30,13 +46,13 @@ import logging
 import sys
 import threading
 import time
-from typing import Callable, Optional
+from typing import Optional
 
 import requests
 
 from core.config import load_config
 from core.types import INTENT_KINDS, Intent
-from voice.intents import normalize, parse
+from voice.intents import _vocab, normalize, parse
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +60,16 @@ ACTS = ("RESET", "RECAL")               # act on the room: the rules alone decid
 NO_OBJECT = ("RESET", "RECAL", "CHANGES")
 SOUNDS_LIKE = 0.6                       # difflib ratio: "wall it" ~ wallet, "note book" ~ notebook, "mug" !~ glasses
 QWEN_KINDS = [k for k in INTENT_KINDS if k not in ACTS]
+IGNORE = "IGNORE"                       # overheard speech not meant for the rig; say and do nothing
+COMMAND_WORDS = {"where", "whered", "wheres", "find", "found", "seen", "lost", "show", "point", "light",
+                 "miss", "missed", "change", "changed", "different", "happened", "happen", "touch",
+                 "touched", "moved", "took", "taken", "grabbed", "who", "when", "reset", "recalibrate",
+                 "calibrate", "laser"}
+QUESTION_START = {"where", "whered", "wheres", "what", "whats", "who", "whos", "when", "did", "has",
+                  "have", "is", "are", "was", "were", "can", "could", "would", "will", "show", "find",
+                  "point", "light", "tell", "any", "anything", "anyone", "anybody"}
+FILLERS = {"um", "uh", "umm", "uhh", "ok", "okay", "so", "hey", "hi", "yeah", "oh", "well", "and",
+           "wait", "hmm", "alright", "right", "please", "excuse", "me"}
 
 SYSTEM = """You sort questions asked out loud to "Ask the Room", a device watching a tabletop with a camera. The question comes from speech recognition, so words may be misheard (wear = where). Work out what the person meant.
 
@@ -69,8 +95,35 @@ def schema(cfg: dict) -> dict:
                            "object": {"type": "string", "enum": _objects(cfg) + ["none"]}}}
 
 
+def wake_words(cfg: dict) -> list[str]:
+    return [normalize(w) for w in ((cfg.get("listen") or {}).get("wake_words") or ["room"])]
+
+
 def system_prompt(cfg: dict) -> str:
     return SYSTEM.format(objects=", ".join(_objects(cfg)))
+
+
+def has_wake_word(text: str, cfg: dict) -> bool:
+    t = f" {normalize(text)} "
+    return any(f" {w} " in t for w in wake_words(cfg))
+
+
+def names_object(text: str, cfg: dict) -> bool:
+    return bool(_vocab(cfg)[1].search(normalize(text)))
+
+
+def gate(text: str, cfg: dict) -> bool:
+    """Cheap first check for overheard speech: an object (or synonym), a command word or the wake word."""
+    return bool(names_object(text, cfg) or COMMAND_WORDS & set(normalize(text).split())
+                or has_wake_word(text, cfg))
+
+
+def addressed(text: str, cfg: dict) -> bool:
+    """Said to the rig: the wake word, or it opens like a question or request ("okay so where's...")."""
+    words = [w for w in normalize(text).split() if w not in wake_words(cfg)]
+    while words and words[0] in FILLERS:
+        words.pop(0)
+    return has_wake_word(text, cfg) or bool(words and words[0] in QUESTION_START)
 
 
 def sounds_like(obj: str, text: str, cfg: dict) -> bool:
@@ -118,8 +171,11 @@ class Qwen:
         self.session = requests.Session()
 
     def ask(self, text: str, timeout: float) -> str:
+        # Qwen3 thinks by default, and llama.cpp skips the JSON schema grammar while it does;
+        # enable_thinking=False turns that off (other models' templates ignore it).
         r = self.session.post(f"{self.url}/chat/completions", timeout=timeout, json={
             "model": self.model, "temperature": 0, "max_tokens": 40, "cache_prompt": True,
+            "chat_template_kwargs": {"enable_thinking": False},
             "messages": [{"role": "system", "content": self.system},
                          {"role": "user", "content": text}],
             "response_format": {"type": "json_schema",
@@ -147,9 +203,10 @@ class Understander:
         self.timeout_s = float(u.get("timeout_s", 1.5))
         self.qwen = qwen if qwen is not None else (Qwen(cfg) if self.enabled else None)
         self._lock = threading.Lock()
-        self._last: tuple[str, Intent] | None = None
+        self._last: tuple[tuple[str, bool], Intent] | None = None
         self.last_ms: float = 0.0
-        self.last_by = "rules"             # who decided the last intent: qwen | rules
+        self.last_by = "rules"             # who decided the last intent: qwen | rules | gate
+        self.wake_only = (cfg.get("listen") or {}).get("mode") == "wake"   # overheard needs "room, ..."
 
     def warm(self) -> bool:
         """Check llama-server and run one question, so the prompt is cached before the first visitor."""
@@ -167,13 +224,30 @@ class Understander:
         log.info("Qwen interpreting questions at %s", self.qwen.url)
         return True
 
-    def __call__(self, text: str) -> Intent:
+    def __call__(self, text: str, overheard: bool = False) -> Intent:
+        """overheard: always-on mic speech, which may be IGNORE. Asked (clicker) speech never is."""
         with self._lock:
-            if self._last is not None and self._last[0] == text:
-                return self._last[1]
-            intent = self._interpret(text)
-            self._last = (text, intent)
+            key = (text, overheard)
+            if self._last is not None and (self._last[0] == key or (
+                    self._last[0] == (text, True) and self._last[1].kind != IGNORE)):
+                return self._last[1]            # accepted overheard speech reads the same when asked
+            intent = self._overheard(text) if overheard else self._interpret(text)
+            self._last = (key, intent)
             return intent
+
+    def _overheard(self, text: str) -> Intent:
+        ignore = Intent(kind=IGNORE, obj=None, raw=text)
+        woke = has_wake_word(text, self.cfg)
+        if (not text.strip() or not gate(text, self.cfg) or not addressed(text, self.cfg)
+                or (self.wake_only and not woke)):
+            self.last_by, self.last_ms = "gate", 0.0
+            return ignore
+        i = self._interpret(text)
+        if i.kind in ACTS and not woke:
+            return ignore
+        if i.kind == "OTHER" and not (woke or names_object(text, self.cfg)):
+            return ignore
+        return i
 
     def _interpret(self, text: str) -> Intent:
         rules = parse(text, self.cfg)
@@ -197,18 +271,16 @@ class Understander:
         return got
 
 
-def make_interpreter(cfg: dict) -> Callable[[str], Intent]:
-    return Understander(cfg)
-
-
 def main(argv=None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(name)s %(message)s")
-    argv = sys.argv[1:] if argv is None else argv
+    argv = list(sys.argv[1:] if argv is None else argv)
+    overheard = "--overheard" in argv
+    argv = [a for a in argv if a != "--overheard"]
     cfg = load_config()
     u = Understander(cfg)
     up = u.warm()
     for text in argv or [line.strip() for line in sys.stdin if line.strip()]:
-        i = u(text)
+        i = u(text, overheard)
         print(f"{i.kind:8} {str(i.obj):12} {u.last_by:5} {u.last_ms:5.0f} ms  {text}")
     return 0 if up else 1
 

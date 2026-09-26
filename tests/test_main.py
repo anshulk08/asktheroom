@@ -33,18 +33,20 @@ def cal_path():
 
 class SpeakLog:
     def __init__(self, delay=0.0):
-        self.said, self.stopped, self.delay = [], 0, delay
+        self.said, self.stopped, self.delay, self.speaking = [], 0, delay, False
 
     def speak(self, text):
+        self.speaking = True
         time.sleep(self.delay)
         self.said.append(text)
+        self.speaking = False
 
     def stop(self):
         self.stopped += 1
 
 
-def no_grok(text, world, events, cfg, online=True):
-    return Answer("grok")
+def no_model(text, world, events, cfg, online=True):
+    return Answer("local")
 
 
 def make_room(tmp_path, cal=None, world=None, **kw):
@@ -52,9 +54,10 @@ def make_room(tmp_path, cal=None, world=None, **kw):
     world = world or demo_world(events)
     rig = SimRig(CFG)
     laser = rig.make_laser(cal or str(tmp_path / "missing.json"))
-    ask = make_ask(CFG, world, events, net=None, grok=no_grok)
+    ask = make_ask(CFG, world, events, net=None, other=no_model)
     room = main.Room(CFG, world, events, SimTable(CFG), None, laser, ask, tts=SpeakLog(), **kw)
     room.laser_timeout_s = 60
+    room.listen_mode = "click"                  # the always-on tests switch it back
     return room, rig
 
 
@@ -147,16 +150,42 @@ class FakeClicker:
     def wait_press(self, timeout=None):
         return self.presses.acquire(timeout=timeout)
 
+    def pressed(self):
+        return self.presses.acquire(blocking=False)
+
+    def press(self):
+        self.presses.release()
+
     def clear(self):
         pass
 
 
 class FakeSTT:
-    def __init__(self, text):
-        self.text, self.last_ms = text, {}
+    def __init__(self, text, overheard=()):
+        self.text, self.last_ms, self.log_text = text, {}, True
+        self.overheard, self.last_stop = list(overheard), "silence"
 
     def listen(self):
         return self.text
+
+    def hear(self, idle_s):
+        """Always-on mic: one scripted utterance per call, then nobody talks."""
+        if self.overheard:
+            return self.overheard.pop(0)
+        time.sleep(0.02)
+        return ""
+
+
+def always_on(room):
+    room.listen_mode = "always"
+    t = threading.Thread(target=room.voice_loop, daemon=True)
+    t.start()
+    return t
+
+
+def stop_voice(room, t):
+    room.stop_ev.set()
+    t.join(2)
 
 
 def test_voice_loop_click_to_answer_and_laser(tmp_path, cal_path):
@@ -187,7 +216,7 @@ def test_voice_loop_nothing_heard(tmp_path, cal_path):
 
 def test_voice_loop_reports_each_question_to_n8n(tmp_path, cal_path, monkeypatch):
     posted = []
-    monkeypatch.setattr(main.requests, "post", lambda url, json, timeout: posted.append((url, json)))
+    monkeypatch.setattr(main.requests, "post", lambda url, json, timeout, headers=None: posted.append((url, json)))
     clicker = FakeClicker()
     room, rig = make_room(tmp_path, cal_path, stt=FakeSTT("where's my wallet"), clicker=clicker)
     room.webhook_url = "http://laptop:5678/webhook/ask-the-room"
@@ -201,6 +230,49 @@ def test_voice_loop_reports_each_question_to_n8n(tmp_path, cal_path, monkeypatch
     assert "wallet" in q["answer"].lower() and q["click_to_laser_s"] < 3.0
     room.stop_ev.set()
     t.join(2)
+
+
+def test_always_listening_answers_questions_and_drops_chatter(tmp_path, cal_path, monkeypatch):
+    posted = []
+    monkeypatch.setattr(main.requests, "post",
+                        lambda url, json, timeout, headers=None: posted.append((json, headers)))
+    stt = FakeSTT("", overheard=["I'll grab my keys on the way out", "we built this last night",
+                                 "okay so where's my wallet"])
+    room, rig = make_room(tmp_path, cal_path, stt=stt, clicker=FakeClicker())
+    room.webhook_url, room.webhook_token = "http://n8n/webhook/ask-the-room", "s3cret"
+    t = always_on(room)
+    assert wait_for(lambda: posted)
+    q, headers = posted[0]
+    assert (q["heard"], q["mode"], q["ignored_since_last"]) == ("okay so where's my wallet", "overheard", 2)
+    assert q["point_at"] == "wallet" and q["speech_end_to_laser_s"] < 3.0 and "click_to_laser_s" not in q
+    assert headers == {"x-askroom-token": "s3cret"} and stt.log_text is False
+    assert room.tts.said == [q["answer"]] and room.world.laser["target"] == "wallet"
+    assert room.events._rows("SELECT text FROM questions") == [("okay so where's my wallet",)]
+    stop_voice(room, t)
+
+
+def test_always_listening_waits_while_the_rig_speaks(tmp_path, cal_path):
+    stt = FakeSTT("", overheard=["where is my wallet", "where are my keys"])
+    room, _ = make_room(tmp_path, cal_path, stt=stt, clicker=FakeClicker())
+    room.tts = SpeakLog(delay=0.3)
+    heard_while_speaking = []
+    hear = stt.hear
+    stt.hear = lambda idle_s: (heard_while_speaking.append(room.tts.speaking), hear(idle_s))[1]
+    t = always_on(room)
+    assert wait_for(lambda: len(room.tts.said) == 2)
+    assert not any(heard_while_speaking)
+    assert "wallet" in room.tts.said[0].lower() and "keys" in room.tts.said[1].lower()
+    stop_voice(room, t)
+
+
+def test_clicker_is_listen_now_in_always_mode(tmp_path, cal_path):
+    clicker = FakeClicker()
+    room, _ = make_room(tmp_path, cal_path, stt=FakeSTT("show me my keys"), clicker=clicker)
+    clicker.press()
+    t = always_on(room)
+    assert wait_for(lambda: room.tts.said)
+    assert room.tts.stopped == 1 and room.tts.said == ["local"]    # asked: no overheard filter
+    stop_voice(room, t)
 
 
 def test_no_webhook_no_post(tmp_path, cal_path, monkeypatch):

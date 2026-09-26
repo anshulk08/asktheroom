@@ -7,7 +7,7 @@ from core.config import load_config
 from core.events import EventLog
 from core.fakeworld import demo_world
 from voice.pipeline import make_ask
-from voice.understand import Understander, schema, sounds_like, system_prompt, to_intent
+from voice.understand import IGNORE, Understander, gate, schema, sounds_like, system_prompt, to_intent
 
 CFG = load_config()
 
@@ -112,3 +112,41 @@ def test_pipeline_answers_with_qwens_reading(tmp_path):
     ask = make_ask(CFG, world, events, net=None, interpret=understander(kind="WHERE", obj="keys"))
     ans = ask("show me my keys", "voice")                   # the rules alone say OTHER
     assert ans.point_at == "keys" and "box" in ans.text
+
+
+@pytest.mark.parametrize("text", ["we built this in twenty hours", "that's so cool", ""])
+def test_overheard_chatter_without_keywords_never_reaches_qwen(text):
+    u = understander(kind="WHERE", obj="keys")
+    assert not gate(text, CFG)
+    assert u(text, overheard=True).kind == IGNORE and u.qwen.asked == []
+
+
+@pytest.mark.parametrize("text", ["I'll grab my keys on the way out", "put the wallet in the box",
+                                  "yeah the keys are under there now", "hold on let me check my phone"])
+def test_overheard_statements_are_not_for_the_rig(text):
+    u = understander(kind="WHERE", obj="keys")
+    assert u(text, overheard=True).kind == IGNORE and u.qwen.asked == []
+    assert u(text).kind != IGNORE                     # asked (clicker) speech never is
+
+
+@pytest.mark.parametrize("text,kind,obj", [("okay so where's my wallet", "WHERE", "wallet"),
+                                           ("hey room, what did I miss", "CHANGES", None),
+                                           ("can you show me the remote", "WHERE", "remote")])
+def test_overheard_questions_are_answered(text, kind, obj):
+    u = understander(kind="WHERE", obj="remote")
+    i = u(text, overheard=True)
+    assert (i.kind, i.obj) == (kind, obj)
+
+
+def test_overheard_reset_needs_the_wake_word():
+    u = understander(kind="OTHER", obj="none")
+    assert u("let's reset after this", overheard=True).kind == IGNORE
+    assert u("reset the table", overheard=True).kind == IGNORE
+    assert u("room, reset the table", overheard=True).kind == "RESET"
+
+
+def test_overheard_open_question_needs_an_object_or_the_wake_word():
+    u = understander(kind="OTHER", obj="none")
+    assert u("where are you guys from", overheard=True).kind == IGNORE
+    assert u("room, where are you guys from", overheard=True).kind == "OTHER"
+    assert u("what is in the box", overheard=True).kind == "OTHER"

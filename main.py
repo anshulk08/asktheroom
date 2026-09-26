@@ -2,8 +2,8 @@
 
   capture     30 fps     core.capture.FrameBuffer runs its own thread
   perception  10-15 fps  wait_new -> detector.detect -> hands.update -> world.update (world logs events)
-  voice       on click   clicker -> stt.record_until_silence -> stt.transcribe -> Qwen reads it -> ask
-                         -> speak + aim
+  voice       always     mic -> VAD -> whisper -> "was that for me?" -> Qwen reads it -> ask -> speak + aim
+                         (listen.mode: always | wake | click; the clicker means "listen now" in all three)
   net         every 5 s  NetMonitor probes; world.online follows it
   server      5 Hz       server.app.create_app(...) under uvicorn
 
@@ -12,8 +12,10 @@
     python main.py --no-voice       # dashboard and /ask only
     python main.py --camera 2
 
-Questions are spoken. Whisper transcribes them and Qwen (voice/understand.py, llama-server on the
-Jetson, scripts/qwen_server.sh) works out what was meant; without it the rule parser does. The
+Questions are spoken. The mic is always on: Whisper transcribes what people near the table say,
+voice/understand.py drops what isn't meant for the rig (never logged, the audio is only ever in
+memory), and Qwen (llama-server on the Jetson, scripts/qwen_server.sh) works out what the rest
+meant; without it the rule parser does. The mic waits while the rig speaks, or it would answer itself. The
 dashboard's /ask (for testing) and texts (/sms) go through the same ask(); dashboard questions also
 speak and move the laser, texts only answer by text. Aiming never blocks speech: an uncalibrated laser
 raises RuntimeError, which is logged, and the answer still plays.
@@ -76,14 +78,20 @@ class Room:
         self.netmon, self.tts, self.stt, self.clicker = netmon, tts, stt, clicker
         self.detector, self.hands = detector, hands
         if interpret is None:
-            from voice.intents import parse
-            interpret = lambda text: parse(text, cfg)     # noqa: E731
+            from voice.understand import Understander
+            interpret = Understander(dict(cfg, understand={"enabled": False}))     # rules only
         self.interpret = interpret
         m = cfg.get("main") or {}
         self.max_fps = float(m.get("perception_max_fps", 15))
         self.net_copy_s = float(m.get("net_copy_s", 5))
         self.laser_timeout_s = float(cfg.get("laser_timeout_s", 10))
-        self.webhook_url = str((cfg.get("n8n") or {}).get("webhook_url") or "")
+        n8n = cfg.get("n8n") or {}
+        self.webhook_url = str(n8n.get("webhook_url") or "")
+        self.webhook_token = str(n8n.get("token") or "")
+        li = cfg.get("listen") or {}
+        self.listen_mode = str(li.get("mode", "always"))       # always | wake | click
+        self.idle_s = float(li.get("idle_s", 8))
+        self.echo_tail_s = float(li.get("echo_tail_s", 0.4))
         self.stop_ev = threading.Event()
         self._aim_lock = threading.Lock()
         self._aim_gen = 0
@@ -227,42 +235,100 @@ class Room:
                 self.stop_ev.wait(rest)
 
     def voice_loop(self) -> None:
+        if self.listen_mode == "click":
+            while not self.stop_ev.is_set():
+                if self.clicker.wait_press(timeout=0.5):
+                    self._asked(time.monotonic())
+            return
+        if self.stt is not None:
+            self.stt.log_text = False           # overheard chatter stays out of the logs
+        ignored = 0
         while not self.stop_ev.is_set():
-            if not self.clicker.wait_press(timeout=0.5):
+            if self.clicker is not None and self.clicker.pressed():
+                self._asked(time.monotonic())   # "listen now": the next thing said is for the rig
+                ignored = 0
                 continue
-            t_press = time.monotonic()
-            if self.tts is not None:
-                self.tts.stop()                 # a click interrupts the previous answer
-            self.clicker.clear()
+            if self._speaking():
+                self.stop_ev.wait(0.05)
+                continue
             try:
-                text = self.stt.listen()
+                text = self.stt.hear(self.idle_s)
             except Exception:
                 log.exception("listening failed")
-                self._speak("Sorry, the microphone isn't working.")
+                self.stop_ev.wait(1.0)
                 continue
             t_heard = time.monotonic()
+            if self.stt.last_stop == "click":   # pressed while talking: that was for the rig
+                if text:
+                    self._answer(text, t_heard, t_heard, {"mode": "asked", "ignored_since_last": ignored})
+                else:
+                    self._asked(t_heard)
+                ignored = 0
+                continue
             if not text:
-                self._speak(NOT_HEARD)
-                self.report({"heard": "", "answer": NOT_HEARD,
-                             "record_transcribe_s": round(t_heard - t_press, 2)})
+                continue
+            if self.interpret(text, overheard=True).kind == "IGNORE":
+                ignored += 1                    # dropped: not logged, not stored, not sent
                 continue
             log.info("heard: %r", text)
-            ans = self.ask(text, "voice")
-            t_ans = time.monotonic()
-            intent = self.interpret(text)
-            say, aim = self.respond(ans)
-            aim.join()
-            self.last_timing = {"record_transcribe_s": round(t_heard - t_press, 2),
-                                "ask_s": round(t_ans - t_heard, 2),
-                                "click_to_laser_s": round(time.monotonic() - t_press, 2),
-                                "stt_ms": dict(self.stt.last_ms)}
-            log.info("timing %s", self.last_timing)
-            self.report({"heard": text, "intent": intent.kind, "object": intent.obj,
-                         "understood_by": getattr(self.interpret, "last_by", "rules"),
-                         "qwen_ms": round(getattr(self.interpret, "last_ms", 0.0)),
-                         "answer": ans.text, "point_at": ans.point_at, "action": ans.action,
-                         "laser_err_cm": (self.world.laser or {}).get("err_cm"),
-                         "online": bool(self.world.online), **self.last_timing})
+            self._answer(text, t_heard, t_heard, {"mode": "overheard", "ignored_since_last": ignored})
+            ignored = 0
+
+    def _speaking(self) -> bool:
+        return bool(getattr(self.tts, "speaking", False))
+
+    def _asked(self, t_press: float) -> None:
+        """Clicker press: stop the current answer, listen for one question, answer it."""
+        if self.tts is not None:
+            self.tts.stop()                     # a click interrupts the previous answer
+        self.clicker.clear()
+        try:
+            text = self.stt.listen()
+        except Exception:
+            log.exception("listening failed")
+            self._speak("Sorry, the microphone isn't working.")
+            return
+        t_heard = time.monotonic()
+        if not text:
+            self._speak(NOT_HEARD)
+            self.report({"heard": "", "answer": NOT_HEARD, "mode": "asked",
+                         "record_transcribe_s": round(t_heard - t_press, 2)})
+            return
+        log.info("heard: %r", text)
+        self._answer(text, t_press, t_heard, {"mode": "asked"})
+
+    def _answer(self, text: str, t0: float, t_heard: float, extra: dict) -> None:
+        """Answer, speak and aim; report to n8n. Asked: t0 is the click. Overheard: the end of speech.
+        Waits until the answer has been spoken plus echo_tail_s, so the mic doesn't hear the rig;
+        a clicker press cuts the answer short (and is kept for the next question)."""
+        ans = self.ask(text, "voice")
+        t_ans = time.monotonic()
+        intent = self.interpret(text)
+        say, aim = self.respond(ans)
+        aim.join()
+        overheard = extra.get("mode") == "overheard"
+        self.last_timing = {"record_transcribe_s": round(t_heard - t0, 2),
+                            "ask_s": round(t_ans - t_heard, 2),
+                            ("speech_end_to_laser_s" if overheard else "click_to_laser_s"):
+                                round(time.monotonic() - t0, 2),
+                            "stt_ms": dict(getattr(self.stt, "last_ms", {}))}
+        log.info("timing %s", self.last_timing)
+        self.report({"heard": text, "intent": intent.kind, "object": intent.obj,
+                     "understood_by": getattr(self.interpret, "last_by", "rules"),
+                     "qwen_ms": round(getattr(self.interpret, "last_ms", 0.0)),
+                     "answer": ans.text, "point_at": ans.point_at, "action": ans.action,
+                     "laser_err_cm": (self.world.laser or {}).get("err_cm"),
+                     "online": bool(self.world.online), **extra, **self.last_timing})
+        if self.listen_mode == "click":
+            return
+        while say.is_alive() and not self.stop_ev.is_set():
+            if self.clicker is not None and self.clicker.wait_press(timeout=0.05):
+                self.tts.stop()
+                self.clicker.press()            # handled by the loop as "listen now"
+                break
+            elif self.clicker is None:
+                say.join(0.05)
+        self.stop_ev.wait(self.echo_tail_s)
 
     def report(self, question: dict) -> None:
         """Send one spoken question to the n8n workflow (n8n.webhook_url), in the background so it
@@ -272,7 +338,8 @@ class Room:
 
         def post() -> None:
             try:
-                requests.post(self.webhook_url, json=dict(question, t=time.time()), timeout=3)
+                requests.post(self.webhook_url, json=dict(question, t=time.time()), timeout=3,
+                              headers={"x-askroom-token": self.webhook_token} if self.webhook_token else None)
             except requests.RequestException as ex:
                 log.debug("n8n webhook: %s", ex)
 
@@ -308,7 +375,10 @@ class Room:
             self._thread(self.perception_loop, "perception")
         if voice:
             self._thread(self.voice_loop, "voice")
-            log.info("press the clicker%s to ask a question", " (or Enter)" if self.clicker.kind == "keyboard" else "")
+            how = "press the clicker%s" % (" (or Enter)" if self.clicker.kind == "keyboard" else "")
+            log.info("%s", {"click": f"{how} to ask a question",
+                            "wake": f"listening for \"room, ...\"; or {how}",
+                            }.get(self.listen_mode, f"listening; ask out loud, or {how}"))
         self.start_server(host, port)
 
     def shutdown(self) -> None:
@@ -425,6 +495,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Ask the Room")
     ap.add_argument("--fake", action="store_true", help="no hardware: sim camera, simulated laser, Enter to ask")
     ap.add_argument("--no-voice", action="store_true", help="dashboard and /ask only")
+    ap.add_argument("--listen", choices=["always", "wake", "click"], help="override listen.mode")
     ap.add_argument("--camera", type=int, default=0, help="camera index")
     ap.add_argument("--video", help="play this recording instead of the camera (through the real detector)")
     ap.add_argument("--host")
@@ -436,6 +507,8 @@ def main(argv=None) -> int:
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
     cfg = load_config(args.config)
+    if args.listen:
+        cfg["listen"] = dict(cfg.get("listen") or {}, mode=args.listen)
     room, perception = build(cfg, fake=args.fake, camera=args.camera, with_voice=not args.no_voice,
                              video=args.video)
     host = args.host or cfg["server"]["host"]
