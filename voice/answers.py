@@ -195,6 +195,54 @@ def _which(cfg: dict) -> Answer:
 # ---------- per-intent answers ----------
 
 def _where(obj: str, world, events, cfg: dict, now: float) -> Answer:
+    """world.place() first (room memory, spec 0009): a room place gets the room templates, anything else
+    today's table templates; then one sentence for a conflicting sighting of the object, if any."""
+    try:
+        place = world.place(obj, now) if hasattr(world, "place") else None
+    except Exception:
+        place = None
+    if place is not None and place.kind == "room":
+        ans = _where_room(obj, place, cfg, now)
+    else:
+        ans = _where_table(obj, world, events, cfg, now)
+    if place is not None and place.conflicts:
+        ans = Answer(f"{ans.text} {_conflict_tail(place.conflicts[0], cfg)}", ans.point_at, ans.action)
+    return ans
+
+
+def _where_room(obj: str, place, cfg: dict, now: float) -> Answer:
+    """Spoken room place (spec 0009 section 4). Room answers never point the laser and never say who put
+    the thing there: the camera saw it arrive, not whose hand it was."""
+    pk = _pk(cfg, obj)
+    n, be, It, it, Y = _dn(cfg, obj), _be(pk), _It(pk), _it(pk), _your(cfg, obj)
+    say, arrived, last = place.say, place.arrived_wall, place.last_seen_wall
+    at = f" at {clock(last)}" if last is not None else ""
+    if place.via and place.via != obj:               # seen only through its outermost container
+        pn = _pn(cfg, place.via)
+        if place.fresh:
+            return Answer(f"{Y} {n} {be} in {pn}. {pn[:1].upper()}{pn[1:]} is on {say}.")
+        return Answer(f"{Y} {n} {be} in {pn}, which I last saw on {say}{at}.")
+    if place.absent:
+        return Answer(f"I last saw {Y.lower()} {n} on {say}{at}. I can't see {it} there now.")
+    if not place.fresh:
+        return Answer(f"I last saw {Y.lower()} {n} on {say}{at}.")
+    text = f"{Y} {n} {be} on {say}."
+    if place.arrival_observed:
+        text += f" {It} appeared there {ago(arrived, now)}."
+    elif arrived is not None or last is not None:
+        text += f" I've seen {it} there since {clock(arrived if arrived is not None else last)}."
+    return Answer(text)
+
+
+def _conflict_tail(c, cfg: dict) -> str:
+    """'I also see keys on the bookshelf.': a sighting of the object's class that isn't the object."""
+    n = _dn(cfg, c.entity)
+    if not _plural(_pk(cfg, c.entity)):
+        n = f"{'an' if n[:1] and n[:1] in 'aeiou' else 'a'} {n}"
+    return f"I also see {n} on {c.say}."
+
+
+def _where_table(obj: str, world, events, cfg: dict, now: float) -> Answer:
     e = world.get(obj)
     pk = _pk(cfg, obj)
     n, be, It, Y = _dn(cfg, obj), _be(pk), _It(pk), _your(cfg, obj)

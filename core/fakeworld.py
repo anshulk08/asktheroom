@@ -1,4 +1,4 @@
-"""A stand-in World with the same read API (get, resolve, history, state_json).
+"""A stand-in World with the same read API (get, resolve, place, history, state_json).
 
 Used by tests and by `--fake` dev runs of the server and voice loop until core/world.py exists.
 """
@@ -8,6 +8,7 @@ import time
 from typing import Optional
 
 from core.events import EventLog
+from core.room_types import TABLE, Place
 from core.types import Entity, Event, Point, Status, entity_json
 
 MAX_DEPTH = 3
@@ -20,6 +21,7 @@ class FakeWorld:
         self.online = False
         self.fps = 0.0
         self.laser = {"on": False, "target": None, "err_cm": None}
+        self.places: dict[str, Place] = {}
 
     def get(self, name: str) -> Entity:
         return self.entities[name]
@@ -33,6 +35,15 @@ class FakeWorld:
             e = self.entities[e.parent]
             chain.append(e.name)
         return e.pos_cm, chain
+
+    def place(self, name: str, now: Optional[float] = None) -> Place:
+        """Where to say `name` is: a place set with set_place, else the table place from resolve()."""
+        if name in self.places:
+            return self.places[name]
+        pos, chain = self.resolve(name)
+        via = chain[-1]
+        return Place(kind=TABLE, zone=TABLE, say="the table", status=self.entities[via].status, chain=chain,
+                     via=via, pos_cm=pos, observed_directly=via == name)
 
     def history(self, name: str, n: int = 3) -> list[Event]:
         return self.events.last(name, n)
@@ -53,6 +64,10 @@ class FakeWorld:
         e = self.entities[name]
         for k, v in fields.items():
             setattr(e, k, v)
+
+    def set_place(self, name: str, place: Place) -> None:
+        """Make place(name) return `place` (a room place, or a table place with conflicts)."""
+        self.places[name] = place
 
 
 def demo_world(events: Optional[EventLog] = None) -> FakeWorld:
