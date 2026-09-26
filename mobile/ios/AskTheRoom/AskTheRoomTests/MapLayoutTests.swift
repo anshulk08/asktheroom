@@ -10,7 +10,7 @@ final class MapLayoutTests: XCTestCase {
 
     func testEveryStatusInTheSampleGetsItsLabel() {
         let items = MapLayout.items(for: sample)
-        XCTAssertEqual(items.count, 10)
+        XCTAssertEqual(items.count, 12)
         XCTAssertEqual(item("keys", in: items).caption, "inside box")
         XCTAssertEqual(item("pill_bottle", in: items).caption, "under notebook")
         XCTAssertEqual(item("phone", in: items).caption, "left table ←")
@@ -123,6 +123,15 @@ final class MapLayoutTests: XCTestCase {
         XCTAssertEqual(item("thing:9", in: items).title, "unnamed object 9")
         XCTAssertEqual(item("thing:7", in: items).label, "my charger", "named things keep their name")
         XCTAssertTrue(item("thing:9", in: items).accessibilityLabel.hasPrefix("unnamed object 9"))
+    }
+
+    /// The room's guesses print with a question mark, on the map and for VoiceOver.
+    func testGuessesAreHedgedOnTheMap() {
+        let items = MapLayout.items(for: sample)
+        XCTAssertEqual(item("thing:11", in: items).label, "phone charger?")
+        XCTAssertEqual(item("thing:11", in: items).title, "phone charger?")
+        XCTAssertEqual(item("thing:12", in: items).label, "tape roll?")
+        XCTAssertTrue(item("thing:12", in: items).accessibilityLabel.hasPrefix("tape roll?"))
     }
 
     /// The key only lists the marks the map is using.

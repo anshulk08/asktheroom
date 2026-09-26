@@ -28,6 +28,11 @@ final class MockRoomTests: XCTestCase {
         XCTAssertEqual(ask("where is the pill bottle").text, "Your pill bottle is under the notebook.")
     }
 
+    func testGrokNamesAreHedgedAndGuessesDontMatch() {
+        XCTAssertEqual(ask("where is the tape roll").text, "What looks like a tape roll is on the table.")
+        XCTAssertEqual(ask("where is my phone").pointAt, "phone", "a guessed phone charger isn't the phone")
+    }
+
     func testPillWordingStaysNeutral() {
         let a = ask("When did I last pick up my pills?")
         XCTAssertEqual(a.text, "You last picked up your pill bottle 25 minutes ago.")
@@ -58,7 +63,7 @@ final class MockRoomTests: XCTestCase {
 
     func testStartingSnapshotIsTheSampleAtNow() {
         XCTAssertEqual(snapshot.t, now.timeIntervalSince1970)
-        XCTAssertEqual(snapshot.entities.count, 10)
+        XCTAssertEqual(snapshot.entities.count, 12)
         XCTAssertEqual(snapshot.entity(named: "keys")?.ls, now.timeIntervalSince1970 - 120)
     }
 }

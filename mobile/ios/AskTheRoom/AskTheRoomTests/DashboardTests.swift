@@ -28,11 +28,37 @@ final class DashboardTests: XCTestCase {
 
     func testNoticesOrderedGoneLostNew() {
         let notices = Dashboard.notices(in: sample)
-        XCTAssertEqual(notices.map(\.kind), [.leftTable, .lostTrack, .unnamed])
+        XCTAssertEqual(notices.map(\.kind), [.leftTable, .lostTrack, .unnamed, .unnamed, .unnamed])
         XCTAssertEqual(notices[0].text, "Your phone was moved off the table, on the left side.")
         XCTAssertEqual(notices[1].text, "The room can't see your glasses right now.")
-        // thing:9 might be thing:4, which has no name: don't guess.
+        // thing:9 might be thing:4, which has no name, and its own guess is weak: don't guess.
         XCTAssertEqual(notices[2].text, "Something new is on the table.")
+        XCTAssertEqual(notices[3].text, "Something new is on the table. It looks like a phone charger.")
+        XCTAssertEqual(notices[4].text, "Something new is on the table. It looks like a tape roll.")
+    }
+
+    func testGrokNamedThingsArentThePersons() {
+        let tape = sample.entity(named: "thing:12")!
+        XCTAssertFalse(Dashboard.things(in: sample).contains { $0.name == "thing:12" })
+        XCTAssertEqual(Dashboard.your(tape), "what looks like a tape roll")
+        XCTAssertEqual(Dashboard.question(for: tape), "Where is the tape roll?")
+        XCTAssertEqual(Dashboard.your(sample.entity(named: "thing:11")!), "what looks like a phone charger")
+
+        var gone = sample
+        gone.update("thing:12") { $0.s = .gone }
+        XCTAssertFalse(Dashboard.notices(in: gone).contains { $0.entity == "thing:12" }, "not \"your tape roll\"")
+    }
+
+    func testChangesHedgeGuesses() {
+        var new = sample
+        new.update("thing:11") { $0.s = .held; $0.p = "hand:1" }
+        new.update("thing:12") { $0.s = .lost }
+        XCTAssertEqual(Dashboard.changes(from: sample, to: new).map(\.text),
+                       ["What looks like a phone charger was picked up", "Lost track of what looks like a tape roll"])
+
+        var appeared = sample
+        appeared.e.append(Entity(n: "thing:13", k: .target, s: .visible, xy: TablePoint(x: 5, y: 5), g: "mug", gc: 0.9))
+        XCTAssertEqual(Dashboard.changes(from: sample, to: appeared).map(\.text), ["What looks like a mug appeared on the table"])
     }
 
     func testCantSeeNoticeSaysWhenLastSeen() {
@@ -73,7 +99,8 @@ final class DashboardTests: XCTestCase {
     func testNoticeGuessesOnlyNamesThePersonKnows() {
         var s = sample
         s.update("thing:9") { $0.m = [MaybeSame(name: "thing:7", score: 0.7)] }
-        XCTAssertEqual(Dashboard.notices(in: s).last?.text, "Something new is on the table. It might be my charger.")
+        XCTAssertEqual(Dashboard.notices(in: s).first { $0.entity == "thing:9" }?.text,
+                       "Something new is on the table. It might be my charger.")
     }
 
     func testChangesDescribeEachMove() {
@@ -128,7 +155,7 @@ final class DashboardTests: XCTestCase {
 
     func testNewUnnamedObjectAppears() {
         var new = sample
-        new.e.append(Entity(n: "thing:12", k: .target, s: .visible, p: nil, xy: TablePoint(x: 5, y: 5), r: nil,
+        new.e.append(Entity(n: "thing:14", k: .target, s: .visible, p: nil, xy: TablePoint(x: 5, y: 5), r: nil,
                             c: 1, edge: nil, a: nil, m: nil, ls: nil))
         XCTAssertEqual(Dashboard.changes(from: sample, to: new).map(\.text), ["Something new appeared on the table"])
     }
