@@ -843,10 +843,12 @@ class ThingRules:
         return key in self._known_names or _singular(key) in self._known_names
 
     def _refound(self, ev) -> bool:
-        """A CORRECTED sighting where the object was last seen: a lost track recovered, not a put-down."""
+        """A CORRECTED sighting where the object was last seen, or an UNCOVERED one from under something
+        unknown (an arm or a blanket lay over it): a lost track recovered, not a put-down."""
         prev = self._rest_pos.get(ev.obj)
-        return (ev.type == EventType.CORRECTED and prev is not None and ev.to_cm is not None
-                and geom.dist(prev, ev.to_cm) < self.cfg.moved_min_cm)
+        again = ev.type == EventType.CORRECTED or (
+            ev.type == EventType.UNCOVERED and ev.obj in getattr(self, '_unknown_uncovered', ()))
+        return again and prev is not None and ev.to_cm is not None and geom.dist(prev, ev.to_cm) < self.cfg.moved_min_cm
 
     def _teach_target(self) -> str | None:
         zone = self.cfg.teach_zone_cm

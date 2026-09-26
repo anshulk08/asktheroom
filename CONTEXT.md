@@ -86,7 +86,7 @@ rules can't read and of open questions (with a compact world state).
 | `core/table.py`, `core/table_area.py` | ArUco / one-tag homography mapping pixels to table cm (`table_cal.json`); the operator's tabletop outline, where objects may appear (`table_area.json`, `python -m core.table --outline`). |
 | `core/detect.py` | YOLO-World (zero-shot, path A) or fine-tuned YOLO11 (path B, the plan), exported to TensorRT. |
 | `core/hands.py` | Stable `hand:N` ids across frames. |
-| `core/world.py`, `core/relations.py`, `core/geom.py` | Deterministic, rule-based world model (covers, containers, holds, edges, parent chains). About 200 tests. |
+| `core/world.py`, `core/relations.py`, `core/geom.py`, `core/surround.py` | Deterministic, rule-based world model (covers, containers, holds, edges, parent chains). `surround.py` remembers the band of table around each object, so a cover no detector knows (a blanket) laid by hand reads as UNDER, not picked up (`unknown_cover:`). About 200 tests. |
 | `core/events.py` | EventLog: SQLite event history, questions table and snapshots. |
 | `core/fakeworld.py` | Stand-in world with the same read API, for tests and `--fake` runs. |
 | `core/things.py`, `core/proposals.py`, `core/embed.py`, `core/crops.py` | Open world: unnamed `thing:N` identity (spec 0008: a thing lost within 60 s and seen again at its spot is itself, `thing_identity:`), object proposals (change detection, YOLOE prompt-free), DINOv2 re-id embedder (off by default), close-up crops. |
