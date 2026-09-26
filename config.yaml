@@ -537,3 +537,7 @@ room_memory:
   change_thr: 40              # grey-level change between visits of a zone counted as change
   change_area_ratio: 1.5      # a change blob this much bigger than the track box blocks it
   max_crop_px: 1280           # zone crops with a longer side are resized down to this
+  things: true                # also unnamed objects (YOLOE) in zones, handed off by departure + Grok name match
+  thing_name_wait_s: 15.0     # a confirmed room object waits this long for its Grok name
+  name_match_min: 2.0         # how well two Grok names must match (core.auto_name.match_score; 2 = same head noun)
+  names_per_minute: 6         # Grok calls for room crops, at most

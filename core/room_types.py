@@ -45,6 +45,10 @@ class RoomConfig:
     change_thr: int = 40                           # grey-level change between visits counted as change
     change_area_ratio: float = 1.5                 # a change blob this much bigger than the track box blocks it
     max_crop_px: int = 1280                        # zone crops with a longer side are resized down to this
+    things: bool = True                            # also track unnamed objects (YOLOE) in zones; handoff by Grok name
+    thing_name_wait_s: float = 15.0                # a confirmed thing track waits this long for its Grok name
+    name_match_min: float = 2.0                    # core.auto_name.match_score two guesses need (head noun shared)
+    names_per_minute: int = 6                      # Grok calls for room crops, at most
 
     @classmethod
     def from_dict(cls, d: Optional[dict]) -> "RoomConfig":
@@ -86,6 +90,8 @@ class RoomTrack:
     confirmed: bool = False
     role: str = "pending"     # 'pending' | 'assoc' | 'conflict' | 'ignored'
     entity: Optional[str] = None
+    guess: Optional[dict] = None   # cls 'thing' only: Grok's {name, also, confidence} for its crop, once named
+    name_asked: bool = False       # its crop was queued for Grok (at most once)
 
 
 @dataclass
@@ -117,6 +123,7 @@ class RoomState:
     absent: bool = False      # absent_visits valid empty visits: UNKNOWN
     absent_t: Optional[float] = None
     table_pos_cm: Optional[Point] = None   # its last table position before it left (history only)
+    tentative: bool = False   # an unnamed thing handed off by departure + Grok name match: answers hedge
 
 
 @dataclass
@@ -149,3 +156,4 @@ class Place:
     last_seen_wall: Optional[float] = None
     arrival_observed: bool = False
     conflicts: list[Conflict] = field(default_factory=list)   # fresh conflict sightings of the object itself
+    tentative: bool = False             # room: handed off by a Grok name match, not a known class: hedge
