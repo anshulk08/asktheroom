@@ -69,6 +69,8 @@ class Config:
     present_k: int = 6
     present_n: int = 10
     absent_max: int = 1
+    # presence.hz: k of n count updates of a loop at this rate, by time (None: updates, whatever the fps)
+    presence_hz: float | None = None
 
     contact_overlap: float = 0.30
     contact_window_s: float = 1.0
@@ -139,6 +141,9 @@ class Config:
             kw["present_k"], kw["present_n"] = raw["present_k_of_n"]
         if "absent_k_of_n" in raw:
             kw["absent_max"] = raw["absent_k_of_n"][0]
+        if "hz" in (raw.get("presence") or {}):
+            hz = raw["presence"]["hz"]
+            kw["presence_hz"] = float(hz) if hz else None
         size = (raw.get("table") or {}).get("size_cm")
         if size:
             kw["table_size_cm"] = tuple(size)

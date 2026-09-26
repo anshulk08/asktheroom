@@ -22,6 +22,7 @@ import cv2
 
 from core import geom, relations
 from core.config import Config
+from core.presence import Presence
 from core.room_world import RoomRules
 from core.surround import SurroundMemory, UnknownCoverConfig
 from core.things import ThingRules, is_thing
@@ -92,7 +93,7 @@ class World(ThingRules, RoomRules):
             self._rest_box: dict[str, tuple] = {}       # obj -> its box there
             self._carry: dict[str, tuple] = {}          # obj -> (hand, origin) while moved in view
             self._path: dict[str, deque] = {n: deque(maxlen=60) for n in self.entities}  # (t, pos)
-            self._bits = {n: deque(maxlen=self.cfg.present_n) for n in self.entities}
+            self._bits = {n: self._new_bits() for n in self.entities}
             self._present = {n: False for n in self.entities}
             self._confirmed: set[str] = set()      # names ever observed (debounced present / found)
             self._contacts: dict[str, dict[str, float]] = {n: {} for n in self.entities}  # obj -> hand -> t
@@ -266,16 +267,20 @@ class World(ThingRules, RoomRules):
                    and self._placed_t.get(n, seen) + ESTABLISHED_S <= seen
                    for n in in_place)
 
+    def _new_bits(self, bits=()) -> Presence:
+        """A presence window: the last present_n updates, or present_n updates' time at presence_hz."""
+        return Presence(bits, self.cfg.present_n, self.cfg.presence_hz)
+
     def _debounce(self, name: str, ent: Entity, det: Detection | None) -> None:
         """Push this batch's presence bit; refresh position while detected (even before a flip)."""
         bits = self._bits[name]
-        bits.append(det is not None)
+        bits.push(self._now, det is not None)
         if det is not None:
             ent.pos_cm, ent.box_cm, ent.last_seen = det.center_cm, det.box_cm, self._wall
             self._seen_t[name] = self._now
             self._box_px[name] = det.box_px
-        count = sum(bits)
-        if count >= self.cfg.present_k:
+        count = bits.hits()
+        if count >= self.cfg.present_k - 1e-9:
             self._present[name] = True
         elif count <= self.cfg.absent_max:
             self._present[name] = False
@@ -691,7 +696,7 @@ class World(ThingRules, RoomRules):
         """Present, or seen often enough lately that the debounce may still flip to present. A put-down
         is judged by observation, so the hand rules wait rather than race it (a hand that drops an
         object and leaves at once would otherwise read as lost before the object is confirmed)."""
-        return self._present[name] or sum(self._bits[name]) > self.cfg.absent_max
+        return self._present[name] or self._bits[name].hits() > self.cfg.absent_max
 
     def _update_held(self, name: str, ent: Entity) -> list[Event]:
         laid = self._laid_over(name, ent)       # it was a cover laid over it, not a pick-up
