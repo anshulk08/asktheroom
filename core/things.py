@@ -51,6 +51,7 @@ ARCHIVED = (Status.GONE, Status.UNKNOWN)
 # Events after which a thing sits on the table where it was just put: what 'this is my X' refers to.
 PLACED = {EventType.APPEARED, EventType.MOVED, EventType.PUT_BACK, EventType.TAKEN_OUT,
           EventType.UNCOVERED, EventType.CORRECTED}
+STARTUP_S = 3.0     # configured objects first seen this soon after the first batch were not put down
 ARTICLES = {'my', 'the', 'a', 'an', 'your', 'our', 'this', 'that', 'his', 'her', 'their'}
 NEG = float('-inf')
 
@@ -209,7 +210,10 @@ class ThingRules:
         self._banks: dict[str, ExemplarBank] = {}
         self._aliases: dict[str, str] = {}              # normalised alias -> thing
         self._hidden_at: dict[str, float] = {}          # thing -> when it became INSIDE / UNDER
-        self._placed_t: dict[str, float] = {}           # thing -> when it was last put down in view
+        self._placed_t: dict[str, float] = {}           # thing or configured object -> when last put down in view
+        self._known_seen: set[str] = set()              # configured objects ever seen visible
+        self._t_start: float | None = None              # the first batch: the scene then was not put down
+        self._rest_pos: dict[str, tuple] = {}           # entity -> where it was last seen visible
         self._merged: dict[str, frozenset] = {}         # thing -> things sharing its merged proposal
         self._unsure_until: dict[str, float] = {}       # thing -> no exemplar learning before this
         self._learn_t: dict[str, float] = {}
@@ -239,10 +243,16 @@ class ThingRules:
                     return self._survivor(hit)
             return None
 
+    def teach_target(self) -> str | None:
+        """What 'this is my X' would name now (see teach), without binding anything."""
+        with self.lock:
+            return self._teach_target()
+
     def teach(self, name: str) -> str | None:
-        """Bind a spoken name to exactly one thing by a fixed rule: the visible thing most recently
-        APPEARED or put down inside teach_zone_cm (without a zone: put down within teach_recent_s).
-        None when nothing qualifies or the name already belongs to a configured object."""
+        """Bind a spoken name to exactly one entity by a fixed rule: the visible thing or configured
+        object most recently APPEARED or put down inside teach_zone_cm (without a zone: put down within
+        teach_recent_s), so 'this is my brown wallet' names the wallet the detector knows. None when
+        nothing qualifies or the name already belongs to a configured object."""
         with self.lock:
             key = norm_name(name)
             if not key or self._is_known_name(key):
@@ -634,8 +644,18 @@ class ThingRules:
         """Bookkeeping once this batch's rules ran: when things were put down / hid, merge groups of
         things no longer in view, and exemplar learning."""
         for ev in events:
-            if is_thing(ev.obj) and ev.type in PLACED:
+            if ev.type in PLACED and ev.obj in self.entities and not self._refound(ev):
                 self._placed_t[ev.obj] = self._now
+        if self._t_start is None:
+            self._t_start = self._now
+        for n, ent in self.entities.items():
+            if ent.status == Status.VISIBLE and ent.pos_cm is not None:
+                self._rest_pos[n] = tuple(ent.pos_cm)
+        for n in self.cfg.names():                  # a configured object's first sighting emits no event
+            if self.entities[n].status == Status.VISIBLE and n not in self._known_seen:
+                self._known_seen.add(n)
+                if self._now - self._t_start >= STARTUP_S:
+                    self._placed_t[n] = self._now
         for n in self._things:
             ent = self.entities[n]
             if ent.status in HIDDEN:
@@ -690,16 +710,24 @@ class ThingRules:
     def _is_known_name(self, key: str) -> bool:
         return key in self._known_names or _singular(key) in self._known_names
 
+    def _refound(self, ev) -> bool:
+        """A CORRECTED sighting where the object was last seen: a lost track recovered, not a put-down."""
+        prev = self._rest_pos.get(ev.obj)
+        return (ev.type == EventType.CORRECTED and prev is not None and ev.to_cm is not None
+                and geom.dist(prev, ev.to_cm) < self.cfg.moved_min_cm)
+
     def _teach_target(self) -> str | None:
         zone = self.cfg.teach_zone_cm
-        pool = [n for n in self._visible_things() if n in self._placed_t]
+        known = [n for n in self.cfg.names() if self.entities[n].status == Status.VISIBLE
+                 and self.entities[n].zone == 'table' and self.entities[n].pos_cm is not None]
+        pool = [n for n in self._visible_things() + known if n in self._placed_t]
         if zone:
             pool = [n for n in pool if geom.contains_point(tuple(zone), self.entities[n].pos_cm)]
         elif self._now is not None:
             pool = [n for n in pool if self._now - self._placed_t[n] <= self._tcfg.teach_recent_s]
         if not pool:
             return None
-        return max(pool, key=lambda n: (self._placed_t[n], -self._thing_number(n)))
+        return max(pool, key=lambda n: (self._placed_t[n], -self._thing_number(n) if is_thing(n) else 0))
 
     def _bind(self, name: str, key: str) -> None:
         old = self._aliases.get(key)

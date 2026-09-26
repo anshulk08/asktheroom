@@ -113,6 +113,63 @@ def test_a_name_has_one_owner_and_moves_when_bound_again(scene, world):
     assert world.alias_phrases() == ['charger']
 
 
+def settle(scene, world):
+    """The empty table for a while: what is in view at start-up was not put down."""
+    scene.run(world, 3.5)
+
+
+def put_known(scene, world, name, at, hid=2):
+    """A hand sets a configured object (the detector knows its class) down at `at` and leaves."""
+    scene.hand(hid, *at)
+    scene.place(name, *at)
+    scene.run(world, 0.5)
+    scene.hand_off(hid)
+    scene.run(world, 1.0)
+
+
+def test_a_new_name_goes_to_a_configured_object_put_down_last(scene, world):
+    """'this is my brown wallet' names the wallet the detector sees, not an older unnamed thing."""
+    settle(scene, world)
+    put(scene, world, 'lamp', (10, 50))            # thing:1, inside the square, earlier
+    put_known(scene, world, 'wallet', (12, 48))
+    assert world.teach('my brown wallet') == 'wallet'
+    assert world.find('brown wallet') == 'wallet'
+    assert world.get('thing:1').aliases == []
+
+
+def test_a_configured_object_in_view_from_the_start_was_not_put_down(scene, world):
+    """The scene at start-up is not a put-down: the box confirmed a frame after the thing does not
+    take the name."""
+    world.cfg.teach_zone_cm = None
+    scene.place('box', 80, 40)
+    scene.thing('lamp', 10, 50)
+    scene.run(world, 2.0)
+    assert world.teach('charger') == 'thing:1'
+
+
+def test_an_object_found_again_where_it_was_lost_was_not_put_down(scene, world):
+    """The phone flickers out (LOST_TRACK) and back at the same spot (CORRECTED) just after the wallet
+    is put down: the wallet takes the name."""
+    world.cfg.teach_zone_cm = None
+    scene.place('phone', 60, 20)
+    settle(scene, world)
+    put_known(scene, world, 'wallet', (12, 48))
+    scene.miss('phone')
+    events = scene.run(world, 4.0)
+    assert any(e.obj == 'phone' and e.type == EventType.LOST_TRACK for e in events)
+    scene.miss('phone', False)
+    events = scene.run(world, 1.0)
+    assert any(e.obj == 'phone' and e.type == EventType.CORRECTED for e in events)
+    assert world.teach('brown wallet') == 'wallet'
+
+
+def test_a_thing_put_down_after_the_configured_object_still_wins(scene, world):
+    settle(scene, world)
+    put_known(scene, world, 'wallet', (12, 48))
+    put(scene, world, 'lamp', (10, 50))
+    assert world.teach('lamp') == 'thing:1'
+
+
 # ----- answers ---------------------------------------------------------------------------------------
 
 def test_teach_answer_confirms_and_points_at_the_thing(scene, world):
@@ -136,6 +193,24 @@ def test_teach_answer_refuses_a_configured_name_politely(scene, world):
     spoken_ok(a)
     assert a.text == "I already know your phone. Give this one a different name."
     assert world.get('thing:1').aliases == []
+
+
+def test_naming_the_configured_object_just_put_down_confirms_it(scene, world):
+    settle(scene, world)
+    put_known(scene, world, 'wallet', (12, 48))
+    a = ask(world, "this is my wallet")
+    spoken_ok(a)
+    assert a.text == "Yes, that's your wallet."
+    assert (a.point_at, a.action) == ('wallet', 'point')
+
+
+def test_where_is_a_name_taught_to_a_configured_object(scene, world):
+    settle(scene, world)
+    put_known(scene, world, 'wallet', (12, 48))
+    ask(world, "this is my brown wallet")
+    a = ask(world, "where is my brown wallet?")
+    spoken_ok(a)
+    assert a.point_at == 'wallet' and "brown wallet" in a.text, a.text
 
 
 def test_question_about_an_unknown_name(world):

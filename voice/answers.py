@@ -367,6 +367,9 @@ def answer(intent: Intent, world, events, cfg: Optional[dict] = None,
         except Exception:
             return Answer(f"I'm not tracking a {_dn(cfg, obj)} right now.")
         cfg = _with_things(cfg, world)
+        spoken = _named(intent, world, cfg)
+        if spoken and spoken != obj and spoken in (getattr(world.get(obj), "aliases", None) or []):
+            cfg = {**cfg, "display_names": {**(cfg.get("display_names") or {}), obj: spoken}}   # 'brown wallet'
         if guessed:
             return _guessed_answer(k, intent, guessed, world, events, cfg, now)
         if k == "WHERE":

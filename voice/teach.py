@@ -1,4 +1,5 @@
-"""TEACH intent -> Answer: 'this is my charger' names the thing just put in the teach square.
+"""TEACH intent -> Answer: 'this is my charger' names the thing (or configured object, e.g. 'this is
+my brown wallet') just put in the teach square.
 
 answers.answer() calls this for TEACH, so every entry point that already routes questions through
 voice.pipeline (voice, dashboard Ask box, SMS) teaches with no extra wiring. The app may also call
@@ -24,6 +25,9 @@ def teach_answer(name: Optional[str], world, cfg: dict) -> Answer:
     known = world.find(key)
     if known is not None and not is_thing(known):
         whose = "your" if (cfg.get("objects") or {}).get(known) == "target" else "the"
+        target = world.teach_target() if hasattr(world, "teach_target") else None
+        if target == known:                 # 'this is my wallet' about the wallet just put down
+            return Answer(f"Yes, that's {whose} {display_name(cfg, known)}.", point_at=known, action="point")
         return Answer(f"I already know {whose} {display_name(cfg, known)}. Give this one a different name.")
     thing = world.teach(key)
     if thing is None:
