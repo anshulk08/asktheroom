@@ -1,0 +1,357 @@
+{
+  "name": "Ask the Repo (Ask the Room)",
+  "nodes": [
+    {
+      "parameters": {
+        "public": true,
+        "initialMessages": "Hi! Ask me anything about Ask the Room: how the world model works, where the laser code lives, what's left to build, how to run the sim.",
+        "options": {
+          "title": "Ask the Repo",
+          "subtitle": "Project guide for Ask the Room (HackGT 13)"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.chatTrigger",
+      "typeVersion": 1.5,
+      "position": [
+        0,
+        0
+      ],
+      "id": "6f40105f-1507-523a-9aa5-853099c27149",
+      "name": "When chat message received",
+      "webhookId": "322cdc14-8efc-5f34-a4b9-5df347c8217f"
+    },
+    {
+      "parameters": {
+        "url": "https://api.github.com/repos/anshulk08/asktheroom/contents/CONTEXT.md?ref=main",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "githubApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/vnd.github.raw+json"
+            },
+            {
+              "name": "X-GitHub-Api-Version",
+              "value": "2022-11-28"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text",
+              "outputPropertyName": "data"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        224,
+        0
+      ],
+      "id": "f8160c85-df34-5eac-bd44-bf3657194170",
+      "name": "Load CONTEXT.md",
+      "credentials": {
+        "githubApi": {
+          "id": "REPLACE_ME",
+          "name": "GitHub (asktheroom read)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $('When chat message received').item.json.chatInput }}",
+        "options": {
+          "systemMessage": "=You are the project guide for Ask the Room, a HackGT 13 team's repo (github.com/anshulk08/asktheroom, branch main). Teammates ask you how the project works, where code lives, what is done, what is still open, and how to run things.\n\nHere is CONTEXT.md, fetched live from main just now. Treat it as the starting map:\n<context>\n{{ $json.data }}\n</context>\n\nHow to answer:\n- Ground answers in the repo. For anything about specific code, open the file with read_repo_file (use list_repo_dir to find it) before answering. Never guess function names, signatures, config keys or thresholds.\n- Cite paths like `core/world.py` and name the class or function.\n- Lead with the answer in a sentence or two, then details. Use code blocks for commands. Keep it short; this is a hackathon.\n- For \"what changed / what's new / who did X\" questions, use recent_commits.\n- TEAMMATE.md (if present) lists open tasks and ground rules; the spec (https://claude.ai/artifact/ETtzPXaFAWWkCJoXjuKiAP) holds interfaces and pass tests. Section numbers like 3.5, V6, H4 in the code refer to the spec. You cannot open the spec; point people to it.\n- If the repo doesn't answer the question, say so plainly and suggest asking Anshul. Don't invent status.",
+          "maxIterations": 12
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        448,
+        0
+      ],
+      "id": "56599cc6-c795-5c1b-8ab0-ec2cab60ad3f",
+      "name": "Project Guide"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "claude-sonnet-5",
+          "cachedResultName": "Claude Sonnet 5"
+        },
+        "options": {
+          "maxTokensToSample": 2048
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.6,
+      "position": [
+        256,
+        240
+      ],
+      "id": "a467e0b6-feaa-5c48-9b28-75878ae9ceae",
+      "name": "Claude Sonnet 5",
+      "credentials": {
+        "anthropicApi": {
+          "id": "REPLACE_ME",
+          "name": "Anthropic"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sessionIdType": "customKey",
+        "sessionKey": "={{ $('When chat message received').item.json.sessionId }}",
+        "contextWindowLength": 10
+      },
+      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "typeVersion": 1.3,
+      "position": [
+        416,
+        240
+      ],
+      "id": "53bf87ad-7df1-5e65-8ff6-50b1f026fb46",
+      "name": "Chat Memory"
+    },
+    {
+      "parameters": {
+        "toolDescription": "Read one file from the Ask the Room repo (branch main) and return its raw text. Input: a repo-relative file path such as core/world.py, config.yaml or TEAMMATE.md.",
+        "url": "=https://api.github.com/repos/anshulk08/asktheroom/contents/{{ $fromAI('path', 'Repo-relative file path, e.g. core/world.py', 'string') }}?ref=main",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "githubApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/vnd.github.raw+json"
+            },
+            {
+              "name": "X-GitHub-Api-Version",
+              "value": "2022-11-28"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        },
+        "optimizeResponse": true,
+        "responseType": "text",
+        "truncateResponse": true,
+        "maxLength": 60000
+      },
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.2,
+      "position": [
+        576,
+        240
+      ],
+      "id": "0a5ebacc-0572-5257-b960-9902ca596d69",
+      "name": "read_repo_file",
+      "credentials": {
+        "githubApi": {
+          "id": "REPLACE_ME",
+          "name": "GitHub (asktheroom read)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "toolDescription": "List a directory in the Ask the Room repo (branch main). Returns each entry's path, type (file or dir) and size. Input: a repo-relative directory such as core or voice; an empty string lists the repo root.",
+        "url": "=https://api.github.com/repos/anshulk08/asktheroom/contents/{{ $fromAI('dir', 'Repo-relative directory, e.g. core. Empty string for the root.', 'string') }}?ref=main",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "githubApi",
+        "optimizeResponse": true,
+        "responseType": "json",
+        "fieldsToInclude": "selected",
+        "fields": "path,type,size",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.2,
+      "position": [
+        736,
+        240
+      ],
+      "id": "a2c70878-4922-511a-83b7-bfb1f9c285fb",
+      "name": "list_repo_dir",
+      "credentials": {
+        "githubApi": {
+          "id": "REPLACE_ME",
+          "name": "GitHub (asktheroom read)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "toolDescription": "The most recent commits on main (newest first): sha, message, author and date. Use for questions about what changed, what's new or who did something.",
+        "url": "https://api.github.com/repos/anshulk08/asktheroom/commits",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "githubApi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "sha",
+              "value": "main"
+            },
+            {
+              "name": "per_page",
+              "value": "15"
+            }
+          ]
+        },
+        "optimizeResponse": true,
+        "responseType": "json",
+        "fieldsToInclude": "selected",
+        "fields": "sha,commit.message,commit.author",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.2,
+      "position": [
+        896,
+        240
+      ],
+      "id": "187e73ac-7d83-5c00-86c3-8df2ee942784",
+      "name": "recent_commits",
+      "credentials": {
+        "githubApi": {
+          "id": "REPLACE_ME",
+          "name": "GitHub (asktheroom read)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## Ask the Repo\nA chat bot that answers questions about the Ask the Room codebase.\n\nEach message: load `CONTEXT.md` from GitHub (always fresh from `main`) \u2192 Claude answers, opening files, listing folders and reading commits as needed.\n\nKeep `CONTEXT.md` up to date and the bot stays up to date with it. No re-import needed.",
+        "height": 272,
+        "width": 400,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -464,
+        -96
+      ],
+      "id": "6b1e7b39-03fb-5272-9d4f-aed6d1fe9399",
+      "name": "About"
+    },
+    {
+      "parameters": {
+        "content": "## Setup (5 min)\n1. **Anthropic** credential: API key from console.anthropic.com. Select it on *Claude Sonnet 5*.\n2. **GitHub API** credential: fine-grained token with *Contents: read* + *Metadata: read* on `anshulk08/asktheroom` (the repo is private). Select it on *Load CONTEXT.md* and the three tools.\n3. Save, then **Publish/Activate**.\n4. Open the chat trigger and copy the **public chat URL**. Share it with the team.",
+        "height": 304,
+        "width": 400,
+        "color": 6
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -464,
+        208
+      ],
+      "id": "158ebd06-cc72-5652-a913-267a72187deb",
+      "name": "Setup"
+    }
+  ],
+  "connections": {
+    "When chat message received": {
+      "main": [
+        [
+          {
+            "node": "Load CONTEXT.md",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load CONTEXT.md": {
+      "main": [
+        [
+          {
+            "node": "Project Guide",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude Sonnet 5": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Project Guide",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chat Memory": {
+      "ai_memory": [
+        [
+          {
+            "node": "Project Guide",
+            "type": "ai_memory",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "read_repo_file": {
+      "ai_tool": [
+        [
+          {
+            "node": "Project Guide",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "list_repo_dir": {
+      "ai_tool": [
+        [
+          {
+            "node": "Project Guide",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "recent_commits": {
+      "ai_tool": [
+        [
+          {
+            "node": "Project Guide",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}
