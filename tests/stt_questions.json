@@ -1,0 +1,22 @@
+[
+  {"text": "Where are my keys?", "intent": "WHERE", "obj": "keys"},
+  {"text": "Where did I leave my pill bottle?", "intent": "WHERE", "obj": "pill_bottle"},
+  {"text": "Where's my wallet?", "intent": "WHERE", "obj": "wallet"},
+  {"text": "Have you seen my glasses?", "intent": "WHERE", "obj": "glasses"},
+  {"text": "Where is my phone?", "intent": "WHERE", "obj": "phone"},
+  {"text": "I can't find the remote.", "intent": "WHERE", "obj": "remote"},
+  {"text": "Where's the box?", "intent": "WHERE", "obj": "box"},
+  {"text": "Where did the notebook go?", "intent": "WHERE", "obj": "notebook"},
+  {"text": "Where are my car keys?", "intent": "WHERE", "obj": "keys"},
+  {"text": "Where are my meds?", "intent": "WHERE", "obj": "pill_bottle"},
+  {"text": "Did anyone touch my wallet?", "intent": "HANDLED", "obj": "wallet"},
+  {"text": "Has somebody moved my phone?", "intent": "HANDLED", "obj": "phone"},
+  {"text": "Did someone take my glasses?", "intent": "HANDLED", "obj": "glasses"},
+  {"text": "What happened to my keys?", "intent": "HISTORY", "obj": "keys"},
+  {"text": "Who moved the box?", "intent": "HISTORY", "obj": "box"},
+  {"text": "When did I last see my remote?", "intent": "HISTORY", "obj": "remote"},
+  {"text": "What changed while I was gone?", "intent": "CHANGES", "obj": null},
+  {"text": "Did anyone touch anything?", "intent": "CHANGES", "obj": null},
+  {"text": "Where are my reading glasses?", "intent": "WHERE", "obj": "glasses"},
+  {"text": "Help me find my cell phone.", "intent": "WHERE", "obj": "phone"}
+]

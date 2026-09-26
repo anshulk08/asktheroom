@@ -172,3 +172,15 @@ server:
 
 sms:
   whitelist: []               # E.164 numbers allowed to text questions, e.g. "+14045550123"
+
+stt:
+  backend: pywhispercpp       # pywhispercpp (laptop) | cli (whisper-cli from a whisper.cpp build, Jetson)
+  model: base.en              # ggml model name (models/whisper/ggml-base.en.bin) or a path
+  cli_binary: whisper-cli
+  threads: 4
+  max_s: 6
+  silence_ms: 700             # this long below the VAD's off threshold after speech ends the question
+  no_speech_s: 4              # give up if nobody starts talking
+  vad_threshold: 0.5          # Silero speech probability; off threshold is this - 0.15
+  input_device: null          # sounddevice device index or name; null = default mic
+
