@@ -6,7 +6,7 @@ struct RootView: View {
 
     var body: some View {
         if store.isMock || store.hasConnected {
-            RoomView(store: store)
+            MainView(store: store)
         } else {
             ConnectView(store: store)
         }
@@ -15,9 +15,7 @@ struct RootView: View {
 
 struct RoomView: View {
     let store: RoomStore
-    @State private var draft = ""
     @State private var selected: String?
-    @State private var dictation = Dictation()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -63,36 +61,25 @@ struct RoomView: View {
             }
             .scrollDismissesKeyboard(.interactively)
 
-            VStack(spacing: 10) {
-                SuggestionChips { store.ask($0) }
-                AskBar(text: $draft,
-                       isListening: dictation.isListening,
-                       micAvailable: dictation.isAvailable,
-                       onSend: { store.ask($0) },
-                       onMicDown: {
-                           Task {
-                               await dictation.start(onPartial: { draft = $0 }, onFinish: { heard in
-                                   draft = ""
-                                   store.ask(heard)
-                               })
-                           }
-                       },
-                       onMicUp: { dictation.stop() })
-            }
-            .padding(.vertical, 10)
+            AskPanel(onAsk: store.ask)
         }
-        .task {
-            if store.isMock, let name = UserDefaults.standard.string(forKey: "mockSelect") { selected = name }
-        }
-        .sheet(item: Binding(get: { selected.map(SelectedEntity.init) }, set: { selected = $0?.id })) { pick in
-            EntityDetailView(name: pick.id, store: store)
-                .presentationDetents([.medium, .large])
-        }
+        .entityDetail($selected, store: store)
     }
 }
 
 private struct SelectedEntity: Identifiable {
     let id: String
+}
+
+extension View {
+    /// The detail sheet for a tapped thing, on the map or on Home.
+    func entityDetail(_ selected: Binding<String?>, store: RoomStore) -> some View {
+        sheet(item: Binding(get: { selected.wrappedValue.map(SelectedEntity.init) },
+                            set: { selected.wrappedValue = $0?.id })) { pick in
+            EntityDetailView(name: pick.id, store: store)
+                .presentationDetents([.medium, .large])
+        }
+    }
 }
 
 // MARK: Status
@@ -129,7 +116,7 @@ struct StatusPill: View {
     }
 }
 
-private struct Banners: View {
+struct Banners: View {
     let store: RoomStore
 
     var body: some View {

@@ -56,6 +56,10 @@ final class RoomStore {
     private(set) var highlight: Highlight?
     /// Latest answer to a question spoken to the room itself (PROTOCOL_PROPOSALS.md P2).
     private(set) var heardInRoom: Answer?
+    /// What changed since the app connected, newest first (Home, "Recently").
+    private(set) var activity: [ActivityEvent] = []
+    /// Notices the person has put away; each comes back if its situation changes.
+    private(set) var dismissedNotices: Set<String> = []
 
     /// Off until the bridge sends voice answers; see PROTOCOL_PROPOSALS.md P2.
     var showRoomVoiceAnswers = UserDefaults.standard.bool(forKey: RoomStore.voiceAnswersKey)
@@ -69,6 +73,9 @@ final class RoomStore {
     private var highlightTask: Task<Void, Never>?
 
     var current: Exchange? { exchanges.first }
+    var notices: [Notice] {
+        snapshot.map(Dashboard.notices(in:))?.filter { !dismissedNotices.contains($0.id) } ?? []
+    }
     var history: ArraySlice<Exchange> { exchanges.dropFirst() }
 
     var isRoomAppDown: Bool { status.map { !$0.appIsUp } ?? false }
@@ -92,6 +99,8 @@ final class RoomStore {
         highlight = nil
         heardInRoom = nil
         exchanges = []
+        activity = []
+        dismissedNotices = []
         timeoutTask?.cancel()
         if on {
             link = .connected
@@ -154,7 +163,15 @@ final class RoomStore {
     }
 
     func receive(state: Snapshot) {
+        if let old = snapshot {
+            activity.insert(contentsOf: Dashboard.changes(from: old, to: state).reversed(), at: 0)
+            if activity.count > Dashboard.activityLimit { activity.removeLast(activity.count - Dashboard.activityLimit) }
+        }
         snapshot = state
+    }
+
+    func dismiss(_ notice: Notice) {
+        dismissedNotices.insert(notice.id)
     }
 
     func receive(status: RigStatus) {
@@ -167,6 +184,12 @@ final class RoomStore {
     }
 
     // MARK: Highlight
+
+    /// Lights up a thing on the map without asking the rig (Home, "Show me").
+    func showOnMap(_ name: String) {
+        guard let entity = snapshot?.entity(named: name), let target = MapLayout.position(of: entity) else { return }
+        setHighlight(Highlight(entity: name, target: target, action: .point))
+    }
 
     private func highlight(for answer: Answer) -> Highlight? {
         let entity = answer.pointAt.flatMap { snapshot?.entity(named: $0) }

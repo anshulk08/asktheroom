@@ -21,6 +21,34 @@ struct SuggestionChips: View {
     }
 }
 
+/// Suggestion chips and the ask bar, wired to dictation. Used on Home and on the Table screen.
+struct AskPanel: View {
+    var showSuggestions = true
+    var onAsk: (String) -> Void
+    @State private var draft = ""
+    @State private var dictation = Dictation()
+
+    var body: some View {
+        VStack(spacing: 10) {
+            if showSuggestions { SuggestionChips(onPick: onAsk) }
+            AskBar(text: $draft,
+                   isListening: dictation.isListening,
+                   micAvailable: dictation.isAvailable,
+                   onSend: onAsk,
+                   onMicDown: {
+                       Task {
+                           await dictation.start(onPartial: { draft = $0 }, onFinish: { heard in
+                               draft = ""
+                               onAsk(heard)
+                           })
+                       }
+                   },
+                   onMicUp: { dictation.stop() })
+        }
+        .padding(.vertical, 10)
+    }
+}
+
 /// Text field plus a large hold-to-talk mic. Dictation fills the field live and sends on release.
 struct AskBar: View {
     @Binding var text: String

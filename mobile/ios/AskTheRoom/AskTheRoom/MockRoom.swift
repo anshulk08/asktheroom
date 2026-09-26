@@ -11,6 +11,8 @@ import Foundation
 ///   -mockAppDown YES   report the room app as down
 ///   -mockAsk "a|b"     ask these, a second after launch and then every 2.5 s
 ///   -mockSelect name   open this entity's detail sheet
+///   -mockTab table     open on the Table tab rather than Home
+///   -mockScroll YES    scroll Home to the bottom
 @MainActor
 final class MockRoom: RoomTransport {
     static let stepInterval: Duration = .seconds(5)

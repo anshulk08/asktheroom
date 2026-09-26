@@ -1,0 +1,195 @@
+import Foundation
+
+// What the Home dashboard shows, worked out from snapshots alone (no protocol changes):
+// where each thing is in plain words, what the room noticed, and a log of recent changes.
+
+/// One change the app saw between two snapshots, e.g. "keys went into box".
+struct ActivityEvent: Identifiable, Equatable {
+    let id = UUID()
+    var entity: String
+    var text: String
+    var time: Date
+
+    static func == (a: ActivityEvent, b: ActivityEvent) -> Bool {
+        a.entity == b.entity && a.text == b.text && a.time == b.time
+    }
+}
+
+/// Something worth telling the person without being asked ("The room noticed").
+struct Notice: Identifiable, Equatable {
+    enum Kind: Equatable { case leftTable, lostTrack, unnamed }
+
+    var kind: Kind
+    var entity: String
+    var text: String
+    /// What "Help me find it" asks the room; nil means just show it on the map.
+    var question: String?
+
+    /// Changes when the situation changes, so a dismissed notice comes back if it happens again.
+    var id: String { "\(entity)|\(text)" }
+}
+
+enum Dashboard {
+    /// Moves smaller than this are sensor jitter, not worth a line in "Recently".
+    static let moveThreshold = 15.0
+    static let activityLimit = 20
+
+    /// The person's own things: targets, plus unknown objects someone has named. Containers
+    /// and covers are furniture here; they show up in "where" words instead.
+    static func things(in snapshot: Snapshot) -> [Entity] {
+        snapshot.entities.filter { $0.kind == .target && (!$0.isThing || !$0.aliases.isEmpty) }
+    }
+
+    /// "On the table", "Inside the box", "Left the table (left side)"… Sentence case.
+    static func whereabouts(_ e: Entity, in snapshot: Snapshot) -> String {
+        let parent = e.parent.map { snapshot.entity(named: $0)?.displayName ?? Entity.displayName(for: $0) }
+        let words: String
+        switch e.status {
+        case .visible: words = "On the table"
+        case .held: words = "In someone's hand"
+        case .inside: words = parent.map { "Inside \(the($0))" } ?? "Inside something"
+        case .under: words = parent.map { "Under \(the($0))" } ?? "Under something"
+        case .gone: words = e.edge.map { "Left the table (\($0.rawValue) side)" } ?? "Left the table"
+        case .lost: words = "Not sure where"
+        case .unrecognized: words = "Unknown"
+        }
+        guard e.isUncertain, e.status != .lost else { return words }
+        return "Probably " + words.prefix(1).lowercased() + words.dropFirst()
+    }
+
+    /// The question a tap on a thing asks.
+    static func question(for e: Entity) -> String {
+        "Where \(isPlural(e.displayName) ? "are" : "is") \(e.displayName.hasPrefix("my ") ? "" : "my ")\(e.displayName)?"
+    }
+
+    /// Things to point out, most urgent first: gone, then lost, then unnamed newcomers.
+    static func notices(in snapshot: Snapshot) -> [Notice] {
+        var out: [Notice] = []
+        for e in snapshot.entities {
+            let name = e.displayName
+            switch e.status {
+            case .gone where !e.isThing || !e.aliases.isEmpty:
+                let side = e.edge.map { " on the \($0.rawValue)" } ?? ""
+                out.append(Notice(kind: .leftTable, entity: e.name,
+                                  text: "\(capitalized(name)) left the table\(side).",
+                                  question: question(for: e)))
+            case .lost where !e.isThing:
+                out.append(Notice(kind: .lostTrack, entity: e.name,
+                                  text: "Lost track of \(the(name)). It was last seen on the table.",
+                                  question: question(for: e)))
+            default:
+                break
+            }
+            if e.isThing, e.aliases.isEmpty, e.status == .visible {
+                // Only guess a name the person would recognise.
+                let known = e.maybeSameAs.lazy.compactMap { snapshot.entity(named: $0.name) }
+                    .first { !$0.isThing || !$0.aliases.isEmpty }
+                let guess = known.map { " It might be \(the($0.displayName))." } ?? ""
+                out.append(Notice(kind: .unnamed, entity: e.name,
+                                  text: "Something new is on the table.\(guess)",
+                                  question: nil))
+            }
+        }
+        let order: [Notice.Kind] = [.leftTable, .lostTrack, .unnamed]
+        return out.enumerated()
+            .sorted { (order.firstIndex(of: $0.element.kind)!, $0.offset) < (order.firstIndex(of: $1.element.kind)!, $1.offset) }
+            .map(\.element)
+    }
+
+    /// What changed from `old` to `new`, one line per entity. Neutral wording throughout:
+    /// the pill bottle is "picked up", never "taken".
+    static func changes(from old: Snapshot, to new: Snapshot, now: Date = Date()) -> [ActivityEvent] {
+        let time = new.time ?? now
+        var out: [ActivityEvent] = []
+        for e in new.entities {
+            let name = e.displayName
+            guard let before = old.entity(named: e.name) else {
+                if e.kind == .target {
+                    out.append(ActivityEvent(entity: e.name, text: e.isThing && e.aliases.isEmpty
+                                             ? "Something new appeared on the table" : "\(capitalized(name)) appeared on the table",
+                                             time: time))
+                }
+                continue
+            }
+            let parent = e.parent.map { new.entity(named: $0)?.displayName ?? Entity.displayName(for: $0) }
+            let oldParent = before.parent.map { old.entity(named: $0)?.displayName ?? Entity.displayName(for: $0) }
+            var text: String?
+            if e.status != before.status || (e.parent != before.parent && !(e.isInHand && before.isInHand)) {
+                switch e.status {
+                case .inside: text = "\(capitalized(name)) went into \(the(parent ?? "something"))"
+                case .under: text = "\(capitalized(name)) went under \(the(parent ?? "something"))"
+                case .held: text = "\(capitalized(name)) \(was(name)) picked up"
+                case .gone: text = "\(capitalized(name)) left the table" + (e.edge.map { " on the \($0.rawValue)" } ?? "")
+                case .lost: text = "Lost track of \(the(name))"
+                case .visible:
+                    switch before.status {
+                    case .inside: text = "\(capitalized(name)) came out of \(the(oldParent ?? "something"))"
+                    case .under: text = "\(capitalized(name)) \(was(name)) uncovered"
+                    case .held: text = "\(capitalized(name)) \(was(name)) put down"
+                    case .gone: text = "\(capitalized(name)) came back to the table"
+                    case .lost: text = "Found \(the(name)) again"
+                    default: text = nil
+                    }
+                case .unrecognized: text = nil
+                }
+            } else if e.status == .visible, let a = before.drawPoint, let b = e.drawPoint,
+                      hypot(a.x - b.x, a.y - b.y) >= moveThreshold {
+                text = "\(capitalized(name)) moved"
+            }
+            if let text { out.append(ActivityEvent(entity: e.name, text: text, time: time)) }
+        }
+        return out
+    }
+
+    /// "the box", but "my charger" stays as the person named it.
+    static func the(_ name: String) -> String {
+        name.hasPrefix("my ") || name == "something" ? name : "the \(name)"
+    }
+
+    /// Names that take "are": "Where are my keys?", "Keys were picked up".
+    static let pluralNames: Set<String> = ["keys", "glasses", "headphones", "earbuds", "scissors"]
+
+    static func isPlural(_ name: String) -> Bool {
+        pluralNames.contains(name.lowercased())
+    }
+
+    static func was(_ name: String) -> String {
+        isPlural(name) ? "were" : "was"
+    }
+
+    static func capitalized(_ s: String) -> String {
+        s.prefix(1).uppercased() + s.dropFirst()
+    }
+
+    static func ago(_ date: Date, now: Date) -> String {
+        let seconds = max(0, now.timeIntervalSince(date))
+        if seconds < 60 { return "Just now" }
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .full
+        return f.localizedString(for: date, relativeTo: now)
+    }
+
+    /// "Good morning" etc., for the top of Home.
+    static func greeting(at date: Date, calendar: Calendar = .current) -> String {
+        switch calendar.component(.hour, from: date) {
+        case 5..<12: return "Good morning"
+        case 12..<17: return "Good afternoon"
+        default: return "Good evening"
+        }
+    }
+
+    /// An SF Symbol for the things the rig knows about; a tag for anything else.
+    static func symbol(for name: String) -> String {
+        switch name {
+        case "keys": return "key.fill"
+        case "phone": return "iphone"
+        case "wallet": return "wallet.bifold.fill"
+        case "glasses": return "eyeglasses"
+        case "remote": return "appletvremote.gen4.fill"
+        case "pill_bottle": return "pills.fill"
+        case "box": return "shippingbox.fill"
+        case "notebook": return "book.closed.fill"
+        default: return "tag.fill"
+        }
+    }
+}
