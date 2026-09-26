@@ -67,7 +67,8 @@ start); overheard speech that isn't a question for the rig is dropped without be
 leaves the device: answer text to ElevenLabs for the voice when online, texts via Twilio for /sms,
 and the question log to the team's own n8n on the laptop. Grok (xAI) does all LLM/VLM work when
 online: visual questions send the current frame (and for "earlier" questions a few saved frames),
-narration sends short clips' keyframes. Visual questions are on in `config.yaml` (Sat), narration is
+narration sends short clips' keyframes, and each new unnamed object's close-up goes once for a guessed name
+(`core/auto_name.py`: "where's my deodorant?" then works after it was hidden, hedged "I think"). Visual questions are on in `config.yaml` (Sat), narration is
 off; the dashboard shows a disclosure for whatever is on. Grok also gets the text of questions the
 rules can't read and of open questions (with a compact world state).
 
@@ -85,6 +86,7 @@ rules can't read and of open questions (with a compact world state).
 | `core/events.py` | EventLog: SQLite event history, questions table and snapshots. |
 | `core/fakeworld.py` | Stand-in world with the same read API, for tests and `--fake` runs. |
 | `core/things.py`, `core/proposals.py`, `core/embed.py`, `core/crops.py` | Open world: unnamed `thing:N` identity, object proposals (change detection, YOLOE prompt-free), DINOv2 re-id embedder (off by default), close-up crops. |
+| `core/auto_name.py` | Automatic names: one Grok look at each new `thing:N`'s close-up, kept as a soft guess (not an alias) that questions fall back to, hedged. |
 | `core/narration*.py`, `core/visual_memory.py`, `core/clip_tokenizer.py` | Grok clip narration and the keyframe archive with MobileCLIP2 text search. |
 | `core/xai.py` | The one client for every Grok call (xAI's API over plain requests, one shared warm connection; no openai package). `main.py` warms it at start and whenever the network comes back. |
 | `core/reminders.py`, `core/reports.py`, `core/profile.py` | Care layer: event-triggered reminders, morning report, profile facts (ideas from Project Memoria, MIT). |
