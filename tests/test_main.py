@@ -469,7 +469,7 @@ def test_reset_clears_the_detectors_proposals_and_crops_on_the_perception_thread
             return hands
 
         def reset(self):
-            pass
+            calls.append((threading.current_thread().name, "hands"))
 
     class Table:
         ok = True
@@ -489,7 +489,45 @@ def test_reset_clears_the_detectors_proposals_and_crops_on_the_perception_thread
     room.stop_ev.set()
     t.join(2)
     i = calls.index(("perception", "reset"))
-    assert calls[i + 1:i + 2] in ([], [("perception", "detect")]) and calls.count(("perception", "reset")) == 1
+    assert calls[i + 1:i + 2] == [("perception", "hands")]           # the hand tracker, on the same thread
+    assert calls[i + 2:i + 3] in ([], [("perception", "detect")]) and calls.count(("perception", "reset")) == 1
+
+
+def test_where_answers_hedge_while_perception_is_stale(tmp_path):
+    room, _ = make_room(tmp_path)
+    assert not room.ask("where is my wallet?", "dashboard").text.startswith("I can't see")   # no live loop
+    room._perceived_t = time.monotonic() - 5                          # the live loop stuck for 5 s
+    ans = room.ask("where is my wallet?", "dashboard")
+    assert ans.text.startswith("I can't see the table right now.") and ans.point_at == "wallet"
+    room._perceived_t = time.monotonic()
+    assert not room.ask("where is my wallet?", "dashboard").text.startswith("I can't see")
+
+
+def test_the_perception_loop_puts_staleness_on_state(tmp_path):
+    class Frames:
+        def wait_new(self, after, timeout=1.0):
+            time.sleep(0.01)
+            return None                                               # the camera gave up
+
+    events = EventLog(":memory:", str(tmp_path))
+    world = World(CFG, events)
+    room = main.Room(CFG, world, events, None, Frames(), None, None)
+    room.stale_s = 0.05
+    t = threading.Thread(target=room.perception_loop, daemon=True)
+    t.start()
+    assert wait_for(lambda: world.state_json()["perception"].get("stale") is True)
+    room.stop_ev.set()
+    t.join(2)
+
+
+def test_a_spoken_recalibrate_can_be_turned_off_for_the_demo(tmp_path, cal_path):
+    room, _ = make_room(tmp_path, cal_path)
+    room.voice_recal = False
+    recal = []
+    room.recalibrate = lambda timeout_s=None: recal.append(1)
+    assert "turned off" in room.ask("recalibrate", "voice").text
+    time.sleep(0.1)
+    assert recal == []
 
 
 def test_voice_answers_are_logged_for_the_phone(tmp_path):
