@@ -590,3 +590,33 @@ def test_an_answer_past_the_server_timeout_is_not_spoken_or_aimed(tmp_path, cal_
     ans = room.ask_and_act("where is my wallet?", "phone")
     time.sleep(0.2)
     assert ans.point_at == "wallet" and room.tts.said == [] and not rig.act.writes
+
+
+def test_a_spoken_recalibrate_that_fails_says_so(tmp_path):
+    room, _ = make_room(tmp_path)
+    room.frames, room.table = _NewFrames(), _TagTable(need=10 ** 6)
+    room.table.size_cm = (80.0, 50.0)
+    room.recalibrate = lambda timeout_s=None: False
+    assert "couldn't recalibrate" in room._recalibrate_and_tell(speak=True)
+    assert room.tts.said and "table tag" in room.tts.said[-1]
+
+
+def test_a_recalibrate_that_changes_the_tracked_area_asks_for_a_restart(tmp_path):
+    room, _ = make_room(tmp_path)
+    room.frames, room.table = _NewFrames(), _TagTable(need=1)
+    room.table.size_cm = (80.0, 50.0)
+
+    def refit(timeout_s=None):
+        room.table.size_cm = (95.0, 55.0)
+        return True
+    room.recalibrate = refit
+    assert "Restart me" in room._recalibrate_and_tell(speak=False)
+    assert room.tts.said == []                               # a text question is not answered aloud
+
+
+def test_a_recalibrate_that_keeps_the_size_says_nothing_more(tmp_path):
+    room, _ = make_room(tmp_path)
+    room.frames, room.table = _NewFrames(), _TagTable(need=1)
+    room.table.size_cm = (80.0, 50.0)
+    room.recalibrate = lambda timeout_s=None: True
+    assert room._recalibrate_and_tell(speak=True) is None and room.tts.said == []

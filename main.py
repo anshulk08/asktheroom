@@ -175,7 +175,8 @@ class Room:
                 self.hands.reset()
             self._clear_ev.set()
         elif kind == "RECAL":
-            threading.Thread(target=self.recalibrate, name="recal", daemon=True).start()
+            threading.Thread(target=self._recalibrate_and_tell, args=(source != "sms",), name="recal",
+                             daemon=True).start()
         return ans
 
     def ask_and_act(self, text: str, source: str) -> Answer:
@@ -301,6 +302,24 @@ class Room:
             log.warning("the table frame moved %.1f cm: recalibrate the laser (python -m act.calibrate) "
                         "or it will point off", moved)
         return True
+
+    def _recalibrate_and_tell(self, speak: bool) -> Optional[str]:
+        """A spoken 'recalibrate': refit, then say what the person has to do about it, if anything. A
+        one-tag refit that measures a new tracked area saves it to table_cal.json, but the world, laser,
+        detector and answers read the size once at startup, so it only takes effect after a restart."""
+        before = tuple(getattr(self.table, "size_cm", ()) or ())
+        tag = bool(getattr(self.table, "tag_mode", False))
+        msg = None
+        if not self.recalibrate():
+            msg = ("I couldn't recalibrate. Hold the table tag in view and ask again." if tag else
+                   "I couldn't recalibrate. Make sure all four corner markers are in view and ask again.")
+        elif tag and before and max(abs(a - b) for a, b in zip(self.table.size_cm, before)) >= 1.0:
+            log.warning("tracked area changed from %.0f x %.0f to %.0f x %.0f cm; restart the app so every "
+                        "part uses it", *before, *self.table.size_cm)
+            msg = "Recalibrated, but the table area changed size. Restart me so I use the new size."
+        if msg and speak:
+            self._speak(msg)
+        return msg
 
     def _frame_probe(self) -> Optional[np.ndarray]:
         """Where three fixed image points land on the table (cm), to tell how far a refit moved the frame."""
