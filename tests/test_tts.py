@@ -18,11 +18,13 @@ class Recorder:
 
     def __init__(self):
         self.opened = []       # sample rates
+        self.devices = []      # output device per open (None = default)
         self.data = bytearray()
         self.closed = self.aborted = 0
 
-    def __call__(self, rate):
+    def __call__(self, rate, device=None):
         self.opened.append(rate)
+        self.devices.append(device)
         rec = self
 
         class Out:

@@ -106,3 +106,55 @@ def test_plural_spoken_forms():
 def test_empty_text_is_other():
     assert parse("", CFG).kind == "OTHER"
     assert parse("um uh", CFG).kind == "OTHER"
+
+
+# ---------- open world: teaching names, and names not in the config ----------
+
+TEACH_CASES = [
+    ("This is my charger.", "charger"),
+    ("this is my phone charger", "phone charger"),
+    ("Okay, this is the blue mug", "blue mug"),
+    ("Remember this as my headphones", "headphones"),
+    ("remember this as Grandma's ring", "grandmas ring"),
+    ("Call this my lucky coin", "lucky coin"),
+    ("This one is my charger, please", "charger"),
+    ("That's my water bottle", "water bottle"),
+    ("This is called my stapler", "stapler"),
+    ("this is my phone", "phone"),                  # a known name: the answer refuses it
+]
+
+
+@pytest.mark.parametrize("text,name", TEACH_CASES)
+def test_teach_intent(text, name):
+    it = parse(text, CFG)
+    assert (it.kind, it.obj, it.name) == ("TEACH", name, name), text
+
+
+@pytest.mark.parametrize("text,kind,name", [
+    ("Where is my charger?", "WHERE", "charger"),
+    ("where did I put the blue mug", "WHERE", "blue mug"),
+    ("What happened to my charger?", "HISTORY", "charger"),
+    ("Did anyone touch my charger today?", "HANDLED", "charger"),
+    ("Is my charger in the box?", "WHERE", "charger"),
+    ("My charger?", "WHERE", "charger"),
+    ("Have you seen my headphones anywhere?", "WHERE", "headphones"),
+])
+def test_names_not_in_the_config_are_kept_as_spoken(text, kind, name):
+    it = parse(text, CFG)
+    assert (it.kind, it.obj, it.name) == (kind, None, name), text
+
+
+@pytest.mark.parametrize("text", ["where is it", "who moved it", "Is there anything on the left side?",
+                                  "What's the weather like?", "Did anyone touch anything?",
+                                  "Where are my keys?", "What's different about the table?"])
+def test_no_spoken_name_where_there_is_none(text):
+    assert parse(text, CFG).name is None
+
+
+def test_taught_aliases_are_matched_like_object_names():
+    al = ["phone charger", "blue mug"]
+    assert parse("where is my phone charger", CFG, aliases=al).obj == "phone charger"
+    assert parse("where is my phone", CFG, aliases=al).obj == "phone"
+    it = parse("what happened to the blue mugs", CFG, aliases=al)
+    assert (it.kind, it.obj) == ("HISTORY", "blue mug")
+    assert parse("Did anyone move my blue mug?", CFG, aliases=al).kind == "HANDLED"

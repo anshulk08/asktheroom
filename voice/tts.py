@@ -9,8 +9,17 @@ Piper: piper-tts 1.8 `PiperVoice.load(model.onnx)`; `voice.synthesize(text)` yie
 AudioChunk per sentence (sample_rate, audio_int16_bytes). Voices live in models/piper/
 (scripts/get_piper_voice.sh).
 
-Audio goes through two seams tests can patch: `open_output(rate)` (a streaming int16 mono sink)
-and `play_pcm(pcm, rate)` (whole buffer, blocking).
+Audio goes through two seams tests can patch: `open_output(rate, device)` (a streaming int16 mono
+sink) and `play_pcm(pcm, rate, device)` (whole buffer, blocking).
+
+Output device: tts.output_device in config.yaml, a sounddevice index or part of a device name; null
+is the default device, which in the Jetson container is HDMI. `python -m voice.tts --devices` lists
+the outputs. The speakerphone and the camera can both be called "USB Audio"; only devices with output
+channels are matched (the camera has none), and if a name still matches several the first is used
+with a warning: then give the index instead (indices can change when USB devices are replugged, so
+prefer a distinctive part of the name, e.g. "Jabra"). A device that refuses the voice's sample rate
+(USB speakerphones under ALSA hw: often take only 48 or 16 kHz) is opened at its own default rate
+and the audio resampled.
 """
 from __future__ import annotations
 
@@ -39,12 +48,45 @@ PIPER_DIR = ROOT / "models" / "piper"
 
 # ---------------------------------------------------------------- audio seam
 
-class AudioOut:
-    """Streaming int16 mono output on the default device (sounddevice/PortAudio)."""
+class _Resampler:
+    """Streaming linear-interpolation resampler for int16 mono: plenty for speech, and only one
+    sample of state carried between chunks, so chunk boundaries don't click."""
 
-    def __init__(self, rate: int):
+    def __init__(self, src: int, dst: int):
+        self.step = src / float(dst)           # input samples per output sample
+        self.t = 0.0                           # next output position, in input samples from self.prev
+        self.prev: Optional[float] = None      # last input sample of the previous chunk
+
+    def __call__(self, x: np.ndarray) -> np.ndarray:
+        x = x.astype(np.float32)
+        if self.prev is not None:
+            x = np.concatenate(([self.prev], x))
+        n = len(x)
+        if n < 2:
+            self.prev = float(x[-1]) if n else self.prev
+            return np.zeros(0, np.int16)
+        k = int(np.floor((n - 1 - self.t) / self.step)) + 1 if self.t <= n - 1 else 0
+        y = np.interp(self.t + self.step * np.arange(k), np.arange(n), x)
+        self.t += self.step * k - (n - 1)
+        self.prev = float(x[-1])
+        return np.clip(np.round(y), -32768, 32767).astype(np.int16)
+
+
+class AudioOut:
+    """Streaming int16 mono output (sounddevice/PortAudio) on device (an index; None = default)."""
+
+    def __init__(self, rate: int, device: Optional[int] = None):
         import sounddevice as sd
-        self.stream = sd.RawOutputStream(samplerate=rate, channels=1, dtype="int16")
+        self._rs: Optional[_Resampler] = None
+        try:
+            self.stream = sd.RawOutputStream(samplerate=rate, channels=1, dtype="int16", device=device)
+        except sd.PortAudioError:
+            dev_rate = int(sd.query_devices(device, "output")["default_samplerate"])
+            if dev_rate == rate:
+                raise
+            log.info("output device refuses %d Hz; playing at its %d Hz, resampled", rate, dev_rate)
+            self.stream = sd.RawOutputStream(samplerate=dev_rate, channels=1, dtype="int16", device=device)
+            self._rs = _Resampler(rate, dev_rate)
         self.stream.start()
         self._odd = b""
 
@@ -53,7 +95,10 @@ class AudioOut:
         cut = len(data) - (len(data) % 2)
         self._odd = data[cut:]
         if cut:
-            self.stream.write(data[:cut])      # blocks when the device buffer is full
+            chunk = data[:cut]
+            if self._rs is not None:
+                chunk = self._rs(np.frombuffer(chunk, np.int16)).tobytes()
+            self.stream.write(chunk)           # blocks when the device buffer is full
 
     def close(self) -> None:
         """Drain what is queued, then close."""
@@ -70,16 +115,44 @@ class AudioOut:
             self.stream.close()
 
 
-def open_output(rate: int) -> AudioOut:
-    return AudioOut(rate)
+def open_output(rate: int, device: Optional[int] = None) -> AudioOut:
+    return AudioOut(rate, device)
 
 
-def play_pcm(pcm: Union[np.ndarray, bytes], rate: int) -> None:
+def play_pcm(pcm: Union[np.ndarray, bytes], rate: int, device: Optional[int] = None) -> None:
     """Play a whole int16 mono buffer and block until it ends."""
     data = pcm.astype(np.int16).tobytes() if isinstance(pcm, np.ndarray) else bytes(pcm)
-    out = open_output(rate)
+    out = open_output(rate, device)
     out.write(data)
     out.close()
+
+
+def output_devices() -> list[dict]:
+    """sounddevice devices that can play (max_output_channels > 0), each with its 'index'."""
+    import sounddevice as sd
+    return [dict(d, index=i) for i, d in enumerate(sd.query_devices()) if d.get("max_output_channels", 0) > 0]
+
+
+def resolve_output_device(spec) -> Optional[int]:
+    """tts.output_device -> a sounddevice index, or None for the default device. An int (or digits)
+    is taken as the index; any other string picks the output device whose name contains it (case
+    insensitive), the first if several do (with a warning naming them). No match: the default device,
+    with a warning, so an unplugged speaker costs the voice its device, not the answer."""
+    if spec is None or (isinstance(spec, str) and not spec.strip()):
+        return None
+    if isinstance(spec, int) or (isinstance(spec, str) and spec.strip().isdigit()):
+        return int(spec)
+    want = str(spec).strip().lower()
+    hits = [d for d in output_devices() if want in str(d.get("name", "")).lower()]
+    if not hits:
+        log.warning("tts.output_device %r: no output device matches; using the default "
+                    "(python -m voice.tts --devices lists them)", spec)
+        return None
+    if len(hits) > 1:
+        log.warning("tts.output_device %r: several output devices match (%s); using %d. Set a longer "
+                    "part of the name, or the index.", spec,
+                    "; ".join(f"{d['index']}: {d['name']}" for d in hits), hits[0]["index"])
+    return int(hits[0]["index"])
 
 
 # ---------------------------------------------------------------- piper
@@ -123,6 +196,7 @@ class TTS:
         self.piper_voice: str = t.get("piper_voice", "en_US-lessac-medium")
         self.eleven_model: str = t.get("elevenlabs_model", "eleven_flash_v2_5")
         self.eleven_voice_cfg: str = t.get("elevenlabs_voice_id") or ""
+        self.output_device = t.get("output_device")      # index | name substring | None (default)
         self._stop = threading.Event()
         self._lock = threading.Lock()          # one utterance at a time
         self._out: Optional[AudioOut] = None
@@ -248,7 +322,7 @@ class TTS:
         if first is DONE:
             raise _ElevenFailed("empty audio stream")
         self.last_first_audio_s = time.monotonic() - t0
-        out = self._out = open_output(ELEVEN_RATE)
+        out = self._out = open_output(ELEVEN_RATE, self._device())
         try:
             out.write(first)  # type: ignore[arg-type]
             while not self._stop.is_set():
@@ -277,7 +351,7 @@ class TTS:
                     break
                 if out is None:
                     self.last_first_audio_s = time.monotonic() - t0
-                    out = self._out = open_output(rate)
+                    out = self._out = open_output(rate, self._device())
                 out.write(pcm)
         finally:
             if out is not None:
@@ -303,6 +377,16 @@ class TTS:
 
     # -- helpers
 
+    def _device(self) -> Optional[int]:
+        """Resolved per utterance: USB devices can be replugged and renumbered while the app runs."""
+        if self.output_device is None:
+            return None
+        try:
+            return resolve_output_device(self.output_device)
+        except Exception:
+            log.exception("output device lookup failed; using the default")
+            return None
+
     def synthesize_piper(self, text: str) -> tuple[np.ndarray, int, float]:
         """Offline synthesis without playback: (int16 samples, rate, seconds to first chunk)."""
         t0 = time.monotonic()
@@ -321,3 +405,42 @@ class TTS:
             load_piper(self.piper_voice)
         except Exception:
             log.exception("Piper warm-up failed")
+
+
+def main(argv=None) -> int:
+    """python -m voice.tts --devices | --say "text" [--device N|name]"""
+    import argparse
+
+    from core.config import load_config
+    ap = argparse.ArgumentParser(description="speech output: list devices, or speak a test sentence")
+    ap.add_argument("--devices", action="store_true", help="list output devices")
+    ap.add_argument("--say", help="speak this through the configured (or --device) output")
+    ap.add_argument("--device", help="override tts.output_device (index or part of the name)")
+    a = ap.parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    cfg = load_config()
+    spec = a.device if a.device is not None else (cfg.get("tts") or {}).get("output_device")
+    if a.devices or not a.say:
+        import sounddevice as sd
+        try:
+            default_out = sd.query_devices(kind="output")["index"]
+        except Exception:
+            default_out = None
+        chosen = resolve_output_device(spec)
+        for d in output_devices():
+            mark = ("*" if d["index"] == chosen else " ") + ("d" if d["index"] == default_out else " ")
+            print(f"{mark} {d['index']:3d}  {d['name']}  ({d['max_output_channels']} ch, "
+                  f"{int(d['default_samplerate'])} Hz)")
+        print(f"tts.output_device = {spec!r} -> {chosen if chosen is not None else 'default'} "
+              f"(* = used for speech, d = system default)")
+        return 0
+    if a.device is not None:
+        cfg.setdefault("tts", {})["output_device"] = a.device
+    t = TTS(cfg)
+    t.speak(a.say)
+    print(f"spoke with {t.last_engine} on {t._device() if t.output_device is not None else 'default'}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -6,19 +6,23 @@ not on this path (team decision: Grok only helps the detector).
 """
 from __future__ import annotations
 
+import logging
 import time
 from typing import Callable, Optional
 
 from core.types import Answer, Intent
 
 AskFn = Callable[[str, str], Answer]
+log = logging.getLogger(__name__)
 
 
 def make_ask(cfg: dict, world, events, net=None, other: Optional[Callable] = None,
-             interpret: Optional[Callable[[str], Intent]] = None) -> AskFn:
+             interpret: Optional[Callable[[str], Intent]] = None, visual=None) -> AskFn:
     """Returns ask(text, source) -> Answer. `net` has `.online` (logged with the question); `other`
     answers OTHER and defaults to voice.local_llm.ask_local; `interpret` (text -> Intent) defaults to
-    the rule parser (main.py passes voice.understand's Qwen)."""
+    the rule parser (main.py passes voice.understand's model interpreter). `visual`
+    (voice.visual.VisualQA, when visual memory is on) gets first say: it answers questions about what
+    the camera sees or saw and returns None for everything the world model and templates handle."""
     from voice.answers import answer
 
     if interpret is None:
@@ -32,9 +36,15 @@ def make_ask(cfg: dict, world, events, net=None, other: Optional[Callable] = Non
         t0 = time.perf_counter()
         online = bool(net and net.online)
         intent = interpret(text)
-        if intent.kind == "OTHER":
+        ans = None
+        if visual is not None:
+            try:
+                ans = visual.route(intent, text, online)
+            except Exception:
+                log.exception("visual route failed")
+        if ans is None and intent.kind == "OTHER":
             ans = other(text, world, events, cfg, online=online)
-        else:
+        elif ans is None:
             ans = answer(intent, world, events, cfg)
         latency_ms = int((time.perf_counter() - t0) * 1000)
         try:

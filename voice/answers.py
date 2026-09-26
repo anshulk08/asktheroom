@@ -2,14 +2,22 @@
 
 Answers are spoken: 1-2 short sentences, no markdown. Pill bottle wording is deliberately neutral:
 no template says a pill or medication was taken ('taken out of' is phrased 'lifted out of').
+
+Open world: a question may name a thing taught with 'this is my charger' (or a name not taught yet).
+Names resolve through world.find; a thing is spoken by its alias (or as the thing I haven't been
+told about), and a thing that left while something similar came back is hedged, never asserted.
+TEACH itself is answered by voice/teach.py.
 """
 from __future__ import annotations
 
+import re
 import time
+from datetime import datetime
 from typing import Optional
 
 from core.config import display_name, load_config
 from core.types import Answer, Entity, Event, Intent, Point, Status
+from voice.intents import AWAY, normalize, parse
 
 __all__ = ["Answer", "answer", "ago", "clock", "area"]
 
@@ -17,6 +25,7 @@ PLURAL = {"keys", "glasses", "pills"}
 NEAR_CM = 25.0          # 'near the X' only when another visible object is this close
 CHANGES_WINDOW_S = 600  # default look-back for 'what changed'
 PUT_DOWN = ("PUT_BACK", "MOVED", "PUT_INSIDE", "COVERED", "EXITED_VIEW")
+UNNAMED = "thing I haven't been told about"
 
 
 # ---------- wording helpers ----------
@@ -32,6 +41,18 @@ def _be(obj: str, past: bool = False) -> str:
 def _your(cfg: dict, obj: str) -> str:
     """'Your keys' for the user's things, 'The box' for props."""
     return "Your" if (cfg.get("objects") or {}).get(obj, "target") == "target" else "The"
+
+
+def _dn(cfg: dict, obj: str) -> str:
+    """display_name, except a thing id is never spoken: an unlabelled thing is the UNNAMED phrase."""
+    if obj.startswith("thing:") and obj not in (cfg.get("display_names") or {}):
+        return UNNAMED
+    return display_name(cfg, obj)
+
+
+def _pk(cfg: dict, obj: str) -> str:
+    """The word whose number decides 'is' / 'are': a thing's spoken name ('headphones'), else obj."""
+    return _dn(cfg, obj) if obj.startswith("thing:") else obj
 
 
 def _it(obj: str) -> str:
@@ -101,7 +122,7 @@ def _rel(world, cfg: dict, parent: Optional[str], status: Optional[Status] = Non
         return "in someone's hand"
     k = _kind(world, cfg, parent)
     under = status == Status.UNDER if status in (Status.UNDER, Status.INSIDE) else k == "cover"
-    return f"{'under' if under else 'inside'} the {display_name(cfg, parent)}"
+    return f"{'under' if under else 'inside'} the {_dn(cfg, parent)}"
 
 
 def _clause(e: Entity, world, cfg: dict) -> Optional[str]:
@@ -117,7 +138,7 @@ def _clause(e: Entity, world, cfg: dict) -> Optional[str]:
 
 def _event_phrase(ev: Event, cfg: dict) -> str:
     """Passive participle phrase for an event: 'picked up', 'put inside the box'."""
-    p = display_name(cfg, ev.parent) if ev.parent and not ev.parent.startswith("hand") \
+    p = _dn(cfg, ev.parent) if ev.parent and not ev.parent.startswith("hand") \
         and ev.parent != "unknown" else None
     return {
         "PICKED_UP": "picked up",
@@ -131,6 +152,7 @@ def _event_phrase(ev: Event, cfg: dict) -> str:
         "LOST_TRACK": "lost from view",
         "CORRECTED": "given a corrected location",
         "FOUND": "found again",
+        "APPEARED": "first seen",
     }.get(ev.type, "seen changing")
 
 
@@ -154,7 +176,7 @@ def _located(world, obj: str) -> bool:
 
 
 def _which(cfg: dict) -> Answer:
-    names = [display_name(cfg, o) for o, k in (cfg.get("objects") or {}).items() if k == "target"]
+    names = [_dn(cfg, o) for o, k in (cfg.get("objects") or {}).items() if k == "target"]
     lst = ", ".join(names[:-1]) + f", and {names[-1]}" if len(names) > 1 else "".join(names)
     return Answer(f"Which object do you mean? I can track your {lst}.")
 
@@ -163,11 +185,15 @@ def _which(cfg: dict) -> Answer:
 
 def _where(obj: str, world, events, cfg: dict, now: float) -> Answer:
     e = world.get(obj)
-    n, be, It, Y = display_name(cfg, obj), _be(obj), _It(obj), _your(cfg, obj)
+    pk = _pk(cfg, obj)
+    n, be, It, Y = _dn(cfg, obj), _be(pk), _It(pk), _your(cfg, obj)
     hedge, plain = float(cfg.get("answer_hedge", 0.5)), float(cfg.get("answer_plain", 0.7))
 
+    if e.status == Status.UNKNOWN and e.pos_cm is None and e.last_seen is None:
+        return Answer(f"I haven't seen {Y.lower()} {n} yet. Put {_it(pk)} on the table and I'll keep track.")
+
     if e.status == Status.UNKNOWN or e.confidence < hedge:
-        return Answer(f"I lost track of {Y.lower()} {n}. I last saw {_it(obj)} {area(e.pos_cm, cfg)} "
+        return Answer(f"I lost track of {Y.lower()} {n}. I last saw {_it(pk)} {area(e.pos_cm, cfg)} "
                       f"{ago(e.last_seen, now)}.", point_at=obj, action="circle")
 
     prob = " probably" if e.confidence < plain or e.candidates else ""
@@ -186,12 +212,12 @@ def _where(obj: str, world, events, cfg: dict, now: float) -> Answer:
         ev = events.last_of_type(obj, ["EXITED_VIEW"]) if events is not None else None
         side = f"the {e.edge} side of the table" if e.edge else "the table"
         when = ago(ev.wall if ev else e.last_seen, now)
-        return Answer(f"{Y} {n} {_be(obj, True)}{prob} carried off {side} {when}.",
+        return Answer(f"{Y} {n} {_be(pk, True)}{prob} carried off {side} {when}.",
                       point_at=obj, action=f"sweep:{e.edge}" if e.edge else "circle")
 
     # INSIDE / UNDER
     if e.status == Status.UNDER and (e.parent in (None, "unknown")):
-        where = "under something near where it was" if not _plural(obj) else "under something near where they were"
+        where = "under something near where it was" if not _plural(pk) else "under something near where they were"
     else:
         where = _rel(world, cfg, e.parent, e.status)
         try:
@@ -213,7 +239,7 @@ def _where(obj: str, world, events, cfg: dict, now: float) -> Answer:
     if e.status == Status.INSIDE and not alts:
         ev = events.last_of_type(obj, ["PUT_INSIDE"]) if events is not None else None
         if ev or e.last_seen:
-            text += f" {It} {_be(obj, True)} put there {ago(ev.wall if ev else e.last_seen, now)}."
+            text += f" {It} {_be(pk, True)} put there {ago(ev.wall if ev else e.last_seen, now)}."
     return Answer(text, point_at=obj, action="point")
 
 
@@ -228,26 +254,28 @@ def _nearest(obj: str, e: Entity, world, cfg: dict) -> Optional[str]:
     for d in ents:
         if d.get("name") == obj or d.get("status") != Status.VISIBLE.value or not d.get("pos_cm"):
             continue
+        if str(d.get("name")).startswith("thing:") and not d.get("label"):
+            continue                    # an unnamed thing is no landmark
         dist = ((d["pos_cm"][0] - e.pos_cm[0]) ** 2 + (d["pos_cm"][1] - e.pos_cm[1]) ** 2) ** 0.5
         if dist < bd:
             best, bd = d["name"], dist
-    return display_name(cfg, best) if best else None
+    return _dn(cfg, best) if best else None
 
 
 def _history(obj: str, world, cfg: dict, now: float) -> Answer:
-    n = display_name(cfg, obj)
+    n = _dn(cfg, obj)
     evs = list(reversed(world.history(obj, 3)))
     point = ("point" if _located(world, obj) else None)
     if not evs:
         return Answer(f"I haven't seen anything happen to {_your(cfg, obj).lower()} {n} since I started watching.",
                       point_at=obj if point else None, action=point)
-    text = f"{_your(cfg, obj)} {n} {_be(obj, True)} {_chain(evs, cfg, now)}."
+    text = f"{_your(cfg, obj)} {n} {_be(_pk(cfg, obj), True)} {_chain(evs, cfg, now)}."
     try:  # a nice touch: the container/cover it is in moved after that
         parent = world.get(obj).parent
         if parent and parent in (cfg.get("objects") or {}):
             pe = world.history(parent, 1)
             if pe and pe[0].wall > evs[-1].wall and pe[0].type in ("MOVED", "PICKED_UP", "EXITED_VIEW"):
-                pn = display_name(cfg, parent)
+                pn = _dn(cfg, parent)
                 text += f" The {pn} {_be(parent, True)} {_event_phrase(pe[0], cfg)} {ago(pe[0].wall, now)}."
     except Exception:
         pass
@@ -255,7 +283,7 @@ def _history(obj: str, world, cfg: dict, now: float) -> Answer:
 
 
 def _handled(obj: str, world, events, cfg: dict, now: float) -> Answer:
-    n, was = display_name(cfg, obj), _be(obj, True)
+    n, was = _dn(cfg, obj), _be(_pk(cfg, obj), True)
     evs = list(reversed(events.last(obj, 50))) if events is not None else []
     point = "point" if _located(world, obj) else None
     picks = [i for i, ev in enumerate(evs) if ev.type == "PICKED_UP"]
@@ -296,9 +324,9 @@ def _changes(events, cfg: dict, now: float, since: Optional[float]) -> Answer:
         pair = g if len(g) == 1 else [g[0], g[-1]]
         ph = _chain(pair, cfg, now) if len(pair) == 1 else \
             f"{_event_phrase(pair[0], cfg)}, then {_event_phrase(pair[1], cfg)} {ago(pair[1].wall, now)}"
-        sents.append(f"The {display_name(cfg, o)} {_be(o, True)} {ph}.")
+        sents.append(f"The {_dn(cfg, o)} {_be(_pk(cfg, o), True)} {ph}.")
     if len(order) > 3:
-        rest = [display_name(cfg, o) for o in order[2:]]
+        rest = [_dn(cfg, o) for o in order[2:]]
         lst = ", ".join(rest[:-1]) + f" and {rest[-1]}"
         sents.append(f"The {lst} also changed.")
     return Answer(" ".join(sents))
@@ -309,23 +337,264 @@ def answer(intent: Intent, world, events, cfg: Optional[dict] = None,
     """Render the offline answer for an intent. `since` (wall time) scopes CHANGES."""
     cfg = cfg if cfg is not None else load_config()
     now = now if now is not None else time.time()
-    k, obj = intent.kind, intent.obj
+    k = intent.kind
     if k == "RESET":
         return Answer("Okay, resetting the table.")
     if k == "RECAL":
         return Answer("Recalibrating now.")
+    if k == "TEACH":
+        from voice.teach import teach_answer
+        return teach_answer(intent.name or intent.obj, world, cfg)
     if k == "CHANGES":
-        return _changes(events, cfg, now, since)
+        if since is None and AWAY.search(normalize(intent.raw or "")):
+            return _away(events, _with_things(cfg, world), now)
+        return _changes(events, _with_things(cfg, world), now, since)
+    if k == "WHAT_DOING":
+        return _what_doing(intent, events, _with_things(cfg, world), now)
     if k in ("WHERE", "HISTORY", "HANDLED"):
+        obj = _target(intent, world, cfg)
         if obj is None:
+            said = intent.name or intent.obj
+            narrated = _narrated_about([said], events, now) if said and k != "WHERE" else None
+            if narrated is not None:
+                return narrated
+            if said:
+                return Answer(f"I don't know what your {said} is yet. "
+                              f"Put it in the teach square and say 'this is my {said}'.")
             return _which(cfg)
         try:
             world.get(obj)
         except Exception:
-            return Answer(f"I'm not tracking a {display_name(cfg, obj)} right now.")
+            return Answer(f"I'm not tracking a {_dn(cfg, obj)} right now.")
+        cfg = _with_things(cfg, world)
         if k == "WHERE":
-            return _where(obj, world, events, cfg, now)
+            return _maybe_back(obj, _where(obj, world, events, cfg, now), world, cfg)
         if k == "HISTORY":
-            return _history(obj, world, cfg, now)
-        return _handled(obj, world, events, cfg, now)
+            return _plus_narration(_history(obj, world, cfg, now), obj, world, events, cfg, now)
+        return _plus_narration(_handled(obj, world, events, cfg, now), obj, world, events, cfg, now)
     return Answer("I can tell you where things are, what happened to them, or what changed.")
+
+
+# ---------- open world ----------
+
+def _target(intent: Intent, world, cfg: dict) -> Optional[str]:
+    """Entity the question is about. A taught alias in the words wins ('where is my phone charger'
+    is the charger, not the phone); names outside the config resolve through world.find."""
+    obj = intent.obj
+    try:
+        phrases = world.alias_phrases() if hasattr(world, "alias_phrases") else []
+    except Exception:
+        phrases = []
+    if phrases and intent.raw:
+        again = parse(intent.raw, cfg, aliases=phrases)
+        if again.obj in phrases:
+            obj = again.obj
+    obj = obj or intent.name
+    if obj is None or obj in (cfg.get("objects") or {}):
+        return obj
+    try:
+        return world.find(obj) if hasattr(world, "find") else None
+    except Exception:
+        return None
+
+
+def _with_things(cfg: dict, world) -> dict:
+    """cfg as the templates see it, with each thing as a target spoken by its alias."""
+    try:
+        labels = world.thing_labels() if hasattr(world, "thing_labels") else {}
+    except Exception:
+        labels = {}
+    if not labels:
+        return cfg
+    names = dict(cfg.get("display_names") or {})
+    objects = dict(cfg.get("objects") or {})
+    for n, label in labels.items():
+        names[n], objects[n] = label or UNNAMED, "target"
+    return {**cfg, "display_names": names, "objects": objects}
+
+
+def _maybe_back(obj: str, ans: Answer, world, cfg: dict) -> Answer:
+    """A thing that left or was lost, while something that may be it came back: say so, hedged, and
+    point at the look-alike. Identity is never asserted (see core/things.py)."""
+    try:
+        if world.get(obj).status not in (Status.GONE, Status.UNKNOWN) or not hasattr(world, "similar_to"):
+            return ans
+        for other, _ in world.similar_to(obj):
+            e = world.get(other)
+            if e.status in (Status.GONE, Status.UNKNOWN):
+                continue
+            where = f"on the table, {area(e.pos_cm, cfg)}" if e.status == Status.VISIBLE \
+                else (_clause(e, world, cfg) or "on the table")
+            return Answer(f"{ans.text} Something similar came back and is {where}; it might be yours.",
+                          point_at=other, action="point")
+    except Exception:
+        pass
+    return ans
+
+
+# ---------- narration memory (core/narration.py) ----------
+#
+# Narrations say what the person was doing; the world model stays the authority on where things are.
+# Every narration read here passes the medication rule again (redact_meds), whatever wrote it.
+
+NARR_HEDGE = 0.5        # below this confidence: 'it looked like you ...'
+NARR_MIN = 0.2          # below this a narration is not used at all
+RECENT_S = 3 * 3600     # 'what was I doing?' with no time: the latest narration within this
+AWAY_MIN_S = 120        # a question asked less than this ago doesn't mark when you left
+AWAY_GAP_S = 900        # else: the last quiet stretch this long does
+
+
+def _store(events):
+    from core.narration_store import store_for
+    return store_for(events, create=False)
+
+
+def _usable(r) -> bool:
+    s = (r.summary or "").strip().lower().rstrip(".")
+    return bool(s) and s != "unclear" and r.confidence >= NARR_MIN
+
+
+def _third_person(text: str) -> str:
+    """'You put your keys in the box' -> 'Someone put your keys in the box': while you were away,
+    the hands on the table weren't yours (the camera can't tell whose they were)."""
+    for a, b in ((r"\bYou were\b", "Someone was"), (r"\bYou have\b", "Someone has"), (r"\bYou\b", "Someone"),
+                 (r"\byou were\b", "they were"), (r"\byourself\b", "themselves"), (r"\byou\b", "they")):
+        text = re.sub(a, b, text)
+    return text
+
+
+def _narr_text(r, now: float, third: bool = False, first_only: bool = False, terms=()) -> str:
+    """'At 2:05 PM, you sorted some papers.' (hedged when unsure; the sentence naming a term first)."""
+    from core.narration_store import _pattern, redact_meds
+    text, _ = redact_meds(r.summary or "")
+    sents = [s for s in re.split(r"(?<=[.!?])\s+", text.strip()) if s]
+    if not sents:
+        return ""
+    if first_only:
+        rx = _pattern(list(terms)) if terms else None
+        sents = [next((s for s in sents if rx and rx.search(s)), sents[0])]
+    text = " ".join(sents)
+    text = _third_person(text) if third else text
+    text = text[0].lower() + text[1:]
+    if r.confidence < NARR_HEDGE:
+        text = "it looked like " + text
+    when = clock(r.t_start)
+    d, today = datetime.fromtimestamp(r.t_start).date(), datetime.fromtimestamp(now).date()
+    if d != today:
+        when += " yesterday" if (today - d).days == 1 else f" on {datetime.fromtimestamp(r.t_start):%A}"
+    text = f"At {when}, {text}"
+    return text if text.endswith((".", "!", "?")) else text + "."
+
+
+def _narrations_text(rows, now: float, third: bool = False) -> str:
+    """At most two narrations (the latest), one sentence each when there are two, plus a count of the rest."""
+    shown = rows[-2:]
+    text = " ".join(_narr_text(r, now, third, first_only=len(shown) > 1) for r in shown)
+    if len(rows) > 2:
+        n = len(rows) - 2
+        text += f" I saw {n} more {'bit' if n == 1 else 'bits'} of activity then."
+    return text
+
+
+def _events_text(evs: list[Event], cfg: dict) -> str:
+    """'the keys were picked up at 2:02 PM and put inside the box' for up to two objects."""
+    groups: dict[str, list[Event]] = {}
+    for ev in sorted(evs, key=lambda e: e.wall):
+        groups.setdefault(ev.obj, []).append(ev)
+    parts = []
+    for o in sorted(groups, key=lambda o: groups[o][-1].wall)[-2:]:
+        g = groups[o]
+        s = f"the {_dn(cfg, o)} {_be(_pk(cfg, o), True)} {_event_phrase(g[0], cfg)} at {clock(g[0].wall)}"
+        if len(g) > 1:
+            s += f" and {_event_phrase(g[-1], cfg)}"
+            if clock(g[-1].wall) != clock(g[0].wall):
+                s += f" at {clock(g[-1].wall)}"
+        parts.append(s)
+    return ", and ".join(parts)
+
+
+def _what_doing(intent: Intent, events, cfg: dict, now: float) -> Answer:
+    """Narrations in the question's time window (or the latest one), else the event log for it."""
+    from core.narration_store import parse_window
+    w = parse_window(intent.raw or "", now)
+    st = _store(events)
+    if w is None:
+        rows = [r for r in (st.latest(5, before=now) if st else []) if _usable(r) and r.t_end >= now - RECENT_S]
+        if rows:
+            return Answer(_narr_text(rows[0], now))
+        t0, t1, none = now - CHANGES_WINDOW_S, now, "I haven't seen anything happen on the table lately."
+    else:
+        rows = [r for r in (st.between(w.t0, w.t1) if st else []) if _usable(r)]
+        if rows:
+            return Answer(_narrations_text(rows, now))
+        t0, t1, none = w.t0, w.t1, f"I didn't see anything happen on the table {w.label}."
+    evs = [e for e in (events.since(t0) if events is not None else []) if e.wall <= t1]
+    if evs:
+        return Answer(f"I don't have a description of that, but {_events_text(evs, cfg)}.")
+    return Answer(none)
+
+
+def _away_since(events, now: float) -> Optional[float]:
+    """When 'while I was away' began: the last question asked (at least AWAY_MIN_S ago), else the start
+    of the activity after the last quiet stretch of AWAY_GAP_S, or of that stretch if it runs to now."""
+    try:
+        q = events._rows("SELECT t FROM questions WHERE t <= ? ORDER BY t DESC LIMIT 1", (now - AWAY_MIN_S,))
+        if q:
+            return float(q[0][0])
+        times = sorted(e.wall for e in events.since(now - 86400) if e.wall <= now)
+    except Exception:
+        return None
+    st = _store(events)
+    if st:
+        times = sorted(times + [x for r in st.between(now - 86400, now) for x in (r.t_start, r.t_end)])
+    if not times:
+        return None
+    if now - times[-1] >= AWAY_GAP_S:
+        return times[-1] + 1
+    for a, b in reversed(list(zip(times, times[1:]))):
+        if b - a >= AWAY_GAP_S:
+            return b - 1
+    return None
+
+
+def _away(events, cfg: dict, now: float) -> Answer:
+    """'What happened while I was away?': narrations since then in third person, else the event changes."""
+    since = _away_since(events, now)
+    st = _store(events)
+    if since is not None and st:
+        rows = [r for r in st.between(since, now) if _usable(r) and r.t_end >= since]
+        if rows:
+            return Answer(_narrations_text(rows, now, third=True))
+    return _changes(events, cfg, now, since)
+
+
+def _terms(obj: str, world, cfg: dict) -> list[str]:
+    """Every name an entity goes by: spoken name, id, synonyms, taught aliases."""
+    out = [_dn(cfg, obj)]
+    if not obj.startswith("thing:"):
+        out.append(obj.replace("_", " "))
+    out += [k for k, v in (cfg.get("synonyms") or {}).items() if v == obj and k not in ("the box", "container")]
+    try:
+        out += list(world.get(obj).aliases or [])
+    except Exception:
+        pass
+    return [t for t in dict.fromkeys(out) if t and t != UNNAMED]
+
+
+def _plus_narration(ans: Answer, obj: str, world, events, cfg: dict, now: float) -> Answer:
+    """An object answer plus the latest narration of the last day that mentions the object (by any of
+    its names), as one more sentence, when the answer has room (3 sentences at most)."""
+    st = _store(events)
+    if st is None or len(re.split(r"(?<=[.!?])\s+", ans.text.strip())) >= 3:
+        return ans
+    terms = _terms(obj, world, cfg)
+    rows = [r for r in st.search(terms, since=now - 86400, until=now, limit=3) if _usable(r)]
+    s = _narr_text(rows[0], now, first_only=True, terms=terms) if rows else ""
+    return Answer(f"{ans.text} {s}", ans.point_at, ans.action) if s else ans
+
+
+def _narrated_about(words: list[str], events, now: float) -> Optional[Answer]:
+    """A thing the world model doesn't know ('did I use the stove?'), found in narrations."""
+    st = _store(events)
+    rows = [r for r in (st.search(words, since=now - 86400, until=now, limit=3) if st else []) if _usable(r)]
+    return Answer(_narr_text(rows[0], now, first_only=True, terms=words)) if rows else None

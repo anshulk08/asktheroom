@@ -309,3 +309,27 @@ def test_every_object_short_and_spoken(w, name, kind):
     a = ask(w, kind, name)
     spoken_ok(a)
     assert len(sentences(a.text)) <= 3
+
+
+def test_where_for_an_object_never_seen_says_so_and_does_not_point():
+    fw = FakeWorld([Entity("keys", "target", Status.UNKNOWN, confidence=0.0)])
+    ans = answer(parse("where are my keys?", CFG), fw, fw.events, CFG)
+    assert "haven't seen" in ans.text.lower() and "lost track" not in ans.text.lower()
+    assert ans.point_at is None
+
+
+# ---------- open world ----------
+
+def test_appeared_event_phrase_and_unnamed_things_in_changes():
+    from core.types import Event
+    fw = FakeWorld([Entity("keys", "target", Status.VISIBLE, pos_cm=(10.0, 10.0))])
+    now = time.time()
+    fw.events.add(Event(t=1.0, wall=now - 5, obj="thing:4", type="APPEARED", to_cm=(40.0, 30.0)))
+    a = answer(Intent("CHANGES", None, "what changed"), fw, fw.events, CFG, now=now)
+    spoken_ok(a)
+    assert a.text == "The thing I haven't been told about was first seen just now."
+
+
+def test_teach_intent_never_mentions_taking_pills(w):
+    a = answer(Intent("TEACH", "pills", "this is my pills", name="pills"), w, w.events, CFG)
+    assert "taken" not in a.text.lower() and "took" not in a.text.lower()

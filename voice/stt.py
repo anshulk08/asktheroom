@@ -15,9 +15,16 @@ Whisper backends, picked by cfg stt.backend:
   cli           the whisper-cli binary from a whisper.cpp build (Jetson: -DGGML_CUDA=ON
                 -DCMAKE_CUDA_ARCHITECTURES=87, make -j2). Flags: -m -f -l en -nt -np --prompt -ac.
                 https://github.com/ggml-org/whisper.cpp/tree/master/examples/cli
-Both get an initial prompt naming the objects (so 'pill bottle' is spelled right) and audio_ctx
-sized to the clip: the default encodes a full 30 s window (1500 positions, 50 per second) even for
-a 3 s question.
+  server        a long-lived whisper-server from the same build (scripts/build_whisper.sh), so the
+                model stays loaded: whisper-cli pays ~0.5 s per question on the Jetson for process
+                start + CUDA init + model load (measured 2026-09-25: base.en 139 ms median per
+                question via the server vs 621 ms via whisper-cli). Falls back to cli if it dies.
+  auto          server > cli > pywhispercpp, whichever this machine has (one config.yaml for both).
+All get an initial prompt naming the objects (so 'pill bottle' is spelled right) and an audio_ctx:
+`sized` to the clip, or a fixed value (cfg stt.audio_ctx; 0 = the full 30 s window, 1500
+positions, 50 per second). Measured on 22 Piper questions (0.8-1.9 s): sized (~90-130 positions)
+made base.en repeat or garble and run long (whisper-cli median 2.2 s, 13/22 exact); 0 gave 22/22
+exact at 139 ms on the Jetson's GPU, so config.yaml uses 0.
 
 Audio goes through one seam tests can patch: `open_input(rate, block)` (a float32 mono source with
 read(timeout) -> one block or None, and close()).
@@ -124,11 +131,51 @@ class SileroVAD:
         return float(out.reshape(-1)[0])
 
 
+class LevelGate:
+    """Optional end-of-speech helper for rooms full of other talkers (cfg stt.end_drop_db).
+
+    Silero hears speech at almost any level: measured on Piper clips, 6 overlapping background
+    talkers 20 dB below the asker still score p ~0.97, so in an expo hall Silero alone never sees the
+    question end and the recording runs to max_s. This is not an absolute energy threshold: after
+    speech starts, a block also counts as quiet when its RMS is drop_db below the 90th percentile of
+    the block RMS since speech started (the asker is much closer to the mic than the crowd, so their
+    loudest blocks set the bar; a percentile, not the peak, so one cough or clicker clack does not).
+    drop_db None: off (Silero only)."""
+
+    PCT = 90
+
+    def __init__(self, drop_db: Optional[float]):
+        self.ratio = None if drop_db is None else 10 ** (-float(drop_db) / 20)
+        self._rms: list[float] = []
+
+    @staticmethod
+    def rms(b: np.ndarray) -> float:
+        return float(np.sqrt(np.mean(np.square(b, dtype=np.float64))))
+
+    def speech(self, b: np.ndarray) -> None:
+        """Called for the first speech block; loud() records every later block itself."""
+        if self.ratio is not None and not self._rms:
+            self._rms.append(self.rms(b))
+
+    def loud(self, b: np.ndarray) -> bool:
+        if self.ratio is None:
+            return True
+        r = self.rms(b)
+        self._rms.append(r)
+        return r >= float(np.percentile(self._rms, self.PCT)) * self.ratio
+
+
 # ---------------------------------------------------------------- whisper
 
-def initial_prompt(cfg: dict) -> str:
-    """Primes Whisper's spelling with the object names: 'Where are my keys, pill bottle, ...?'"""
+def initial_prompt(cfg: dict, synonyms: bool = False) -> str:
+    """Primes Whisper's spelling with the object names: 'Where are my keys, pill bottle, ...?'
+    synonyms (cfg stt.prompt_synonyms) also lists the spoken synonyms ('meds', 'specs', ...): with
+    names only, base.en heard Piper's 'Where are my meds?' as 'mids' on both the Mac and the Jetson."""
     names = [display_name(cfg, o) for o in (cfg.get("objects") or {})]
+    if synonyms:
+        objs = cfg.get("objects") or {}
+        names += [re.sub(r"^the ", "", str(k)) for k, v in (cfg.get("synonyms") or {}).items() if v in objs]
+        names = list(dict.fromkeys(names))
     return f"Where are my {', '.join(names)}?" if names else ""
 
 
@@ -165,9 +212,7 @@ class WhisperCliBackend:
 
     def __init__(self, model: str = "base.en", binary: str = "whisper-cli",
                  models_dir: Path = WHISPER_DIR, threads: int = 4):
-        path = Path(model)
-        if not path.suffix:
-            path = Path(models_dir) / f"ggml-{model}.bin"
+        path = model_path(model, models_dir)
         if not path.exists():
             raise FileNotFoundError(f"{path} missing; whisper.cpp: models/download-ggml-model.sh {model}")
         exe = shutil.which(binary) or (binary if os.path.exists(binary) else None)
@@ -187,23 +232,205 @@ class WhisperCliBackend:
         return r.stdout
 
 
-BACKENDS = {"pywhispercpp": PyWhisperCppBackend, "cli": WhisperCliBackend}
+WHISPER_BUILDS = [ROOT / "third_party" / "whisper.cpp" / d / "bin" for d in ("build", "build-mac")]
+
+
+def find_binary(name: str) -> Optional[str]:
+    """A whisper.cpp binary: `name` as a path (absolute, or relative to the cwd or the repo), then
+    PATH, then scripts/build_whisper.sh's output (third_party/whisper.cpp/build{,-mac}/bin)."""
+    p = Path(name)
+    for c in ([p] if p.is_absolute() else [p, ROOT / p]):
+        if c.is_file() and os.access(c, os.X_OK):
+            return str(c)
+    exe = shutil.which(name)
+    if exe:
+        return exe
+    for d in WHISPER_BUILDS:
+        c = d / p.name
+        if c.is_file() and os.access(c, os.X_OK):
+            return str(c)
+    return None
+
+
+def model_path(model: str, models_dir: Path = WHISPER_DIR) -> Path:
+    """'base.en' -> models/whisper/ggml-base.en.bin; a .bin file or a path is used as given.
+    (Not Path.suffix: 'base.en' has the suffix '.en'.)"""
+    m = str(model)
+    if m.endswith(".bin") or os.sep in m or "/" in m:
+        return Path(m)
+    return Path(models_dir) / f"ggml-{m}.bin"
+
+
+def _die_with_parent():
+    """Popen preexec_fn on Linux: SIGTERM the server if the app dies, even by SIGKILL, so no orphan
+    keeps the port and the GPU memory. prctl is looked up here, in the parent, so the forked child
+    only makes one C call (no imports, which could deadlock after fork in a threaded app)."""
+    if not Path("/proc/self").exists():
+        return None
+    try:
+        import ctypes
+        prctl = ctypes.CDLL(None, use_errno=True).prctl
+    except Exception:
+        return None
+    return lambda: prctl(1, 15)            # PR_SET_PDEATHSIG, SIGTERM
+
+
+class WhisperServerBackend:
+    """A long-lived whisper-server (whisper.cpp examples/server), started once, so the model and the
+    CUDA context stay loaded between questions: launching whisper-cli per question pays process
+    start + CUDA init + model load every time. The server takes per-request multipart fields and
+    resets them after each request (server.cpp get_req_parameters, checked 2026-09-25 at d09f61a):
+    `file` (WAV bytes), `prompt`, `audio_ctx`, `no_timestamps`, `response_format=json` -> {"text"}.
+    GET /health is 200 {"status":"ok"} once the model is loaded.
+
+    If a healthy server already answers on host:port it is reused (e.g. left over from a run that
+    was SIGKILLed on the Mac). If the server cannot be reached for a request, it is restarted once
+    (when we own it) and the request goes to `fallback` (whisper-cli) meanwhile."""
+
+    def __init__(self, model: str = "base.en", binary: str = "whisper-server",
+                 models_dir: Path = WHISPER_DIR, threads: int = 4, host: str = "127.0.0.1",
+                 port: int = 8178, start_timeout: float = 60.0, request_timeout: float = 15.0,
+                 fallback: Optional[Backend] = None, start: bool = True):
+        import requests
+        self._http = requests.Session()
+        self.url = f"http://{host}:{port}"
+        self.host, self.port, self.threads = host, int(port), threads
+        self.start_timeout, self.request_timeout = start_timeout, request_timeout
+        self.fallback = fallback
+        self.model = str(model_path(model, models_dir))
+        self.exe = find_binary(binary)
+        self.proc: Optional[subprocess.Popen] = None
+        self._log = None
+        self.fallbacks = 0              # requests answered by the fallback
+        if start and not self.healthy():
+            if not Path(self.model).exists():
+                raise FileNotFoundError(f"{self.model} missing; whisper.cpp: models/download-ggml-model.sh {model}")
+            if self.exe is None:
+                raise FileNotFoundError(f"{binary} not found; run scripts/build_whisper.sh or set stt.server_binary")
+            self.start()
+
+    def healthy(self, timeout: float = 0.5) -> bool:
+        try:
+            r = self._http.get(self.url + "/health", timeout=timeout)
+            return r.status_code == 200 and r.json().get("status") == "ok"
+        except Exception:
+            return False
+
+    def start(self) -> None:
+        """Spawn the server and wait (up to start_timeout) for /health. Raises if it never comes up."""
+        import atexit
+        self._log = tempfile.NamedTemporaryFile(prefix="whisper-server-", suffix=".log", delete=False)
+        cmd = [self.exe, "-m", self.model, "-t", str(self.threads), "-l", "en", "-nt",
+               "--host", self.host, "--port", str(self.port)]
+        log.info("starting %s", " ".join(cmd))
+        self.proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=self._log,
+                                     stdin=subprocess.DEVNULL,
+                                     preexec_fn=_die_with_parent())
+        atexit.register(self.close)
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < self.start_timeout:
+            if self.proc.poll() is not None:
+                break
+            if self.healthy():
+                log.info("whisper-server up in %.1f s (%s)", time.monotonic() - t0, self.url)
+                return
+            time.sleep(0.1)
+        tail = Path(self._log.name).read_text(errors="replace")[-500:]
+        self.close()
+        raise RuntimeError(f"whisper-server did not come up on {self.url}: {tail}")
+
+    def _post(self, audio: np.ndarray, prompt: str, audio_ctx: int) -> str:
+        import io
+        buf = io.BytesIO()
+        write_wav(buf, audio)
+        data = {"prompt": prompt, "audio_ctx": str(int(audio_ctx)), "no_timestamps": "true",
+                "response_format": "json", "temperature": "0.0"}
+        r = self._http.post(self.url + "/inference", files={"file": ("clip.wav", buf.getvalue(), "audio/wav")},
+                            data=data, timeout=self.request_timeout)
+        r.raise_for_status()
+        return str(r.json().get("text", ""))
+
+    def transcribe(self, audio: np.ndarray, prompt: str, audio_ctx: int) -> str:
+        import requests
+        try:
+            return self._post(audio, prompt, audio_ctx)
+        except requests.RequestException as e:
+            log.warning("whisper-server request failed (%s)", e)
+            if self.proc is not None and self.proc.poll() is not None:
+                try:
+                    self.start()
+                    return self._post(audio, prompt, audio_ctx)
+                except Exception as e2:
+                    log.warning("whisper-server restart failed: %s", e2)
+            if self.fallback is None:
+                raise
+            self.fallbacks += 1
+            return self.fallback.transcribe(audio, prompt, audio_ctx)
+
+    def close(self) -> None:
+        p, self.proc = self.proc, None
+        if p is not None and p.poll() is None:
+            p.terminate()
+            try:
+                p.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                p.kill()
+
+
+BACKENDS = {"pywhispercpp": PyWhisperCppBackend, "cli": WhisperCliBackend,
+            "server": WhisperServerBackend}
+
+
+def _server(s: dict, model: str, threads: int, fallback: Optional[Backend]) -> WhisperServerBackend:
+    return WhisperServerBackend(model, s.get("server_binary", "whisper-server"), threads=threads,
+                                port=int(s.get("server_port", 8178)), fallback=fallback)
+
+
+def _cli_or_none(s: dict, model: str, threads: int) -> Optional[Backend]:
+    try:
+        return WhisperCliBackend(model, find_binary(s.get("cli_binary", "whisper-cli")) or
+                                 s.get("cli_binary", "whisper-cli"), threads=threads)
+    except FileNotFoundError:
+        return None
 
 
 def make_backend(cfg: dict) -> Backend:
+    """stt.backend: server | cli | pywhispercpp | auto. auto (one config for the Mac and the Jetson)
+    takes the first that is available here: server (whisper-server binary + model; whisper-cli as
+    its fallback), then cli, then pywhispercpp."""
     s = (cfg or {}).get("stt") or {}
     kind = str(s.get("backend", "pywhispercpp")).lower()
     model, threads = s.get("model", "base.en"), int(s.get("threads", 4))
     if kind == "cli":
-        return WhisperCliBackend(model, s.get("cli_binary", "whisper-cli"), threads=threads)
+        binary = s.get("cli_binary", "whisper-cli")
+        return WhisperCliBackend(model, find_binary(binary) or binary, threads=threads)
+    if kind in ("server", "auto"):
+        cli = _cli_or_none(s, model, threads)
+        if kind == "server" or (find_binary(s.get("server_binary", "whisper-server"))
+                                and model_path(model).exists()):
+            try:
+                return _server(s, model, threads, cli)
+            except Exception as e:
+                if cli is None and kind == "server":
+                    raise
+                log.warning("stt %s: whisper-server failed (%s); trying whisper-cli", kind, e)
+        if cli is not None:
+            return cli
+        if kind == "server":
+            raise RuntimeError("stt server: whisper-server and whisper-cli both unavailable")
+        try:
+            return PyWhisperCppBackend(model, threads=threads)
+        except ImportError:
+            raise RuntimeError("stt auto: no whisper backend; run scripts/build_whisper.sh "
+                               "or pip install pywhispercpp") from None
     if kind not in BACKENDS:
-        raise ValueError(f"unknown stt.backend {kind!r}; expected one of {sorted(BACKENDS)}")
+        raise ValueError(f"unknown stt.backend {kind!r}; expected one of {sorted(BACKENDS) + ['auto']}")
     return PyWhisperCppBackend(model, threads=threads)
 
 
 def write_wav(path, audio: np.ndarray, rate: int = RATE) -> None:
     pcm = (np.clip(np.asarray(audio, dtype=np.float32), -1, 1) * 32767).astype(np.int16)
-    with wave.open(str(path), "wb") as w:
+    with wave.open(path if hasattr(path, "write") else str(path), "wb") as w:   # a path or a file object
         w.setnchannels(1)
         w.setsampwidth(2)
         w.setframerate(rate)
@@ -237,8 +464,12 @@ class STT:
         self.silence_ms = float(s.get("silence_ms", 700))
         self.threshold = float(s.get("vad_threshold", 0.5))
         self.no_speech_s = float(s.get("no_speech_s", 4))
+        ctx = s.get("audio_ctx", "sized")
+        self.audio_ctx = "sized" if ctx in (None, "", "sized") else int(ctx)   # int: fixed (0 = full 30 s)
+        drop = s.get("end_drop_db")
+        self.end_drop_db = None if drop in (None, "", 0) else float(drop)
         self.device = s.get("input_device")
-        self.prompt = initial_prompt(cfg or {})
+        self.prompt = initial_prompt(cfg or {}, synonyms=bool(s.get("prompt_synonyms", False)))
         self._backend, self._vad = backend, vad
         self.last_speech = False            # did the last recording contain speech?
         self.last_stop = ""                 # why it ended: silence | max_s | click | no speech | no audio
@@ -275,6 +506,7 @@ class STT:
         vad = self.vad
         vad.reset()
         off_thr = max(0.0, self.threshold - 0.15)
+        level = LevelGate(self.end_drop_db)
         block_s = BLOCK / RATE
         need_quiet = int(math.ceil(silence_ms / 1000 / block_s))
         blocks: list[np.ndarray] = []
@@ -296,10 +528,11 @@ class STT:
                 if first is None:
                     if p >= self.threshold:
                         first = last = i
+                        level.speech(b)
                     elif i * block_s >= no_speech_s:
                         stop = "no speech"
                         break
-                elif p >= off_thr:
+                elif level.loud(b) and p >= off_thr:
                     last, quiet = i, 0
                 else:
                     quiet += 1
@@ -331,7 +564,8 @@ class STT:
         if len(audio) < n_min:
             audio = np.concatenate([audio, np.zeros(n_min - len(audio), dtype=np.float32)])
         t0 = time.monotonic()
-        text = clean(self.backend.transcribe(audio, self.prompt, audio_ctx_for(len(audio))))
+        ctx = audio_ctx_for(len(audio)) if self.audio_ctx == "sized" else self.audio_ctx
+        text = clean(self.backend.transcribe(audio, self.prompt, ctx))
         self.last_ms["transcribe"] = 1000 * (time.monotonic() - t0)
         log.info("transcribed %.1f s in %.0f ms%s", len(audio) / RATE, self.last_ms["transcribe"],
                  f": {text!r}" if self.log_text else "")
