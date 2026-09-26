@@ -575,3 +575,18 @@ def test_laser_fitted_before_the_table_calibration_is_flagged(tmp_path):
     assert main.laser_older_than_table(SimpleNamespace(timestamp=1000.0), str(p))
     assert not main.laser_older_than_table(SimpleNamespace(timestamp=3000.0), str(p))
     assert not main.laser_older_than_table(SimpleNamespace(timestamp=1000.0), str(tmp_path / "none.json"))
+
+
+def test_the_ask_timeout_matches_the_server():
+    import main
+    from server.app import ASK_TIMEOUT_S
+    assert main.ANSWER_LATE_S == ASK_TIMEOUT_S
+
+
+def test_an_answer_past_the_server_timeout_is_not_spoken_or_aimed(tmp_path, cal_path, monkeypatch):
+    import main
+    room, rig = make_room(tmp_path, cal_path)
+    monkeypatch.setattr(main, "ANSWER_LATE_S", -1.0)      # every answer is "late"
+    ans = room.ask_and_act("where is my wallet?", "phone")
+    time.sleep(0.2)
+    assert ans.point_at == "wallet" and room.tts.said == [] and not rig.act.writes

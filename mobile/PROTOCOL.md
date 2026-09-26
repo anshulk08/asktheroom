@@ -120,6 +120,8 @@ A 414-byte state snapshot at MTU 185 is 3 chunks: `03 00 00 …179 B`, `03 01 00
 | `target` | [x, y] \| null | table-cm position of `point_at`: its resolved position (a hidden object inherits its parent's), falling back to its last-seen spot; 1 decimal |
 | `ms` | int | bridge time from receiving the write to having the answer (includes `/ask` and one `/state`) |
 
+Timeouts nest so exactly one answer comes back and the rig never contradicts it: the server gives up after 10 s (`server/app.py` `ASK_TIMEOUT_S`) and answers "Sorry, that took too long. Please ask again."; an answer that finishes later is neither spoken nor aimed (`main.ANSWER_LATE_S`). The bridge waits 12 s (`ask_timeout_s`) before its own `ok: false` reply, and the app waits 15 s (`RoomStore.answerTimeout`).
+
 All keys are always present. `ok: false` texts: `"The room isn't running right now."` (the app's HTTP API is
 unreachable), `"Sorry, that took too long. Please ask again."` (over 12 s),
 `"Sorry, something went wrong answering that."` (HTTP error).

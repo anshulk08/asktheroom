@@ -102,6 +102,7 @@ def warm_on_connect(netmon, warm: Callable[[], object]) -> None:
 
 
 PHONE_ECHO_S = 3.0      # a voice question matching a phone question this recent is the same question
+ANSWER_LATE_S = 10.0    # server.app.ASK_TIMEOUT_S: past it the asker was told "took too long", so stay quiet
 
 
 def _norm(text: str) -> str:
@@ -178,11 +179,18 @@ class Room:
         return ans
 
     def ask_and_act(self, text: str, source: str) -> Answer:
-        """ask_fn for the server: dashboard questions are spoken and aimed, texts only answered."""
+        """ask_fn for the server: dashboard questions are spoken and aimed, texts only answered. An
+        answer that arrives after the server gave up (ANSWER_LATE_S) is dropped, not spoken: the asker
+        already heard "that took too long", and a late laser would contradict it."""
         if source == "phone":
             self._phone_qs.append((time.monotonic(), _norm(text)))
+        t0 = time.monotonic()
         ans = self.ask(text, source)
-        if source != "sms":
+        late = time.monotonic() - t0
+        if late > ANSWER_LATE_S:
+            log.warning("answer to %r took %.1f s, past the server's %.0f s timeout; not speaking or aiming it",
+                        text, late, ANSWER_LATE_S)
+        elif source != "sms":
             self.respond(ans)
         return ans
 

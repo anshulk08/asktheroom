@@ -106,4 +106,4 @@ All LLM/VLM work goes through Grok (grok-4.3 via the xAI API, `XAI_API_KEY`). Ev
 | Spec | Feature | Status | Evidence |
 |---|---|---|---|
 | — | Bluetooth LE bridge on the Jetson, chunked JSON protocol (`mobile/bridge/`, `mobile/PROTOCOL.md`) | implemented | `tests/test_mobile_protocol.py`. Needs `sudo hcitool` advertising fix on the Jetson; not yet tested with an iPhone |
-| — | Native iPhone app (SwiftUI + CoreBluetooth) (`mobile/ios/`) | implemented | Xcode project from the mobile teammate; framing and wire models reviewed against `mobile/PROTOCOL.md`. Not yet tested against the Jetson |
+| — | Native iPhone app (SwiftUI + CoreBluetooth) (`mobile/ios/`) | implemented | Xcode project from the mobile teammate; framing and wire models reviewed against `mobile/PROTOCOL.md`. Ask timeouts nest (server 10 s < bridge 12 s < app 15 s); a rig answer later than 10 s is not spoken or aimed (`tests/test_main.py`). Not yet tested against the Jetson |
