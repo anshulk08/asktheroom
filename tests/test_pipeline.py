@@ -48,6 +48,7 @@ def test_open_questions_go_to_grok_by_default_after_the_templates(monkeypatch):
         return Answer("Grok says the mug is fine.")
 
     monkeypatch.setattr(voice.llm, "ask_grok", fake_grok)
+    monkeypatch.setenv("XAI_API_KEY", "k")
     cfg = load_config()
     w = demo_world()
     ask = make_ask(cfg, w, w.events, net=SimpleNamespace(online=True))
@@ -57,11 +58,26 @@ def test_open_questions_go_to_grok_by_default_after_the_templates(monkeypatch):
     assert asked == [("what should I tidy up first?", True)]
 
 
+def test_offline_open_questions_go_to_the_local_qwen_with_backend_auto(monkeypatch):
+    import voice.llm
+    import voice.local_llm
+    monkeypatch.setenv("XAI_API_KEY", "k")
+    monkeypatch.setattr(voice.llm, "ask_grok", lambda *a, **k: (_ for _ in ()).throw(AssertionError("grok")))
+    monkeypatch.setattr(voice.local_llm, "ask_local", lambda q, *a, **k: Answer(f"Qwen: {q}"))
+    w = demo_world()
+    for backend, online in (("auto", False), ("qwen", True)):
+        cfg = load_config()
+        cfg["understand"] = dict(cfg["understand"], backend=backend)
+        ask = make_ask(cfg, w, w.events, net=SimpleNamespace(online=online))
+        assert ask("what should I tidy up first?", "voice").text == "Qwen: what should I tidy up first?"
+
+
 def test_offline_open_questions_get_the_fallback_sentence(monkeypatch):
     import voice.llm
     monkeypatch.setenv("XAI_API_KEY", "k")
     monkeypatch.setattr(voice.llm, "_make_client", lambda *a, **k: (_ for _ in ()).throw(AssertionError("called")))
     cfg = load_config()
+    cfg["understand"] = dict(cfg["understand"], backend="grok")     # no local stand-in
     w = demo_world()
     ask = make_ask(cfg, w, w.events, net=SimpleNamespace(online=False))
     assert ask("what should I tidy up first?", "voice").text == voice.llm.FALLBACK_TEXT

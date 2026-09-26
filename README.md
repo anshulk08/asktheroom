@@ -78,7 +78,7 @@ A judge runs it, and it resets in under a minute:
 | Detection | YOLO-World v2 (`models/yolov8s-worldv2-askroom.engine`), YOLO11 fine-tune planned; Ultralytics container (`scripts/dock.sh`) |
 | World model | Rule-based, deterministic (`core/world.py`, `core/relations.py`) |
 | Speech in | Silero VAD (ONNX) + whisper.cpp base.en (`pywhispercpp` on the laptop, `whisper-cli` on the Jetson) |
-| Understanding | Rule parser, then Grok (`grok-4.3`, reasoning none) for what the rules can't read; local Qwen3-1.7B via `llama-server` is an offline option (`understand.backend: qwen`) |
+| Understanding | Rule parser, then Grok (`grok-4.3`, reasoning none) for what the rules can't read; local Qwen3-1.7B via `llama-server` stands in offline (`understand.backend: auto`, the default; `grok` / `qwen` force one) |
 | Speech out | ElevenLabs `eleven_flash_v2_5` online, Piper `en_US-lessac-medium` offline |
 | Laser | Pan-tilt servos (PCA9685, serial or bus servo) + laser diode, 2nd-order poly fit + closed-loop correction |
 | Server | FastAPI + uvicorn, vanilla JS dashboard, served locally so it works offline |
@@ -128,7 +128,7 @@ Everything lives in `config.yaml`. All thresholds are starting values: tune them
 | world keys (`present_k_of_n` … `answer_hedge`) | World model rule thresholds and confidences |
 | `table`, `servo_limits`, `actuator`, `laser_*` | Table size and markers, pan-tilt driver and limits |
 | `stt` | Whisper backend and VAD settings |
-| `understand` | Model on/off, `backend: grok \| qwen`, llama-server URL and model (qwen), intent timeout 1.5 s |
+| `understand` | Model on/off, `backend: auto \| grok \| qwen` (auto: Grok online, Qwen offline), llama-server URL and model (qwen), intent timeout 1.5 s |
 | `listen` | `mode: always \| wake \| click` (default `always`), `wake_words: [room]`, `idle_s`, `echo_tail_s` |
 | `n8n` | `webhook_url` for the question log (empty turns it off), shared `token` |
 | `sms` | `whitelist` of E.164 numbers allowed to text questions |

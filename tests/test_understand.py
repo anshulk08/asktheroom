@@ -246,3 +246,36 @@ def test_offline_the_model_is_not_asked(monkeypatch):
     u = Understander(CFG, model=stub, online=lambda: False)
     i = u("wears my wall it")
     assert stub.asked == [] and u.last_by == "rules" and i.kind == "OTHER"
+
+
+def test_backend_auto_uses_grok_online_and_the_local_qwen_offline(monkeypatch):
+    from voice.understand import Grok, Qwen
+    monkeypatch.setenv("XAI_API_KEY", "k")
+    net = {"online": True}
+    grok, local = StubQwen(kind="WHERE", obj="wallet"), StubQwen(kind="HANDLED", obj="wallet")
+    grok.name, local.name, local.local = "grok", "qwen", True
+    u = Understander(CFG, model=grok, local=local, online=lambda: net["online"])
+    assert (u("wears my wall it").kind, u.last_by) == ("WHERE", "grok")
+    net["online"] = False
+    assert (u("did someone mess with my wall it").kind, u.last_by) == ("HANDLED", "qwen")
+    assert grok.asked == ["wears my wall it"] and local.asked == ["did someone mess with my wall it"]
+    auto = Understander(dict(CFG, understand=dict(CFG["understand"], backend="auto")))
+    assert isinstance(auto.model, Grok) and isinstance(auto.local, Qwen)
+    assert Understander(dict(CFG, understand=dict(CFG["understand"], backend="grok"))).local is None
+
+
+def test_backend_auto_without_a_key_uses_the_local_qwen(monkeypatch):
+    from voice.understand import Grok
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+    s = FakeSession()
+    local = StubQwen(kind="WHERE", obj="wallet")
+    local.name, local.local = "qwen", True
+    u = Understander(CFG, model=Grok(CFG, session=s), local=local)
+    assert (u("wears my wall it").obj, u.last_by) == ("wallet", "qwen") and s.posts == []
+
+
+def test_backend_qwen_is_asked_offline(monkeypatch):
+    local = StubQwen(kind="WHERE", obj="wallet")
+    local.local = True
+    u = Understander(CFG, model=local, online=lambda: False)
+    assert u("wears my wall it").obj == "wallet" and local.asked
