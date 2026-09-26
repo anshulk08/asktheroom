@@ -245,8 +245,11 @@ enum Grok {
         }
     }
 
-    /// Shown until the helper's key fetches the full list.
-    static let knownVoices = ["eve", "ara", "leo", "rex", "sal"].map { Voice(id: $0, name: $0.capitalized) }
+    /// Shown until the helper's key fetches the list; all 28 from `GET /v1/tts/voices` on Sep 26 2026.
+    static let knownVoices = ["altair", "ara", "atlas", "aurora", "carina", "castor", "celeste", "cosmo", "eve",
+                              "helios", "helix", "iris", "kepler", "leo", "liora", "lumen", "luna", "lux", "naksh",
+                              "orion", "perseus", "rex", "rigel", "sal", "sirius", "ursa", "zagan", "zenith"]
+        .map { Voice(id: $0, name: $0.capitalized) }
 
     static func request(text: String, voice: String, speed: Double, route: VoiceRoute, key: String?) -> URLRequest? {
         guard let key, !key.isEmpty else { return nil }

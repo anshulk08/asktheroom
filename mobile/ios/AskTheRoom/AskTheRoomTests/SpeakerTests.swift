@@ -78,6 +78,7 @@ final class SpeakerTests: XCTestCase {
         XCTAssertEqual(Grok.voices(from: Data(json.utf8)).map(\.id), ["ara", "rex"])
         XCTAssertEqual(Grok.voices(from: Data(json.utf8)).last?.name, "Rex")
         XCTAssertEqual(Grok.voices(from: Data("nope".utf8)), [])
-        XCTAssertEqual(Grok.knownVoices.first?.id, Grok.defaultVoice)
+        XCTAssertTrue(Grok.knownVoices.contains { $0.id == Grok.defaultVoice })
+        XCTAssertEqual(Grok.knownVoices.count, 28)
     }
 }
