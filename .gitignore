@@ -27,6 +27,7 @@ table_cal.json
 table_area.json
 laser_cal.json
 room_map.json
+room_zones.json
 camera_intrinsics.json
 *.log
 

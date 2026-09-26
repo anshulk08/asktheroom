@@ -14,6 +14,8 @@
   7 world       after reset, every object VISIBLE (at config demo_check.home_cm, if set)
   8 kill switch manual: laser on, press the kill switch, confirm the dot went out
   9 clock       not behind the last saved file (a Jetson offline with no RTC battery boots stale)
+ 10 room memory when room_memory.enabled: the zones file has zones drawn at this camera view (files only)
+ 11 room        when room.enabled: the room dot map matches the camera and mapped dots are hit again
 
 Missing hardware fails that check with the reason, so this also runs on a laptop. Parts (camera,
 table, detector, laser) are built on first use and shared; one that fails to build fails every
@@ -495,6 +497,32 @@ def check_clock(rig: Rig) -> Result:
     return True, time.strftime("%a %b %d %H:%M %Z")
 
 
+def check_room_memory(rig: Rig) -> Result:
+    """Room memory (spec 0009 M0), when enabled: table_view_rect is measured, and the zones file exists, has
+    zones and was drawn at this view (capture size, zoom, table_view_rect). Files only: no camera."""
+    from core.room_types import RoomConfig
+    rc = RoomConfig.from_dict(rig.cfg.get("room_memory"))
+    if not rc.enabled:
+        return None, "room memory off (room_memory.enabled: false)"
+    from core.room_zones import Zones, view_version
+    draw = "python -m core.room --zone NAME --say TEXT --poly x,y x,y x,y"
+    if rc.table_view_rect is None:
+        return False, ("no room_memory.table_view_rect: measure it (python -m core.room --measure-rect "
+                       "--full FULL.jpg --ref REF.jpg) and put it in config.local.yaml")
+    try:
+        zones = Zones.load(rc.zones_path)
+    except FileNotFoundError:
+        return False, f"no {rc.zones_path}: draw the zones ({draw})"
+    if not zones.zones:
+        return False, f"{rc.zones_path} has no zones: draw them ({draw})"
+    view = view_version(rc.capture_size, rc.zoom, rc.table_view_rect)
+    if zones.view != view:
+        return False, (f"zones drawn at view {zones.view}, the config gives {view} (capture size, zoom or "
+                       f"table_view_rect changed): redraw them ({draw})")
+    names = ", ".join(f"{n} ({z.say})" for n, z in zones.zones.items())
+    return True, f"{len(zones.zones)} zones at view {view}: {names}"
+
+
 def check_room(rig: Rig) -> Result:
     """Room pointing (spec 0006), when enabled: the map matches the camera, has zones, and three mapped
     dots spread over the room are hit again. The first look (the map's open-loop guess) must land within
@@ -537,6 +565,7 @@ CHECKS: list[tuple[str, Callable[[Rig], Result]]] = [
     ("world", check_world),
     ("kill switch", check_kill_switch),
     ("clock", check_clock),
+    ("room memory", check_room_memory),
     ("room", check_room),
 ]
 

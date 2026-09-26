@@ -25,6 +25,10 @@ feeds the real World itself, so it stands in for capture + perception; the laser
 (a FakeActuator plus its own simulated camera), calibrated at startup into a temp file. With
 --video, a recording replaces the sim camera and goes through the real detector (needs ultralytics
 and the model; the table falls back to frame == table when table_cal.json is missing).
+
+Room memory (spec 0009 M0, `room_memory.enabled`, off by default) runs only on the live camera, never with
+--fake or --video: the camera runs at 1920x1080 behind core.room_view.TableView, and the perception step
+also hands the full frame to core.room.RoomMemory, one drawn zone every room_every_n frames.
 """
 from __future__ import annotations
 
@@ -121,6 +125,8 @@ class Room:
         self.base_ask = self._router(ask)          # the care layer (attach_care) goes in front of this
         self.netmon, self.tts, self.stt, self.clicker = netmon, tts, stt, clicker
         self.detector, self.hands = detector, hands
+        self.room_memory = None                    # core.room.RoomMemory when room_memory.enabled (build)
+        self._room_err_t = float("-inf")
         if interpret is None:
             from voice.understand import Understander
             interpret = Understander(dict(cfg, understand={"enabled": False}))     # rules only
@@ -406,7 +412,26 @@ class Room:
         dets.hands = self.hands.update(dets.hands, dets.t)
         if self.room_enabled:
             self._hand_boxes.extend((time.monotonic(), h.box_px) for h in dets.hands)
-        return dets, self.world.update(dets, frame)
+        events = self.world.update(dets, frame)
+        if self.room_memory is not None:
+            events = events + self._room_step(frame)
+        return dets, events
+
+    def _room_step(self, frame) -> list:
+        """Room memory (spec 0009 M0) on the full camera frame this table frame was cut from. Its errors are
+        logged (at most every 10 s) and never cost table perception."""
+        full_at = getattr(self.frames, "full_at", None)
+        if full_at is None:
+            return []
+        try:
+            full = full_at(frame.t)
+            return list(self.room_memory.step(full) or []) if full is not None else []
+        except Exception:                   # the room must never cost the table
+            now = time.monotonic()
+            if now - self._room_err_t > 10:
+                log.exception("room memory step failed; table perception goes on")
+                self._room_err_t = now
+            return []
 
     def perception_loop(self) -> None:
         last_idx, n, t_win = 0, 0, time.monotonic()
@@ -657,6 +682,44 @@ def warn_if_clock_behind(cfg: dict) -> Optional[float]:
     return behind
 
 
+def open_frames(cfg: dict, camera) -> tuple[object, Optional[tuple[int, int, int, int]]]:
+    """The live camera, and the table view rect when room memory is on (else None).
+
+    Room memory off: FrameBuffer(camera), as always. On (spec 0009 M0): the camera runs at
+    room_memory.capture_size (1920x1080, zoom 100) in a short ring (ring_s: 1080p frames are big), and the
+    table pipeline sees it through TableView, which cuts the zoom-160 region (table_view_rect) and resizes
+    it to 1280x720, so everything that reads frames keeps getting table frames."""
+    import core.capture
+    from core.room_types import RoomConfig
+    rc = RoomConfig.from_dict(cfg.get("room_memory"))
+    if not rc.enabled:
+        return core.capture.FrameBuffer(camera), None
+    from core.room_view import TableView, default_rect
+    out = tuple(cfg.get("frame_size_px", (1280, 720)))
+    rect = rc.table_view_rect
+    if rect is None:
+        rect = tuple(default_rect(rc.capture_size, rc.zoom, rc.ref_zoom, out))
+        log.warning("room_memory: no table_view_rect, using the centred default %s; measure it "
+                    "(python -m core.room --measure-rect) and put it in config.local.yaml", list(rect))
+    w, h = rc.capture_size
+    fb = core.capture.FrameBuffer(camera, ring_s=rc.ring_s,
+                                  opener=lambda src: core.capture.open_camera(src, w, h))
+    log.info("room memory: camera at %dx%d, table view %s", w, h, list(rect))
+    return TableView(fb, rect, out), rect
+
+
+def make_room_memory(cfg: dict, world, detector, rect):
+    """core.room.RoomMemory on the detector's already-loaded prop model, or None (RoomMemory.from_config logs
+    why: no zones file, no zones, zones drawn at another view). A failure to start is logged and the table
+    runs without it."""
+    try:
+        from core.room import RoomMemory
+        return RoomMemory.from_config(cfg, world, detector.backend, rect)
+    except Exception:
+        log.exception("room memory failed to start; the table runs without it")
+        return None
+
+
 def build(cfg: dict, fake: bool = False, camera: int = 0, with_voice: bool = True,
           video: Optional[str] = None, keyboard: Optional[bool] = None) -> tuple[Room, bool]:
     """Construct everything. Returns (room, needs_perception_thread)."""
@@ -684,7 +747,10 @@ def build(cfg: dict, fake: bool = False, camera: int = 0, with_voice: bool = Tru
     world = core.world.World(cfg, events, embed=core.embed.make_embedder(cfg))   # None unless reid.enabled
 
     detector = hands = None
+    room_rect = None                                   # table view rect: room memory on (open_frames)
     perception = True
+    if (fake or video) and (cfg.get("room_memory") or {}).get("enabled"):
+        log.info("room_memory.enabled is ignored with --fake / --video: room memory needs the live camera")
     if fake and not video:
         from server.sim import SimCamera
         frames = SimCamera(cfg, world).start()          # plays the story and updates the world
@@ -701,7 +767,7 @@ def build(cfg: dict, fake: bool = False, camera: int = 0, with_voice: bool = Tru
         if video:
             frames = core.capture.VideoFileSource(video, loop=True)
         else:
-            frames = core.capture.FrameBuffer(camera)
+            frames, room_rect = open_frames(cfg, camera)
         cleanup.append(frames.stop)
         table = core.table.Table(cfg)                  # loads table_cal.json; table.ok says if calibrated
         # (one-tag mode: the saved tracked-area size went into cfg at the top of build())
@@ -786,6 +852,11 @@ def build(cfg: dict, fake: bool = False, camera: int = 0, with_voice: bool = Tru
     room = Room(cfg, world, events, table, frames, laser, ask, netmon=netmon, tts=tts, stt=stt,
                 clicker=clicker, detector=detector, hands=hands, interpret=interpret)
     room.cleanup = cleanup
+    if room_rect is not None:
+        room.room_memory = make_room_memory(cfg, world, detector, room_rect)
+        if room.room_enabled:      # 0006 room pointing reads frames.latest(), now the table view (spec 0009 M5)
+            log.error("room pointing (room.enabled) does not work with room_memory yet: room pointing is off")
+            room.room_enabled = False
     if (cfg.get("care") or {}).get("enabled", True):     # reminders, reports, follow-ups, profile (voice/care.py)
         from voice.care import attach_care
         cleanup.append(attach_care(room, cfg).stop)

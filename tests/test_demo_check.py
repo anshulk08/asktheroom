@@ -210,7 +210,7 @@ def test_clock_check_passes_on_a_set_clock_and_keeps_its_number():
         ok, msg = dc.check_clock(rig)
     finally:
         rig.close()
-    assert ok is True and dc.CHECKS[8][0] == "clock" and len(dc.CHECKS) == 10
+    assert ok is True and dc.CHECKS[8][0] == "clock" and len(dc.CHECKS) == 11
 
 
 def test_room_check_skips_when_off_and_rehits_the_sim_map():

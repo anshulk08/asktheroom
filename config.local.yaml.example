@@ -7,3 +7,10 @@ actuator: pca9685            # the committed default is fake, which never moves 
 # The laptop running n8n, or the rig if it reports to it:
 # n8n:
 #   webhook_url: http://192.168.55.100:5678/webhook/ask-the-room
+
+# Room memory (spec 0009 M0) on the rig: the camera at 1920x1080, zoom 100. table_view_rect is measured
+# once (python -m core.room --measure-rect --full FULL.jpg --ref REF.jpg prints it); zones drawn with
+# python -m core.room --zone NAME --say TEXT --poly x,y x,y x,y ... must match it (demo_check.py check 10).
+# room_memory:
+#   enabled: true
+#   table_view_rect: [x1, y1, x2, y2]

@@ -46,6 +46,7 @@ the name, so the next ask needs no Grok call.
 camera ─▶ core/capture.FrameBuffer (30 fps thread)
         ─▶ core/detect.Detector (YOLO, TensorRT, ~14 ms) ─▶ core/hands.HandTracker (stable hand ids)
         ─▶ core/world.World.update()  ── rules from spec 3.5 ──▶ core/events.EventLog (SQLite + JPEG snapshots)
+        ─▶ core/room.RoomMemory.step(full frame) ─▶ World.room_update()   (room memory, off by default)
                      │
 always-on mic ─▶ voice/stt (Silero VAD + whisper.cpp; audio only in memory; muted while the rig speaks)
           ─▶ voice/understand: meant for the rig? (keyword gate, then wake word "room" or a question
@@ -90,6 +91,7 @@ rules can't read and of open questions (with a compact world state).
 | `core/events.py` | EventLog: SQLite event history, questions table and snapshots. |
 | `core/fakeworld.py` | Stand-in world with the same read API, for tests and `--fake` runs. |
 | `core/things.py`, `core/proposals.py`, `core/embed.py`, `core/crops.py` | Open world: unnamed `thing:N` identity (spec 0008: a thing lost within 60 s and seen again at its spot is itself, `thing_identity:`), object proposals (change detection, YOLOE prompt-free), DINOv2 re-id embedder (off by default), close-up crops. |
+| `core/room_types.py`, `core/room_zones.py`, `core/room_view.py`, `core/room.py`, `core/room_world.py` | Room memory (spec 0009 M0, off by default, `room_memory:`): `TableView` cuts the table view out of the 1080p frame so the table pipeline is unchanged; drawn zones with spoken names (`room_zones.json`, `python -m core.room --zone`); per-zone tracks and the per-frame driver (`RoomMemory`); the World rules that follow a prop carried off the table into a zone (`world.place()`). Room positions are full-frame px, never table cm. |
 | `core/auto_name.py` | Automatic names: one Grok look at each new `thing:N`'s close-up, kept as a soft guess (not an alias) that questions fall back to, hedged. |
 | `core/narration*.py`, `core/visual_memory.py`, `core/clip_tokenizer.py` | Grok clip narration and the keyframe archive with MobileCLIP2 text search. |
 | `core/grok_check.py` | Grok settle check (spec 0007, off by default): Grok checks the tracked marks when the table settles; verdict rows in `grok_checks`; sightings answer "where is my X" when the world has no position; one object per kind and the label belief (spec 0008). YOLO stays Stage 1. |
@@ -112,7 +114,7 @@ rules can't read and of open questions (with a compact world state).
 - Code must run on **Python 3.10** (JetPack 6). No `match` statements and no 3.11+ stdlib.
 - Add new config keys in new sections at the end of `config.yaml`. Don't rename existing keys.
   Tune thresholds from replays, never by guessing during a live run.
-- Readers of the world use only `get / resolve / history / state_json` (`WorldAPI`).
+- Readers of the world use only `get / resolve / history / state_json / place` (`WorldAPI`).
 - Spoken answers are 1–2 short sentences with no markdown. Pill-bottle wording stays neutral (never "taken").
 
 ## Running it
@@ -161,6 +163,13 @@ Room pointing (spec 0006, branch `room-pointing`, after the freeze): the laser c
 things off the table without depth, using a swept dot map and a pixel-space loop that stops once the camera
 sees the dot inside the object's box. It's off by default (`room.enabled: false`) and tested in a sim
 room only, not on the rig.
+
+Room memory M0 (spec 0009, branch `room-memory-m0`; the freeze was lifted for it): implemented,
+unit-tested, not yet on the rig. A prop carried from the table to a drawn room zone ("the bookshelf") is
+answered as "on the bookshelf", from the one camera at 1920x1080 with no laser. Off by default
+(`room_memory.enabled: false`); on the rig it needs `table_view_rect` measured, zones drawn, and D17 passing
+on the table view (`demo_check.py` check 10 checks the files). One instance per prop class is a demo
+assumption, not identity evidence.
 
 ## Decisions worth knowing
 

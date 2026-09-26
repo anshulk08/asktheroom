@@ -504,3 +504,34 @@ room:
   hand_recent_s: 2            # hand boxes seen this recently block a room aim
   person_check: true          # also run OpenCV HOG for standing people before each room aim
   person_clear_s: 5           # the sweep needs nobody seen for this long, and stops when someone appears
+
+# Room memory (spec 0009 M0, off by default): "where are my keys?" answers "on the bookshelf" when a prop is
+# carried from the table to a drawn room zone. The Brio runs at 1920x1080, zoom 100; the table pipeline
+# sees the zoom-160 region cut out and resized to 1280x720 (core/room_view.TableView). Every room_every_n
+# perception frames one zone is cropped at full resolution and run through the prop model (core/room.py).
+# Live camera only (never --fake or --video). Per rig, in config.local.yaml: enabled, table_view_rect.
+# Zones: python -m core.room --zone NAME --say TEXT --poly x,y x,y x,y ...; demo_check.py check 10.
+room_memory:
+  enabled: false
+  capture_size: [1920, 1080]  # full camera frame, px (the camera runs at this size when enabled)
+  zoom: 100                   # Brio zoom_absolute the room runs at (scripts/camera_setup.sh)
+  ref_zoom: 160               # zoom the table pipeline was tuned at (the table view)
+  table_view_rect: null       # [x1, y1, x2, y2] full-frame px of the table view; null = centred default
+                              # (python -m core.room --measure-rect, into config.local.yaml)
+  zones_path: room_zones.json # drawn zones, spoken names and the view they were drawn at
+  ring_s: 1.0                 # FrameBuffer ring when enabled (1080p frames: the 10 s default is ~1.8 GB)
+  room_every_n: 5             # process one zone every N perception frames, round-robin
+  confirm_visits: 2           # consecutive matched visits to confirm a room track
+  handoff_s: 120              # a table departure lets one room track take the prop this long
+  table_fresh_s: 2.0          # a prop seen VISIBLE on the table this recently is on the table
+  room_prop_conf: 0.45        # class score a room detection needs
+  absent_visits: 3            # valid empty visits of its zone before a room prop is UNKNOWN
+  fresh_visits: 2             # present tense ("is on") needs fewer valid misses than this ...
+  fresh_s: 10.0               # ... and a match this recent; else "I last saw"
+  lum_lo: 25                  # a box darker than this mean grey is not a valid visit
+  lum_hi: 235                 # ... or brighter than this
+  hand_iou: 0.6               # a prop box this much on a hand box is the hand
+  blocker_overlap: 0.3        # a hand or change blob covering this much of a track box: invalid visit
+  change_thr: 40              # grey-level change between visits of a zone counted as change
+  change_area_ratio: 1.5      # a change blob this much bigger than the track box blocks it
+  max_crop_px: 1280           # zone crops with a longer side are resized down to this

@@ -23,7 +23,7 @@ An overhead camera on a Jetson tracks tabletop objects, including hidden ones (u
 - **Python 3.10.** The Jetson runs JetPack 6. Don't use `match` statements or 3.11+ stdlib (`tomllib`, `ExceptionGroup`, `typing.Self` and so on).
 - **Config.** Add new config keys in new sections at the end of `config.yaml`. Never rename existing keys. Tune thresholds from recorded replays (`eval.replay`, `scripts/eval_understand.py`, `scripts/overheard_test.py`), never by guessing during a live run. Per-device values (actuator driver, webhook URL) go in the gitignored `config.local.yaml`, not in `config.yaml`.
 - **Units.** Positions are table centimetres (origin at ArUco marker 0, x right, y down). A field is in pixels only if its name says so (`box_px`).
-- **World readers** (answers, LLM prompts, server, eval) use only `get`, `resolve`, `history` and `state_json` (`WorldAPI` in `core/world.py`).
+- **World readers** (answers, LLM prompts, server, eval) use only `get`, `resolve`, `history`, `state_json` and `place` (`WorldAPI` in `core/world.py`; `place` says whether something is on the table or in a room zone, spec 0009).
 - **Spoken answers** are 1–2 short sentences with no markdown. Pill-bottle wording stays neutral: never say or imply that medication was "taken". The pill filter in `voice/llm.py` (`to_answer`, `PILLS_SAFE`) runs on every LLM answer.
 - **Shared types** in `core/types.py` change only as a team.
 - **Owned files.** Don't edit `core/capture.py`, `core/detect.py`, `core/hands.py`, `core/table.py`, `core/world.py`, `core/relations.py` or `core/events.py`. A teammate owns them, so propose changes to them instead. (Exception on record: the Friday-night open-world work changed `core/world.py`, `core/detect.py` and `core/table.py` with the lead's approval; `git log -- <file>` shows each change.)
@@ -33,7 +33,7 @@ An overhead camera on a Jetson tracks tabletop objects, including hidden ones (u
 - **Tests.** Keep them passing: `.venv/bin/python -m pytest -q`. None need hardware. Add tests with new behaviour.
 - **Never commit** `tests/stt_audio/*.wav`, anything under `models/` (small licensed data files the code needs go in `assets/`), `.env`, calibration files (`table_cal.json`, `laser_cal.json`) or `data/events.db`.
 - **Commits.** Small, one topic each, with conventional prefixes (`feat:`, `fix:`, `docs:`, `chore:`). No AI attribution lines. Dated commits are part of the hackathon record: all code was written after the Friday 8 PM start (the first commit is Fri Sep 25 20:05 EDT).
-- **Freeze.** After Sat Sep 26 6 PM EDT: only bug fixes, tuning from replays, and docs. Anything new becomes a spec or roadmap item, not half-built code.
+- **Freeze.** After Sat Sep 26 6 PM EDT: only bug fixes, tuning from replays, and docs. Anything new becomes a spec or roadmap item, not half-built code. Lifted for spec 0009 (room memory M0) by Anshul, Sat 26 Sep.
 - **Docs in the same change.** When a feature's state changes, update `docs/FEATURE_STATUS.md`, and `CONTEXT.md` if the map or status moved. The n8n bot is only as current as `CONTEXT.md`.
 
 ## Commands
