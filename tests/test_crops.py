@@ -72,6 +72,18 @@ def test_known_objects_are_keyed_by_name_and_things_by_position():
     assert store.for_box(box_cm=(20, 60, 25, 65)) is None           # nothing there
 
 
+def test_a_thing_track_restarts_its_best_crop_after_a_gap():
+    """A different object put where a proposal was must not inherit the old one's best crop: after the
+    spot was empty for more than renew_after_s the track starts over; a short flicker keeps it."""
+    store = CropStore(recent_every_s=0)
+    store.update(scene({'red mug': MUG}), [det('thing', MUG)], [], 1.0)          # clean, sharp
+    store.update(scene({'red mug': MUG}, blur=4), [det('thing', MUG)], [], 1.5)  # flicker gap: kept
+    assert store.for_box(box_cm=(60, 30, 69, 38)).best.t == 1.0
+    store.update(scene({'blue notebook': MUG}, blur=4), [det('thing', MUG)], [], 4.0)   # after 2.5 s away
+    rec = store.for_box(box_cm=(60, 30, 69, 38))
+    assert rec.best.t == 4.0 and rec.recent.t == 4.0
+
+
 def test_the_store_is_bounded_by_evicting_the_least_recently_seen():
     store = CropStore(max_tracks=4, recent_every_s=0)
     for i in range(10):
