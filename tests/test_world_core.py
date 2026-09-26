@@ -57,7 +57,7 @@ def test_vanishing_without_a_hand_is_lost_track(scene, world):
     scene.place('keys', 40, 30)
     scene.run(world, 1.0)
     scene.remove('keys')
-    events = scene.run(world, 1.0)
+    events = scene.run(world, world.cfg.lost_grace_s + 0.2)       # unseen that long: lost
     keys = world.get('keys')
     assert types(events) == [EventType.LOST_TRACK]
     assert keys.status == Status.UNKNOWN
@@ -196,7 +196,7 @@ def test_reappearing_after_lost_track_is_corrected(scene, world):
     scene.place('keys', 40, 30)
     scene.run(world, 1.0)
     scene.remove('keys')
-    scene.run(world, 1.0)
+    scene.run(world, world.cfg.lost_grace_s + 0.2)
     scene.place('keys', 40, 30)
     assert types(scene.run(world, 1.0)) == [EventType.CORRECTED]
 
@@ -243,7 +243,7 @@ def test_confidence_decays_for_hidden_beliefs_but_not_for_visible_ones(scene, wo
     scene.place('keys', 40, 30)
     scene.run(world, 1.0)
     scene.remove('keys')
-    scene.run(world, 1.0)
+    scene.run(world, cfg.lost_grace_s + 0.2)
     before = world.get('keys').confidence
     scene.dt = 60.0                   # one batch per simulated minute
     scene.run(world, 10 * 60.0)

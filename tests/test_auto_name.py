@@ -325,7 +325,8 @@ def test_config_off_by_default_and_from_config():
     assert from_config({}, object()) is None
     c = AutoNameConfig.from_dict(CFG.get("auto_name"))
     assert c.enabled and c.max_per_minute >= 1 and 0 < c.min_confidence < 1
-    assert list(CFG)[-1] == "auto_name"             # a new section goes at the end (AGENTS.md)
+    keys = list(CFG)                                # a new section goes at the end (AGENTS.md): after
+    assert keys.index("auto_name") > keys.index("table_area")      # the sections that came before it
 
 
 def test_labels_and_phone_carry_the_guess():

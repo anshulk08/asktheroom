@@ -74,6 +74,9 @@ class Config:
     bg_change_threshold: float = 25.0
     appearance_match: float = 0.7
     bg_update_every_s: float = 1.0
+    # An object on the table unseen (no detection, no patch match) for less than this is kept where it
+    # was before LOST_TRACK: an arm the detectors miss, or a detector that drops objects near an arm.
+    lost_grace_s: float = 2.0
 
     synonyms: dict[str, str] = field(default_factory=dict)
     edge_drop_cm: float = 10.0

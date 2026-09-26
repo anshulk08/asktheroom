@@ -410,3 +410,12 @@ auto_name:
   max_per_minute: 10          # Grok calls per minute; more new things wait their turn
   min_confidence: 0.5         # a guess below this is not kept (and not asked again)
   retry_after_s: 30           # a failed call is tried once more this much later
+
+# Briefly unseen is not lost (core/world.py, rule 4). An object on the table that no rule explains (no hand
+# took it, no cover, nothing new over its spot) stays where it was, still visible, until it has been unseen
+# this long: no detection and no match of its remembered patch. The fine-tuned detector drops objects while
+# an arm is near them and dim-light arms are often not detected as hands; on shell_1 untouched objects were
+# unseen for up to 1.9 s and then found in place (LOST_TRACK then CORRECTED churn). Seen again in the
+# window: nothing is logged. Only LOST_TRACK waits: hand, cover, container and 'unknown' cover rules
+# still decide at once. A removed object is lost this long after it was last seen.
+lost_grace_s: 2.0
