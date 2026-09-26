@@ -241,6 +241,8 @@ class ThingRules:
         self._thing_n = max(getattr(self, '_thing_n', 0), logged(PREFIX) if logged else 0)
         self._things: list[str] = []                   # every thing ever confirmed, oldest first
         self._born: dict[str, float] = {}              # thing -> wall time it was confirmed
+        self._alias_by: dict[str, str] = {}             # alias -> who bound it ('grok'), absent = taught
+        self._vetoes: list[tuple] = []                  # (centre cm, until wall): retired clutter's spots
         self._cands: list[Candidate] = []
         self._banks: dict[str, ExemplarBank] = {}
         self._aliases: dict[str, str] = {}              # normalised alias -> thing
@@ -315,14 +317,40 @@ class ThingRules:
                 self._bind(target, key)
             return target
 
-    def bind_alias(self, entity: str, name: str) -> bool:
+    def bind_alias(self, entity: str, name: str, by: str | None = None) -> bool:
         """Bind a name to a given thing (the 'yes, that's it' flow). A name keeps one owner: it
-        moves here from any other thing. Configured objects' names are refused."""
+        moves here from any other thing. Configured objects' names are refused. by: who named it when
+        not a person ('grok'); shown as named_by, so answers and the phone can hedge."""
         with self.lock:
             key, ent = norm_name(name), self._survivor(entity)
             if not key or self._is_known_name(key) or not is_thing(ent) or ent not in self.entities:
                 return False
             self._bind(ent, key)
+            if by:
+                self._alias_by[key] = by
+            return True
+
+    def retire_thing(self, name: str, since: float, veto_s: float = 120.0, veto_cm: float = 5.0) -> bool:
+        """Drop an unnamed thing judged not an object (Grok, over several settle checks: a cable, part of
+        the desk). Only one lying VISIBLE on the table, without a taught name, holding nothing, with no hand
+        contact since monotonic time `since` (the judged frame). It leaves the state (merged_into itself,
+        history kept) and no new thing is born within veto_cm of it for veto_s. No event: nothing moved."""
+        with self.lock:
+            e = self.entities.get(name)
+            if e is None or not is_thing(name) or e.merged_into is not None or e.status != Status.VISIBLE \
+                    or e.pos_cm is None or any(self._alias_by.get(a) is None for a in e.aliases) \
+                    or any(o.parent == name for o in self.entities.values()) \
+                    or max(self._contacts.get(name, {}).values(), default=NEG) > since:
+                return False
+            now = self._wall if self._wall is not None else time.time()
+            self._vetoes = [v for v in self._vetoes if v[1] > now] + [(tuple(e.pos_cm), now + veto_s, veto_cm)]
+            for a in list(e.aliases):
+                self._aliases.pop(a, None)
+                self._alias_by.pop(a, None)
+            e.merged_into, e.status, e.parent, e.confidence, e.aliases = name, Status.UNKNOWN, None, 0.0, []
+            self._bits[name] = deque(maxlen=self.cfg.present_n)
+            self._present[name] = False
+            self._merged.pop(name, None)
             return True
 
     def confirm_same(self, a: str, b: str) -> str | None:
@@ -594,6 +622,9 @@ class ThingRules:
         """A proposal may start a NEW identity only inside the tabletop outline, clear of its edge
         band (table_area:), and only if it is not flagged occluded (mostly inside a person box: a
         finger, a knee, a carried object). Otherwise it can still be an existing thing (rules a-c)."""
+        if self._vetoes and any(until > (self._wall or 0) and geom.dist(d.center_cm, c) <= r
+                                for c, until, r in self._vetoes):
+            return False                    # where retired clutter lay (retire_thing)
         return not d.occluded and self._area.interior(d.center_cm)
 
     def _identify(self, d: Detection, vec, seen, may_create: bool = True):
@@ -829,6 +860,7 @@ class ThingRules:
         return max(pool, key=lambda n: (self._placed_t[n], -self._thing_number(n) if is_thing(n) else 0))
 
     def _bind(self, name: str, key: str) -> None:
+        self._alias_by.pop(key, None)
         old = self._aliases.get(key)
         if old is not None and key in self.entities[old].aliases:
             self.entities[old].aliases.remove(key)
@@ -873,7 +905,10 @@ class ThingRules:
         self._banks[keep].extend(self._banks[drop])
         mine = list(ek.aliases)
         for key in reversed(ed.aliases):
+            by = self._alias_by.get(key)
             self._bind(keep, key)
+            if by:
+                self._alias_by[key] = by
         ek.aliases = mine + [a for a in ek.aliases if a not in mine]     # its own names stay first
         links: dict[str, float] = {}
         for n, sc in ek.maybe_same_as + ed.maybe_same_as:
@@ -912,7 +947,8 @@ class ThingRules:
     def _thing_json(self, ent: Entity, out: dict) -> dict:
         if is_thing(ent.name):
             out.update(label=ent.aliases[0] if ent.aliases else None, aliases=list(ent.aliases),
-                       maybe_same_as=[[n, s] for n, s in ent.maybe_same_as])
+                       maybe_same_as=[[n, s] for n, s in ent.maybe_same_as],
+                       named_by=self._alias_by.get(ent.aliases[0]) if ent.aliases else None)
         return out
 
     # ----- things as containers ---------------------------------------------------------------------

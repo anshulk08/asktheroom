@@ -47,7 +47,7 @@ class ThingWorld(FakeWorld):
     def find(self, name):
         return name if name in self.entities else next((n for n, v in self.labels.items() if v == name), None)
 
-    def bind_alias(self, entity, name):
+    def bind_alias(self, entity, name, by=None):
         if entity not in self.entities or entity in self.labels:
             return False
         self.labels[entity] = name

@@ -447,6 +447,13 @@ grok_check:                   # Grok checks the tracker each time the table sett
                               # 'phone' and 'phone charger' on two checks; at 0.9 names held up)
   merge_same: true            # one per kind: a new thing Grok names what a lost thing answers to is that
                               # thing (never two seen at once, never one holding another)
+  belief_enabled: false       # an unnamed thing's top-3 guesses, summed over checks, name it or retire it
+  min_obs: 3                  # checks before the belief acts
+  name_p: 0.6                 # top label's share to name it, name_margin ahead of the next
+  name_margin: 0.2
+  retire_p: 0.7               # 'not an object' share to retire it as clutter (never one a hand touched)
+  half_life_s: 120            # older checks count half after this
+  veto_s: 120                 # no new thing where retired clutter lay, this long
   sighting_max_age_s: 900     # WHERE falls back to a sighting no older than this
   keep_h: 24                  # rows older than this are deleted on start
 

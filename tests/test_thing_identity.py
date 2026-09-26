@@ -199,3 +199,111 @@ def test_a_lost_thing_still_on_the_marks_is_not_merged():
     lost_mug_then_new(scene, world)
     grok_names(world, 'thing:2', 'mug', others=[('thing:1', 'tape')])
     assert things(world) == ['thing:1', 'thing:2']
+
+
+# ----- belief: an unnamed thing's guesses over several checks name it or retire it as clutter ------
+
+def checker(world, replies, **gc):
+    """A GrokCheck on `world` whose settle checks reply, in turn, with `replies` (one mark each)."""
+    import json
+    import tempfile
+
+    from core.config import load_config
+    from core.events import EventLog
+    from core.grok_check import GrokCheck
+    from core.narration import FakeProvider
+    from server.sim import SimTable
+    raw = load_config()
+    rep = [json.dumps({"marks": [dict(mark=1, real=r.get("real", True), label=r.get("label"),
+                                      confidence=r.get("conf", 0.5), guesses=r.get("guesses", []),
+                                      not_object=r.get("no", 0.0), held=False)], "unmarked": []})
+           for r in replies]
+    g = GrokCheck({**raw, "grok_check": {"enabled": True, "belief_enabled": True, **gc}},
+                  EventLog(":memory:", tempfile.mkdtemp()),
+                  table=SimTable(raw), provider=FakeProvider(rep), online=lambda: True, start=False)
+    g.world = world
+    return g
+
+
+def settle_checks(g, ent, n, wall=2000.0, t=None, gap=10.0):
+    import numpy as np
+    img = np.full((720, 1280, 3), 170, np.uint8)
+    for i in range(n):
+        s = g.check(img, wall + i * gap, t=t, marks=[(ent, (100, 100, 160, 160))], names={ent: None})
+    return s
+
+
+def one_thing(scene, world, at=(40, 30)):
+    scene.thing('blob', *at)
+    scene.run(world, 2.0)
+    assert things(world) == ['thing:1']
+
+
+def test_three_checks_that_agree_on_a_guess_name_the_thing():
+    scene, world = make(rebirth_s=0.0)
+    one_thing(scene, world)
+    g = checker(world, [dict(guesses=[dict(label='phone charger', p=0.6), dict(label='cable', p=0.2)])])
+    s = settle_checks(g, 'thing:1', 2)
+    assert world.get('thing:1').aliases == [] and g.belief('thing:1')[0][0] == 'phone charger'
+    s = settle_checks(g, 'thing:1', 1)
+    assert world.find('phone charger') == 'thing:1' and s['bound'] == ['thing:1 = phone charger']
+    assert world.state_json()['entities'][-1]['named_by'] == 'grok'
+
+
+def test_split_guesses_never_name_it():
+    scene, world = make(rebirth_s=0.0)
+    one_thing(scene, world)
+    g = checker(world, [dict(guesses=[dict(label='phone', p=0.45), dict(label='remote', p=0.4)])])
+    settle_checks(g, 'thing:1', 5)
+    assert world.get('thing:1').aliases == []
+
+
+def test_clutter_is_retired_and_nothing_is_born_there_for_a_while():
+    scene, world = make(rebirth_s=0.0)
+    one_thing(scene, world)
+    g = checker(world, [dict(real=False, conf=0.9, no=0.9)])
+    s = settle_checks(g, 'thing:1', 3, wall=scene.t, t=scene.t)
+    assert s['retired'] == ['thing:1'] and things(world) == []
+    assert 'thing:1' not in [e['name'] for e in world.state_json()['entities']]
+    scene.run(world, 3.0)                              # still on the table: no new thing at that spot
+    assert things(world) == []
+
+
+def test_a_touched_thing_is_not_retired():
+    scene, world = make(rebirth_s=0.0)
+    one_thing(scene, world)
+    t0 = scene.t
+    scene.hand(1, 40, 30)
+    scene.run(world, 0.3)
+    scene.hand_off(1)
+    scene.run(world, 2.0)
+    g = checker(world, [dict(real=False, conf=0.9, no=0.9)])
+    s = settle_checks(g, 'thing:1', 3, t=t0)             # judged a frame from before the touch
+    assert s['retired'] == [] and things(world) == ['thing:1']
+
+
+def test_named_things_have_no_belief_and_belief_is_off_by_default():
+    scene, world = make(rebirth_s=0.0)
+    one_thing(scene, world)
+    g = checker(world, [dict(real=False, conf=0.9, no=0.9)], belief_enabled=False)
+    settle_checks(g, 'thing:1', 3, t=scene.t)
+    assert things(world) == ['thing:1'] and g.belief('thing:1') == []
+    world.bind_alias('thing:1', 'tape')
+    g = checker(world, [dict(real=False, conf=0.9, no=0.9)])
+    settle_checks(g, 'thing:1', 3, t=scene.t)
+    assert things(world) == ['thing:1']
+
+
+def test_an_old_grok_checks_table_gains_the_new_columns():
+    import tempfile
+
+    from core.events import EventLog
+    from core.grok_check import COLS, CheckStore
+    ev = EventLog(":memory:", tempfile.mkdtemp())
+    with ev._locked():
+        ev._conn().execute("CREATE TABLE grok_checks (id INTEGER PRIMARY KEY, t REAL, wall REAL, episode TEXT, "
+                           "mark INTEGER, entity TEXT, world_label TEXT, grok_label TEXT, verdict TEXT, x_cm REAL, "
+                           "y_cm REAL, confidence REAL, latency_ms INTEGER, model TEXT)")
+    store = CheckStore(ev)
+    store.add([{"wall": 1.0, "verdict": "named", "guesses": '[["mug", 0.7]]', "not_object": 0.1, "held": 0}])
+    assert set(store.rows()[0]) == set(COLS) and store.rows()[0]["guesses"] == '[["mug", 0.7]]'

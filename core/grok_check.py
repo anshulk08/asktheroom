@@ -70,6 +70,14 @@ class GrokCheckConfig:
     bind_names: bool = True
     bind_conf: float = 0.7                  # an unnamed thing takes Grok's label at or above this
     merge_same: bool = False                # one per kind: a thing named what a lost thing answers to is it
+    # Belief: an unnamed thing's top-3 guesses, summed over checks (older ones fade), name it or retire it.
+    belief_enabled: bool = False
+    min_obs: int = 3                        # checks before the belief acts
+    name_p: float = 0.6                     # top label's share to name the thing
+    name_margin: float = 0.2                # ... and its lead over the next label
+    retire_p: float = 0.7                   # 'not an object' share to retire it as clutter
+    half_life_s: float = 120.0
+    veto_s: float = 120.0                   # no new thing where a retired one lay, this long
     sighting_max_age_s: float = 900.0       # lookup() ignores older sightings
     keep_h: float = 24.0                    # rows older than this are deleted on start
 
@@ -93,6 +101,9 @@ For every mark:
 - real: true if the box shows a physical object on the table; false if it shows only empty table, a shadow, a reflection, a hand or arm, or a printed black-and-white marker.
 - label: what the object in the box is, the way a person would say it: 1 to 4 plain words, colour first if it helps ("red mug", "phone charger"). Null if real is false. For any medicine container say only "pill bottle".
 - confidence: 0 to 1; below 0.5 if you aren't sure.
+- guesses: up to 3 labels the object could be, most likely first, each with p = your probability that it is that (0 to 1, together at most 1). Empty if real is false.
+- not_object: your probability (0 to 1) that the box shows no object at all (table, shadow, cable, tape, part of the desk).
+- held: true if a hand is touching or holding the object.
 
 unmarked: objects on the table that no box covers (at most 8), each with a label as above, point = its centre as {"x": fraction of the image width, "y": fraction of the height}, each 0 to 1, and a confidence. Ignore the table itself, cables, hands and the printed square markers.
 
@@ -102,10 +113,15 @@ SCHEMA = {
     "type": "object", "additionalProperties": False, "required": ["marks", "unmarked"],
     "properties": {
         "marks": {"type": "array", "items": {
-            "type": "object", "additionalProperties": False, "required": ["mark", "real", "label", "confidence"],
+            "type": "object", "additionalProperties": False,
+            "required": ["mark", "real", "label", "confidence", "guesses", "not_object", "held"],
             "properties": {"mark": {"type": "integer"}, "real": {"type": "boolean"},
                            "label": {"anyOf": [{"type": "null"}, {"type": "string"}]},
-                           "confidence": {"type": "number"}}}},
+                           "confidence": {"type": "number"},
+                           "guesses": {"type": "array", "maxItems": 3, "items": {
+                               "type": "object", "additionalProperties": False, "required": ["label", "p"],
+                               "properties": {"label": {"type": "string"}, "p": {"type": "number"}}}},
+                           "not_object": {"type": "number"}, "held": {"type": "boolean"}}}},
         "unmarked": {"type": "array", "items": {
             "type": "object", "additionalProperties": False, "required": ["label", "point", "confidence"],
             "properties": {"label": {"type": "string"},
@@ -120,8 +136,32 @@ def _fake_reply(job) -> str:
     """The fake provider's reply: every mark is real and is what the tracker calls it."""
     text = " ".join(v for k, v in job.parts if k == "text")
     marks = [{"mark": int(i), "real": True, "label": None if n.strip() == "unnamed object" else n.strip(),
-              "confidence": 0.9} for i, n in re.findall(r"(\d+) = ([^,.\n]+)", text)]
+              "confidence": 0.9, "guesses": [], "not_object": 0.05, "held": False}
+             for i, n in re.findall(r"(\d+) = ([^,.\n]+)", text)]
     return json.dumps({"marks": marks, "unmarked": []})
+
+
+NOT_OBJECT = "not an object"                              # the belief's clutter label
+
+
+def _p(v) -> Optional[float]:
+    """A probability from the reply, clipped to 0-1, or None."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or v != v:
+        return None
+    return round(min(1.0, max(0.0, float(v))), 3)
+
+
+def guesses(v) -> list[list]:
+    """The reply's guesses as [[label, p], ...]: safe labels only, at most 3, p rescaled if they sum over 1."""
+    out = []
+    for g in (v if isinstance(v, list) else [])[:3]:
+        if not isinstance(g, dict):
+            continue
+        label, p = safe_label(g.get("label")), _p(g.get("p"))
+        if label and p and all(not same_thing(label, o) for o, _ in out):
+            out.append([label, p])
+    total = sum(p for _, p in out)
+    return [[lab, round(p / total, 3)] for lab, p in out] if total > 1 else out
 
 
 def safe_label(v) -> Optional[str]:
@@ -150,11 +190,12 @@ def same_thing(a: Optional[str], b: Optional[str]) -> bool:
 TABLE = """
 CREATE TABLE IF NOT EXISTS grok_checks (id INTEGER PRIMARY KEY, t REAL, wall REAL, episode TEXT, mark INTEGER,
   entity TEXT, world_label TEXT, grok_label TEXT, verdict TEXT, x_cm REAL, y_cm REAL, confidence REAL,
-  latency_ms INTEGER, model TEXT);
+  latency_ms INTEGER, model TEXT, guesses TEXT, not_object REAL, held INTEGER);
 CREATE INDEX IF NOT EXISTS grok_checks_wall ON grok_checks(wall);
 """
+ADDED = (("guesses", "TEXT"), ("not_object", "REAL"), ("held", "INTEGER"))    # to tables made before them
 COLS = ("t", "wall", "episode", "mark", "entity", "world_label", "grok_label", "verdict", "x_cm", "y_cm",
-        "confidence", "latency_ms", "model")
+        "confidence", "latency_ms", "model", "guesses", "not_object", "held")
 
 
 class CheckStore:
@@ -164,7 +205,13 @@ class CheckStore:
     def __init__(self, events):
         self.events = events
         with events._locked():
-            events._conn().executescript(TABLE)
+            c = events._conn()
+            c.executescript(TABLE)
+            have = {r[1] for r in c.execute("PRAGMA table_info(grok_checks)")}
+            for col, kind in ADDED:
+                if col not in have:
+                    c.execute(f"ALTER TABLE grok_checks ADD COLUMN {col} {kind}")
+            c.commit()
 
     def add(self, rows: list[dict]) -> None:
         if not rows:
@@ -215,6 +262,7 @@ class GrokCheck:
         self.online = online or (lambda: True)
         self.clock = clock
         self.last: Optional[dict] = None
+        self._belief: dict[str, dict] = {}       # unnamed thing -> {'a': {label: weight}, 'wall', 'n'}
         self._slot: Optional[tuple] = None       # (frame, episode id): the newest settled frame
         self._lock = threading.Lock()
         self._wake = threading.Event()
@@ -273,6 +321,10 @@ class GrokCheck:
         def state_json(*a, **kw):
             st = state(*a, **kw)
             try:
+                for e in st.get("entities") or []:
+                    top = self.belief(e.get("name") or "")[:3]
+                    if top:
+                        e["belief"] = top
                 st["grok_check"] = self.status()
             except Exception:
                 log.exception("grok check status failed")
@@ -392,8 +444,11 @@ class GrokCheck:
             else:
                 verdict = "relabel"
             x, y = self._cm(((box[0] + box[2]) / 2, (box[1] + box[3]) / 2))
+            held = m.get("held")
             rows.append({**base, "mark": i, "entity": ent, "world_label": said, "grok_label": label,
-                         "verdict": verdict, "x_cm": x, "y_cm": y, "confidence": round(conf, 3)})
+                         "verdict": verdict, "x_cm": x, "y_cm": y, "confidence": round(conf, 3),
+                         "guesses": json.dumps(guesses(m.get("guesses"))), "not_object": _p(m.get("not_object")),
+                         "held": int(held) if isinstance(held, bool) else None})
         for u in (d.get("unmarked") or [])[:MAX_UNMARKED]:
             if not isinstance(u, dict):
                 continue
@@ -414,7 +469,9 @@ class GrokCheck:
         except Exception:
             log.exception("grok check rows not stored")
         bound = self._bind(rows)
-        self.last = self._summary(rows, wall, reply.latency_ms, bound, len(marks))
+        named, retired = self._believe(rows, wall, t)
+        self.last = self._summary(rows, wall, reply.latency_ms, bound + named, len(marks))
+        self.last["retired"] = retired
         self.last["usage"] = reply.usage
         log.info("grok check (%d ms): %s", reply.latency_ms, self.last["text"])
         return self.last
@@ -449,13 +506,83 @@ class GrokCheck:
                     if kept:
                         out.append(f"{ent} = {r['grok_label']} ({kept})")
                 continue
-            try:
-                if self.world.bind_alias(ent, r["grok_label"]):
-                    log.info("grok check: %s is now '%s' (%.2f)", ent, r["grok_label"], r["confidence"])
-                    out.append(f"{ent} = {r['grok_label']}")
-            except Exception:
-                log.exception("bind_alias failed")
+            if self._name(ent, r["grok_label"]):
+                log.info("grok check: %s is now '%s' (%.2f)", ent, r["grok_label"], r["confidence"])
+                out.append(f"{ent} = {r['grok_label']}")
         return out
+
+    def _name(self, ent: str, label: str) -> bool:
+        """bind_alias, marked as Grok's (worlds without the by= argument take it plain)."""
+        try:
+            try:
+                return bool(self.world.bind_alias(ent, label, by="grok"))
+            except TypeError:
+                return bool(self.world.bind_alias(ent, label))
+        except Exception:
+            log.exception("bind_alias failed")
+            return False
+
+    # -- belief: what an unnamed thing is, over several checks
+
+    def _believe(self, rows: list[dict], wall: float, t: Optional[float]) -> tuple[list[str], list[str]]:
+        """Add this check's guesses for each unnamed thing to its belief (weights fade with half_life_s),
+        then, after min_obs checks, name it (top label >= name_p, name_margin ahead of the next) or retire
+        it as clutter ('not an object' >= retire_p). Returns (named, retired)."""
+        if not self.c.belief_enabled:
+            return [], []
+        named, retired = [], []
+        for r in rows:
+            ent = r["entity"]
+            if not (ent or "").startswith("thing:") or r["world_label"] is not None:
+                continue
+            b = self._belief.setdefault(ent, {"a": {}, "wall": wall, "n": 0})
+            fade = 0.5 ** (max(0.0, wall - b["wall"]) / self.c.half_life_s)
+            a = {k: v * fade for k, v in b["a"].items()}
+            got = json.loads(r["guesses"] or "[]")
+            if not got and r["grok_label"]:
+                got = [[r["grok_label"], r["confidence"]]]
+            for label, p in got:
+                key = next((k for k in a if k != NOT_OBJECT and same_thing(k, label)), label)
+                a[key] = a.get(key, 0.0) + p
+            no = r["not_object"] or 0.0
+            if r["verdict"] == "phantom":
+                no = max(no, r["confidence"])
+            a[NOT_OBJECT] = a.get(NOT_OBJECT, 0.0) + no
+            b.update(a=a, wall=wall, n=b["n"] + 1)
+            top = self.belief(ent)
+            if b["n"] < self.c.min_obs or not top:
+                continue
+            (label, p), p2 = top[0], (top[1][1] if len(top) > 1 else 0.0)
+            if label == NOT_OBJECT:
+                if p >= self.c.retire_p and t is not None and self._retire(ent, t):
+                    retired.append(ent)
+                    self._belief.pop(ent, None)
+            elif p >= self.c.name_p and p - p2 >= self.c.name_margin and self._finds(label) is None \
+                    and self._name(ent, label):
+                log.info("grok check: %s is now '%s' (belief %.2f over %d checks)", ent, label, p, b["n"])
+                named.append(f"{ent} = {label}")
+                self._belief.pop(ent, None)
+        return named, retired
+
+    def belief(self, ent: str) -> list[list]:
+        """[[label, share], ...] for an unnamed thing, largest first ('not an object' is NOT_OBJECT)."""
+        a = (self._belief.get(ent) or {}).get("a") or {}
+        total = sum(a.values())
+        if total <= 0:
+            return []
+        return sorted(([k, round(v / total, 3)] for k, v in a.items()), key=lambda kv: -kv[1])
+
+    def _retire(self, ent: str, t: float) -> bool:
+        if self.world is None or not hasattr(self.world, "retire_thing"):
+            return False
+        try:
+            ok = bool(self.world.retire_thing(ent, t, veto_s=self.c.veto_s))
+        except Exception:
+            log.exception("retire_thing failed")
+            return False
+        if ok:
+            log.info("grok check: %s retired (not an object)", ent)
+        return ok
 
     def _one_of_kind(self, r: dict, rows: list[dict]) -> bool:
         """Grok saw only one of this kind in the frame: no other real mark with a label like it."""
