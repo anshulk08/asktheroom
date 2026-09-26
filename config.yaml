@@ -184,3 +184,8 @@ stt:
   vad_threshold: 0.5          # Silero speech probability; off threshold is this - 0.15
   input_device: null          # sounddevice device index or name; null = default mic
 
+main:
+  clicker_name: ""            # part of the evdev device name, if more than one keyboard sends PageDown
+  perception_max_fps: 15
+  net_copy_s: 5
+
