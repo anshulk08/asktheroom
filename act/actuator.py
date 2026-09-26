@@ -132,6 +132,22 @@ class BaseActuator:
     def limits(self) -> Limits:
         return self._limits
 
+    def set_limits(self, limits: Limits) -> None:
+        """New servo limits (act.calibrate --rig's jog measures them). Only narrower than the current
+        ones: a jog can't widen what config allows."""
+        (plo, phi), (tlo, thi) = self._limits
+        new = ((max(plo, float(limits[0][0])), min(phi, float(limits[0][1]))),
+               (max(tlo, float(limits[1][0])), min(thi, float(limits[1][1]))))
+        for lo, hi in new:
+            if not lo < hi:
+                raise ValueError(f"bad servo_limits {limits} (current {self._limits})")
+        with self.lock:
+            self._limits = new                               # type: ignore[assignment]
+            self._on_limits()
+
+    def _on_limits(self) -> None:
+        pass
+
     def clamp(self, pan: float, tilt: float) -> tuple[float, float]:
         (plo, phi), (tlo, thi) = self._limits
         return clamp(float(pan), plo, phi), clamp(float(tilt), tlo, thi)
@@ -233,6 +249,10 @@ class PCA9685Actuator(BaseActuator):
             self._kit.servo[ch].set_pulse_width_range(int(lo), int(hi))
         self._pca = self._kit._pca  # ServoKit has no public raw-channel API
         self._hw_laser(False, 0.0)
+
+    def _on_limits(self) -> None:
+        for ch, (lo, hi) in ((self._pan_ch, self._limits[0]), (self._tilt_ch, self._limits[1])):
+            self._kit.servo[ch].set_pulse_width_range(int(lo), int(hi))
 
     def _hw_pulses(self, pan: float, tilt: float, t: float) -> None:
         (plo, phi), (tlo, thi) = self._limits

@@ -184,3 +184,16 @@ def test_a_driver_that_cannot_start_falls_back_to_fake_with_the_reason(monkeypat
     assert type(a) is FakeActuator and "pca9685" in why and "adafruit_servokit" in why
     a, why = make_actuator_or_fake(dict(CFG, actuator="fake"), clock=SimClock())
     assert type(a) is FakeActuator and why is None
+
+
+def test_set_limits_only_narrows_and_reprograms_the_pca9685(monkeypatch):
+    monkeypatch.setitem(sys.modules, "adafruit_servokit", types.SimpleNamespace(ServoKit=_Kit))
+    a = make_actuator(dict(CFG, actuator="pca9685"), clock=SimClock())
+    a.set_limits(((1200, 1800), (500, 1600)))
+    assert a.limits() == ((1200.0, 1800.0), (700.0, 1600.0))             # tilt can't go below config's 700
+    assert a._kit.servo[0].range == (1200, 1800) and a._kit.servo[1].range == (700, 1600)
+    a.move(3000, 0, duration_s=0)
+    assert (a.pan, a.tilt) == (1800.0, 700.0)
+    with pytest.raises(ValueError):
+        a.set_limits(((2500, 2600), (800, 900)))
+    a.close()
