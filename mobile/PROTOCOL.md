@@ -1,0 +1,215 @@
+# Ask the Room BLE protocol (v1)
+
+The iPhone app talks to the Jetson directly over Bluetooth LE. There is no cloud server and no Wi-Fi,
+and the link is one phone to one rig. The Jetson is the GATT **peripheral** (`mobile/bridge/ble_bridge.py`,
+BlueZ 5.64). The phone is the **central** (CoreBluetooth). The reference implementation of everything
+below is `mobile/bridge/bleproto.py`; `tests/test_mobile_protocol.py` pins it down.
+
+Positions are table centimetres: origin at ArUco marker 0 (top-left), x to the right, y down. The
+table is `table` = `[w, h]` from `config.yaml` `table.size_cm` (default `[90, 60]`).
+
+## 1. Advertising
+
+| Field | Value |
+|---|---|
+| Advertising data (21 of 31 bytes) | Flags `0x06` (LE General Discoverable, BR/EDR not supported), complete list of 128-bit service UUIDs = `8A1E0001-6B7F-4C2B-9E3A-2F5D7C1A0001` |
+| Scan response (12 bytes) | Complete local name `AskTheRoom`. BlueZ moves it here because it doesn't fit next to the 128-bit UUID. |
+| PDU | Legacy `ADV_IND` (connectable, scannable), sent through the controller's extended-advertising commands |
+| Interval | 100–150 ms (`--adv-interval`; the BlueZ default is 1.28 s, which makes discovery slow) |
+
+The phone scans with `scanForPeripherals(withServices: [8A1E0001-…])`. Don't filter on the name: iOS
+reports `CBAdvertisementDataLocalNameKey` only after it receives a scan response, and `peripheral.name`
+can show the Jetson's GAP name (`guru-desktop`) or a cached name.
+
+## 2. GATT table
+
+Service `8A1E0001-6B7F-4C2B-9E3A-2F5D7C1A0001` (primary). Every UUID follows the pattern
+`8A1E000N-6B7F-4C2B-9E3A-2F5D7C1A000N`.
+
+| N | Name | UUID | Properties | Direction | Payload |
+|---|---|---|---|---|---|
+| 2 | question | `8A1E0002-6B7F-4C2B-9E3A-2F5D7C1A0002` | Write (with response) | phone → rig | unframed UTF-8 JSON, ≤ 180 bytes |
+| 3 | answer | `8A1E0003-6B7F-4C2B-9E3A-2F5D7C1A0003` | Notify | rig → phone | framed JSON |
+| 4 | state | `8A1E0004-6B7F-4C2B-9E3A-2F5D7C1A0004` | Notify | rig → phone | framed JSON |
+| 5 | status | `8A1E0005-6B7F-4C2B-9E3A-2F5D7C1A0005` | Read + Notify | rig → phone | Read: unframed JSON. Notify: framed JSON |
+
+No characteristic needs encryption or pairing, so iOS never shows a pairing prompt.
+
+## 3. MTU and chunk size
+
+A notification value can be at most `ATT_MTU − 3` bytes. Each chunk's payload is at most
+`ATT_MTU − 3 − 3` bytes: 3 bytes of ATT overhead, then our 3-byte header.
+
+| ATT MTU | Notification value max | JSON bytes per chunk |
+|---|---|---|
+| 185 (typical iPhone) | 182 | **179** |
+| 23 (ATT minimum) | 20 | 17 |
+| 517 | 514 | 511 |
+
+The bridge learns the MTU from BlueZ's `mtu` option on every read and write. Until it has heard from the
+phone it assumes 185 (`--mtu`). With several centrals it uses the smallest MTU. If it learns an MTU smaller
+than the one it assumed, it resends the state snapshot, because the earlier one may have been cut short.
+**Recommended phone sequence:** discover → read `status` (this tells the bridge the MTU) → subscribe to
+`answer`, `status`, `state`.
+
+## 4. Framing (every notification: answer, state, status)
+
+```
+byte 0     msg_id        u8   per characteristic; +1 per message, wraps 255 → 0
+byte 1     chunk_index   u8   0, 1, 2, … within this message
+byte 2     flags         u8   bit0 = FINAL (last chunk of the message); bits 1–7 are 0
+byte 3..   payload            UTF-8 JSON bytes, ≤ MTU − 6 per chunk
+```
+
+- A message has 1 to 256 chunks. An empty or short message is a single chunk with FINAL set.
+- The JSON is split on byte boundaries, which can fall inside a multi-byte UTF-8 character. Concatenate
+  the payloads first and only then decode UTF-8 and parse JSON.
+- **Reassembly (phone):** keep one partial message per characteristic. If a chunk has a different `msg_id`,
+  discard the incomplete previous message. On chunk 0, start a new message. Append chunks in order. On FINAL,
+  concatenate, decode and parse. If the index skips (a gap) or a chunk arrives with nothing in progress, drop
+  the partial message and wait for the next chunk 0. Notifications on one link arrive in order, so gaps
+  should not happen, but they must never produce a corrupt message.
+- `msg_id` numbers are independent per characteristic. The bridge may skip ids: it drops a state or status
+  message that was superseded before its first chunk went out.
+
+Example: an answer as msg 7, in one chunk at MTU 185 (147 bytes on the air):
+
+```
+07 00 01  7B 22 69 64 22 3A 33 32 31 2C …   {"id":321,"ok":true,"text":"Your keys are inside the box. …"}
+^msg ^idx ^FINAL
+```
+
+A 414-byte state snapshot at MTU 185 is 3 chunks: `03 00 00 …179 B`, `03 01 00 …179 B`, `03 02 01 …56 B`.
+
+## 5. question (write with response)
+
+```json
+{"id": 321, "q": "where are my keys?"}
+```
+
+- `id`: integer 0–65535, chosen by the phone and echoed in the answer. `q`: the question text, as typed or dictated.
+- The whole write is **≤ 180 bytes** of UTF-8 (`JSONSerialization` output). That fits one ATT write at MTU
+  185, so no long or prepared write is needed. Truncate the question on the phone to stay under the limit.
+- The ATT write always succeeds. Every rejection comes back as an answer with `ok: false`:
+  - longer than 180 bytes: `{"id": id, "ok": false, "text": "Question too long."}` (the id is echoed if the JSON parses)
+  - unparseable: `"I couldn't read that question."`; empty `q`: `"Ask me where something is, like: where are my keys?"`
+  - a question while another is still in flight: `"I'm still answering your last question."`
+    (one question is answered at a time, and one more can wait in the queue)
+- The bridge sends the question to `POST http://127.0.0.1:8000/ask` with `{"text": q, "source": "dashboard"}`.
+  **`dashboard` is the source that speaks and moves the laser.** `server/app.py` accepts only
+  `{"dashboard", "n8n"}`, and `main.Room.ask_and_act` treats `sms` and `n8n` as text-only. Asking from the
+  phone has the same effect as asking from the dashboard: the answer is spoken on the rig and the laser points.
+
+## 6. answer (notify)
+
+```json
+{"id": 321, "ok": true, "text": "Your keys are inside the box. I'm pointing at it.",
+ "point_at": "keys", "action": "point", "target": [70.4, 38.1], "ms": 812}
+```
+
+| Key | Type | Meaning |
+|---|---|---|
+| `id` | int | the question's id |
+| `ok` | bool | false = the bridge's own reply (rejected, room down, timeout, error) |
+| `text` | str | what the rig speaks; show it on the answer card |
+| `point_at` | str \| null | entity the laser aims at (`keys`, `box`, `thing:3`, …) |
+| `action` | str \| null | `point`, `circle` (lost track: circling the last-seen spot), `sweep:left\|right\|top\|bottom` (carried off that edge), or null |
+| `target` | [x, y] \| null | table-cm position of `point_at`: its resolved position (a hidden object inherits its parent's), falling back to its last-seen spot; 1 decimal |
+| `ms` | int | bridge time from receiving the write to having the answer (includes `/ask` and one `/state`) |
+
+All keys are always present. `ok: false` texts: `"The room isn't running right now."` (the app's HTTP API is
+unreachable), `"Sorry, that took too long. Please ask again."` (over 12 s),
+`"Sorry, something went wrong answering that."` (HTTP error).
+
+The laser stays on for `laser_timeout_s` (10 s). Its live state comes in `state.laser`, so the phone can
+pulse the target while `laser.on && laser.target == point_at`.
+
+## 7. state (notify)
+
+A full snapshot every time; there are no diffs. It is sent:
+
+1. right after the phone subscribes to `state`
+2. when something changed, at most **2 Hz** (the bridge polls `GET /state` at 4 Hz)
+3. at least every **5 s**, as a heartbeat
+
+"Changed" ignores detector jitter: a position has to move more than 0.5 cm, or confidence more than 0.05,
+or a status, parent, edge, alias or `maybe_same_as` value has to change, or an entity has to be added or
+removed, or `online` or `laser` has to change. A visible object's `ls` ticking does not count.
+
+```json
+{"v": 1, "t": 1790389843.0, "table": [90.0, 60.0], "online": false,
+ "laser": {"on": true, "target": "box"},
+ "e": [{"n": "keys", "k": "t", "s": "I", "p": "box", "xy": [41.2, 29.0], "r": [70.4, 38.1], "c": 0.85, "ls": 1790389800.4},
+       {"n": "box", "k": "c", "s": "V", "xy": [70.4, 38.1], "r": [70.4, 38.1], "c": 1.0, "ls": 1790389843.0},
+       {"n": "thing:3", "k": "t", "s": "V", "xy": [20.0, 12.5], "r": [20.0, 12.5], "c": 0.9, "a": ["charger"], "m": [["thing:1", 0.74]]}]}
+```
+
+| Key | Type | Meaning |
+|---|---|---|
+| `v` | int | protocol version, 1 |
+| `t` | float | wall time of the snapshot (Unix s, 1 decimal) |
+| `table` | [w, h] | table size in cm |
+| `online` | bool | the rig has internet (only open-ended questions need it) |
+| `laser` | {on, target} | laser on, and which entity it points at (`target` is present, null when none) |
+| `e` | list | every entity |
+| `e[].n` | str | name (`keys`, `pill_bottle`, …, or open-world `thing:N`). Always present |
+| `e[].k` | `t`/`c`/`v` | kind: target / container / cover. Always present |
+| `e[].s` | `V`/`H`/`U`/`I`/`G`/`X` | VISIBLE / HELD / UNDER / INSIDE / GONE / UNKNOWN. Always present |
+| `e[].p` | str | parent: an entity name (`box`, `notebook`), `hand:N`, or `unknown` |
+| `e[].xy` | [x, y] | last observed centre (cm, 1 decimal) |
+| `e[].r` | [x, y] | resolved position: where it is now, through the parent chain (keys → box → table). Draw hidden objects here |
+| `e[].c` | float | confidence 0–1, 2 decimals (a heuristic, not a probability) |
+| `e[].edge` | str | `left`/`right`/`top`/`bottom`: the edge a GONE object left by |
+| `e[].a` | [str] | taught names (aliases), newest first. **Things only**, and present for every thing (may be `[]`) |
+| `e[].m` | [[name, score]] | "maybe the same as" an earlier thing (score 2 decimals). Optional |
+| `e[].ls` | float | last-seen wall time (Unix s, 1 decimal) |
+
+Keys whose value is null are **omitted**, except `n`, `k` and `s`. Unknown extra keys may appear in later
+versions and must be ignored. Measured sizes: the live rig with 8 untracked objects is 414 B (3 chunks at
+MTU 185). With all 8 objects tracked it is about 870 B (5 chunks). With 8 objects and 12 things with
+aliases it is about 2.8 KB (16 chunks); the raw `/state` JSON for that is 5.7 KB.
+
+## 8. status (read + notify)
+
+```json
+{"app": "up", "fps": 13.1, "online": true, "cal": true, "laser_cal": false}
+```
+
+| Key | Type | Meaning |
+|---|---|---|
+| `app` | `up`/`down` | the room app's HTTP API answered the last `GET /state` |
+| `fps` | float | perception frames per second (0.0 when down) |
+| `online` | bool | the rig has internet |
+| `cal` | bool | table calibrated: `table_cal.json` exists, or the world is being updated |
+| `laser_cal` | bool | `laser_cal.json` exists (false: answers are spoken, but the laser can't aim) |
+
+- **Read** returns this JSON **unframed**. It is about 66 bytes, and always under 180.
+- **Notify** is framed (section 4). It is sent right after subscribing and then on change, at most 1 Hz,
+  except that an `app` change goes out at once. An fps change under 1.0 doesn't count.
+
+## 9. Timing budget
+
+| What | Target |
+|---|---|
+| answer | notified as soon as `/ask` returns. Offline template answers take about 10–60 ms on the rig; LLM answers take up to 4 s |
+| state | ≤ 2 Hz, heartbeat 5 s, 1–16 chunks |
+| status | on change, ≤ 1 Hz |
+| queueing | the bridge sends notifications in priority order answer > status > state, 4 chunks per 5 ms tick. A newer state or status replaces a queued one that hasn't started sending; a message already partly sent is always finished |
+
+## 10. Rig-specific: Realtek controller workaround
+
+The Jetson's Bluetooth controller is a Realtek (LE features `BD 5F 66 00`: extended advertising, no LL
+Privacy). With extended advertising it reports a new connection only as **LE Enhanced Connection
+Complete**. Kernel 5.15 unmasks that event only for controllers with LL Privacy, so the event never reaches
+the kernel. btmon showed the symptom: the central connects, its `Exchange MTU Request` arrives for an
+unknown handle and is never answered, and the central gives up after 30 s (bleak on the Mac:
+`BleakError: disconnected` during service discovery). The fix is to set the LE event mask to the kernel's
+bits plus bit 9, once after every adapter power-on:
+
+```
+sudo hcitool -i hci0 cmd 0x08 0x0001 DF 1F 0A 00 00 00 00 00
+```
+
+The bridge sends this itself at startup and whenever the adapter powers on. That works only when the bridge
+runs as root, or when `hcitool` has `cap_net_raw`. Otherwise the bridge logs the exact command to run.
+See `mobile/README.md`.
