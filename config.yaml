@@ -384,3 +384,15 @@ demo:
   thinking_phrases: ["Let me look.", "One moment.", "Hmm, let me check."]   # used in turn
   hold_notices: false         # true: nothing speaks unasked (reminders, morning report); notices still
                               # show on /state and the phone. Turn on if reminders would talk over a judge.
+
+# One-tag table calibration (core/table.py): ONE printed AprilTag 36h11 lying anywhere on the table replaces
+# markers 0-3, so nothing is measured. Print: python scripts/make_markers.py --tag (160 mm), then set size_cm
+# to the black square's side as printed (check with a ruler). The tracked area becomes what the camera sees
+# of the table; it is saved with the calibration and applied at the next start. false = four markers.
+table_tag:
+  enabled: true
+  family: apriltag_36h11
+  id: 0
+  size_cm: 16.0               # black square side as printed
+  frames: 15                  # corner positions averaged over this many consecutive frames
+  max_cm: 250                 # cap on the tracked area (a steep camera sees far across the plane)

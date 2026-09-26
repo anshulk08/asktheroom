@@ -69,6 +69,13 @@ class FlatTable:
         return False
 
 
+def camera_source(s: str):
+    """--camera: an index ('2') or a device path. Indices move when cameras are replugged; the
+    /dev/v4l/by-id/ path names one camera for good (scripts/dock.sh passes /dev/v4l into the container)."""
+    s = str(s).strip()
+    return int(s) if s.isdigit() else s
+
+
 def warm_on_connect(netmon, warm: Callable[[], object]) -> None:
     """Warm the connection to Grok (core.xai.warm) now if online, and every time the network comes back:
     otherwise the first question after a start or a drop pays for the TLS handshake and can run past its
@@ -267,9 +274,12 @@ class Room:
             last_idx = frame.idx
             if not self.table.ok:
                 if not warned:
-                    log.warning("table not calibrated; trying markers 0-3 every frame (python -m core.table)")
+                    what = ("the table tag" if getattr(self.table, "tag_mode", False) else "markers 0-3")
+                    log.warning("table not calibrated; looking for %s every frame (python -m core.table)", what)
                     warned = True
-                self.table.calibrate(frame.img)
+                if self.table.calibrate(frame.img) and getattr(self.table, "tag_mode", False):
+                    log.warning("table calibrated: tracked area %.0f x %.0f cm; restart the app so every part "
+                                "uses that size", *self.table.size_cm)
                 continue
             try:
                 if self._clear_ev.is_set():        # here, not in ask: the proposer isn't thread-safe
@@ -510,6 +520,9 @@ def build(cfg: dict, fake: bool = False, camera: int = 0, with_voice: bool = Tru
     import voice.understand
 
     cleanup: list[Callable[[], None]] = []
+    if not fake:
+        import core.table
+        core.table.apply_saved_size(cfg)            # one-tag mode: the saved tracked area, before anything reads it
     if fake:
         snap = tempfile.mkdtemp(prefix="askroom_fake_snaps_")
         events = core.events.EventLog(":memory:", snap)
@@ -539,6 +552,7 @@ def build(cfg: dict, fake: bool = False, camera: int = 0, with_voice: bool = Tru
             frames = core.capture.FrameBuffer(camera)
         cleanup.append(frames.stop)
         table = core.table.Table(cfg)                  # loads table_cal.json; table.ok says if calibrated
+        # (one-tag mode: the saved tracked-area size went into cfg at the top of build())
         if video and not table.ok:
             log.warning("table not calibrated; using frame == table for the recording")
             table = FlatTable(cfg)
@@ -607,7 +621,8 @@ def main(argv=None) -> int:
     ap.add_argument("--fake", action="store_true", help="no hardware: sim camera, simulated laser, Enter to ask")
     ap.add_argument("--no-voice", action="store_true", help="dashboard and /ask only")
     ap.add_argument("--listen", choices=["always", "wake", "click"], help="override listen.mode")
-    ap.add_argument("--camera", type=int, default=0, help="camera index")
+    ap.add_argument("--camera", type=camera_source, default=0,
+                    help="camera index, or a stable path like /dev/v4l/by-id/usb-046d_0809_...-video-index0")
     ap.add_argument("--video", help="play this recording instead of the camera (through the real detector)")
     ap.add_argument("--host")
     ap.add_argument("--port", type=int)

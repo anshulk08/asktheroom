@@ -6,7 +6,7 @@ Status meanings:
 - **implemented**: the code exists and runs, but hasn't been tested or measured on the real rig.
 - **planned**: a spec or roadmap item with no code yet.
 
-Test suite at time of writing (Sat 26 Sep, after the overnight merge): `.venv/bin/python -m pytest -q` gives 1361 passed, 21 skipped on the laptop (the skips need optional models or hardware). Jetson measurements are labelled "Jetson". See PLANS.md checkpoints F1–F6.
+Test suite at time of writing (Sat 26 Sep, after the overnight merge): `.venv/bin/python -m pytest -q` gives 1370 passed, 21 skipped on the laptop (the skips need optional models or hardware). Jetson measurements are labelled "Jetson". See PLANS.md checkpoints F1–F6.
 
 ## Perception and world model
 
@@ -14,6 +14,7 @@ Test suite at time of writing (Sat 26 Sep, after the overnight merge): `.venv/bi
 |---|---|---|---|
 | — | Camera capture, newest frame + ring (`core/capture.py`) | validated | `tests/test_capture.py`; 29.9 fps live on the Jetson (MJPG 1280x720, manual exposure) |
 | — | ArUco table frame, px→cm homography (`core/table.py`) | validated | `tests/test_table.py` (synthetic frames) |
+| — | One-tag table calibration: one printed AprilTag 36h11 anywhere on the table, no measuring; tracked area = what the camera sees, axes follow the image (`core/table.py`, `table_tag:` in config, on by default; `scripts/make_markers.py --tag`) | validated (synthetic) | `tests/test_table.py`: distances across the view within 1.5 cm on noisy synthetic frames, same area whether the tag lies straight or at 40°; `tests/test_demo_check.py` drift check. Real-table accuracy not measured yet |
 | — | YOLO-World detector, TensorRT on the Jetson (`core/detect.py`) | implemented | `tests/test_detect.py` covers the post-processing only. There is no accuracy measurement on our objects yet |
 | — | YOLO11 fine-tune on overhead frames (`scripts/finetune/`) | implemented | `tests/test_finetune.py` covers the tooling. No trained model yet |
 | — | Hand tracking via detector `hand` class (`core/hands.py`) | validated | `tests/test_hands.py` |

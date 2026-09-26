@@ -3,6 +3,7 @@
     python scripts/make_markers.py                       # table markers 0-3 -> markers_0-3.pdf
     python scripts/make_markers.py --ids 4 5 6 7         # floor markers (stretch D15)
     python scripts/make_markers.py --size-mm 70 --out x.pdf
+    python scripts/make_markers.py --tag                     # ONE big AprilTag 36h11 (config table_tag): no measuring
 
 Print at 100% / "Actual size" (never "fit to page"), then check the 10 cm ruler with a real ruler.
 Matte paper: glossy paper reflects the lamp and breaks detection. Tape each marker flat with its centre on
@@ -19,11 +20,25 @@ PAGE_W, PAGE_H = 612.0, 792.0            # US Letter in points
 LABELS = {0: "top-left (origin)", 1: "top-right", 2: "bottom-right", 3: "bottom-left"}
 
 
-def cells(marker_id: int) -> list[list[bool]]:
-    """6 x 6 grid (4 x 4 data + 1-cell black border); True = black."""
-    d = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
-    img = cv2.aruco.generateImageMarker(d, marker_id, 6, borderBits=1)
-    return [[img[r, c] < 128 for c in range(6)] for r in range(6)]
+FAMILY = {"aruco_4x4_50": (cv2.aruco.DICT_4X4_50, 6), "apriltag_36h11": (cv2.aruco.DICT_APRILTAG_36h11, 8)}
+
+
+def cells(marker_id: int, family: str = "aruco_4x4_50") -> list[list[bool]]:
+    """n x n grid (data + a 1-cell black border): 6 x 6 for ArUco 4x4, 8 x 8 for AprilTag 36h11; True = black."""
+    dict_id, n = FAMILY[family]
+    img = cv2.aruco.generateImageMarker(cv2.aruco.getPredefinedDictionary(dict_id), marker_id, n, borderBits=1)
+    return [[img[r, c] < 128 for c in range(n)] for r in range(n)]
+
+
+def _square(ops: list, grid: list, x0: float, y0: float, s: float) -> None:
+    """One black square with white cells drawn on top (no seams between black cells)."""
+    n, cell = len(grid), s / len(grid)
+    ops.append(f"0 g {x0:.3f} {y0:.3f} {s:.3f} {s:.3f} re f 1 g")
+    for r, line in enumerate(grid):
+        for c, black in enumerate(line):
+            if not black:
+                ops.append(f"{x0 + c * cell:.3f} {y0 + (n - 1 - r) * cell:.3f} {cell:.3f} {cell:.3f} re f")
+    ops.append("0 g")
 
 
 def pdf(ids: list[int], size_mm: float) -> bytes:
@@ -35,17 +50,27 @@ def pdf(ids: list[int], size_mm: float) -> bytes:
         col, row = [(0, 0), (1, 0), (1, 1), (0, 1)][k]    # clockwise from top-left, as on the table
         x0 = col * slot_w + (slot_w - s) / 2
         y0 = PAGE_H - 50 - (row + 1) * slot_h + (slot_h - s) / 2 + 12
-        cell = s / 6
-        ops.append(f"0 g {x0:.3f} {y0:.3f} {s:.3f} {s:.3f} re f 1 g")   # one black square, white cells on
-        for r, line in enumerate(cells(mid)):                              # top: no seams between black cells
-            for c, black in enumerate(line):
-                if not black:
-                    ops.append(f"{x0 + c * cell:.3f} {y0 + (5 - r) * cell:.3f} {cell:.3f} {cell:.3f} re f")
-        ops.append("0 g")
+        _square(ops, cells(mid), x0, y0, s)
         ops.append(f"0.6 G 0.5 w [4 3] 0 d {x0 - quiet:.2f} {y0 - quiet:.2f} {s + 2 * quiet:.2f} "
                    f"{s + 2 * quiet:.2f} re S [] 0 d")
         label = f"ID {mid}" + (f"  {LABELS[mid]}" if mid in LABELS else "") + f"  ({size_mm:g} mm)"
         ops.append(f"BT /F1 11 Tf {x0 - quiet:.2f} {y0 - quiet - 14:.2f} Td ({label}) Tj ET")
+    return _document(ops)
+
+
+def pdf_tag(tag_id: int = 0, size_mm: float = 160.0) -> bytes:
+    """ONE AprilTag 36h11 centred on the page, for one-tag table calibration (config table_tag). size_mm is
+    the black square's side: set table_tag.size_cm to what the ruler says it printed at."""
+    s = size_mm * PT_PER_MM
+    x0, y0 = (PAGE_W - s) / 2, (PAGE_H - s) / 2 + 20
+    ops: list = []
+    _square(ops, cells(tag_id, "apriltag_36h11"), x0, y0, s)
+    ops.append(f"BT /F1 12 Tf {x0:.2f} {y0 - 22:.2f} Td (AprilTag 36h11 ID {tag_id}  black square {size_mm:g} mm. "
+               f"Keep the white margin; lay it flat anywhere on the table.) Tj ET")
+    return _document(ops)
+
+
+def _document(ops: list) -> bytes:
     ruler = 100 * PT_PER_MM                   # 10 cm scale check
     ops.append(f"0 G 1 w 50 40 m {50 + ruler:.2f} 40 l S 50 35 m 50 45 l S {50 + ruler:.2f} 35 m "
                f"{50 + ruler:.2f} 45 l S")
@@ -75,7 +100,15 @@ def main(argv=None) -> None:
     ap.add_argument("--ids", type=int, nargs="+", default=[0, 1, 2, 3], help="up to 4 marker ids")
     ap.add_argument("--size-mm", type=float, default=60.0, help="black square side")
     ap.add_argument("--out")
+    ap.add_argument("--tag", action="store_true", help="one big AprilTag 36h11 (id = first --ids, default 0)")
+    ap.add_argument("--tag-mm", type=float, default=160.0, help="--tag: black square side")
     a = ap.parse_args(argv)
+    if a.tag:
+        out = a.out or f"apriltag_36h11_id{a.ids[0]}_{a.tag_mm:g}mm.pdf"
+        with open(out, "wb") as f:
+            f.write(pdf_tag(a.ids[0], a.tag_mm))
+        print(f"wrote {out}: AprilTag 36h11 id {a.ids[0]}, {a.tag_mm:g} mm")
+        return
     out = a.out or f"markers_{a.ids[0]}-{a.ids[-1]}.pdf"
     with open(out, "wb") as f:
         f.write(pdf(a.ids, a.size_mm))
