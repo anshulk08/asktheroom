@@ -202,21 +202,30 @@ def test_a_prop_picked_up_again_after_its_step_is_followed_not_handed_to_a_neigh
 
 
 def test_an_undeclared_object_found_again_in_place_is_not_the_placed_prop(tmp_path):
-    """A phone nobody declared flickers out and back at its spot just as A is put down (the hand
-    unseen): the placement is A's new thing, not the phone's re-sighting."""
+    """Like data/clips/shell_1: a wallet nobody declared lies on the table from the start; the detector
+    loses it (LOST_TRACK) and finds it again at the same spot (CORRECTED) just after A is put down,
+    before A's new thing is admitted (the hand unseen). The wallet was already there: A is the new
+    thing, not the wallet's re-sighting."""
     take = Take(tmp_path)
     take.scene.place("box", *BOX_AT)
-    take.scene.place("phone", 100, 20)
+    take.scene.place("wallet", 100, 20)
     take.run(2)
-    take.scene.miss("phone")
+    take.scene.remove("wallet")
     take.run(3)
     t_place = take.now
-    take.scene.miss("phone", False)
+    take.run(0.2)
+    take.scene.place("wallet", 100, 20)
+    take.run(0.3)
     take.scene.thing("A", 40, 30)
-    take.run(4)
-    r = score(take, {"props": {"A": "charger", "BOX": "box"},
+    take.run(5)
+    r = score(take, {"props": {"A": "small object", "BOX": "box"},
                      "steps": [{"t": t_place, "event": "place", "obj": "A", "parent": None, "note": ""}]})
+    types = [e["type"] for e in score_clip.replay_clip(load_clip(str(take.dir)), detector=take.stub()).events
+             if e["obj"] == "wallet"]
+    assert types == ["LOST_TRACK", "CORRECTED"], types        # the re-sighting really happens in A's window
     assert [m["entity"] for m in r["mapping"]["A"]] == ["thing:1"], r["mapping"]["A"]
+    (p,) = r["placements"]
+    assert p["entity"] == "thing:1" and p["delay_s"] > 0.5    # admitted after the wallet came back
 
 
 def test_a_phantom_thing_while_a_hand_waves_is_a_false_birth(tmp_path):
@@ -276,6 +285,26 @@ def test_static_clutter_is_the_initial_scene_and_props_match_configured_names_on
     assert r["roles"]["BOX"]["kind"] == "container" and r["roles"]["BOX"]["rate"] == pytest.approx(1.0)
     assert r["roles"]["NB"]["kind"] == "cover" and "A" not in r["roles"]
     assert r["checkpoint_accuracy"] == 1.0 and r["pass"] is True
+
+
+@pytest.mark.parametrize("clutter", [False, True])
+def test_undeclared_configured_objects_are_not_guessed_for_a_prop_of_another_type(tmp_path, clutter):
+    """Like data/clips/shell_1: a phone and a wallet nobody declared lie on the table with clutter; the
+    box prop is never detected as a box. The phone is no box (not its name, not its role), and with
+    the box unseen truth has no position for it: BOX stays unmapped rather than guessed. The small
+    object (no configured name) is still guessed from the initial scene, never the phone or wallet.
+    With clutter, BOX is not guessed as some unrelated thing of the scene either."""
+    take = Take(tmp_path)
+    take.scene.place("phone", 20, 20)
+    take.scene.place("wallet", 100, 20)
+    take.scene.thing("B", 60, 40)
+    if clutter:
+        take.scene.thing("speaker", 110, 60, w=14, h=10)
+    take.run(6)
+    r = score(take, {"props": {"B": "small object", "BOX": "box"},
+                     "checkpoints": [{"t": 5, "expect": at_rest("B")}]})
+    assert r["mapping"]["BOX"] == [] and "BOX" not in r["guessed"], r["mapping"]["BOX"]
+    assert [m["entity"] for m in r["mapping"]["B"]] == ["thing:1"] and r["guessed"] == ["B"]
 
 
 def test_clutter_that_comes_back_as_a_new_identity_is_an_identity_change_not_the_scene(tmp_path):
@@ -338,6 +367,43 @@ def test_put_inside_the_box_sees_the_hands_and_answers_inside_the_box(tmp_path):
     assert r["pass"] is True
 
 
+def test_replayed_answers_measure_ago_on_clip_time_not_the_real_clock(tmp_path):
+    """The clip's frames carry their recording wall clock (here 2023): 'put there ... ago' is measured
+    from the clip's time at the question, so it says seconds, not the days since the recording."""
+    take = Take(tmp_path)
+    take.scene.place("box", 80, 40)
+    take.scene.thing("A", 10, 50)
+    take.run(2)
+    t_teach = take.now
+    take.run(1)
+    t_pick = take.now
+    take.scene.hand(1, 10, 50)
+    take.run(0.3)
+    take.scene.remove("A")
+    take.run(0.3)
+    t_in = take.now
+    for x, y in [(30, 46), (50, 43), (70, 41)]:
+        take.scene.hand(1, x, y)
+        take.run(0.1)
+    take.scene.hand(1, 80, 40)
+    take.run(0.6)
+    take.scene.hand(1, 100, 60)
+    take.run(0.5)
+    take.scene.hand_off(1)
+    take.run(25)
+    t_q = take.now
+    take.run(1)
+    r = score(take, {"props": {"A": "charger", "BOX": "box"},
+                     "steps": [{"t": t_pick, "event": "pickup", "obj": "A", "parent": None, "note": ""},
+                               {"t": t_in, "event": "put_inside", "obj": "A", "parent": "BOX", "note": ""}],
+                     "commands": [{"t": t_teach, "text": "this is my charger"}],
+                     "questions": [{"t": t_q, "text": "where is my charger?", "expect_prop": "A",
+                                    "expect_parent": "BOX"}]})
+    ans = r["questions"][0]["answer"]
+    assert "inside the box" in ans and "seconds ago" in ans, ans
+    assert "day" not in ans and "hour" not in ans
+
+
 # ----- replay pacing ------------------------------------------------------------------------------
 
 def test_replay_takes_the_newest_frame_each_time_the_capped_loop_is_ready(tmp_path):
@@ -371,3 +437,9 @@ def test_command_line_prints_pass_fail_lines_and_writes_json(tmp_path, monkeypat
     text = capsys.readouterr().out
     assert "PASS  false births" in text and "OVERALL: PASS" in text
     assert json.loads(out.read_text())["pass"] is True
+
+
+def test_a_question_at_the_right_thing_in_the_wrong_parent_says_so():
+    q = {"point_at": "thing:6", "expected_entity": "thing:6", "expect_parent": "BOX", "parent_ok": False}
+    assert score_clip._want(q) == "want thing:6 in BOX, the world has it elsewhere"
+    assert score_clip._want(dict(q, point_at="thing:2")) == "want thing:6"
