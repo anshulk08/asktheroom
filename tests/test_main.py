@@ -484,3 +484,9 @@ def test_grok_is_warmed_at_start_when_already_online_and_a_slow_warm_never_block
     net.flip(True)
     assert time.monotonic() - t0 < 0.2                  # the monitor thread is never held up
     assert wait_for(lambda: len(warmed) >= 1)
+
+
+def test_camera_is_an_index_or_a_stable_device_path():
+    assert main.camera_source("2") == 2 and main.camera_source(" 0 ") == 0
+    by_id = "/dev/v4l/by-id/usb-046d_0809_A1C0DC94-video-index0"
+    assert main.camera_source(by_id) == by_id and main.camera_source("/dev/video2") == "/dev/video2"

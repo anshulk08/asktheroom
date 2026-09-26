@@ -69,6 +69,13 @@ class FlatTable:
         return False
 
 
+def camera_source(s: str):
+    """--camera: an index ('2') or a device path. Indices move when cameras are replugged; the
+    /dev/v4l/by-id/ path names one camera for good (scripts/dock.sh passes /dev/v4l into the container)."""
+    s = str(s).strip()
+    return int(s) if s.isdigit() else s
+
+
 def warm_on_connect(netmon, warm: Callable[[], object]) -> None:
     """Warm the connection to Grok (core.xai.warm) now if online, and every time the network comes back:
     otherwise the first question after a start or a drop pays for the TLS handshake and can run past its
@@ -575,7 +582,8 @@ def main(argv=None) -> int:
     ap.add_argument("--fake", action="store_true", help="no hardware: sim camera, simulated laser, Enter to ask")
     ap.add_argument("--no-voice", action="store_true", help="dashboard and /ask only")
     ap.add_argument("--listen", choices=["always", "wake", "click"], help="override listen.mode")
-    ap.add_argument("--camera", type=int, default=0, help="camera index")
+    ap.add_argument("--camera", type=camera_source, default=0,
+                    help="camera index, or a stable path like /dev/v4l/by-id/usb-046d_0809_...-video-index0")
     ap.add_argument("--video", help="play this recording instead of the camera (through the real detector)")
     ap.add_argument("--host")
     ap.add_argument("--port", type=int)
