@@ -4,7 +4,9 @@ that decides which layer answers a question.
 Routing (VisualQA.route, called by voice/pipeline.py before the offline templates):
   - object location / history questions about known things stay with the world model (fast, offline);
   - activity questions (WHAT_DOING, 'while I was away') stay with narrations + events (voice/answers.py);
-  - OTHER questions about the scene now go to look(); in the past tense, to recall();
+  - OTHER questions about the scene now go to look(); in the past tense, to recall(). An OTHER question
+    that isn't about the table or what the camera sees ('what time is it', 'tell me a joke') returns None
+    so the pipeline's `other` answerer takes it, online or offline;
   - WHERE for a name the world model doesn't know ('where is my red mug?') goes to look(), which can
     point at it; HISTORY / HANDLED for such a name goes to recall() when no narration mentions it.
 Offline, a question only the VLM could answer gets a spoken 'I need the connection' (the world model
@@ -60,6 +62,12 @@ POINT_NEAR_CM = 6.0
 
 PAST = re.compile(r"\b(?:was|were|did|had|earlier|before|ago|yesterday|used to|show(?:ed|n)? up|appeared"
                   r"|last time|when i left|before i left|while i was)\b")
+# An OTHER question is about the table (so the camera can answer it) when it says so; 'what time is it'
+# or 'tell me a joke' is not, and goes to the pipeline's `other` answerer instead.
+SCENE = re.compile(r"\b(?:table|desk|here|this|that|these|those|see|seen|saw|look|looks|looking|colou?rs?"
+                   r"|whats on|what is on|how many|read|reads|note|notes|written|writing|shape|size)\b")
+THING_Q = re.compile(r"^(?:is|are) (?:the|my|your|our|a|an|there)\b")     # 'is the charger plugged in'
+NOT_THING = re.compile(r"\b(?:weather|time|date|day|news|temperature)\b")  # 'is the weather nice'
 
 LOOK_SYSTEM = """You answer spoken questions about a tabletop seen by an overhead camera that looks straight down. You see the table surface, the objects on it and sometimes hands; nothing beyond the table's edge, no faces, no room. Image 1 is the whole table right now. Any later images are enlarged close-ups of objects the question names. You also get what an object tracker believes about known objects; it remembers hidden ones (an object INSIDE the box or UNDER the notebook can't be seen but is there).
 
@@ -529,8 +537,11 @@ class VisualQA:
         from voice.answers import _narrated_about, _target
         from voice.intents import normalize
         k = intent.kind
-        past = bool(PAST.search(normalize(text)))
+        t = normalize(text)
+        past = bool(PAST.search(t))
         if k == "OTHER":
+            if not self._about_table(intent, t):
+                return None
             how = "recall" if past else "look"
         elif k in ("WHERE", "HISTORY", "HANDLED") and (intent.name or intent.obj):
             try:
@@ -555,6 +566,18 @@ class VisualQA:
             log.info("visual questions: hourly cap reached; answering without the camera")
             return None
         return self.look(text, intent) if how == "look" else self.recall(text)
+
+    def _about_table(self, intent: Intent, t: str) -> bool:
+        """Whether an OTHER question (t normalized) is about the table or what the camera sees: it says
+        so, names a tracked object or thing label, or asks about a thing ('was there a red mug')."""
+        from voice.intents import normalize
+        if intent.obj or intent.name or SCENE.search(t) or query_phrase(t):
+            return True
+        if THING_Q.search(t) and not NOT_THING.search(t):
+            return True
+        low = f" {t} "
+        return any(spoken and re.search(rf"\b{re.escape(normalize(spoken))}s?\b", low)
+                   for spoken in self._names().values())
 
     # -- status
 

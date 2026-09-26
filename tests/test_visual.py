@@ -431,6 +431,46 @@ def test_offline_and_capped(log):
     assert len(prov.calls) == 1
 
 
+@pytest.mark.parametrize("online", [True, False])
+@pytest.mark.parametrize("text", ["What time is it?", "Tell me a joke.", "What's the weather?",
+                                  "What did you say?"])
+def test_questions_not_about_the_table_are_left_to_the_other_answerer(log, text, online):
+    q, prov = qa(log, look_reply())
+    q.archive = archive(log)
+    seen = []
+    q.look = lambda t, i=None: seen.append("look") or Answer("L")
+    q.recall = lambda t: seen.append("recall") or Answer("R")
+    assert q.route(parse(text, CFG), text, online=online) is None and seen == []
+
+
+@pytest.mark.parametrize("text", ["Does the box have a lid?", "Does the calculator have batteries?",
+                                  "How many pens are there?", "What colour is it?", "Is that my wallet?"])
+def test_other_questions_about_tracked_things_or_the_view_still_look(log, text):
+    world = FakeWorld([Entity("box", "container", Status.VISIBLE, pos_cm=(70.0, 40.0)),
+                       Entity("thing:3", "thing", Status.VISIBLE, pos_cm=(30.0, 30.0))], log)
+    world.thing_labels = lambda: {"thing:3": "calculator"}
+    q, _ = qa(log, look_reply(), world=world)
+    seen = []
+    q.look = lambda t, i=None: seen.append("look") or Answer("L")
+    assert q.route(parse(text, CFG), text, online=True) == Answer("L") and seen == ["look"]
+    assert q.route(parse(text, CFG), text, online=False).text == OFFLINE
+
+
+def test_pipeline_answers_non_visual_questions_with_other(log):
+    from voice.pipeline import make_ask
+    q, prov = qa(log, look_reply("A blue notebook and your keys."))
+
+    class Net:
+        online = True
+
+    for online in (True, False):
+        Net.online = online
+        ask = make_ask(CFG, q.world, log, net=Net(), other=lambda *a, **k: Answer("grok"), visual=q)
+        assert ask("What time is it?", "voice").text == "grok"
+        assert ask("Tell me a joke.", "voice").text == "grok"
+    assert prov.calls == []
+
+
 def test_pipeline_gives_visual_the_first_say(log):
     from voice.pipeline import make_ask
     q, prov = qa(log, look_reply("A blue notebook and your keys."))
