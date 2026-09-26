@@ -30,7 +30,7 @@ struct AnswerCard: View {
             } else {
                 HStack(spacing: 10) {
                     ProgressView()
-                    Text("Asking the room…").foregroundStyle(.secondary)
+                    Text(exchange.slow ? "Still working on it…" : "Asking the room…").foregroundStyle(.secondary)
                 }
                 .font(.title3)
             }

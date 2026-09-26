@@ -14,6 +14,8 @@ struct Exchange: Identifiable, Equatable {
     var question: String
     var answer: Answer?
     var timedOut = false
+    /// Past `RoomStore.slowAfter`: still waiting, and the card says so.
+    var slow = false
     var askedAt = Date()
 
     var isPending: Bool { answer == nil && !timedOut }
@@ -68,7 +70,12 @@ final class RoomStore {
     var showRoomVoiceAnswers = UserDefaults.standard.bool(forKey: RoomStore.voiceAnswersKey) {
         didSet { UserDefaults.standard.set(showRoomVoiceAnswers, forKey: Self.voiceAnswersKey) }
     }
-    var answerTimeout: Duration = .seconds(6)
+    /// The bridge gives up on the room after 12 s and sends its own "took too long" answer
+    /// (PROTOCOL.md section 6), so the phone waits a little longer than that. Retrying sooner would
+    /// only queue the same question behind the one still being answered.
+    var answerTimeout: Duration = .seconds(14)
+    /// Open questions answered by Grok can take several seconds.
+    var slowAfter: Duration = .seconds(5)
     var highlightDuration: Duration = .seconds(5)
 
     private var transport: RoomTransport?
@@ -133,8 +140,11 @@ final class RoomStore {
         transport?.send(Question(id: id, q: q))
 
         timeoutTask?.cancel()
-        timeoutTask = Task { [weak self, answerTimeout] in
-            try? await Task.sleep(for: answerTimeout)
+        timeoutTask = Task { [weak self, answerTimeout, slowAfter] in
+            try? await Task.sleep(for: slowAfter)
+            guard !Task.isCancelled else { return }
+            self?.markSlow(id)
+            try? await Task.sleep(for: answerTimeout - slowAfter)
             guard !Task.isCancelled else { return }
             self?.timeOut(id)
         }
@@ -143,6 +153,11 @@ final class RoomStore {
     func retry() {
         guard let last = current, last.timedOut else { return }
         ask(last.question)
+    }
+
+    private func markSlow(_ id: Int) {
+        guard exchanges.first?.id == id, exchanges[0].answer == nil else { return }
+        exchanges[0].slow = true
     }
 
     private func timeOut(_ id: Int) {

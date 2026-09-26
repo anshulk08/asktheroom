@@ -49,7 +49,25 @@ final class RoomStoreTests: XCTestCase {
         XCTAssertNil(store.highlight)
     }
 
+    /// The phone must not give up before the bridge does (12 s), or a retry queues behind the first question.
+    func testPhoneWaitsLongerThanTheBridge() {
+        XCTAssertGreaterThan(store.answerTimeout, .seconds(12))
+        XCTAssertLessThan(store.slowAfter, store.answerTimeout)
+    }
+
+    func testSlowThenAnswered() async throws {
+        store.slowAfter = .milliseconds(20)
+        store.answerTimeout = .seconds(5)
+        store.ask("What's on the table?")
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertTrue(store.current!.slow)
+        XCTAssertTrue(store.current!.isPending, "slow is still waiting, not timed out")
+        store.receive(answer: answer(transport.sent[0].id))
+        XCTAssertNotNil(store.current?.answer)
+    }
+
     func testTimeoutThenLateAnswer() async throws {
+        store.slowAfter = .milliseconds(10)
         store.answerTimeout = .milliseconds(50)
         store.ask("Where are my keys?")
         try await Task.sleep(for: .milliseconds(300))
@@ -60,6 +78,7 @@ final class RoomStoreTests: XCTestCase {
     }
 
     func testRetryAsksAgain() async throws {
+        store.slowAfter = .milliseconds(10)
         store.answerTimeout = .milliseconds(20)
         store.ask("Where are my keys?")
         try await Task.sleep(for: .milliseconds(200))
