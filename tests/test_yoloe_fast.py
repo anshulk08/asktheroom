@@ -40,7 +40,7 @@ def test_conf_threshold_and_class_agnostic_nms():
             (400, 300, 40, 40, 0.6, 1),       # elsewhere: kept
             (500, 300, 40, 40, 0.10, 3)]      # below conf
     r = postprocess(head(dets), None, SHAPE, conf=0.15, iou=0.5, **LB)
-    assert list(np.round(r.conf, 3)) == [0.8, 0.6]
+    assert list(np.round(r.conf.astype(float), 3)) == [0.8, 0.6]
     assert list(r.cls) == [1, 1]
 
 
