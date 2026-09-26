@@ -408,3 +408,19 @@ def test_put_down_then_quick_hand_withdrawal_is_put_back_not_lost(scene, world):
     scene.place('keys', 40, 30)
     events += scene.run(world, 1.0)
     assert types(events) == [EventType.PUT_BACK]
+
+
+def test_history_of_a_merged_thing_is_ordered_by_wall_time(cfg, tmp_path):
+    """Merged identities' events are interleaved by wall time: monotonic t restarts with every boot, so an
+    event from an earlier run can carry a larger t than today's."""
+    from core.events import EventLog
+    from core.types import Entity, Event
+    log = EventLog(':memory:', str(tmp_path))
+    world = World(cfg, events=log)
+    for n in ('thing:1', 'thing:2'):
+        world.entities[n] = Entity(name=n, kind='target')
+    world.entities['thing:2'].merged_into = 'thing:1'
+    log.add(Event(t=9000.0, wall=1000.0, obj='thing:2', type=EventType.APPEARED))    # earlier run
+    log.add(Event(t=50.0, wall=2000.0, obj='thing:1', type=EventType.MOVED))         # this run
+    assert types(world.history('thing:1')) == [EventType.MOVED, EventType.APPEARED]
+    log.close()

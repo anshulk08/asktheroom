@@ -155,7 +155,7 @@ class World(ThingRules):
             names = {name} | {m for m, e in self.entities.items() if e.merged_into == name}
             if self.events is not None:
                 evs = [ev for m in names for ev in self.events.last(m, n)]
-                return sorted(evs, key=lambda ev: ev.t, reverse=True)[:n] if len(names) > 1 else evs
+                return sorted(evs, key=lambda ev: ev.wall, reverse=True)[:n] if len(names) > 1 else evs
             return [ev for ev in reversed(self._history) if ev.obj in names][:n]
 
     def observe_external(self, name: str, pos_cm, zone: str) -> list[Event]:
