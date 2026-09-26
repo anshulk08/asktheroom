@@ -4,7 +4,7 @@ end-to-end run through the real World with a fake VLM provider."""
 import json
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import numpy as np
 import pytest
@@ -18,7 +18,9 @@ from core.narration_store import NarrationStore, redact_meds, store_for
 from core.types import Detection, Detections, Event, Frame
 
 CFG = load_config()
-WALL0 = datetime(2026, 9, 25, 14, 2, 0).timestamp()      # a local 2:02:00 PM
+# The latest local 2:02:00 PM already past: within the store's 24 h, so pending episodes aren't pruned.
+_TWO = datetime.now().replace(hour=14, minute=2, second=0, microsecond=0)
+WALL0 = (_TWO if _TWO <= datetime.now() else _TWO - timedelta(days=1)).timestamp()
 
 
 def hand(i=1):
