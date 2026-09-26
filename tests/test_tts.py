@@ -211,3 +211,117 @@ def test_real_piper_synthesis():
           f"{len(audio) / rate:.2f} s of audio at {rate} Hz")
     assert rate == 22050 and audio.dtype == np.int16 and len(audio) > 0
     assert np.abs(audio).max() > 1000          # not silence
+
+
+# ------------------------------------------------------------------ a hung speaker
+
+class HungOut:
+    """A speaker that stops taking audio: write() (and abort(), unless abort_ok) block until released."""
+
+    def __init__(self, release, abort_ok=True):
+        self.release, self.abort_ok = release, abort_ok
+        self.aborted = 0
+
+    def write(self, b):
+        self.release.wait()
+
+    def close(self):
+        self.release.wait()
+
+    def abort(self):
+        self.aborted += 1
+        if not self.abort_ok:
+            self.release.wait()
+
+
+@pytest.mark.parametrize("abort_ok", [True, False])
+def test_hung_speaker_times_out_and_the_next_answer_plays(monkeypatch, piper, abort_ok, caplog):
+    monkeypatch.setattr(tts, "PLAY_S_PER_CHAR", 0.01)
+    monkeypatch.setattr(tts, "PLAY_SLACK_S", 0.2)
+    monkeypatch.setattr(tts, "ABORT_S", 0.1)
+    release = threading.Event()
+    hung = HungOut(release, abort_ok)
+    monkeypatch.setattr(tts, "open_output", lambda rate, device=None: hung)
+    t = TTS(CFG, online(False))
+    budget = tts.playback_budget_s("stuck answer")
+    assert budget == pytest.approx(0.32)
+    th = threading.Thread(target=t.speak, args=("stuck answer",), daemon=True)
+    t0 = time.perf_counter()
+    th.start()
+    time.sleep(0.05)
+    assert t.speaking                              # the mic waits while it plays ...
+    th.join(budget + 1.0)
+    assert not th.is_alive() and not t.speaking   # ... and reopens once the deadline passes
+    assert time.perf_counter() - t0 < budget + 0.5
+    assert hung.aborted >= 1 and t.last_timed_out
+    assert "speech output hung" in caplog.text
+
+    rec = Recorder()                               # the speaker is back: the next answer plays in full
+    monkeypatch.setattr(tts, "open_output", rec)
+    t.speak("next answer")
+    assert t.last_engine == "piper" and not t.last_timed_out and len(rec.data) == 200 and rec.closed == 1
+    release.set()                                  # the old worker wakes up: it must not touch the new one
+    time.sleep(0.05)
+    assert not t.speaking
+
+
+def test_hung_device_open_times_out(monkeypatch, piper):
+    """Opening the stream can hang as well: the deadline runs from the open."""
+    monkeypatch.setattr(tts, "PLAY_S_PER_CHAR", 0.0)
+    monkeypatch.setattr(tts, "PLAY_SLACK_S", 0.2)
+    release = threading.Event()
+    monkeypatch.setattr(tts, "open_output", lambda rate, device=None: release.wait() and HungOut(release))
+    t = TTS(CFG, online(False))
+    t0 = time.perf_counter()
+    t.speak("hello")
+    assert time.perf_counter() - t0 < 0.6 and not t.speaking and t.last_timed_out
+    release.set()
+
+
+def test_stop_returns_even_if_abort_hangs(monkeypatch, piper):
+    monkeypatch.setattr(tts, "ABORT_S", 0.1)
+    release = threading.Event()
+    hung = HungOut(release, abort_ok=False)
+    monkeypatch.setattr(tts, "open_output", lambda rate, device=None: hung)
+    t = TTS(CFG, online(False))
+    th = threading.Thread(target=t.speak, args=("a long answer " * 20,), daemon=True)
+    th.start()
+    time.sleep(0.05)
+    t0 = time.perf_counter()
+    t.stop()
+    assert time.perf_counter() - t0 < 0.4
+    release.set()
+    th.join(1)
+    assert not th.is_alive() and not t.speaking
+
+
+# ------------------------------------------------------------------ Piper won't load
+
+def test_piper_load_failure_is_retried_and_espeak_speaks_meanwhile(monkeypatch, audio, caplog):
+    tries = []
+
+    def broken(name, model_dir=None):
+        tries.append(name)
+        raise FileNotFoundError("models/piper/x.onnx missing")
+
+    monkeypatch.setattr(tts, "load_piper", broken)
+    monkeypatch.setattr(tts, "espeak_pcm", lambda text: (b"\x05\x00" * 30, 16000))
+    t = TTS(CFG, online(False))
+    assert t.warm() is False
+    assert "failed to load" in caplog.text
+    t.speak("still talking")
+    assert t.last_engine == "espeak" and audio.opened == [16000] and len(audio.data) == 60
+    good = FakeVoice()
+    monkeypatch.setattr(tts, "load_piper", lambda name, model_dir=None: tries.append(name) or good)
+    t.speak("piper again")
+    assert t.last_engine == "piper" and good.texts == ["piper again"]
+    assert len(tries) == 3                          # warm, first answer, second answer: each tried Piper
+
+
+def test_no_voice_at_all_logs_clearly(monkeypatch, audio, caplog):
+    monkeypatch.setattr(tts, "load_piper", lambda name, model_dir=None: (_ for _ in ()).throw(OSError("bad onnx")))
+    monkeypatch.setattr(tts, "espeak_pcm", lambda text: None)
+    t = TTS(CFG, online(False))
+    t.speak("nobody hears this")
+    assert t.last_engine is None and audio.opened == [] and not t.speaking
+    assert "was not said" in caplog.text
