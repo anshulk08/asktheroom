@@ -151,7 +151,7 @@ def test_two_classes_do_not_cross_match():
     r.visit(("keys", KEYS))
     r.visit(("wallet", KEYS))                              # same spot, other class
     tr = r.tr.tracks()
-    assert [x.cls for x in tr] == ["wallet"]              # keys had a valid miss (unconfirmed: dropped)
+    assert sorted(x.cls for x in tr) == ["keys", "wallet"]  # the wallet on its spot: no valid miss for keys
     r = Run()
     r.visit(("keys", KEYS), ("wallet", WALLET))
     v = r.visit(("keys", KEYS), ("wallet", WALLET))
@@ -206,3 +206,14 @@ def test_confirm_visits_one_confirms_at_once():
     r = Run(confirm_visits=1)
     v = r.visit(("keys", KEYS))
     assert len(v.confirmed) == 1 and v.confirmed[0].confirmed
+
+
+def test_another_object_on_the_spot_is_not_a_miss():
+    r = Run()
+    r.visit(("keys", KEYS))
+    r.visit(("keys", KEYS))
+    [keys] = r.tr.tracks()
+    for _ in range(4):                                     # a wallet put down on top of the keys
+        v = r.visit(("wallet", (95, 95, 145, 135)))
+        assert v.missed == [] and keys.misses == 0
+    assert keys in r.tr.tracks()

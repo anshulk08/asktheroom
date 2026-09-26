@@ -78,8 +78,9 @@ class RoomTracker:
                 if tr.confirmed:
                     v.confirmed.append(tr)
                 keep.append(tr)
-            elif not self._valid(tr.box_px, blockers, changes, lum):
-                keep.append(tr)                   # an invalid visit counts for nothing
+            elif not self._valid(tr.box_px, blockers + [o.box_px for o in obs], changes, lum):
+                keep.append(tr)                   # an invalid visit counts for nothing (another object
+                                                  # on its spot is a blocker too: spec 0009, Absence)
             elif not tr.confirmed:
                 v.dropped.append(tr)
             else:
