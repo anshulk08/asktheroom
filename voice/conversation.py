@@ -169,7 +169,9 @@ class Conversation:
         if m and not PRONOUN.fullmatch(m.group("n")):
             n = re.sub(r"^(?:(?:my|the|your|our)\s+)+", "", m.group("n")).strip()
             _, obj, name = entity_of(f"where is my {n}", world, cfg)
-            if obj or re.match(r"(?:my|our)\s", m.group("n")):
+            # a thing we know, or 'and my charger?' after an object question ('what about my
+            # appointment?' after the weather is not about the table)
+            if obj or (last.kind in OBJECT_KINDS and re.match(r"(?:my|our)\s", m.group("n"))):
                 kind = last.kind if last.kind in OBJECT_KINDS else "WHERE"
                 return Followup(text=TEMPLATES[kind].format(n=name or n), base=last)
             return None

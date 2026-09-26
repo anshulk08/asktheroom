@@ -213,3 +213,24 @@ def test_not_follow_ups(room, q):
     ask, base, _ = room
     ask("where are my keys?")
     assert ask(q, now=NOW + 5).text == base(q, "voice").text
+
+
+def test_what_about_after_a_non_object_turn_is_not_an_object_question(room):
+    ask, base, conv = room
+    ask("what's the weather?")
+    q = "what about my appointment tomorrow?"
+    assert conv.resolve(q, "voice", None, None, CFG, NOW + 5) is None
+    assert ask(q, now=NOW + 5).text == base(q, "voice").text
+
+
+def test_what_about_a_known_object_after_a_non_object_turn(room):
+    ask, base, _ = room
+    ask("what's the weather?")
+    assert ask("what about my keys?", now=NOW + 5).text == base("where is my keys", "voice").text
+
+
+def test_and_an_unknown_name_after_an_object_question_is_still_a_follow_up(room):
+    _, _, conv = room
+    conv.ask("where are my keys?", "voice", lambda t, s: Answer("x"), None, None, CFG, now=NOW)
+    f = conv.resolve("and my charger?", "voice", None, None, CFG, NOW + 5)
+    assert f is not None and f.text == "where is my charger"
