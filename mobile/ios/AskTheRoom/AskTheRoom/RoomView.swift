@@ -17,6 +17,7 @@ struct RoomView: View {
     let store: RoomStore
     @State private var draft = ""
     @State private var selected: String?
+    @State private var dictation = Dictation()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -62,7 +63,19 @@ struct RoomView: View {
 
             VStack(spacing: 10) {
                 SuggestionChips { store.ask($0) }
-                AskBar(text: $draft, onSend: { store.ask($0) })
+                AskBar(text: $draft,
+                       isListening: dictation.isListening,
+                       micAvailable: dictation.isAvailable,
+                       onSend: { store.ask($0) },
+                       onMicDown: {
+                           Task {
+                               await dictation.start(onPartial: { draft = $0 }, onFinish: { heard in
+                                   draft = ""
+                                   store.ask(heard)
+                               })
+                           }
+                       },
+                       onMicUp: { dictation.stop() })
             }
             .padding(.vertical, 10)
         }
@@ -197,6 +210,10 @@ struct ConnectView: View {
             Spacer()
             if store.link == .bluetoothOff || store.link == .unauthorized || store.link == .unsupported {
                 BluetoothExplainer(state: store.link)
+                if store.link == .unsupported {
+                    Button("Use demo mode") { store.setMock(true) }
+                        .buttonStyle(.bordered)
+                }
             } else {
                 ZStack {
                     Circle().stroke(Theme.laser.opacity(0.35), lineWidth: 2)
