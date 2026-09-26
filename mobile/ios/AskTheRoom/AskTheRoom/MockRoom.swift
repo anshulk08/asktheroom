@@ -9,7 +9,8 @@ import Foundation
 ///   -mockPaused YES    hold the sample snapshot still
 ///   -mockOffline YES   report the cloud voice as unavailable
 ///   -mockAppDown YES   report the room app as down
-///   -mockAsk "text"    ask this a second after launch
+///   -mockAsk "a|b"     ask these, a second after launch and then every 2.5 s
+///   -mockSelect name   open this entity's detail sheet
 @MainActor
 final class MockRoom: RoomTransport {
     static let stepInterval: Duration = .seconds(5)
@@ -42,10 +43,13 @@ final class MockRoom: RoomTransport {
                 }
             })
         }
-        if let q = defaults.string(forKey: "mockAsk") {
+        if let script = defaults.string(forKey: "mockAsk") {
             tasks.append(Task { [weak store] in
                 try? await Task.sleep(for: .seconds(1))
-                store?.ask(q)
+                for q in script.split(separator: "|") {
+                    store?.ask(String(q))
+                    try? await Task.sleep(for: .seconds(2.5))
+                }
             })
         }
     }
