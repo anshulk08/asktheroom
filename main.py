@@ -127,6 +127,9 @@ class Room:
         self.detector, self.hands = detector, hands
         self.room_memory = None                    # core.room.RoomMemory when room_memory.enabled (build)
         self._room_err_t = float("-inf")
+        info = getattr(getattr(detector, "backend", None), "info", None)
+        if info is not None and isinstance(getattr(world, "perception", None), dict):
+            world.perception["model"] = info       # which weights loaded, on /state
         if interpret is None:
             from voice.understand import Understander
             interpret = Understander(dict(cfg, understand={"enabled": False}))     # rules only

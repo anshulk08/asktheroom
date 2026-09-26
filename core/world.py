@@ -77,6 +77,8 @@ class World(ThingRules, RoomRules):
         self.online = False
         self.fps = 0.0
         self.laser = {'on': False, 'target': None, 'err_cm': None}
+        # detector weights (core.detect.weights_info) and whether the camera feed is stale (main.py)
+        self.perception: dict = {}
         self.reset()
 
     # ----- public API -------------------------------------------------------------------------
@@ -177,7 +179,7 @@ class World(ThingRules, RoomRules):
             return {'t': self._wall, 'online': self.online, 'fps': self.fps,
                     'entities': [self._entity_json(ent) for ent in self.entities.values()
                                  if ent.merged_into is None],
-                    'edges': self._edges(), 'laser': dict(self.laser),
+                    'edges': self._edges(), 'laser': dict(self.laser), 'perception': dict(self.perception),
                     'aliases': dict(self._aliases),
                     'merged': {n: e.merged_into for n, e in self.entities.items() if e.merged_into},
                     'room': self.room_json()}

@@ -385,6 +385,20 @@ def test_perceive_is_one_perception_step_after_the_table_is_calibrated(tmp_path)
     assert str(world.get("wallet").status) == "VISIBLE"
 
 
+def test_the_detector_weights_are_on_state(tmp_path):
+    class Backend:
+        info = {"path": "models/brio.engine", "size": 1, "mtime": "2026-09-26T17:53:00", "names": ["keys"],
+                "missing": ["wallet"]}
+
+    class Det:
+        backend = Backend()
+
+    events = EventLog(":memory:", str(tmp_path))
+    world = World(CFG, events)
+    main.Room(CFG, world, events, None, None, None, None, detector=Det())
+    assert world.state_json()["perception"]["model"]["path"] == "models/brio.engine"
+
+
 def test_build_fake_runs_without_hardware(monkeypatch, tmp_path):
     import net
     import voice.understand
