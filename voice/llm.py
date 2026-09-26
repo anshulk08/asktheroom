@@ -29,6 +29,7 @@ from typing import Any, Optional
 
 from core.config import display_name, load_config
 from core.labels import thing_labels
+from core.narration_store import med_claim
 from core.types import Answer, Status
 
 log = logging.getLogger(__name__)
@@ -244,10 +245,15 @@ def _labels(world) -> dict[str, str]:
 # ---------------------------------------------------------------- answer post-processing
 
 _MD = re.compile(r"[*_#`>\[\]]+")
-_MEDS = r"\b(pills?(?!\s*bottle)|medication|medicine|meds|doses?)\b"
-_PILLS_TAKEN = re.compile(
-    r"\b(took|taken|takes|swallow\w*)\b[^.?!]*" + _MEDS
-    + r"|" + _MEDS + r"[^.?!]*\b(taken|took|swallowed)\b", re.I)
+_BOTTLE = re.compile(r"\bpill[ _]bottles?\b", re.I)   # the object, not medication
+
+
+def _med_claim(text: str) -> bool:
+    """Any sentence saying medication was taken, missed or skipped (narration_store.med_claim, the
+    wider rule the visual answers use); 'pill bottle' is the object and doesn't count as medication."""
+    return any(med_claim(_BOTTLE.sub("bottle", s)) for s in re.split(r"(?<=[.!?])\s+", text))
+
+
 PILLS_SAFE = ("I can't tell whether medication was taken; I can only tell you where the pill "
               "bottle is and when it was moved.")
 
@@ -271,8 +277,7 @@ def to_answer(text: str, point_at: Optional[str], names: list[str], cfg: dict,
     ids = {v.lower(): k for k, v in (labels or {}).items() if k in names}
     p = ids.get(p) or (cfg.get("synonyms") or {}).get(p, p).replace(" ", "_")
     target = p if p in names else None
-    if _PILLS_TAKEN.search(text) and not re.search(r"\b(can't|cannot|can not|don't know)\b",
-                                                   text, re.I):
+    if _med_claim(text):
         text, target = PILLS_SAFE, ("pill_bottle" if "pill_bottle" in names else None)
     return Answer(text, target, "point" if target else None)
 
