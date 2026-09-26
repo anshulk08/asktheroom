@@ -60,6 +60,8 @@ class ThingsConfig:
     dup_iou: float = 0.5               # IoU with a known object / hand / kept proposal: a duplicate
     hand_contain: float = 0.8          # a proposal covering this much of a hand box is hand or arm
     new_hand_overlap_max: float = 0.1  # a candidate is decided only once hands cover less of it
+    still_cm: float = 3.0              # a candidate that moves more than this from where it started over ...
+    still_s: float = 0.8               # ... must then hold still this long: a moving hand never settles
     gate_cm: float = 8.0               # visible thing: nearest proposal within this per batch
     size_ratio_max: float = 4.0        # ... and no more than this many times larger or smaller
     hand_gate_cm: float = 4.0          # HELD thing: proposal centre within this of its hand's box
@@ -97,6 +99,7 @@ class Candidate:
     det: Detection
     bits: deque
     born: float = 0.0
+    anchor: tuple = ()                 # centre_cm where it has held still since `born`
 
 
 class ExemplarBank:
@@ -449,18 +452,22 @@ class ThingRules:
             if dd <= tc.gate_cm and i not in used_p and j not in used_c:
                 used_p.add(i)
                 used_c.add(j)
-                self._cands[j].det = props[i]
-                self._cands[j].bits.append(True)
+                c = self._cands[j]
+                c.det = props[i]
+                if geom.dist(props[i].center_cm, c.anchor or props[i].center_cm) > tc.still_cm:
+                    c.anchor, c.born = props[i].center_cm, self._now       # moved: start over here
+                    c.bits.clear()
+                c.bits.append(True)
         for j, c in enumerate(self._cands):
             if j not in used_c:
                 c.bits.append(False)
         self._cands = [c for c in self._cands if any(c.bits)]
         for i, d in enumerate(props):
             if i not in used_p:
-                self._cands.append(Candidate(d, deque([True], maxlen=n), self._now))
+                self._cands.append(Candidate(d, deque([True], maxlen=n), self._now, d.center_cm))
         out = []
         for c in list(self._cands):
-            if sum(c.bits) < k or not c.bits[-1]:
+            if sum(c.bits) < k or not c.bits[-1] or self._now - c.born < tc.still_s:
                 continue
             if any(geom.overlap_frac(h.box_cm, c.det.box_cm) > tc.new_hand_overlap_max for h in hands):
                 continue                       # still being put down: decide once the hand is off it

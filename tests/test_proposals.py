@@ -213,6 +213,34 @@ def test_a_hand_shadow_that_lingers_does_not_leave_a_phantom():
     assert run(p, tab, 3) == []
 
 
+def test_a_moving_hand_the_detector_missed_is_not_a_thing():
+    """No hand box at all (YOLO-World missed it): the hand and arm sweep across the table, and the
+    motion check rejects them every frame after the first."""
+    tab, p = Table(), proposer()
+    warm(p, tab)
+    for i in range(20):
+        x = 300 + 25 * i
+        tab.hands = [(x, 300, x + 120, 420)]
+        tab.arms = [(0, 330, x + 5, 400)]
+        out = p.propose(tab.frame(), [], [])
+        if i > 0:
+            assert out == [], i
+            assert ('moving' in {r for _, r in p.debug['rejected']})
+
+
+def test_a_moving_hand_does_not_hide_a_still_object_elsewhere():
+    tab, p = Table(), proposer()
+    warm(p, tab)
+    tab.things['mug'] = (900, 200, 990, 280)
+    for i in range(10):
+        x = 300 + 25 * i
+        tab.hands = [(x, 400, x + 120, 520)]
+        tab.arms = [(0, 430, x + 5, 500)]
+        out = p.propose(tab.frame(), [], [])
+    [pr] = out
+    assert iou(pr.box_px, (900, 200, 990, 280)) > 0.8
+
+
 def test_a_lamp_switched_on_over_most_of_the_table_rebuilds_the_reference():
     """Uneven light the global offset cannot absorb: without a rebuild the whole right side is one huge
     changed region, and an object put there would vanish inside it."""

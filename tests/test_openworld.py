@@ -76,6 +76,25 @@ def test_flickering_proposal_never_becomes_a_thing(scene, world):
     assert things(world) == []
 
 
+def test_a_wandering_blob_never_becomes_a_thing(scene, world):
+    """A hand the detector missed, proposed as a blob that drifts ~4 cm per batch (slow enough for
+    the per-frame gate): it never holds still, so it never becomes a thing."""
+    for i in range(40):
+        scene.thing('hand-blob', 20 + 1.5 * i if i < 20 else 50 - 1.5 * (i - 20), 30, 10, 10)
+        world.update(*scene.step())
+    assert things(world) == []
+
+
+def test_a_blob_that_stops_becomes_a_thing_once_it_has_held_still(scene, world):
+    for i in range(10):
+        scene.thing('mug', 20 + 4 * i, 30)
+        world.update(*scene.step())
+    assert things(world) == []
+    events = scene.run(world, 1.0)                 # still at x = 56 from here
+    assert types(events) == [EventType.APPEARED]
+    assert events[0].to_cm == pytest.approx((56, 30))
+
+
 def test_the_hand_itself_reported_as_a_proposal_is_ignored(scene, world):
     scene.hand(1, 40, 30)
     scene.thing('hand-blob', 40, 30, 12, 12)
