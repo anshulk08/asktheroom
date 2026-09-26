@@ -273,8 +273,9 @@ def test_look_marks_visible_entities_and_points_at_the_chosen_mark(log):
 
 def test_marks_skip_hidden_and_unboxed_entities(log):
     world = FakeWorld([Entity("keys", "target", Status.INSIDE, parent="box", pos_cm=(70.0, 40.0)),
-                       Entity("box", "container", Status.VISIBLE, pos_cm=(70.0, 40.0), box_cm=(62.0, 34.0, 78.0, 46.0)),
-                       Entity("wallet", "target", Status.VISIBLE, pos_cm=(30.0, 30.0))], log)
+                       Entity("box", "container", Status.VISIBLE, pos_cm=(70.0, 40.0), box_cm=(62.0, 34.0, 78.0, 46.0),
+                              last_seen=T0),
+                       Entity("wallet", "target", Status.VISIBLE, pos_cm=(30.0, 30.0), last_seen=T0)], log)
     q, prov = qa(log, look_reply(mark=1), world=world)
     q.look("what's on the table?")
     texts = " ".join(p[1] for p in prov.calls[0].parts if p[0] == "text")
@@ -444,6 +445,114 @@ def test_attach_binds_crops_to_the_things_the_world_saw(log, monkeypatch):
     one = store.for_entity(world.get("thing:1"))
     assert one is not None and one.owner == "thing:1" and one.best.t <= 1.1 + 1e-9
     assert store.for_entity(world.get("thing:2")) is None       # nothing confirmed as thing:2 yet
+
+
+# ---------------------------------------------------------------- one observation per question
+
+class TickingWorld(FakeWorld):
+    """Perception keeps running while a question is answered: every state_json read after the first
+    shows the next phase of the scene (and get follows the phase)."""
+
+    def __init__(self, phases, events):
+        super().__init__(phases[0], events)
+        self.phases, self.reads = phases, 0
+
+    def state_json(self):
+        if self.reads:
+            k = min(self.reads, len(self.phases) - 1)
+            self.entities = {e.name: e for e in self.phases[k]}
+        self.reads += 1
+        return super().state_json()
+
+
+def keys_at(x, y, status=Status.VISIBLE, seen=T0, **kw):
+    return Entity("keys", "target", status, pos_cm=(x, y), box_cm=(x - 3, y - 2, x + 3, y + 2), last_seen=seen, **kw)
+
+
+BOX = Entity("box", "container", Status.VISIBLE, pos_cm=(70.0, 40.0), box_cm=(62.0, 34.0, 78.0, 46.0), last_seen=T0)
+
+
+def test_look_builds_one_observation_from_one_world_read(log):
+    """The marks drawn, the mark list, the names and the tracker text all come from one reading of
+    the world, even though the world moves on while the question is prepared."""
+    later = [keys_at(70.0, 40.0, Status.INSIDE, parent="box"), BOX]
+    world = TickingWorld([[keys_at(20.0, 15.0), BOX], later, later, later, later], log)
+    q, prov = qa(log, look_reply(mark=1), world=world)
+    q.look("where are the shiny things?")
+    last = [p[1] for p in prov.calls[0].parts if p[0] == "text"][-1]
+    marks, tracker = last.split("\n")[0], last.split("\n")[1]
+    assert "1 = keys" in marks and "2 = box" in marks
+    assert "keys: visible" in tracker and "inside" not in tracker
+
+
+def test_look_uses_one_frame_for_the_image_the_point_and_the_close_up_ages(log, monkeypatch):
+    import core.crops as crops
+    from core.crops import Crop, CropTrack
+
+    class Frames:
+        def __init__(self):
+            self.n = 0
+
+        def latest(self):
+            self.n += 1
+            if self.n == 1:
+                return Frame(t=100.0, wall=T0, img=img(), idx=1)
+            return Frame(t=160.0, wall=T0 + 60, img=np.zeros((360, 640, 3), np.uint8), idx=900)
+
+    class Store:
+        def for_entity(self, ent):
+            c = Crop(img=np.full((40, 30, 3), 90, np.uint8), box_px=(0, 0, 30, 40), box_cm=ent.box_cm, t=70.0, score=1)
+            return CropTrack(ent.name, ent.name, (0, 0, 30, 40), ent.box_cm, c.t, best=c)
+
+    monkeypatch.setattr(crops, "active", lambda: Store())
+    q, prov = qa(log, look_reply("Your keys are there.", point={"x": 0.222, "y": 0.25}))
+    q.frames = Frames()
+    a = q.look("where are my keys?", parse("where are my keys?", CFG))
+    assert a.point_at == "keys"                                  # the point read against frame 1's size
+    texts = [p[1] for p in prov.calls[0].parts if p[0] == "text"]
+    assert any("30 seconds before image 1" in t for t in texts)
+    import cv2
+    first = cv2.imdecode(np.frombuffer([p for p in prov.calls[0].parts if p[0] == "image"][0][1], np.uint8), 1)
+    assert first.shape[:2] == (720, 1280)
+
+
+def test_marks_older_than_the_frame_are_not_drawn(log):
+    """A box the world last saw more than half a second before the frame may not be where the frame
+    shows it: it gets no mark (and the VLM can't pick it)."""
+    world = FakeWorld([keys_at(20.0, 15.0, seen=T0 - 2.0), Entity("wallet", "target", Status.VISIBLE, pos_cm=(40.0, 30.0),
+                                                                   box_cm=(37.0, 28.0, 43.0, 32.0), last_seen=T0 - 0.3),
+                       Entity("remote", "target", Status.VISIBLE, pos_cm=(60.0, 20.0), box_cm=(57.0, 18.0, 63.0, 22.0))],
+                      log)
+    q, prov = qa(log, look_reply(mark=2), world=world)
+    a = q.look("what's on the table?")
+    marks = [p[1] for p in prov.calls[0].parts if p[0] == "text"][-1].split("\n")[0]
+    assert marks == "Marks: 1 = wallet." and a.point_at is None
+
+
+def moving(log, after, reply="Your keys are near the top left.", mark=1, question="where are the shiny things?"):
+    """look() while the world changes during the VLM call: after(world) runs as the reply comes back."""
+    world = FakeWorld([keys_at(20.0, 15.0), BOX], log)
+
+    def answer(job):
+        after(world)
+        return look_reply(reply, mark=mark)
+
+    q, _ = qa(log, answer, world=world)
+    return q.look(question)
+
+
+def test_the_chosen_entity_is_checked_again_when_the_answer_comes_back(log):
+    still = moving(log, lambda w: w.set("keys", pos_cm=(21.0, 15.5)))            # jitter: still points
+    assert still.point_at == "keys" and still.action == "point"
+    hidden = moving(log, lambda w: w.set("keys", status=Status.INSIDE, parent="box", pos_cm=(70.0, 40.0)))
+    assert hidden.point_at == "keys" and hidden.action == "point"              # the laser resolves it
+    for change in (lambda w: w.set("keys", pos_cm=(45.0, 30.0)),               # jumped 29 cm
+                   lambda w: w.entities.pop("keys"),                           # reset / forgotten
+                   lambda w: w.set("keys", merged_into="box"),                 # folded into another
+                   lambda w: w.set("keys", status=Status.GONE, edge="left")):
+        a = moving(log, change)
+        assert a.point_at is None and a.action is None and a.target_cm is None
+        assert a.text == "Your keys are near the top left. It moved while I was looking, so I won't point at it."
 
 
 # ---------------------------------------------------------------- B: recalling

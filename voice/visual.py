@@ -16,13 +16,19 @@ look(): set-of-marks grounding. Every VISIBLE tracked entity with a box (known o
 drawn on the current frame (<= look_px) as a numbered yellow box; that marked frame, upscaled close-ups of
 entities the question names (from core.crops.active(): only views the store knows were of that entity, each
 labelled with when it was taken; attach() binds views to things after every world.update), the compact
-world state and the question go to
-the VLM, which replies with strict JSON {answer, confidence, mark: null | number, point: null | {x, y}
-fractions of image 1}. A mark points at its entity (the laser then follows it through world.resolve); a
+world state and the question go to the VLM, which replies with strict JSON {answer, confidence,
+mark: null | number, point: null | {x, y} fractions of image 1}. A mark points at its entity (the laser then follows it through world.resolve); a
 point is mapped to table cm (frame px -> table homography) and points only when it lands inside a marked
 entity's box (the smallest, when that one lies inside the others). The laser never aims at a raw table
 position: a point on no tracked entity, or on an ambiguous overlap, gets the spoken answer and a brief
 "not sure exactly where". Low confidence abstains: "I can't tell from here."
+
+One observation per question: the frame is read once and the world state once right after it (marks,
+names, tracker text and close-ups all come from that reading); a box the world last saw more than
+MARK_FRESH_S from the frame's time is not drawn. When the reply comes back the chosen entity is checked
+against the world as it is now: gone, merged, off the table, or (still visible) moved more than JUMP_CM
+means no pointing and a short "it moved" note; hidden meanwhile, the laser follows it through
+world.resolve as usual.
 
 Why marks: measured with grok-4.3 on a 5-object desk photo, asking for boxes (Project Memoria's Gemini
 box_2d convention, [ymin, xmin, ymax, xmax] 0-1000) scored 0/5 (mean IoU 0.14; pixel and fraction boxes
@@ -51,7 +57,7 @@ import numpy as np
 from core.config import display_name
 from core.narration import NarrationConfig, NarrationError, ProviderError, _parse_json, event_line, make_provider
 from core.narration_store import parse_window, redact_meds
-from core.types import Answer, Intent
+from core.types import Answer, Intent, Status
 from core.visual_memory import VisualArchive, VisualConfig, digest_text, make_embedder
 
 if TYPE_CHECKING:
@@ -66,6 +72,10 @@ ABSTAIN = "I can't tell from here."
 PILLS_SAFE = ("I can't tell whether medication was taken; I can only tell you where the pill bottle is "
               "and when it was moved.")
 UNSURE_WHERE = "I'm not sure exactly where, so I won't point."
+MOVED = "It moved while I was looking, so I won't point at it."
+MARK_FRESH_S = 0.5         # a box the world last saw further than this from the frame's time is not drawn
+JUMP_CM = 5.0              # a visible entity that moved more than this during the VLM call is not pointed at
+HIDDEN = (Status.HELD.value, Status.UNDER.value, Status.INSIDE.value)
 POINT_MARGIN_CM = 2.0      # a VLM point this close outside a marked box still lands on it
 
 PAST = re.compile(r"\b(?:was|were|did|had|earlier|before|ago|yesterday|used to|show(?:ed|n)? up|appeared"
@@ -247,6 +257,32 @@ class Mark:
     box_px: tuple
     box_cm: tuple
     pos_cm: Optional[tuple] = None
+    seen: Optional[float] = None      # wall time the world last observed it
+
+
+@dataclass
+class Observation:
+    """Everything one look() question is answered from, captured once while perception keeps running:
+    the frame (with its idx and times), the world state read once for it, the marks drawn on that frame
+    (mark n -> marks[n - 1].name) and the close-ups with their capture times (crop.t, Frame.t clock)."""
+    img: np.ndarray
+    idx: int
+    t: float                          # Frame.t (time.monotonic())
+    wall: float                       # Frame.wall
+    state: dict
+    names: dict
+    marks: list
+    crops: list
+
+
+class _Frozen:
+    """A world whose state_json is one captured reading (for compact_state)."""
+
+    def __init__(self, state: dict):
+        self.state = state
+
+    def state_json(self) -> dict:
+        return self.state
 
 
 def _spoken(text: str) -> str:
@@ -342,10 +378,11 @@ class VisualQA:
 
     # -- names
 
-    def _names(self) -> dict:
-        """entity -> spoken name, for everything the world tracks (unnamed things: None)."""
+    def _names(self, state: Optional[dict] = None) -> dict:
+        """entity -> spoken name, for everything the world tracks (unnamed things: None); from state
+        (one captured state_json) when given."""
         try:
-            ents = [e["name"] for e in self.world.state_json().get("entities", [])]
+            ents = [e["name"] for e in (self.world.state_json() if state is None else state)["entities"]]
         except Exception:
             ents = list((self.cfg.get("objects") or {}))
         try:
@@ -354,7 +391,7 @@ class VisualQA:
             labels = {}
         return {n: (labels.get(n) if n.startswith("thing:") else display_name(self.cfg, n)) for n in ents}
 
-    def _focus(self, intent: Optional[Intent], text: str) -> list[str]:
+    def _focus(self, intent: Optional[Intent], text: str, names: Optional[dict] = None) -> list[str]:
         """Entities the question names, for close-ups: the intent's target, then any spoken name or alias
         that appears in the question."""
         out = []
@@ -367,17 +404,17 @@ class VisualQA:
             if t:
                 out.append(t)
         low = f" {text.lower()} "
-        for n, spoken in self._names().items():
+        for n, spoken in (self._names() if names is None else names).items():
             if spoken and re.search(rf"\b{re.escape(spoken.lower())}s?\b", low) and n not in out:
                 out.append(n)
         return out[: self.c.max_crops]
 
-    def _state_text(self) -> str:
+    def _state_text(self, state: Optional[dict] = None) -> str:
         from voice.llm import compact_state
         try:
-            names = self._names()
+            names = self._names(state)
             rows = []
-            for d in compact_state(self.world, self.cfg):
+            for d in compact_state(self.world if state is None else _Frozen(state), self.cfg):
                 spoken = names.get(d["name"]) or "unnamed object"
                 s = f"{spoken}: {d['status'].lower()}"
                 if d.get("parent"):
@@ -392,22 +429,19 @@ class VisualQA:
     # -- A: the table now
 
     def look(self, question: str, intent: Optional[Intent] = None) -> Answer:
-        f = self.frames.latest() if self.frames is not None else None
-        if f is None or getattr(f, "img", None) is None:
+        obs = self._observe(question, intent)
+        if obs is None:
             return Answer(CANT_SEE)
-        oh, ow = f.img.shape[:2]
-        names = self._names()
-        marks = self._marks()
-        full, _ = _jpeg(draw_marks(f.img, [mk.box_px for mk in marks]) if marks else f.img, self.c.look_px)
+        oh, ow = obs.img.shape[:2]
+        names, marks = obs.names, obs.marks
+        full, _ = _jpeg(draw_marks(obs.img, [mk.box_px for mk in marks]) if marks else obs.img, self.c.look_px)
         parts: list = [("text", "Image 1: the whole table now, from above."), ("image", full)]
-        focus = self._focus(intent, question)
-        crops = self._crops(focus)
-        for i, (n, crop) in enumerate(crops, 2):
+        for i, (n, crop) in enumerate(obs.crops, 2):
             parts += [("text", f"Image {i}: close-up of the {names.get(n) or 'unnamed object'}, "
-                               f"{_taken(f.t - crop.t)}."),
+                               f"{_taken(obs.t - crop.t)}."),
                       ("image", _jpeg(crop.img, self.c.crop_px, upscale=True)[0])]
         listed = ", ".join(f"{i} = {names.get(mk.name) or 'unnamed object'}" for i, mk in enumerate(marks, 1))
-        parts.append(("text", f"Marks: {listed or 'none'}.\nTracker: {self._state_text()}.\n"
+        parts.append(("text", f"Marks: {listed or 'none'}.\nTracker: {self._state_text(obs.state)}.\n"
                               f"Question: {question}"))
         try:
             d = self._vlm(LOOK_SYSTEM, parts, LOOK_SCHEMA)
@@ -417,34 +451,66 @@ class VisualQA:
         text = _spoken(_unmark(str(d.get("answer") or "")))
         if not text or _conf(d) < self.c.abstain_below:
             return Answer(ABSTAIN)
+        where = (intent is not None and intent.kind == "WHERE") or "where" in question.lower()
         m = d.get("mark")
         if isinstance(m, int) and not isinstance(m, bool) and 1 <= m <= len(marks):
-            return Answer(text, point_at=marks[m - 1].name, action="point")
-        where = (intent is not None and intent.kind == "WHERE") or "where" in question.lower()
+            return self._verified(text, marks[m - 1], where)
         return self._pointed(text, d.get("point"), (ow, oh), marks, where)
 
-    def _marks(self) -> list[Mark]:
-        """(entity, frame px box) for every VISIBLE tracked entity with a box, in world order: the
-        candidates the VLM picks from."""
+    def _observe(self, question: str, intent: Optional[Intent]) -> Optional[Observation]:
+        """One consistent observation for a question: the frame read once, the world state read once
+        right after it, the marks fresh for that frame, the close-ups with their times."""
+        f = self.frames.latest() if self.frames is not None else None
+        if f is None or getattr(f, "img", None) is None:
+            return None
+        try:
+            state = self.world.state_json()
+        except Exception:
+            state = {}
+        marks = self._marks(state, f.wall)
+        names = self._names(state)
+        crops = self._crops(self._focus(intent, question, names))
+        return Observation(f.img, getattr(f, "idx", 0), float(f.t), float(f.wall), state, names, marks, crops)
+
+    def _marks(self, state: dict, wall: float) -> list[Mark]:
+        """A Mark for every entity VISIBLE in state with a box the world saw within MARK_FRESH_S of the
+        frame's wall time, in world order: the candidates the VLM picks from. Box, position and time
+        are read together; an entity whose live status already differs is left out."""
         if self.table is None or getattr(self.table, "ok", True) is False:
             return []
-        try:
-            ents = self.world.state_json().get("entities", [])
-        except Exception:
-            return []
         out = []
-        for d in ents:
+        for d in state.get("entities", []):
             if d.get("status") != "VISIBLE":
                 continue
             try:
                 ent = self.world.get(d["name"])
-                box, pos = ent.box_cm, ent.pos_cm
+                status, box, pos, seen = str(ent.status), ent.box_cm, ent.pos_cm, ent.last_seen
             except Exception:
                 continue
-            px = cm_box_to_px(self.table, box) if box is not None else None
+            if status != "VISIBLE" or box is None or seen is None or abs(wall - seen) > MARK_FRESH_S:
+                continue
+            px = cm_box_to_px(self.table, box)
             if px is not None:
-                out.append(Mark(d["name"], px, tuple(box), tuple(pos) if pos is not None else None))
+                out.append(Mark(d["name"], px, tuple(box), tuple(pos) if pos is not None else None, seen))
         return out
+
+    def _verified(self, text: str, mk: Mark, where: bool = True) -> Answer:
+        """Point at mk's entity only if it still holds now that the answer is back: it still exists and
+        wasn't merged, and if still visible it hasn't moved more than JUMP_CM (hidden: the laser follows
+        it through world.resolve as usual). Otherwise the answer, a short note and no pointing."""
+        try:
+            ent = self.world.get(mk.name)
+            status, pos, merged = str(ent.status), ent.pos_cm, getattr(ent, "merged_into", None)
+        except Exception:
+            ent = None
+        if ent is None or merged:
+            return Answer(_with_note(text, MOVED, where))
+        if status == "VISIBLE":
+            if mk.pos_cm is None or pos is None or np.hypot(pos[0] - mk.pos_cm[0], pos[1] - mk.pos_cm[1]) > JUMP_CM:
+                return Answer(_with_note(text, MOVED, where))
+        elif status not in HIDDEN:
+            return Answer(_with_note(text, MOVED, where))
+        return Answer(text, point_at=mk.name, action="point")
 
     def _crops(self, focus: list[str]) -> list[tuple[str, Crop]]:
         """(entity, crop) close-ups of focus entities: only crops the store knows were of that entity
@@ -483,7 +549,7 @@ class VisualQA:
         hit = self._mark_at(float(c[0][0]), float(c[0][1]), marks) if c is not None else None
         if hit is None:
             return Answer(_with_note(text, UNSURE_WHERE, where))
-        return Answer(text, point_at=hit.name, action="point")
+        return self._verified(text, hit, where)
 
     @staticmethod
     def _mark_at(x: float, y: float, marks: list[Mark]) -> Optional[Mark]:
