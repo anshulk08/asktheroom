@@ -2,26 +2,33 @@
 
 Two workflows, both self-contained JSON you import into n8n:
 
-- `ask-the-room.json`: the **project workflow**. Chat questions go to the rig and come back as text, and a health check runs every 5 minutes. See below.
-- `ask-the-repo.json`: a chat bot that answers questions about the **codebase**. See *Ask the Repo*.
+- `ask-the-room.json`: the **project workflow**. A live log of every spoken question (what the rig heard,
+  how it understood it, what it said, how long it took), plus a health check every 5 minutes. See below.
+- `ask-the-repo.json`: a chat bot that answers questions about the **codebase**, for the team. See *Ask the Repo*.
 
 ## Ask the Room (project workflow)
 
-n8n sits around the rig: everything real-time runs in Python (`main.py`), and n8n talks to its HTTP API.
+Visitors ask out loud; nobody types. Everything real-time runs on the Jetson, offline: clicker, mic,
+Silero VAD, whisper.cpp, the rule parser with Qwen2.5 1.5B (llama.cpp) for what it can't read, answers,
+voice and laser (`main.py`). n8n runs on the laptop, around the rig, and never slows an answer down.
 
 ```
-chat message ─▶ Settings (rig_url) ─▶ GET /healthz ─▶ POST /ask {text, source: "n8n"} ─▶ answer text
-                                           └─ unreachable ─────────┴─▶ "I can't reach the rig at ..."
-every 5 min  ─▶ Settings (rig_url) ─▶ GET /state ─▶ Check the room ─▶ problems? ─▶ fail the execution
-                                           └─ unreachable ─▶ fail the execution ("Rig unreachable at ...")
+rig: clicker ─▶ speech ─▶ Whisper ─▶ rules │ Qwen ─▶ answer ─▶ speak + laser ─▶ POST webhook (background)
+                                                                                  │
+n8n: Rig heard a question ─▶ Settings ─▶ Read the question ─▶ went wrong? ─▶ fail the execution
+     every 5 min ──────────▶ Settings ─▶ GET /state ─▶ GET Qwen /health ─▶ Check the room ─▶ problems? ─▶ fail
+                                             └─ rig unreachable ─▶ fail the execution
 ```
 
-- **Text only.** `source: "n8n"` tells the rig to answer without speaking or moving the laser, the
-  same as texts. The rig still logs the question.
-- **Health check** flags perception under 10 fps, no internet (the rig falls back to templates and
-  Piper), objects with status UNKNOWN (lost track), and objects that left the table (GONE). Hidden objects
-  (INSIDE, UNDER, HELD) are normal and not flagged. A problem makes the execution fail, so it shows red
-  under *Executions*. Swap the two *Alert* nodes for Slack or Discord when there's a channel.
+- **Rig heard a question.** After every clicker press `main.py` posts
+  `{heard, intent, object, understood_by (qwen | rules), qwen_ms, answer, point_at, laser_err_cm, online,
+  click_to_laser_s, ...}` to the webhook in a background thread. Each question is one execution, so
+  *Executions* reads like a transcript of the demo. It fails (red) when nothing was heard, an open question
+  got the canned reply, click to laser took over 3 s, Qwen took over 1 s, or the laser landed over 3 cm off.
+- **Health check** flags Qwen not answering (questions fall back to the rule parser), perception under
+  10 fps, no internet (canned reply for open questions, Piper voice), objects with status UNKNOWN, and
+  objects that left the table (GONE). Hidden objects (INSIDE, UNDER, HELD) are normal and not flagged.
+- Swap the *Alert* nodes for Slack or Discord when there's a channel.
 - **SMS** stays on the rig's own `/sms` route (Twilio signature check and whitelist). n8n isn't involved.
 - **Detector:** the default YOLO-World v2 (`detect.model` in `config.yaml`) while the team compares models.
   Nothing in the workflow depends on which model it is.
@@ -31,15 +38,19 @@ every 5 min  ─▶ Settings (rig_url) ─▶ GET /state ─▶ Check the room �
 1. Start n8n: `npx n8n`, or `docker run -it --rm -p 5678:5678 -v n8n_data:/home/node/.n8n n8nio/n8n`.
    Open http://localhost:5678.
 2. **Create workflow → ⋯ → Import from File** → `n8n/ask-the-room.json`. No credentials are needed.
-3. Open the **Settings** node and set `rig_url`:
-   - The Jetson over USB-C: `http://192.168.55.1:8000` (the default)
-   - `python main.py --fake` on the same laptop: `http://127.0.0.1:8000`. Use `127.0.0.1`, not `localhost`:
-     n8n resolves `localhost` to IPv6 `::1`, and the rig only listens on IPv4.
+   **Save**, then **Publish** (the webhook only listens once published).
+3. Open the **Settings** node and set `rig_url` and `qwen_url`:
+   - The Jetson over USB-C: `http://192.168.55.1:8000` and `http://192.168.55.1:8081` (the defaults)
+   - `python main.py --fake` on the same laptop: `http://127.0.0.1:8000` and `:8081`. Use `127.0.0.1`,
+     not `localhost`: n8n resolves `localhost` to IPv6 `::1`, and the rig only listens on IPv4.
    - n8n in Docker, rig on the same laptop: `http://host.docker.internal:8000`
-4. **Save**, then **Publish**. Open *When chat message received* for the chat URL.
+4. On the Jetson, start Qwen so the laptop can reach it: `QWEN_HOST=0.0.0.0 scripts/qwen_server.sh`.
+5. In the rig's `config.yaml`, point the rig at the webhook (the laptop is `192.168.55.100` over USB-C):
+   `n8n: webhook_url: http://192.168.55.100:5678/webhook/ask-the-room`. Empty turns reporting off.
 
-Tested with n8n 2.40.7 against `main.py --fake --no-voice`: the chat questions, the unreachable-rig reply,
-and both scheduled outcomes (healthy, rig down).
+Tested with n8n 2.40.7 against `main.py --fake --no-voice` and llama-server with Qwen2.5 1.5B on the
+laptop: spoken questions driven through `Room.voice_loop` (a good answer, the canned reply, nothing heard)
+and the scheduled check.
 
 # Ask the Repo (n8n)
 

@@ -3,23 +3,20 @@
   "nodes": [
     {
       "parameters": {
-        "public": true,
-        "initialMessages": "Hi! Ask me about the table, like \"where are my keys?\" or \"what changed?\". I answer in text; the rig doesn't speak or move the laser for chat questions.",
-        "options": {
-          "title": "Ask the Room",
-          "subtitle": "Text questions to the tabletop rig (HackGT 13)",
-          "responseMode": "lastNode"
-        }
+        "httpMethod": "POST",
+        "path": "ask-the-room",
+        "responseMode": "onReceived",
+        "options": {}
       },
-      "type": "@n8n/n8n-nodes-langchain.chatTrigger",
-      "typeVersion": 1.5,
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
       "position": [
         0,
         0
       ],
-      "id": "8dc1a215-74ea-548c-afbd-c237961b074d",
-      "name": "When chat message received",
-      "webhookId": "1caa4782-4631-52d2-8f5d-a369b9f54a7d"
+      "id": "db05b4bb-3b97-5c09-9a0a-6c3c3d33f831",
+      "name": "Rig heard a question",
+      "webhookId": "a77652bf-b2dc-512b-98df-0f6a91570412"
     },
     {
       "parameters": {
@@ -50,6 +47,12 @@
               "name": "rig_url",
               "value": "http://192.168.55.1:8000",
               "type": "string"
+            },
+            {
+              "id": "d821f563-e600-5465-90fd-00416c690b93",
+              "name": "qwen_url",
+              "value": "http://192.168.55.1:8081",
+              "type": "string"
             }
           ]
         },
@@ -71,16 +74,16 @@
           "options": {
             "caseSensitive": true,
             "leftValue": "",
-            "typeValidation": "strict",
+            "typeValidation": "loose",
             "version": 2
           },
           "conditions": [
             {
               "id": "7e08a54e-7c61-5f06-89ee-651527c24a14",
-              "leftValue": "={{ $json.sessionId }}",
+              "leftValue": "={{ $json.body }}",
               "rightValue": "",
               "operator": {
-                "type": "string",
+                "type": "object",
                 "operation": "exists",
                 "singleValue": true
               }
@@ -96,94 +99,68 @@
         460,
         200
       ],
-      "id": "eb6e7c10-3dae-5f4f-b073-955a520663ef",
-      "name": "Chat question?"
+      "id": "6ccc3d44-6678-5bbd-9c2d-68d5ef59d167",
+      "name": "Spoken question?"
     },
     {
       "parameters": {
-        "url": "={{ $('Settings').item.json.rig_url }}/healthz",
-        "options": {
-          "timeout": 3000
-        }
+        "jsCode": "// main.py posts one of these after every clicker press (n8n.webhook_url in config.yaml):\n// {heard, intent, object, understood_by: qwen|rules, qwen_ms, answer, point_at, action, laser_err_cm,\n//   online, record_transcribe_s, ask_s, click_to_laser_s, stt_ms}\nconst q = $json.body;\nconst problems = [];\nif (!q.heard) problems.push('heard nothing: mic level, or the visitor spoke before the click?');\nif (q.answer === \"I can tell you where things are, what happened to them, or what changed.\")\n  problems.push(q.online ? 'Grok gave no answer' : 'offline, so an open question got the canned reply');\nif ((q.click_to_laser_s || 0) > 3) problems.push(`click to laser took ${q.click_to_laser_s} s (target 3 s)`);\nif ((q.qwen_ms || 0) > 1000) problems.push(`Qwen took ${q.qwen_ms} ms`);\nif (q.laser_err_cm != null && q.laser_err_cm > 3) problems.push(`laser landed ${q.laser_err_cm} cm off`);\nconst what = q.object ? `${q.intent} ${q.object}` : (q.intent || '-');\nreturn [{ json: {\n  summary: `\"${q.heard}\" -> ${what} (${q.understood_by || '-'}) -> \"${q.answer}\"`\n           + (q.click_to_laser_s != null ? ` in ${q.click_to_laser_s} s` : ''),\n  ok: problems.length === 0, problems, ...q } }];\n"
       },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
       "position": [
         700,
         0
       ],
-      "id": "405d1f04-7ba8-5e9e-961c-f057f12ebea5",
-      "name": "Rig up?",
-      "onError": "continueErrorOutput"
+      "id": "7428599b-afb1-5721-8aa2-3dd0b5bfb0f4",
+      "name": "Read the question"
     },
     {
       "parameters": {
-        "method": "POST",
-        "url": "={{ $('Settings').item.json.rig_url }}/ask",
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ text: $('Settings').item.json.chatInput, source: 'n8n' }) }}",
-        "options": {
-          "timeout": 12000
-        }
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "1ce55d4c-5314-5130-b029-ec02640dd4f3",
+              "leftValue": "={{ $json.ok }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "false",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
       },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
       "position": [
         940,
-        -100
+        0
       ],
-      "id": "011496da-cff7-57e2-94fc-77a93c3e686d",
-      "name": "Ask the rig",
-      "onError": "continueErrorOutput"
+      "id": "33b97dbf-a5d9-5581-8ce2-58c7104b5cde",
+      "name": "Question went wrong?"
     },
     {
       "parameters": {
-        "assignments": {
-          "assignments": [
-            {
-              "id": "b06304f1-be5f-583c-828d-4b004e7e08aa",
-              "name": "output",
-              "value": "={{ $json.text }}",
-              "type": "string"
-            }
-          ]
-        },
-        "includeOtherFields": false,
-        "options": {}
+        "errorMessage": "={{ $json.summary }}: {{ $json.problems.join('; ') }}"
       },
-      "type": "n8n-nodes-base.set",
-      "typeVersion": 3.4,
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
       "position": [
         1180,
-        -100
+        -80
       ],
-      "id": "0383b685-f8ef-5e07-8289-4710ef107e88",
-      "name": "Chat reply"
-    },
-    {
-      "parameters": {
-        "assignments": {
-          "assignments": [
-            {
-              "id": "2b55503a-f606-58fc-a1fc-7e297a8f21a0",
-              "name": "output",
-              "value": "=I can't reach the rig at {{ $('Settings').item.json.rig_url }}. Is main.py running on the Jetson (or main.py --fake on the laptop), and is rig_url in the Settings node right?",
-              "type": "string"
-            }
-          ]
-        },
-        "includeOtherFields": false,
-        "options": {}
-      },
-      "type": "n8n-nodes-base.set",
-      "typeVersion": 3.4,
-      "position": [
-        1180,
-        100
-      ],
-      "id": "7e5fa145-7abf-5a24-896e-b4c8bf707647",
-      "name": "Rig unreachable"
+      "id": "a5cca14d-79a4-59e4-a926-ce8ce8a22f99",
+      "name": "Alert: question needs a look"
     },
     {
       "parameters": {
@@ -204,12 +181,29 @@
     },
     {
       "parameters": {
-        "jsCode": "// /state is {state: world.state_json(), last_answer, server_t}. Hidden objects (INSIDE, UNDER, HELD)\n// are normal during a demo; a lost track, a stalled detector or no internet are worth a look.\nconst s = $json.state || {};\nconst problems = [];\nif ((s.fps || 0) < 10) problems.push(`perception at ${s.fps || 0} fps (want 10+): is the detector running?`);\nif (!s.online) problems.push('rig is offline: answers use templates and Piper, no Grok or ElevenLabs');\nconst lost = (s.entities || []).filter(e => e.status === 'UNKNOWN').map(e => e.name);\nif (lost.length) problems.push(`lost track of: ${lost.join(', ')}`);\nconst gone = (s.entities || []).filter(e => e.status === 'GONE').map(e => `${e.name} (${e.edge || 'edge'})`);\nif (gone.length) problems.push(`left the table: ${gone.join(', ')}`);\nreturn [{ json: { ok: problems.length === 0, problems, fps: s.fps, online: s.online,\n                  checked: new Date().toISOString() } }];\n"
+        "url": "={{ $('Settings').item.json.qwen_url }}/health",
+        "options": {
+          "timeout": 3000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        940,
+        320
+      ],
+      "id": "bdf8cd3e-1931-55d1-b2ef-5bd3afe345d6",
+      "name": "Qwen up?",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// /state is {state: world.state_json(), last_answer, server_t}. Hidden objects (INSIDE, UNDER, HELD)\n// are normal during a demo; a lost track, a stalled detector, no Qwen or no internet are worth a look.\nconst s = $('Get room state').first().json.state || {};\nconst problems = [];\nif ($json.error) problems.push('Qwen (llama-server) not answering: questions fall back to the rule parser. Run scripts/qwen_server.sh');\nif ((s.fps || 0) < 10) problems.push(`perception at ${s.fps || 0} fps (want 10+): is the detector running?`);\nif (!s.online) problems.push('rig is offline: open questions get the canned reply, voice is Piper');\nconst lost = (s.entities || []).filter(e => e.status === 'UNKNOWN').map(e => e.name);\nif (lost.length) problems.push(`lost track of: ${lost.join(', ')}`);\nconst gone = (s.entities || []).filter(e => e.status === 'GONE').map(e => `${e.name} (${e.edge || 'edge'})`);\nif (gone.length) problems.push(`left the table: ${gone.join(', ')}`);\nreturn [{ json: { ok: problems.length === 0, problems, fps: s.fps, online: s.online, qwen: !$json.error,\n                  checked: new Date().toISOString() } }];\n"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        940,
+        1180,
         320
       ],
       "id": "2a316cb9-49f3-5db7-9d8e-ea4ee9b2602c",
@@ -243,7 +237,7 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
       "position": [
-        1180,
+        1420,
         320
       ],
       "id": "8e715af3-cbd5-56c7-815f-9fc03bfb6d3b",
@@ -256,7 +250,7 @@
       "type": "n8n-nodes-base.stopAndError",
       "typeVersion": 1,
       "position": [
-        1420,
+        1660,
         300
       ],
       "id": "45f265b9-3195-5dcf-99e6-152d01aef598",
@@ -277,71 +271,71 @@
     },
     {
       "parameters": {
-        "content": "## Ask the Room: project workflow\nn8n sits **around** the rig. Everything real-time runs in Python on the Jetson (`main.py`); this workflow talks to its HTTP API.\n\n**Chat** (top): a typed question → `GET /healthz` → `POST /ask {text, source: \"n8n\"}` → the answer text. Chat questions are **text only**: the rig doesn't speak or move the laser.\n\n**Every 5 min** (bottom): `GET /state` → flags a stalled detector, no internet, lost or carried-off objects. A problem fails the execution, so it shows red under *Executions*. Swap the *Alert* nodes for Slack/Discord later.\n\nTexts (Twilio SMS) stay on the rig's own `/sms` route (signature check + whitelist); n8n isn't involved.",
-        "height": 500,
-        "width": 520,
+        "content": "## Ask the Room: project workflow\nVisitors **speak**; nobody types. Everything real-time runs on the Jetson (`main.py`), offline. n8n sits **around** it, on the laptop, and never slows an answer down.\n\n**Rig heard a question** (top): after every clicker press the rig posts what it heard, how it understood it (Qwen or rules), what it said and how long it took. Each one is an execution here: a live log of the demo. A slow answer (click to laser over 3 s), nothing heard, the canned reply or a laser miss fails the execution, so it shows red under *Executions*.\n\n**Every 5 min** (bottom): `GET /state` and Qwen's `/health` → flags a stalled detector, Qwen down, no internet, lost or carried-off objects.\n\nSwap the *Alert* nodes for Slack/Discord later. Texts (Twilio SMS) stay on the rig's own `/sms`.",
+        "height": 560,
+        "width": 540,
         "color": 4
       },
       "type": "n8n-nodes-base.stickyNote",
       "typeVersion": 1,
       "position": [
         -40,
-        -560
+        -620
       ],
       "id": "b4289b25-1287-5610-ac82-747e9307c08e",
       "name": "About"
     },
     {
       "parameters": {
-        "content": "## What main.py runs (for reference, not executed here)\n```\ncamera 30 fps ─▶ detector: YOLO-World v2 (yolov8s-worldv2, config prompts)\n               ─▶ hand tracker ─▶ world model (rules) ─▶ event log (SQLite)\nclicker ─▶ Silero VAD ─▶ whisper.cpp ─▶ intent parser\n       ─▶ answer templates │ Grok (OTHER questions, online only)\n       ─▶ voice (ElevenLabs online, Piper offline) + laser pointer\ndashboard + /ask + /sms + /state  ◀─ FastAPI on :8000\n```\nDetector: the team is still comparing YOLO models; this uses the default YOLO-World v2 until that's decided (`detect.model` in `config.yaml`).",
-        "height": 400,
-        "width": 700,
+        "content": "## What main.py runs (for reference, not executed here)\n```\ncamera 30 fps ─▶ detector: YOLO-World v2 (yolov8s-worldv2, config prompts)\n               ─▶ hand tracker ─▶ world model (rules) ─▶ event log (SQLite)\nclicker ─▶ mic ─▶ Silero VAD ─▶ whisper.cpp base.en        \"uh, show me my specs\"\n        ─▶ rule parser; what it can't read ─▶ Qwen2.5 1.5B     → WHERE glasses\n           (llama.cpp on the Jetson, :8081, offline)\n        ─▶ answer templates │ Grok (open questions, online only)\n        ─▶ voice (ElevenLabs online, Piper offline) + laser, at the same time\n        ─▶ POST this workflow's webhook\ndashboard + /state  ◀─ FastAPI on :8000\n```\nDetector: the team is still comparing YOLO models; this uses the default YOLO-World v2 until that's decided (`detect.model` in `config.yaml`).",
+        "height": 440,
+        "width": 740,
         "color": 7
       },
       "type": "n8n-nodes-base.stickyNote",
       "typeVersion": 1,
       "position": [
         560,
-        -560
+        -620
       ],
       "id": "a2c88e9b-a9f0-5fc0-be83-31441e771652",
       "name": "Inside the rig"
     },
     {
       "parameters": {
-        "content": "## Setup (self-hosted, laptop)\n1. `npx n8n` (or Docker), open http://localhost:5678, **Import from File** → `n8n/ask-the-room.json`.\n2. In **Settings**, set `rig_url`:\n   - Jetson over USB-C: `http://192.168.55.1:8000`\n   - `main.py --fake` on this laptop: `http://127.0.0.1:8000`, not `localhost` (n8n tries IPv6 `::1`; the rig listens on IPv4). Docker n8n: `http://host.docker.internal:8000`\n3. **Publish**. Open the chat trigger for the chat URL.\nNo credentials needed.",
-        "height": 400,
-        "width": 420,
+        "content": "## Setup (self-hosted, laptop)\n1. `npx n8n` (or Docker), open http://localhost:5678, **Import from File** → `n8n/ask-the-room.json`, **Publish**.\n2. **Settings** node: `rig_url` and `qwen_url` are the Jetson over USB-C (`192.168.55.1`). For `main.py --fake` on this laptop use `http://127.0.0.1:8000` and `:8081`, not `localhost` (n8n tries IPv6 `::1`).\n3. On the Jetson: `QWEN_HOST=0.0.0.0 scripts/qwen_server.sh`, and in `config.yaml` set `n8n.webhook_url: http://192.168.55.100:5678/webhook/ask-the-room` (the laptop's USB-C address).\nNo credentials needed.",
+        "height": 480,
+        "width": 460,
         "color": 6
       },
       "type": "n8n-nodes-base.stickyNote",
       "typeVersion": 1,
       "position": [
-        1320,
-        -560
+        1340,
+        -620
       ],
       "id": "f73ee6ce-397f-529a-9722-a578700bcec2",
       "name": "Setup"
     },
     {
       "parameters": {
-        "content": "## Grok: to do\nGrok answers OTHER questions inside the rig (`voice/llm.py`, tools `locate` / `history` / `changes_since` / `respond`).\nIts config and tool schema reference get added here next.",
-        "height": 260,
-        "width": 420,
+        "content": "## Grok: to do\nGrok answers open questions inside the rig (`voice/llm.py`, tools `locate` / `history` / `changes_since` / `respond`). Its config and tool schema reference get added here next.",
+        "height": 240,
+        "width": 460,
         "color": 3
       },
       "type": "n8n-nodes-base.stickyNote",
       "typeVersion": 1,
       "position": [
-        1320,
-        200
+        1340,
+        -100
       ],
       "id": "2e097acd-085e-567f-aa74-6ca392705963",
       "name": "Grok (next)"
     }
   ],
   "connections": {
-    "When chat message received": {
+    "Rig heard a question": {
       "main": [
         [
           {
@@ -367,18 +361,18 @@
       "main": [
         [
           {
-            "node": "Chat question?",
+            "node": "Spoken question?",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Chat question?": {
+    "Spoken question?": {
       "main": [
         [
           {
-            "node": "Rig up?",
+            "node": "Read the question",
             "type": "main",
             "index": 0
           }
@@ -392,36 +386,22 @@
         ]
       ]
     },
-    "Rig up?": {
+    "Read the question": {
       "main": [
         [
           {
-            "node": "Ask the rig",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Rig unreachable",
+            "node": "Question went wrong?",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Ask the rig": {
+    "Question went wrong?": {
       "main": [
         [
           {
-            "node": "Chat reply",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Rig unreachable",
+            "node": "Alert: question needs a look",
             "type": "main",
             "index": 0
           }
@@ -432,7 +412,7 @@
       "main": [
         [
           {
-            "node": "Check the room",
+            "node": "Qwen up?",
             "type": "main",
             "index": 0
           }
@@ -440,6 +420,17 @@
         [
           {
             "node": "Alert: rig unreachable",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Qwen up?": {
+      "main": [
+        [
+          {
+            "node": "Check the room",
             "type": "main",
             "index": 0
           }

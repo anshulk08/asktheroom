@@ -33,17 +33,21 @@ camera ─▶ core/capture.FrameBuffer (30 fps thread)
         ─▶ core/detect.Detector (YOLO, TensorRT, ~14 ms) ─▶ core/hands.HandTracker (stable hand ids)
         ─▶ core/world.World.update()  ── rules from spec 3.5 ──▶ core/events.EventLog (SQLite + JPEG snapshots)
                      │
-question ─▶ voice/intents.parse ─▶ voice/pipeline.make_ask
+spoken question ─▶ voice/stt (Silero VAD + whisper.cpp)
+          ─▶ voice/understand: voice/intents.parse, then Qwen2.5 1.5B (llama.cpp, on the Jetson) for what
+             the rules can't read ─▶ voice/pipeline.make_ask
                      ├─ WHERE / HANDLED / CHANGES / ... ─▶ voice/answers (offline templates)
                      └─ OTHER, and online only ─────────▶ voice/llm (Grok grok-4.3, reasoning none)
           ─▶ Answer(speech, point_at, action)
                      ├─ voice/tts: ElevenLabs when online, Piper offline
                      └─ act/laser.Laser.aim_object: closed-loop aim, corrects on the camera's view of the dot
 server/app.py (FastAPI): dashboard, MJPEG overlay, WebSocket state, POST /ask, /sms (Twilio)
+main.py ─▶ n8n webhook (laptop): a log of every spoken question, plus a 5-minute health check
 ```
 
-Core answers never need the network. Only open-ended (OTHER) questions go to Grok, and only question
-text plus a compact world-state JSON leave the device.
+Core answers never need the network: speech, Qwen and the templates all run on the Jetson. Only
+open-ended (OTHER) questions go to Grok, and only question text plus a compact world-state JSON leave
+the device.
 
 ## Repo map
 
@@ -58,14 +62,14 @@ text plus a compact world-state JSON leave the device.
 | `core/world.py`, `core/relations.py`, `core/geom.py` | Deterministic, rule-based world model (covers, containers, holds, edges, parent chains). About 200 tests. |
 | `core/events.py` | EventLog: SQLite event history, questions table and snapshots. |
 | `core/fakeworld.py` | Stand-in world with the same read API, for tests and `--fake` runs. |
-| `voice/` | `intents` (rule parser), `answers` (spoken templates), `llm` (Grok tools), `pipeline` (router), `tts`. STT and the clicker are not built yet. |
+| `voice/` | `intents` (rule parser), `answers` (spoken templates), `llm` (Grok tools), `pipeline` (router), `tts`, `stt` (Silero VAD + whisper.cpp), `trigger` (clicker), `understand` (Qwen reads what the rules can't; `scripts/qwen_server.sh`). |
 | `act/` | `actuator` (servo drivers + fake), `laser` (poly2 fit + closed-loop aim), `calibrate`, `sim` (simulated rig). |
 | `server/` | FastAPI dashboard (`app.py`), frame overlay, `sim.py` (full demo on a synthetic camera). |
 | `eval/` | Trial recording, synthetic trials, replay against baselines (last-seen, nearest-object, current-frame) and the report. |
 | `net.py` | Online/offline monitor. Readers check `.online`, which never blocks. |
 | `scripts/` | `dock.sh` (run inside the Jetson Ultralytics container), camera setup, markers PDF, servo sweep, Grok smoke test. |
 | `tests/` | About 475 tests. None need hardware. |
-| `n8n/` | `ask-the-room.json`: text chat to the rig plus a 5-minute health check. `ask-the-repo.json`: a chat bot about this repo. See `n8n/README.md`. |
+| `n8n/` | `ask-the-room.json`: a live log of every spoken question plus a 5-minute health check. `ask-the-repo.json`: a chat bot about this repo. See `n8n/README.md`. |
 
 ## Conventions
 
@@ -98,9 +102,11 @@ intents, answers, Grok fallback, TTS, laser math and calibration against the sim
 harness. The synthetic eval scores 255/300. That number is synthetic and says nothing about how well the
 real detector works.
 
-Open (see `TEAMMATE.md`): speech input (Silero VAD + whisper.cpp) and the clicker, `main.py` wiring all
-threads together, the fine-tuning pipeline (zero-shot YOLO-World mistook the Jetson case for a phone),
-and `demo_check.py`. Stretch goals (floor search camera, room map) wait until checkpoints D8/D9 pass.
+Also built, tested on the laptop, not yet on the Jetson: speech input (Silero VAD + whisper.cpp) and the
+clicker, `main.py` wiring all threads together, the fine-tuning scripts (zero-shot YOLO-World mistook the
+Jetson case for a phone), `demo_check.py`, and Qwen question understanding (llama.cpp still needs building
+on the Jetson; time it there). Stretch goals (floor search camera, room map) wait until checkpoints D8/D9
+pass.
 
 ## Decisions worth knowing
 
