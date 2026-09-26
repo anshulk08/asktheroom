@@ -8,7 +8,7 @@ overhead). `synthesize.py` then pastes the cutouts into multi-object, occluded, 
 with exact boxes. Validation is real captures only: group `cap3` (poses 4 and 8 of every object, a
 quarter of the hand frames), which is never pasted. Synthetic `synth_*` images always train.
 
-**Jetson** (`ssh guru@192.168.55.1`, `cd ~/askroom`). The app holds the camera, so stop it first:
+**Jetson** (`ssh guru@10.90.84.178` (Wi-Fi; `guru@192.168.55.1` over USB), `cd ~/askroom`). The app holds the camera, so stop it first:
 ```
 docker ps --filter ancestor=askroom:latest --format '{{.ID}} {{.Command}}' | grep main.py | cut -d' ' -f1 | xargs -r docker stop
 scripts/camera_setup.sh                          # lamp on: labels need a lit, still table
@@ -43,7 +43,7 @@ another phone), or the model learns that the class's own look is "not it".
 **Mac** (`cd ~/askroom`):
 ```
 mv data/finetune data/finetune-oldcam                                      # new camera only (as on the Jetson)
-rsync -a guru@192.168.55.1:askroom/data/finetune/ data/finetune/           # ~1 min
+rsync -a "guru@10.90.84.178:askroom/data/finetune/" data/finetune/           # ~1 min
 cp data/hands_public/images/pubhand_* data/finetune/images/ && \
     cp data/hands_public/labels/pubhand_* data/finetune/labels/            # optional: EgoHands hands (public_hands.py)
 open data/finetune/qa_capture.jpg                                          # every box right?
@@ -51,7 +51,7 @@ open data/finetune/qa_capture.jpg                                          # eve
 PYTORCH_ENABLE_MPS_FALLBACK=1 .venv/bin/python scripts/finetune/train.py \
     --model models/yolo26s.pt --device mps --batch 8 --epochs 30 --val-trials cap3 --name askroom-yolo26s
 cp <the "best weights:" path it prints> models/askroom-yolo26s.pt          # usually ~/runs/detect/runs/askroom/askroom-yolo26s/weights/best.pt
-scp models/askroom-yolo26s.pt guru@192.168.55.1:askroom/models/
+scp models/askroom-yolo26s.pt "guru@10.90.84.178:askroom/models/"
 ```
 Training on the M-series Mac runs ~1.4 s/iteration at 640 px, batch 8 (batch 16 swaps on 16 GB), so
 30 epochs of ~650 images is roughly 60-70 min; a cloud GPU is much faster. If YOLO26 gives any trouble,
