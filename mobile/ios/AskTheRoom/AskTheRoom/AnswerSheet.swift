@@ -145,6 +145,9 @@ struct ThingSummary: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(Dashboard.capitalized(e.displayName))
                         .font(.title2.bold())
+                    if e.isHedged, let number = e.thingNumber {
+                        Text("The room's guess, object \(number)").font(.body).foregroundStyle(.secondary)
+                    }
                     Text(Dashboard.whereabouts(e, in: snapshot))
                         .font(.title3)
                     if let seen = Dashboard.lastSeen(e, now: snapshot.time ?? Date()) {

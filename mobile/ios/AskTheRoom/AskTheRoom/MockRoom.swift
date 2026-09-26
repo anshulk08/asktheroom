@@ -221,9 +221,10 @@ final class MockRoom: RoomTransport {
     }
 
     /// The entity whose name or aliases share the most words with the question; targets win ties.
+    /// Grok's guesses (`g`) aren't names the rig answers to, so they don't match.
     static func bestMatch(for words: Set<String>, in snapshot: Snapshot) -> Entity? {
         let scored = snapshot.entities.map { e -> (Entity, Int) in
-            let names = [e.displayName, e.name.replacingOccurrences(of: "_", with: " ")] + e.aliases
+            let names = [e.name.replacingOccurrences(of: "_", with: " ")] + e.aliases
             let terms = Set(names.flatMap { stems(of: $0) })
             return (e, terms.intersection(words).count)
         }
@@ -235,6 +236,7 @@ final class MockRoom: RoomTransport {
 
     private static func spokenName(_ e: Entity) -> String {
         if e.kind != .target { return "the \(e.displayName)" }
+        if e.isHedged { return e.phrase }
         if e.isThing {
             guard let alias = e.aliases.first else { return "that object" }
             return alias.hasPrefix("my ") ? "your " + alias.dropFirst(3) : "the \(alias)"

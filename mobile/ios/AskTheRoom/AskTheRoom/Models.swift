@@ -82,6 +82,16 @@ struct Entity: Codable, Equatable, Identifiable {
     var a: [String]?
     var m: [MaybeSame]?
     var ls: Double?
+    /// Unnamed things only: Grok's soft guess of what it is, and how sure (missing means 0.6).
+    var g: String?
+    var gc: Double?
+    /// `as` on the wire: "grok" when `a[0]` was set by Grok, not taught by a person.
+    var aliasSource: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case n, k, s, p, xy, r, c, edge, a, m, ls, g, gc
+        case aliasSource = "as"
+    }
 
     var id: String { n }
     var name: String { n }
@@ -104,7 +114,55 @@ struct Entity: Codable, Equatable, Identifiable {
     /// Held by a hand rather than inside or under another entity.
     var isInHand: Bool { p?.hasPrefix("hand:") ?? false }
 
-    var displayName: String { Entity.displayName(for: n, aliases: aliases) }
+    // Naming. The views use only these, so a thing is called the same everywhere:
+    //   taught alias        "my charger"       ("your" in sentences)
+    //   alias from Grok     "tape roll?"       ("what looks like a tape roll", never "your")
+    //   Grok guess >= 0.5   "phone charger?"   (same hedging)
+    //   nothing, weak guess "unnamed object 9"
+
+    /// A guess counts from here up; below it the thing stays "unnamed".
+    static let guessThreshold = 0.5
+    /// Older bridges send `g` without `gc`.
+    static let defaultGuessConfidence = 0.6
+
+    /// A thing a person named: it has an alias, and Grok didn't set the newest one.
+    var hasTaughtName: Bool { isThing && !aliases.isEmpty && aliasSource != "grok" }
+
+    /// What the room thinks it is, without a person's say-so: Grok's alias, else a confident guess.
+    var hedgedName: String? {
+        guard isThing, !hasTaughtName else { return nil }
+        if let alias = aliases.first { return alias }
+        guard let g, !g.isEmpty, (gc ?? Self.defaultGuessConfidence) >= Self.guessThreshold else { return nil }
+        return g
+    }
+
+    var isHedged: Bool { hedgedName != nil }
+
+    /// A thing with nothing to call it but its number.
+    var isNameless: Bool { isThing && aliases.isEmpty && !isHedged }
+
+    /// "7" for `thing:7`, kept for the detail sheet once a guess replaces it in the title.
+    var thingNumber: String? { isThing ? String(n.dropFirst("thing:".count)) : nil }
+
+    var displayName: String {
+        hedgedName.map { "\($0)?" } ?? Entity.displayName(for: n, aliases: aliases)
+    }
+
+    /// How a sentence names it: "what looks like a tape roll" when hedged, else `displayName`.
+    var phrase: String {
+        hedgedName.map { Entity.looksLike($0) } ?? displayName
+    }
+
+    static let hedgePrefix = "what looks like "
+
+    /// "what looks like a tape roll".
+    static func looksLike(_ name: String) -> String { hedgePrefix + withArticle(name) }
+
+    /// "a tape roll", "an apple".
+    static func withArticle(_ name: String) -> String {
+        let vowel = name.lowercased().first.map { "aeiou".contains($0) } ?? false
+        return "\(vowel ? "an" : "a") \(name)"
+    }
 
     static func displayName(for name: String, aliases: [String] = []) -> String {
         if name.hasPrefix("thing:") {

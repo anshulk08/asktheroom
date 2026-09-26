@@ -74,6 +74,7 @@ struct MapItem: Identifiable, Equatable {
     var title: String
     /// What the map prints: the title, or just "unnamed" for a thing without a name, so a
     /// long "unnamed object 9" doesn't crowd the table. VoiceOver and the card say it in full.
+    /// A guess keeps its question mark: "phone charger?".
     var label: String
     /// The entity this one is inside or under, if any.
     var parent: String?
@@ -137,7 +138,7 @@ enum MapLayout {
             var item = MapItem(
                 id: entity.name,
                 title: entity.displayName,
-                label: entity.isThing && entity.aliases.isEmpty ? "unnamed" : entity.displayName,
+                label: entity.isNameless ? "unnamed" : entity.displayName,
                 parent: entity.status == .inside || entity.status == .under ? entity.parent : nil,
                 caption: caption(for: entity, in: snapshot),
                 shape: blockShape ?? .pin,

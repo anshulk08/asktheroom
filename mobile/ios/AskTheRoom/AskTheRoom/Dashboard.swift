@@ -85,9 +85,15 @@ enum Dashboard {
     static let recentHour: TimeInterval = 60 * 60
 
     /// The person's own things: targets, plus unknown objects someone has named. Containers
-    /// and covers are furniture here; they show up in "where" words instead.
+    /// and covers are furniture here; they show up in "where" words instead. Things only Grok
+    /// has named are the room's guess, not the person's, so they stay in "The room noticed".
     static func things(in snapshot: Snapshot) -> [Entity] {
-        snapshot.entities.filter { $0.kind == .target && (!$0.isThing || !$0.aliases.isEmpty) }
+        snapshot.entities.filter(isTheirs)
+    }
+
+    /// Something the person owns and named: "your keys", never "your tape roll" from Grok.
+    static func isTheirs(_ e: Entity) -> Bool {
+        e.kind == .target && (!e.isThing || e.hasTaughtName)
     }
 
     /// "On the table", "Inside the box", "Off the table, on the left side"… Sentence case.
@@ -114,9 +120,10 @@ enum Dashboard {
         return "Last seen \(ago(seen, now: now).lowercased())"
     }
 
-    /// The question a tap on a thing asks.
+    /// The question a tap on a thing asks. A name Grok gave isn't the person's: "the tape roll".
     static func question(for e: Entity) -> String {
-        "Where \(isPlural(e.displayName) ? "are" : "is") \(e.displayName.hasPrefix("my ") ? "" : "my ")\(e.displayName)?"
+        if e.isHedged, let alias = e.aliases.first { return "Where is the \(alias)?" }
+        return "Where \(isPlural(e.displayName) ? "are" : "is") \(e.displayName.hasPrefix("my ") ? "" : "my ")\(e.displayName)?"
     }
 
     /// Things to point out, most urgent first: gone, then lost, then unnamed newcomers.
@@ -125,7 +132,7 @@ enum Dashboard {
         for e in snapshot.entities {
             let name = e.displayName
             switch e.status {
-            case .gone where !e.isThing || !e.aliases.isEmpty:
+            case .gone where !e.isThing || e.hasTaughtName:
                 let side = e.edge.map { ", on the \($0.rawValue) side" } ?? ""
                 out.append(Notice(kind: .leftTable, entity: e.name,
                                   text: "\(capitalized(your(e))) \(was(name)) moved off the table\(side).",
@@ -139,13 +146,14 @@ enum Dashboard {
             default:
                 break
             }
-            if e.isThing, e.aliases.isEmpty, e.status == .visible {
-                // Only guess a name the person would recognise.
+            if e.isThing, !e.hasTaughtName, e.status == .visible {
+                // The room's own guess, hedged, then an older thing only if the person named it.
+                let looks = e.hedgedName.map { " It looks like \(Entity.withArticle($0))." } ?? ""
                 let known = e.maybeSameAs.lazy.compactMap { snapshot.entity(named: $0.name) }
-                    .first { !$0.isThing || !$0.aliases.isEmpty }
+                    .first { !$0.isThing || $0.hasTaughtName }
                 let guess = known.map { " It might be \(your($0))." } ?? ""
                 out.append(Notice(kind: .unnamed, entity: e.name,
-                                  text: "Something new is on the table.\(guess)",
+                                  text: "Something new is on the table.\(looks)\(guess)",
                                   question: nil))
             }
         }
@@ -161,10 +169,10 @@ enum Dashboard {
         let time = new.time ?? now
         var out: [ActivityEvent] = []
         for e in new.entities {
-            let name = e.displayName
+            let name = e.phrase
             guard let before = old.entity(named: e.name) else {
                 if e.kind == .target {
-                    out.append(ActivityEvent(entity: e.name, text: e.isThing && e.aliases.isEmpty
+                    out.append(ActivityEvent(entity: e.name, text: e.isNameless
                                              ? "Something new appeared on the table" : "\(capitalized(name)) appeared on the table",
                                              time: time))
                 }
@@ -212,17 +220,18 @@ enum Dashboard {
         return (all.filter { $0.time >= cutoff }, all.filter { $0.time < cutoff })
     }
 
-    /// "the box", but "my charger" stays as the person named it.
+    /// "the box", but "my charger" stays as the person named it, and a guess stays hedged.
     static func the(_ name: String) -> String {
-        name.hasPrefix("my ") || name == "something" ? name : "the \(name)"
+        name.hasPrefix("my ") || name.hasPrefix(Entity.hedgePrefix) || name == "something" ? name : "the \(name)"
     }
 
     /// "your keys" for the person's things, "the box" for furniture and nameless things,
-    /// "my charger" as the person named it.
+    /// "my charger" as the person named it, "what looks like a tape roll" for the room's guess.
     static func your(_ e: Entity) -> String {
+        if e.isHedged { return e.phrase }
         let name = e.displayName
         if name.hasPrefix("my ") { return name }
-        return e.kind == .target && (!e.isThing || !e.aliases.isEmpty) ? "your \(name)" : "the \(name)"
+        return isTheirs(e) ? "your \(name)" : "the \(name)"
     }
 
     /// Names that take "are": "Where are my keys?", "Keys were picked up".
