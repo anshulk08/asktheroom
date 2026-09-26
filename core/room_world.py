@@ -54,6 +54,7 @@ DEPART_BACKDATE_MAX_S = 5.0  # a departure is dated back to the last table evide
 DEPARTURES = (EventType.EXITED_VIEW, EventType.LOST_TRACK)
 TABLE_HIDDEN = (Status.UNDER, Status.INSIDE, Status.HELD)
 OFF_TABLE = (Status.GONE, Status.UNKNOWN)
+UNKNOWN_COVER = 'unknown'   # UNDER an unknown cover: from a high corner an arm grabbing it reads this way
 TABLE_SAY = 'the table'
 THING = 'thing'                         # RoomTrack.cls of an unnamed object in a zone
 FINAL = ('conflict', 'ignored')         # a thing track in one of these roles is never re-decided
@@ -162,7 +163,7 @@ class RoomRules:
         """_emit hook: an EXITED_VIEW / LOST_TRACK while the entity is on the table is its latest
         departure (a newer one replaces an unconsumed older one)."""
         anchor = self.__dict__.pop('_depart_anchor', None)
-        if ev.type in DEPARTURES and self.entities[ev.obj].zone == TABLE:
+        if _is_departure(ev) and self.entities[ev.obj].zone == TABLE:
             # The table decides a departure up to ~2 s after the object left (absence debounce, hand_lost_s,
             # lost_grace_s); a room zone near the table can see it before that. Date the departure at the
             # last table evidence the rule set just before emitting (the holding hand's last sighting, or the
@@ -220,7 +221,7 @@ class RoomRules:
             if ent.status == Status.VISIBLE and visit.t - self._seen_t.get(name, float('-inf')) <= rc.table_fresh_s:
                 return 'ignored'
             dep = self._departures.get(name)
-            if (ent.status in OFF_TABLE and dep is not None and visit.t - dep[0] <= rc.handoff_s
+            if (_off_table(ent) and dep is not None and visit.t - dep[0] <= rc.handoff_s
                     and trk.first_seen > dep[0]):
                 return 'acquire'
             return 'conflict'
@@ -292,7 +293,7 @@ class RoomRules:
             if (ent is None or not is_thing(name) or ent.merged_into is not None or name in taken
                     or name in self._room):
                 continue
-            if (ent.zone == TABLE and ent.status in OFF_TABLE and visit.t - dep_t <= self.room_cfg.handoff_s
+            if (ent.zone == TABLE and _off_table(ent) and visit.t - dep_t <= self.room_cfg.handoff_s
                     and dep_t < trk.first_seen):
                 out.append((name, dep_t))
         return out
@@ -386,3 +387,17 @@ class RoomRules:
             self._conflicts[name].pop(trk.tid, None)
             if not self._conflicts[name]:
                 del self._conflicts[name]
+
+
+def _is_departure(ev: Event) -> bool:
+    """EXITED_VIEW / LOST_TRACK, or COVERED by an unknown cover. On the rig (spec 0009: the Brio high in a
+    corner) the detector rarely sees hands, so a grab reads as the object vanishing under something
+    unknown (an arm), not as HELD; counting it lets the handoff happen. A real unknown cover is safe: a
+    handoff still needs a new room track first seen after it, one candidate and, for things, a Grok name
+    match."""
+    return ev.type in DEPARTURES or (ev.type == EventType.COVERED and ev.parent == UNKNOWN_COVER)
+
+
+def _off_table(ent: Entity) -> bool:
+    """Gone from the table as far as a handoff is concerned: GONE, UNKNOWN, or UNDER an unknown cover."""
+    return ent.status in OFF_TABLE or (ent.status == Status.UNDER and ent.parent == UNKNOWN_COVER)

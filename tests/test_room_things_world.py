@@ -253,3 +253,33 @@ def test_props_are_unaffected_by_thing_tracks(scene, world):
 
 def test_without_a_namer_no_thing_has_a_guess(world):
     assert world.thing_guess('thing:1') is None
+
+
+def test_a_grab_read_as_covered_by_something_unknown_is_a_departure_too(scene, world):
+    """Rig run (Sat 26 Sep, corner camera): the pickup of the remote was logged COVERED by 'unknown' (no
+    hand seen), so no handoff happened although the couch zone saw a 'remote control' right after."""
+    namer = namer_for(world, REMOTE)
+    scene.thing('remote', 40, 30)
+    scene.run(world, 1.5)
+    assert namer.step() is True
+    ent = world.get('thing:1')
+    ev = world._apply_verdict('thing:1', ent, (Status.UNDER, 'unknown', 0.6, EventType.COVERED))
+    assert [e.type for e in ev] == [EventType.COVERED] and 'thing:1' in world._departures
+    scene.remove('remote')                                  # carried away under the arm: gone from view, so the
+    world._bits['thing:1'].clear()                          # presence debounce restarts, as it would have after
+    world._present['thing:1'] = False                       # the object vanished (the verdict came after that)
+    trk = room_thing(scene, world, 'r:1', guess={"name": "remote control", "also": [], "confidence": 0.7})
+    assert types(seen(scene, world, trk, zone='couch')) == [EventType.FOUND]
+    assert world.get('thing:1').zone == 'couch' and world.place('thing:1', now=scene.t).tentative
+
+
+def test_covered_by_a_known_cover_is_not_a_departure(scene, world):
+    namer = namer_for(world, REMOTE)
+    scene.thing('remote', 40, 30)
+    scene.run(world, 1.5)
+    namer.step()
+    world._apply_verdict('thing:1', world.get('thing:1'), (Status.UNDER, 'notebook', 0.85, EventType.COVERED))
+    assert 'thing:1' not in world._departures
+    trk = room_thing(scene, world, 'r:1', guess={"name": "remote control", "also": [], "confidence": 0.7})
+    seen(scene, world, trk, zone='couch')
+    assert world.get('thing:1').zone == 'table'
