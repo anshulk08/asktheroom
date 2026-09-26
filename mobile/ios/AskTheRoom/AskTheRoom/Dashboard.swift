@@ -237,19 +237,4 @@ enum Dashboard {
         default: return "Good evening"
         }
     }
-
-    /// An SF Symbol for the things the rig knows about; a tag for anything else.
-    static func symbol(for name: String) -> String {
-        switch name {
-        case "keys": return "key.fill"
-        case "phone": return "iphone"
-        case "wallet": return "wallet.bifold.fill"
-        case "glasses": return "eyeglasses"
-        case "remote": return "appletvremote.gen4.fill"
-        case "pill_bottle": return "pills.fill"
-        case "box": return "shippingbox.fill"
-        case "notebook": return "book.closed.fill"
-        default: return "tag.fill"
-        }
-    }
 }

@@ -15,6 +15,8 @@ import Foundation
 ///   -mockTab table     open on the Table (or `recent`) tab rather than Home
 ///   -mockScroll YES    scroll Home to the bottom
 ///   -mockSettings YES  open helper settings
+///   -mockIconPicker YES  with -mockSelect: open the picture picker over the detail sheet
+///   -mockIcons "remote=📺"  show these pictures instead of the usual ones (not saved)
 @MainActor
 final class MockRoom: RoomTransport {
     static let stepInterval: Duration = .seconds(5)

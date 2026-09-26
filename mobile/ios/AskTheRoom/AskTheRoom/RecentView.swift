@@ -46,9 +46,7 @@ private struct RecentRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            Image(systemName: icon)
-                .font(.title3)
-                .foregroundStyle(.secondary)
+            icon
                 .frame(width: 30)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 4) {
@@ -77,10 +75,12 @@ private struct RecentRow: View {
         .accessibilityElement(children: .combine)
     }
 
-    private var icon: String {
+    @ViewBuilder private var icon: some View {
         switch entry {
-        case .change(let event): return Dashboard.symbol(for: event.entity)
-        case .question: return "bubble.left"
+        case .change(let event):
+            ThingIconView(icon: IconStore.shared.icon(for: event.entity), size: 26)
+        case .question:
+            Image(systemName: "bubble.left").font(.title3).foregroundStyle(.secondary)
         }
     }
 }

@@ -17,6 +17,7 @@ enum Theme {
         scheme == .dark ? Color(red: 0.31, green: 0.36, blue: 0.43) : Color(red: 0.82, green: 0.74, blue: 0.62)
     }
 
+    /// A pin's disc and the badge behind a name.
     static func chip(_ scheme: ColorScheme) -> Color {
         scheme == .dark ? Color(red: 0.10, green: 0.11, blue: 0.13) : .white
     }
@@ -55,7 +56,7 @@ struct TableMapView: View {
 
                 ForEach(items) { item in
                     MapItemView(item: item, scale: geo.scale, isSelected: item.id == selected)
-                        .position(places[item.id] ?? .zero)
+                        .position(MapLayout.viewCenter(of: item, at: places[item.id] ?? .zero))
                         .zIndex(Double(item.layer))
                         .onTapGesture { onSelect(item.id) }
                         .accessibilityElement(children: .ignore)
@@ -82,7 +83,9 @@ struct TableMapView: View {
             }
             .animation(reduceMotion ? nil : .easeInOut(duration: 0.3), value: items)
             .animation(reduceMotion ? nil : .spring(duration: 0.4), value: snapshot.laser)
+            .animation(reduceMotion ? nil : .spring(duration: 0.3, bounce: 0.3), value: selected)
         }
+        .sensoryFeedback(.selection, trigger: selected)
         .aspectRatio(MapGeometry.aspectRatio(for: snapshot.tableSize), contentMode: .fit)
         .dynamicTypeSize(...DynamicTypeSize.xLarge)
         .saturation(greyed ? 0 : 1)
@@ -122,12 +125,14 @@ private struct MapItemView: View {
     var isSelected = false
     @Environment(\.colorScheme) private var scheme
 
+    private var icon: ThingIcon { IconStore.shared.icon(for: item.id, title: item.title) }
+
     var body: some View {
         switch item.shape {
         case .block(let w, let h):
             block(width: w * scale, height: h * scale)
-        case .chip:
-            chip
+        case .pin:
+            pin
         }
     }
 
@@ -135,56 +140,79 @@ private struct MapItemView: View {
     /// so the lines that are there mean something.
     private var edge: (Color, StrokeStyle) {
         item.dashed
-            ? (.primary.opacity(0.6), StrokeStyle(lineWidth: 1.5, dash: [5, 3]))
-            : (.primary.opacity(0.18), StrokeStyle(lineWidth: 1))
+            ? (.primary.opacity(0.6), StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
+            : (.primary.opacity(0.12), StrokeStyle(lineWidth: 1))
     }
 
     private func block(width: CGFloat, height: CGFloat) -> some View {
-        RoundedRectangle(cornerRadius: 6)
+        RoundedRectangle(cornerRadius: 8)
             .fill(Theme.block(scheme))
-            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(edge.0, style: edge.1))
+            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(edge.0, style: edge.1))
             .overlay {
                 if isSelected {
-                    RoundedRectangle(cornerRadius: 8).strokeBorder(Theme.accent, lineWidth: 3).padding(-3)
+                    RoundedRectangle(cornerRadius: 10).strokeBorder(Theme.accent, lineWidth: 3).padding(-3)
                 }
             }
             .frame(width: width, height: height)
             .overlay(alignment: .top) {
-                // The name sits inside the block, so nothing floats above it.
-                Text(item.label)
-                    .font(.caption.weight(.semibold))
-                    .fixedSize()
-                    .frame(height: MapLayout.blockTitleHeight)
+                // The picture and name sit inside the block, so nothing floats above it.
+                HStack(spacing: 3) {
+                    ThingIconView(icon: icon, size: 14)
+                    Text(item.label).font(.caption.weight(.semibold))
+                }
+                .fixedSize()
+                .frame(height: MapLayout.blockTitleHeight)
             }
             .opacity(item.opacity)
             .contentShape(Rectangle())
     }
 
-    private var chip: some View {
-        HStack(spacing: 4) {
-            if let glyph = item.glyph {
-                Image(systemName: glyph).font(.footnote.weight(.bold))
-            }
-            Text(item.label).font(.subheadline.weight(.semibold))
-            if item.linkBadge {
-                Image(systemName: "link")
-                    .font(.caption2.weight(.bold))
-                    .foregroundStyle(.secondary)
-            }
+    /// Find My's pin: the thing's picture on a disc, its name underneath, and status as a
+    /// badge (held, lost), a dashed ring (hidden) or a fade (not sure).
+    private var pin: some View {
+        let d = MapLayout.pinDiameter(for: item)
+        return VStack(spacing: 1) {
+            ThingIconView(icon: icon, size: d * 0.62)
+                .frame(width: d, height: d)
+                .background(Circle().fill(Theme.chip(scheme)).shadow(color: .black.opacity(0.2), radius: 3, y: 1.5))
+                .overlay(Circle().strokeBorder(edge.0, style: edge.1))
+                .overlay(alignment: .topTrailing) {
+                    if let glyph = item.glyph { PinBadge(symbol: glyph).offset(x: 5, y: -4) }
+                }
+                .overlay(alignment: .topLeading) {
+                    if item.linkBadge { PinBadge(symbol: "link", quiet: true).offset(x: -5, y: -4) }
+                }
+                .overlay {
+                    if isSelected { Circle().strokeBorder(Theme.accent, lineWidth: 3).padding(-4) }
+                }
+                .scaleEffect(isSelected ? 1.15 : 1)
+            Text(item.label)
+                .font(.caption.weight(.semibold))
+                .lineLimit(1)
+                .fixedSize()
+                .padding(.horizontal, 5)
+                .frame(height: MapLayout.pinLabelHeight - 1)
+                .background(Capsule().fill(Theme.chip(scheme).opacity(0.85)))
         }
-        .lineLimit(1)
-        .fixedSize()
-        .padding(.horizontal, 8)
-        .frame(height: MapLayout.chipHeight)
-        .background(Capsule().fill(Theme.chip(scheme)).shadow(color: .black.opacity(0.08), radius: 1, y: 1))
-        .overlay(Capsule().strokeBorder(edge.0, style: edge.1))
-        .overlay {
-            if isSelected {
-                Capsule().strokeBorder(Theme.accent, lineWidth: 3).padding(-4)
-            }
-        }
+        .frame(minWidth: 44, minHeight: d + MapLayout.pinLabelHeight, alignment: .top)
         .opacity(item.opacity)
-        .contentShape(Capsule())
+        .contentShape(Rectangle())
+    }
+}
+
+/// A status mark on a pin's corner, the way Find My and Messages badge a picture.
+private struct PinBadge: View {
+    let symbol: String
+    var quiet = false
+
+    var body: some View {
+        Image(systemName: symbol)
+            .font(.system(size: 9, weight: .bold))
+            .foregroundStyle(quiet ? Color.primary : Color(.systemBackground))
+            .frame(width: 17, height: 17)
+            .background(Circle().fill(quiet ? Color(.systemBackground) : Color.primary))
+            .overlay(Circle().strokeBorder(Color(.systemBackground), lineWidth: 1.5))
+            .accessibilityHidden(true)
     }
 }
 
@@ -213,17 +241,17 @@ struct MapLegend: View {
     @ViewBuilder private func mark(_ entry: MapLayout.LegendEntry) -> some View {
         switch entry {
         case .held:
-            Image(systemName: "hand.raised.fill").foregroundStyle(.primary)
+            PinBadge(symbol: "hand.raised.fill")
         case .hidden:
-            Capsule().strokeBorder(.primary.opacity(0.6), style: StrokeStyle(lineWidth: 1.5, dash: [4, 2]))
-                .frame(width: 22, height: 13)
+            Circle().strokeBorder(.primary.opacity(0.6), style: StrokeStyle(lineWidth: 1.5, dash: [3, 2]))
+                .frame(width: 17, height: 17)
         case .left:
             Image(systemName: "arrow.left").foregroundStyle(.primary)
         case .lost:
-            Image(systemName: "questionmark").foregroundStyle(.primary)
+            PinBadge(symbol: "questionmark")
         case .unsure:
-            Capsule().fill(Theme.chip(scheme)).overlay(Capsule().strokeBorder(.primary.opacity(0.18)))
-                .frame(width: 22, height: 13)
+            Circle().fill(Theme.chip(scheme)).overlay(Circle().strokeBorder(.primary.opacity(0.18)))
+                .frame(width: 17, height: 17)
                 .opacity(MapLayout.uncertainOpacity)
         }
     }
@@ -254,11 +282,12 @@ private struct Reticle: View {
     @State private var landed = false
 
     var body: some View {
+        // Hugs the pin, so the names around it stay readable.
         ZStack {
             Circle().stroke(Theme.laser, lineWidth: 3)
-            Circle().stroke(Theme.laser.opacity(0.45), lineWidth: 1.5).padding(-6)
+            Circle().stroke(Theme.laser.opacity(0.45), lineWidth: 1.5).padding(-4)
         }
-        .frame(width: 58, height: 58)
+        .frame(width: 40, height: 40)
         .scaleEffect(landed || reduceMotion ? 1 : 2.5)
         .onAppear {
             withAnimation(.spring(duration: 0.4)) { landed = true }

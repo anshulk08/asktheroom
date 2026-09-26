@@ -66,8 +66,8 @@ struct MapItem: Identifiable, Equatable {
     enum Shape: Equatable {
         /// Containers and covers: a large rectangle sized in table cm.
         case block(width: Double, height: Double)
-        /// Targets: a rounded chip sized by its label.
-        case chip
+        /// Targets: a round pin with the thing's picture, its name underneath, like Find My.
+        case pin
     }
 
     var id: String
@@ -78,7 +78,7 @@ struct MapItem: Identifiable, Equatable {
     /// The entity this one is inside or under, if any.
     var parent: String?
     /// Status in words ("inside box"); nil for a plainly visible object. Read by VoiceOver;
-    /// on screen the outline, glyph and legend carry it, and a tap shows it in full.
+    /// on screen the ring, badge and legend carry it, and a tap shows it in full.
     var caption: String?
     var shape: Shape
     var status: EntityStatus
@@ -86,16 +86,16 @@ struct MapItem: Identifiable, Equatable {
     /// Hidden objects are dashed, so status reads in greyscale.
     var dashed: Bool
     var opacity: Double
-    /// SF Symbol shown before the title.
+    /// SF Symbol badged on the pin's corner (held, lost).
     var glyph: String?
     /// Set for gone objects: draw an arrow off the table through this edge.
     var exitEdge: Edge?
     /// A link badge for things that might be an older thing.
     var linkBadge: Bool
-    /// Where this chip sits among children sharing a parent, so they don't stack exactly.
+    /// Where this pin sits among children sharing a parent, so they don't stack exactly.
     var siblingIndex = 0
     var siblingCount = 1
-    /// For U: the chip peeks out from under its parent, whose size is needed to place it.
+    /// For U: the pin peeks out from under its parent, whose size is needed to place it.
     var peekFrom: Shape?
     /// Drawing order: lower first.
     var layer: Int
@@ -140,7 +140,7 @@ enum MapLayout {
                 label: entity.isThing && entity.aliases.isEmpty ? "unnamed" : entity.displayName,
                 parent: entity.status == .inside || entity.status == .under ? entity.parent : nil,
                 caption: caption(for: entity, in: snapshot),
-                shape: blockShape ?? .chip,
+                shape: blockShape ?? .pin,
                 status: entity.status,
                 center: center,
                 dashed: [.held, .inside, .under].contains(entity.status),
@@ -264,20 +264,41 @@ enum MapLayout {
 // MARK: Placement in points
 
 extension MapLayout {
-    static let chipHeight: CGFloat = 28
-    /// A block's name sits inside its top edge; what's inside sits below it.
+    /// A pin's disc; smaller for things inside or under something, so they fit in their block.
+    static let pinSize: CGFloat = 32
+    static let innerPinSize: CGFloat = 26
+    /// The name under the disc.
+    static let pinLabelHeight: CGFloat = 16
+    /// A block's picture and name sit inside its top edge; what's inside sits below them.
     static let blockTitleHeight: CGFloat = 18
 
-    /// Rough on-screen size of a chip, for keeping names apart.
-    /// Measured against SF Pro subheadline-semibold at the default text size.
-    static func footprint(of item: MapItem) -> CGSize {
-        let width = CGFloat(item.label.count) * 8 + 16 + (item.glyph == nil ? 0 : 18) + (item.linkBadge ? 22 : 0)
-        return CGSize(width: width, height: chipHeight)
+    static func pinDiameter(for item: MapItem) -> CGFloat {
+        item.status == .inside || item.status == .under ? innerPinSize : pinSize
     }
 
-    /// Where each item's centre goes on screen. Blocks sit exactly at their position.
-    /// Chips start there (below the name inside a parent and fanned out, or peeking from
-    /// under a cover), stay on the table, and then take the nearby spot that covers the
+    /// Rough on-screen size of a pin and its name, for keeping names apart. Measured against
+    /// SF Pro caption-semibold at the default text size; never under a 44 pt tap target wide.
+    static func footprint(of item: MapItem) -> CGSize {
+        let d = pinDiameter(for: item)
+        return CGSize(width: max(44, CGFloat(item.label.count) * 7 + 14), height: d + pinLabelHeight)
+    }
+
+    /// The room a pin and its name take up, for a pin whose disc is centred on `p`.
+    static func rect(of item: MapItem, at p: CGPoint) -> CGRect {
+        let size = footprint(of: item)
+        return CGRect(x: p.x - size.width / 2, y: p.y - pinDiameter(for: item) / 2, width: size.width, height: size.height)
+    }
+
+    /// Where to put a view so its disc (the top of it) lands on `p`; blocks are centred.
+    static func viewCenter(of item: MapItem, at p: CGPoint) -> CGPoint {
+        guard item.shape == .pin else { return p }
+        let r = rect(of: item, at: p)
+        return CGPoint(x: r.midX, y: r.midY)
+    }
+
+    /// Where each item's centre goes on screen (a pin's disc). Blocks sit exactly at their
+    /// position. Pins start there (below the name inside a parent and fanned out, or peeking
+    /// from under a cover), stay on the table, and then take the nearby spot that covers the
     /// least of the names and blocks already placed, so every name stays readable.
     static func placements(for items: [MapItem], in geo: MapGeometry) -> [String: CGPoint] {
         var out: [String: CGPoint] = [:]
@@ -289,50 +310,51 @@ extension MapLayout {
             let p = geo.point(item.center)
             out[item.id] = p
             let body = CGRect(x: p.x - geo.length(w) / 2, y: p.y - geo.length(h) / 2, width: geo.length(w), height: geo.length(h))
-            let labelWidth = CGFloat(item.label.count) * 7 + 8
+            let titleWidth = CGFloat(item.label.count) * 7 + 8 + blockTitleHeight
             taken.append((item.id, true, body))
-            taken.append((item.id, false, CGRect(x: p.x - labelWidth / 2, y: body.minY + 1, width: labelWidth, height: blockTitleHeight - 2)))
+            taken.append((item.id, false, CGRect(x: p.x - titleWidth / 2, y: body.minY + 1, width: titleWidth, height: blockTitleHeight - 2)))
         }
 
         // Hidden children first: they belong inside their parent and move least.
-        let chips = items.enumerated()
-            .filter { $0.element.shape == .chip }
+        let pins = items.enumerated()
+            .filter { $0.element.shape == .pin }
             .sorted { (rank($0.element), $0.offset) < (rank($1.element), $1.offset) }
             .map(\.element)
 
-        for item in chips {
+        for item in pins {
+            let size = footprint(of: item)
             var p = geo.point(item.center)
             if item.status == .inside {
                 p.y += blockTitleHeight / 2
             }
             if item.siblingCount > 1 {
-                p.y += (CGFloat(item.siblingIndex) - CGFloat(item.siblingCount - 1) / 2) * (chipHeight + 2)
+                p.x += (CGFloat(item.siblingIndex) - CGFloat(item.siblingCount - 1) / 2) * (size.width + 2)
             }
             if case .block(let w, let h) = item.peekFrom {
                 // Peek out below the cover's lower edge, towards its right.
                 p.x += geo.length(w) * 0.2
-                p.y += geo.length(h) / 2 + chipHeight * 0.2
+                p.y += geo.length(h) / 2 + pinDiameter(for: item) * 0.2
             }
 
-            // A chip may sit on its own parent's body, never on anyone's name.
+            // A pin may sit on its own parent's body, never on anyone's name.
             let obstacles = taken.filter { !($0.isBody && $0.owner == item.parent) }.map(\.rect)
-            let size = footprint(of: item)
-            let best = bestSpot(near: p, size: size, avoiding: obstacles, in: table)
+            let best = bestSpot(for: item, near: p, avoiding: obstacles, in: table)
             out[item.id] = best
-            taken.append((item.id, false, rect(at: best, size: size)))
+            taken.append((item.id, false, rect(of: item, at: best)))
         }
         return out
     }
 
-    /// The nearby point where a footprint covers the least; distance from `p` breaks ties.
-    private static func bestSpot(near p: CGPoint, size: CGSize, avoiding obstacles: [CGRect], in table: CGRect) -> CGPoint {
-        let step = chipHeight + 4
-        var best = clamp(p, size: size, in: table)
+    /// The nearby point where a pin covers the least; distance from `p` breaks ties.
+    private static func bestSpot(for item: MapItem, near p: CGPoint, avoiding obstacles: [CGRect], in table: CGRect) -> CGPoint {
+        let size = footprint(of: item)
+        let step = size.height / 2 + 4
+        var best = clamp(p, item: item, in: table)
         var bestScore = CGFloat.infinity
         for dy in [0, 1, -1, 2, -2, 3, -3] as [CGFloat] {
-            for dx in [0, 0.5, -0.5] as [CGFloat] {
-                let candidate = clamp(CGPoint(x: p.x + dx * size.width, y: p.y + dy * step), size: size, in: table)
-                let r = rect(at: candidate, size: size)
+            for dx in [0, 0.5, -0.5, 1, -1] as [CGFloat] {
+                let candidate = clamp(CGPoint(x: p.x + dx * size.width, y: p.y + dy * step), item: item, in: table)
+                let r = rect(of: item, at: candidate)
                 let overlap = obstacles.reduce(CGFloat(0)) { sum, o in
                     let i = o.intersection(r)
                     return i.isNull ? sum : sum + i.width * i.height
@@ -355,15 +377,13 @@ extension MapLayout {
         }
     }
 
-    /// The chip, centred on the point.
-    static func rect(at p: CGPoint, size: CGSize) -> CGRect {
-        CGRect(x: p.x - size.width / 2, y: p.y - size.height / 2, width: size.width, height: size.height)
-    }
-
-    private static func clamp(_ p: CGPoint, size: CGSize, in table: CGRect) -> CGPoint {
+    /// Keeps a pin and its name on the table.
+    private static func clamp(_ p: CGPoint, item: MapItem, in table: CGRect) -> CGPoint {
+        let size = footprint(of: item)
+        let above = pinDiameter(for: item) / 2
+        let below = size.height - above
         let halfW = min(size.width / 2, table.width / 2)
-        let halfH = min(size.height / 2, table.height / 2)
         return CGPoint(x: min(max(p.x, table.minX + halfW + 4), table.maxX - halfW - 4),
-                       y: min(max(p.y, table.minY + halfH + 4), table.maxY - halfH - 4))
+                       y: min(max(p.y, table.minY + above + 4), table.maxY - below - 4))
     }
 }

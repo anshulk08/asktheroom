@@ -139,11 +139,9 @@ struct ThingSummary: View {
     var body: some View {
         if let snapshot = store.snapshot, let e = snapshot.entity(named: name) {
             HStack(alignment: .top, spacing: 14) {
-                Image(systemName: Dashboard.symbol(for: e.name))
-                    .font(.title)
+                ThingIconView(icon: IconStore.shared.icon(for: e.name, title: e.displayName), size: 36)
                     .frame(width: 56, height: 56)
                     .background(Circle().fill(Theme.iconWell))
-                    .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 4) {
                     Text(Dashboard.capitalized(e.displayName))
                         .font(.title2.bold())

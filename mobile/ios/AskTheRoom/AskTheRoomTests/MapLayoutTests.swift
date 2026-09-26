@@ -66,7 +66,7 @@ final class MapLayoutTests: XCTestCase {
         XCTAssertEqual(item("keys", in: items).siblingCount, 2)
         let geo = MapGeometry(table: s.tableSize, size: CGSize(width: 390, height: 280))
         let points = MapLayout.placements(for: items, in: geo)
-        XCTAssertNotEqual(points["keys"]!.y, points["wallet"]!.y)
+        XCTAssertGreaterThanOrEqual(abs(points["keys"]!.x - points["wallet"]!.x), 40, "side by side, not stacked")
     }
 
     func testGeometryIsUniformAndCentred() {
@@ -86,12 +86,12 @@ final class MapLayoutTests: XCTestCase {
         return MapGeometry(table: sample.tableSize, size: size)
     }
 
-    /// On an iPhone-width map the sample's chips don't cover one another.
-    func testSampleChipsDontOverlapOnAnIPhone() {
+    /// On an iPhone-width map the sample's pins and names don't cover one another.
+    func testSamplePinsDontOverlapOnAnIPhone() {
         let items = MapLayout.items(for: sample)
         let points = MapLayout.placements(for: items, in: iPhoneGeometry())
-        let chips = items.filter { $0.shape == .chip }
-        let rects = chips.map { MapLayout.rect(at: points[$0.id]!, size: MapLayout.footprint(of: $0)) }
+        let chips = items.filter { $0.shape == .pin }
+        let rects = chips.map { MapLayout.rect(of: $0, at: points[$0.id]!) }
         for i in rects.indices {
             for j in rects.indices where j > i {
                 // Footprints are estimates, so edges touching by a few points is fine.
@@ -102,8 +102,8 @@ final class MapLayoutTests: XCTestCase {
         }
     }
 
-    /// The box's name sits inside its top edge; the keys go below it, still inside the box.
-    func testInsideChipSitsUnderItsParentsName() {
+    /// The box's name sits inside its top edge; the keys' pin goes below it, still inside the box.
+    func testInsidePinSitsUnderItsParentsName() {
         let items = MapLayout.items(for: sample)
         let geo = iPhoneGeometry()
         let keys = MapLayout.placements(for: items, in: geo)["keys"]!
@@ -111,7 +111,7 @@ final class MapLayoutTests: XCTestCase {
         guard case .block(let w, let h) = box.shape else { return XCTFail("box is a block") }
         let c = geo.point(box.center)
         let body = CGRect(x: c.x - geo.length(w) / 2, y: c.y - geo.length(h) / 2, width: geo.length(w), height: geo.length(h))
-        let chip = MapLayout.rect(at: keys, size: MapLayout.footprint(of: item("keys", in: items)))
+        let chip = MapLayout.rect(of: item("keys", in: items), at: keys)
         XCTAssertGreaterThanOrEqual(chip.minY, body.minY + MapLayout.blockTitleHeight - 1, "clear of the name")
         XCTAssertTrue(body.contains(CGPoint(x: keys.x, y: keys.y)), "still inside the box")
     }

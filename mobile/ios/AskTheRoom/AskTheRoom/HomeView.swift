@@ -250,11 +250,9 @@ private struct ThingTile: View {
         Button(action: onTap) {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
-                    Image(systemName: Dashboard.symbol(for: thing.name))
-                        .font(.title2)
+                    ThingIconView(icon: IconStore.shared.icon(for: thing.name, title: thing.displayName), size: well * 0.62)
                         .frame(width: well, height: well)
                         .background(Circle().fill(Theme.iconWell))
-                        .foregroundStyle(.primary)
                     Spacer()
                     if isHidden || isAway {
                         Image(systemName: isAway ? "questionmark.circle" : "eye.slash")

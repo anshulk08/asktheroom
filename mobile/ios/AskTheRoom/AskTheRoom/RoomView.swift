@@ -342,12 +342,24 @@ struct ConnectView: View {
 struct EntityDetailView: View {
     let name: String
     let store: RoomStore
+    @State private var picking = UserDefaults.standard.bool(forKey: "mockIconPicker")
 
     var body: some View {
         NavigationStack {
             Group {
                 if let snapshot = store.snapshot, let entity = snapshot.entity(named: name) {
                     List {
+                        Section {
+                            Button { picking = true } label: {
+                                HStack(spacing: 14) {
+                                    ThingIconView(icon: IconStore.shared.icon(for: name, title: entity.displayName), size: 30)
+                                        .frame(width: 48, height: 48)
+                                        .background(Circle().fill(Theme.iconWell))
+                                    Text("Change picture")
+                                }
+                            }
+                            .tint(.primary)
+                        }
                         Section {
                             LabeledContent("Status", value: EntityDetailView.statusWords(entity, in: snapshot))
                             if let seen = entity.lastSeen {
@@ -384,9 +396,14 @@ struct EntityDetailView: View {
                     ContentUnavailableView("No longer on the map", systemImage: "questionmark.circle")
                 }
             }
-            .navigationTitle(store.snapshot?.entity(named: name)?.displayName ?? Entity.displayName(for: name))
+            .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
+            .sheet(isPresented: $picking) { IconPicker(name: name, title: title) }
         }
+    }
+
+    private var title: String {
+        store.snapshot?.entity(named: name)?.displayName ?? Entity.displayName(for: name)
     }
 
     static func statusWords(_ e: Entity, in snapshot: Snapshot) -> String {
