@@ -41,7 +41,7 @@ from typing import Callable, Optional
 
 from core.narration import (FakeProvider, NarrationConfig, NarrationError, ProviderError, Segmenter,
                             _parse_json, make_provider)
-from core.narration_store import stem
+from core.narration_store import med_claim, stem
 from core.types import Event
 
 log = logging.getLogger(__name__)
@@ -121,6 +121,16 @@ def _fake_reply(job) -> str:
     marks = [{"mark": int(i), "real": True, "label": None if n.strip() == "unnamed object" else n.strip(),
               "confidence": 0.9} for i, n in re.findall(r"(\d+) = ([^,.\n]+)", text)]
     return json.dumps({"marks": marks, "unmarked": []})
+
+
+def safe_label(v) -> Optional[str]:
+    """Grok's name for a mark or find, as something safe to store and say: 1-4 plain lower-case words,
+    never a medication claim, or None. Own copy (voice/visual.py's pick has one only on some branches)."""
+    t = re.sub(r"[^a-z' -]", "", str(v or "").lower()).strip()
+    t = re.sub(r"^(?:a|an|the|my|your)\s+", "", t)
+    if not t or len(t.split()) > 4 or len(t) > 30 or med_claim(t) or t in ("object", "thing", "item", "unknown"):
+        return None
+    return t
 
 
 def same_thing(a: Optional[str], b: Optional[str]) -> bool:
@@ -344,7 +354,7 @@ class GrokCheck:
         """One Grok call on img with the tracker's marks (default: the attached world's VISIBLE entities)
         -> rows stored, unnamed things named, and the summary (also self.last). Never raises on a
         provider or reply failure: the summary carries the error."""
-        from voice.visual import _conf, _jpeg, _label, draw_marks, point_to_px
+        from voice.visual import _conf, _jpeg, draw_marks, point_to_px
         marks = self._marks() if marks is None else marks
         names = self._names() if names is None else names
         h, w = img.shape[:2]
@@ -369,7 +379,7 @@ class GrokCheck:
                 continue
             seen.add(i)
             ent, box = marks[i - 1]
-            conf, label, real, said = _conf(m), _label(m.get("label")), m.get("real"), names.get(ent)
+            conf, label, real, said = _conf(m), safe_label(m.get("label")), m.get("real"), names.get(ent)
             if conf < self.c.min_conf or not isinstance(real, bool) or (real and label is None):
                 verdict = "unsure"
             elif not real:
@@ -386,7 +396,7 @@ class GrokCheck:
         for u in (d.get("unmarked") or [])[:MAX_UNMARKED]:
             if not isinstance(u, dict):
                 continue
-            label, px = _label(u.get("label")), point_to_px(u.get("point"), (w, h))
+            label, px = safe_label(u.get("label")), point_to_px(u.get("point"), (w, h))
             if label is None or px is None:
                 continue
             if any(b[0] <= px[0] <= b[2] and b[1] <= px[1] <= b[3] for _, b in marks):
