@@ -3,6 +3,8 @@
 Path A: YOLO-World v2 with the config prompts (zero-shot baseline and auto-labeller).
 Path B (the plan): a YOLO11 model fine-tuned on overhead frames, classes = the 8 objects + hand.
 Either way: keep the highest-confidence box per object, keep every hand box, convert to table cm.
+Open world (core/proposals.py): an optional class-agnostic proposer adds cls 'thing' items that are not
+a known object or a hand (proposals: in config.yaml), and core/crops.py keeps crops of what was seen.
 
 Runs inside the ultralytics/ultralytics:latest-jetson-jetpack6 container. Build TensorRT engines in
 the same container that runs them (its TensorRT differs from the host's). Classes are fixed at
@@ -21,6 +23,8 @@ from typing import Optional, Protocol
 
 import numpy as np
 
+from core.crops import CropStore, set_active
+from core.proposals import THING, DedupeConfig, dedupe, make_proposer, table_roi
 from core.types import Detection, Detections, Frame
 
 log = logging.getLogger(__name__)
@@ -63,7 +67,9 @@ class UltralyticsBackend:
         self.names = self.model.names
 
     def infer(self, img: np.ndarray) -> list[Raw]:
-        r = self.model.predict(img, imgsz=self.imgsz, conf=self.floor, half=self.half, verbose=False)[0]
+        # An engine's precision is fixed at export; passing half= to it only prints a deprecation warning.
+        extra = {"half": True} if self.half and not str(self.path).endswith(".engine") else {}
+        r = self.model.predict(img, imgsz=self.imgsz, conf=self.floor, verbose=False, **extra)[0]
         b = r.boxes
         out = []
         for xyxy, conf, cls in zip(b.xyxy.cpu().numpy(), b.conf.cpu().numpy(), b.cls.cpu().numpy()):
@@ -71,8 +77,14 @@ class UltralyticsBackend:
         return out
 
 
+_FROM_CONFIG = object()
+
+
 class Detector:
-    def __init__(self, cfg: dict, table=None, backend: Optional[Backend] = None):
+    def __init__(self, cfg: dict, table=None, backend: Optional[Backend] = None,
+                 proposer=_FROM_CONFIG, crops=_FROM_CONFIG):
+        """proposer / crops default to what config.yaml's proposals: section asks for; pass None to
+        turn either off, or an instance (tests, experiments)."""
         self.cfg = cfg
         self.table = table
         self.backend = backend or UltralyticsBackend(cfg)
@@ -80,6 +92,25 @@ class Detector:
         ct = cfg.get("conf_threshold", 0.35)
         self.thresholds = ct if isinstance(ct, dict) else {"default": ct}
         self.last_ms = 0.0
+        self.last_proposal_ms = 0.0
+        pc = cfg.get("proposals") or {}
+        self.proposer = make_proposer(cfg) if proposer is _FROM_CONFIG else proposer
+        self.dedupe_cfg = DedupeConfig.from_dict(pc.get("dedupe"))
+        if crops is _FROM_CONFIG:
+            cc = pc.get("crops") or {}
+            crops = CropStore.from_config(cc) if pc.get("enabled") and cc.get("enabled", True) else None
+        self.crops = crops
+        if crops is not None:
+            set_active(crops)
+        self._roi_for = _FROM_CONFIG           # the table calibration the proposer's outline was made from
+        self._open_err_t = float("-inf")
+
+    def reset_proposals(self) -> None:
+        """Recapture the empty-table reference and forget crops (RESET, or the table was cleared)."""
+        if self.proposer is not None:
+            self.proposer.reset()
+        if self.crops is not None:
+            self.crops.clear()
 
     def threshold(self, obj: str) -> float:
         return float(self.thresholds.get(obj, self.thresholds.get("default", 0.35)))
@@ -100,9 +131,35 @@ class Detector:
                 hands.append((obj, conf, box))
             elif obj not in best or conf > best[obj][1]:
                 best[obj] = (obj, conf, box)
-        return Detections(t=frame.t, frame_idx=frame.idx,
-                          items=[self._to_det(*r) for r in best.values()],
-                          hands=[self._to_det(*r) for r in hands])
+        items = [self._to_det(*r) for r in best.values()]
+        hand_dets = [self._to_det(*r) for r in hands]
+        if frame.img is not None and (self.proposer is not None or self.crops is not None):
+            try:
+                if self.proposer is not None:
+                    items += self._proposals(frame.img, items, hand_dets)
+                if self.crops is not None:
+                    self.crops.update(frame.img, items, hand_dets, frame.t)
+            except Exception:                   # the open world must never cost the known objects
+                now = time.monotonic()
+                if now - self._open_err_t > 10:
+                    log.exception("open-world proposals / crops failed; known objects only this frame")
+                    self._open_err_t = now
+        return Detections(t=frame.t, frame_idx=frame.idx, items=items, hands=hand_dets)
+
+    def _proposals(self, img: np.ndarray, items: list[Detection], hands: list[Detection]) -> list[Detection]:
+        """Class-agnostic 'thing' detections that duplicate no known object or hand."""
+        t0 = time.perf_counter()
+        cal = getattr(self.table, "H", None)
+        if cal is not self._roi_for:            # first frame, or the table was recalibrated
+            if self._roi_for is not _FROM_CONFIG:
+                self.proposer.reset()
+            self._roi_for = cal
+            self.proposer.set_roi(table_roi(self.table, self.cfg))
+        known = [d.box_px for d in items]
+        hand_boxes = [h.box_px for h in hands]
+        props = dedupe(self.proposer.propose(img, known, hand_boxes), known, hand_boxes, self.dedupe_cfg)
+        self.last_proposal_ms = 1000 * (time.perf_counter() - t0)
+        return [self._to_det(THING, p.conf, p.box_px) for p in props]
 
     __call__ = detect
 
