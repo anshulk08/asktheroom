@@ -12,6 +12,7 @@ IMAGE="${ASKROOM_IMAGE:-askroom:latest}"   # docker/Dockerfile: the Ultralytics 
 devs=()
 for d in /dev/video* /dev/i2c-7 /dev/snd /dev/input; do [ -e "$d" ] && devs+=(--device "$d"); done
 tty=(); [ -t 0 ] && tty=(-it)
+envf=(); [ -f .env ] && envf=(--env-file .env)   # API keys (e.g. XAI_API_KEY); .env is gitignored
 exec docker run --rm "${tty[@]}" --runtime=nvidia --ipc=host --network=host "${devs[@]}" \
   -v /etc/localtime:/etc/localtime:ro -v /etc/timezone:/etc/timezone:ro \
-  -v "$PWD":/askroom -w /askroom -e PYTHONPATH=/askroom "$IMAGE" "$@"
+  "${envf[@]}" -v "$PWD":/askroom -w /askroom -e PYTHONPATH=/askroom "$IMAGE" "$@"
