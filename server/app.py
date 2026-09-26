@@ -275,6 +275,54 @@ def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = 
         jpg = await asyncio.to_thread(render_jpeg)
         return Response(jpg, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
+    # -- room memory (spec 0009): the whole camera frame with the zones, the table view and room places
+    room_zones: dict = {}
+
+    def render_full() -> Optional[bytes]:
+        latest_full = getattr(frames, "latest_full", None)
+        if not callable(latest_full):
+            return None
+        f = latest_full()
+        if f is None or getattr(f, "img", None) is None:
+            return None
+        img = f.img.copy()
+        if "zones" not in room_zones:
+            try:
+                from core.room_zones import Zones
+                path = (cfg.get("room_memory") or {}).get("zones_path", "room_zones.json")
+                room_zones["zones"] = list(Zones.load(path).zones.values())
+            except Exception:
+                room_zones["zones"] = []
+        for z in room_zones["zones"]:
+            pts = np.array(z.poly, np.int32).reshape(-1, 1, 2)
+            cv2.polylines(img, [pts], True, (0, 220, 0), 3)
+            cv2.putText(img, z.say, (int(z.poly[0][0]) + 6, int(z.poly[0][1]) + 28), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.9, (0, 220, 0), 2)
+        rect = getattr(frames, "rect", None)
+        if rect is not None:
+            cv2.rectangle(img, (int(rect[0]), int(rect[1])), (int(rect[2]), int(rect[3])), (255, 160, 0), 3)
+        try:
+            places = (world.state_json() or {}).get("room") or {}
+        except Exception:
+            places = {}
+        for name, st in places.items():
+            if isinstance(st, dict) and st.get("box_px"):
+                x1, y1, x2, y2 = (int(v) for v in st["box_px"])
+                cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 255), 3)
+                cv2.putText(img, name, (x1, max(20, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
+        h, w = img.shape[:2]
+        if w > 1280:
+            img = cv2.resize(img, (1280, round(h * 1280 / w)), interpolation=cv2.INTER_AREA)
+        ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        return buf.tobytes() if ok else None
+
+    @app.get("/full.jpg")
+    async def full_jpg():
+        jpg = await asyncio.to_thread(render_full)
+        if jpg is None:
+            raise HTTPException(404, "no full camera frame (room memory is off)")
+        return Response(jpg, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
     # -- live state
     @app.websocket("/ws")
     async def ws(websocket: WebSocket):

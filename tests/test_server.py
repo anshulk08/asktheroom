@@ -232,3 +232,31 @@ def test_overlay_draw_with_and_without_table():
     assert not np.array_equal(out, out2)                   # positions + laser crosshair drawn
     assert overlay.draw(img, None).shape == (540, 960, 3)  # no state yet
     assert img.sum() == 0                                  # input untouched
+
+
+def test_full_frame_view_with_zones_and_room_places(tmp_path):
+    """Spec 0009: /full.jpg is the whole camera frame (room memory's TableView) with the zones drawn;
+    404 when the frames source has no full frame."""
+    from core.room_zones import Zone, Zones
+    cfg = load_config()
+    zp = tmp_path / "zones.json"
+    Zones("v", (1920, 1080), {"couch": Zone("couch", "the couch", [(700, 800), (1000, 800), (1000, 1070)])}).save(zp)
+    cfg = dict(cfg, room_memory=dict(cfg.get("room_memory") or {}, zones_path=str(zp)))
+    events = EventLog(":memory:", str(tmp_path / "snaps"))
+
+    class Full:
+        rect = (0, 735, 613, 1080)
+
+        def latest(self):
+            return Frame(t=1.0, wall=1.0, img=np.zeros((720, 1280, 3), np.uint8), idx=1)
+
+        def latest_full(self):
+            return Frame(t=1.0, wall=1.0, img=np.zeros((1080, 1920, 3), np.uint8), idx=1)
+
+    with TestClient(create_app(cfg, demo_world(events), events, frames=Full())) as c:
+        r = c.get("/full.jpg")
+        assert r.status_code == 200 and r.headers["content-type"] == "image/jpeg"
+        img = cv2.imdecode(np.frombuffer(r.content, np.uint8), cv2.IMREAD_COLOR)
+        assert img.shape[1] == 1280 and img.sum() > 0          # downscaled, zones drawn on black
+    with TestClient(create_app(cfg, demo_world(events), events, frames=None)) as c:
+        assert c.get("/full.jpg").status_code == 404

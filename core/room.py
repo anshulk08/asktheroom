@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import logging
 import math
+import os
 import sys
 import threading
 import time
@@ -223,14 +224,32 @@ class RoomNamer:
         except Exception as e:
             log.info("naming room track %s failed (attempt %d): %s", job.track.tid, job.attempts, e)
             g = None
+        self._save(job, g)
         if g:
             job.track.guess = g
             log.info("room track %s in %s looks like a %s", job.track.tid, job.track.zone, g.get("name"))
-        elif job.attempts < 2:
+        else:
+            log.info("room track %s in %s: no usable name (attempt %d)", job.track.tid, job.track.zone, job.attempts)
+        if not g and job.attempts < 2:
             job.due = now + self.retry_s
             with self._lock:
                 self._jobs.append(job)
         return True
+
+    def _save(self, job, g) -> None:
+        """Debug (env ASKROOM_ROOM_CROPS=dir): keep every room crop sent to Grok, named by track and reply,
+        to see what it was asked about when a handoff's names don't match."""
+        d = os.environ.get("ASKROOM_ROOM_CROPS")
+        if not d:
+            return
+        try:
+            os.makedirs(d, exist_ok=True)
+            name = (g or {}).get("name") or "none"
+            safe = "".join(ch if ch.isalnum() else "_" for ch in str(name))[:40]
+            cv2.imwrite(os.path.join(d, f"{job.track.tid.replace(':', '')}_{job.track.zone}_{job.attempts}_{safe}.jpg"),
+                        job.img)
+        except Exception:
+            log.debug("saving the room crop failed", exc_info=True)
 
     def _run(self) -> None:
         while not self._stop.is_set():
