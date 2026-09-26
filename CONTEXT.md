@@ -59,7 +59,7 @@ always-on mic ─▶ voice/stt (Silero VAD + whisper.cpp; audio only in memory; 
                      ├─ voice/tts: ElevenLabs when online, Piper offline
                      └─ act/laser.Laser.aim_object: closed-loop aim, corrects on the camera's view of the dot
 server/app.py (FastAPI): dashboard, MJPEG overlay, WebSocket state, POST /ask, /sms (Twilio)
-mobile/bridge (BLE GATT on the Jetson) ◀─▶ iPhone app (mobile/ios): ask, state, answers, notices; no cloud
+mobile/bridge (BLE GATT on the Jetson) ◀─▶ iPhone app (mobile/ios): ask, state, answers, notices over BLE, no internet needed; optional read-aloud on the phone sends answer text to xAI or ElevenLabs
 main.py ─▶ n8n webhook (laptop): a log of every spoken question, plus a 5-minute health check
 ```
 
