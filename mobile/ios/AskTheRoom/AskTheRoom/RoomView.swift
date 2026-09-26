@@ -79,6 +79,9 @@ struct RoomView: View {
             }
             .padding(.vertical, 10)
         }
+        .task {
+            if store.isMock, let name = UserDefaults.standard.string(forKey: "mockSelect") { selected = name }
+        }
         .sheet(item: Binding(get: { selected.map(SelectedEntity.init) }, set: { selected = $0?.id })) { pick in
             EntityDetailView(name: pick.id, store: store)
                 .presentationDetents([.medium, .large])
@@ -274,7 +277,8 @@ struct EntityDetailView: View {
                         if !chain.isEmpty {
                             Section("Where it is") {
                                 ForEach(Array(zip(snapshot.chain(from: entity.name), chain)), id: \.1.id) { child, parent in
-                                    Text("\(child.displayName) is \(child.status == .under ? "under" : "inside") \(parent.displayName)")
+                                    LabeledContent(child.displayName,
+                                                   value: "\(child.status == .under ? "under" : "inside") \(parent.displayName)")
                                 }
                             }
                         }
