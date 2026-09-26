@@ -1,8 +1,8 @@
 import SwiftUI
 
-/// Home and the Table map as two tabs. Asking from Home, or tapping "Show me", jumps to the map.
+/// Home, the Table map and Recent as tabs. Asking from Home, or tapping "Show me", jumps to the map.
 struct MainView: View {
-    enum Tab: String { case home, table }
+    enum Tab: String { case home, table, recent }
 
     let store: RoomStore
     /// `-mockTab table` opens on the map, for screenshots.
@@ -24,11 +24,14 @@ struct MainView: View {
             RoomView(store: store)
                 .tabItem { Label("Table", systemImage: "square.grid.3x2.fill") }
                 .tag(Tab.table)
+            RecentView(store: store)
+                .tabItem { Label("Recent", systemImage: "clock") }
+                .tag(Tab.recent)
         }
     }
 }
 
-/// The start screen: the day, what the room noticed, where each thing is, and what changed.
+/// The start screen: the day, what the room noticed, and where each thing is.
 /// Everything is a big tap target that asks the room.
 struct HomeView: View {
     let store: RoomStore
@@ -69,9 +72,6 @@ struct HomeView: View {
                     }
                 }
 
-                HomeSection(title: "Recently") {
-                    RecentList(events: store.activity)
-                }
                 Color.clear.frame(height: 1).id("end")
             }
             .padding(.horizontal, 16)
@@ -236,48 +236,6 @@ private struct ThingTile: View {
         .accessibilityElement(children: .combine)
         .accessibilityHint("Asks the room and shows it on the table")
         .accessibilityAction(named: "Details", onDetails)
-    }
-}
-
-private struct RecentList: View {
-    static let shown = 8
-    let events: [ActivityEvent]
-
-    var body: some View {
-        if events.isEmpty {
-            Text("Nothing has changed since the app opened.")
-                .font(.body)
-                .foregroundStyle(.secondary)
-        } else {
-            TimelineView(.periodic(from: .now, by: 30)) { context in
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(events.prefix(Self.shown)) { event in
-                        HStack(alignment: .firstTextBaseline, spacing: 10) {
-                            Image(systemName: Dashboard.symbol(for: event.entity))
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                                .frame(width: 24)
-                                .accessibilityHidden(true)
-                            Text(event.text)
-                                .font(.body)
-                                .fixedSize(horizontal: false, vertical: true)
-                            Spacer(minLength: 8)
-                            Text(Dashboard.ago(event.time, now: context.date))
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                        }
-                        .padding(.vertical, 10)
-                        .accessibilityElement(children: .combine)
-                        if event.id != events.prefix(Self.shown).last?.id {
-                            Divider().padding(.leading, 34)
-                        }
-                    }
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 4)
-                .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 18))
-            }
-        }
     }
 }
 

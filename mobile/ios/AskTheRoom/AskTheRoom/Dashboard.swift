@@ -29,10 +29,31 @@ struct Notice: Identifiable, Equatable {
     var id: String { "\(entity)|\(text)" }
 }
 
+/// A line on the Recent tab: something that changed, or something the person asked.
+enum RecentEntry: Identifiable, Equatable {
+    case change(ActivityEvent)
+    case question(Exchange)
+
+    var id: String {
+        switch self {
+        case .change(let e): return "c\(e.id)"
+        case .question(let x): return "q\(x.id)"
+        }
+    }
+
+    var time: Date {
+        switch self {
+        case .change(let e): return e.time
+        case .question(let x): return x.askedAt
+        }
+    }
+}
+
 enum Dashboard {
-    /// Moves smaller than this are sensor jitter, not worth a line in "Recently".
+    /// Moves smaller than this are sensor jitter, not worth a line on the Recent tab.
     static let moveThreshold = 15.0
-    static let activityLimit = 20
+    static let activityLimit = 50
+    static let recentHour: TimeInterval = 60 * 60
 
     /// The person's own things: targets, plus unknown objects someone has named. Containers
     /// and covers are furniture here; they show up in "where" words instead.
@@ -139,6 +160,18 @@ enum Dashboard {
             if let text { out.append(ActivityEvent(entity: e.name, text: text, time: time)) }
         }
         return out
+    }
+
+    /// Changes and questions together, newest first, split into the last hour and earlier.
+    static func recent(activity: [ActivityEvent], exchanges: [Exchange], now: Date = Date())
+        -> (lastHour: [RecentEntry], earlier: [RecentEntry]) {
+        let all = (activity.map(RecentEntry.change) + exchanges.map(RecentEntry.question))
+            .enumerated()
+            // Newest first; ties keep their order (activity is already newest first).
+            .sorted { ($0.element.time, -$0.offset) > ($1.element.time, -$1.offset) }
+            .map(\.element)
+        let cutoff = now.addingTimeInterval(-recentHour)
+        return (all.filter { $0.time >= cutoff }, all.filter { $0.time < cutoff })
     }
 
     /// "the box", but "my charger" stays as the person named it.

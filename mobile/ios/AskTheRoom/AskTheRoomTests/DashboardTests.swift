@@ -93,6 +93,22 @@ final class DashboardTests: XCTestCase {
         XCTAssertEqual(Dashboard.changes(from: sample, to: new).map(\.text), ["Something new appeared on the table"])
     }
 
+    func testRecentMergesChangesAndQuestionsNewestFirst() {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let activity = [
+            ActivityEvent(entity: "keys", text: "Keys went into the box", time: now.addingTimeInterval(-60)),
+            ActivityEvent(entity: "phone", text: "Phone moved", time: now.addingTimeInterval(-2 * 3600)),
+        ]
+        var asked = Exchange(id: 1, question: "Where are my keys?")
+        asked.askedAt = now.addingTimeInterval(-30)
+        var old = Exchange(id: 2, question: "What changed?")
+        old.askedAt = now.addingTimeInterval(-3 * 3600)
+
+        let groups = Dashboard.recent(activity: activity, exchanges: [asked, old], now: now)
+        XCTAssertEqual(groups.lastHour.map(\.id), ["q1", "c\(activity[0].id)"])
+        XCTAssertEqual(groups.earlier.map(\.id), ["c\(activity[1].id)", "q2"])
+    }
+
     func testGreeting() {
         var cal = Calendar(identifier: .gregorian)
         cal.timeZone = TimeZone(identifier: "America/New_York")!
