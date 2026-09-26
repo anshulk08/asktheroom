@@ -225,11 +225,11 @@ def checker(world, replies, **gc):
     return g
 
 
-def settle_checks(g, ent, n, wall=2000.0, t=None, gap=10.0):
+def settle_checks(g, ent, n, wall=2000.0, t=None, gap=10.0, box=(100, 100, 160, 160)):
     import numpy as np
     img = np.full((720, 1280, 3), 170, np.uint8)
     for i in range(n):
-        s = g.check(img, wall + i * gap, t=t, marks=[(ent, (100, 100, 160, 160))], names={ent: None})
+        s = g.check(img, wall + i * gap, t=t, marks=[(ent, box)], names={ent: None})
     return s
 
 
@@ -267,6 +267,29 @@ def test_clutter_is_retired_and_nothing_is_born_there_for_a_while():
     assert 'thing:1' not in [e['name'] for e in world.state_json()['entities']]
     scene.run(world, 3.0)                              # still on the table: no new thing at that spot
     assert things(world) == []
+
+
+def test_the_veto_covers_all_of_a_long_retired_thing():
+    """A cable 30 cm long: another stretch of it, 12 cm from its centre, is not a new thing either."""
+    scene, world = make(rebirth_s=0.0)
+    scene.thing('cable', 40, 30, w=30, h=2)
+    scene.run(world, 2.0)
+    g = checker(world, [dict(real=False, conf=0.9, no=0.9)])
+    assert settle_checks(g, 'thing:1', 3, wall=scene.t, t=scene.t)['retired'] == ['thing:1']
+    scene.remove('cable')
+    scene.thing('bit', 52, 30.5, w=5, h=2)
+    scene.run(world, 3.0)
+    assert things(world) == []
+
+
+def test_a_thing_that_moved_between_checks_starts_its_belief_over():
+    """Two 'not an object' checks at one spot, then the name is on something 10+ cm away: no retiring."""
+    scene, world = make(rebirth_s=0.0)
+    one_thing(scene, world)
+    g = checker(world, [dict(real=False, conf=0.9, no=0.9)] * 2 + [dict(guesses=[dict(label='mug', p=0.9)])])
+    settle_checks(g, 'thing:1', 2, t=scene.t)
+    s = settle_checks(g, 'thing:1', 1, wall=2020.0, t=scene.t, box=(600, 400, 660, 460))
+    assert s['retired'] == [] and things(world) == ['thing:1'] and g.belief('thing:1') == [['mug', 1.0]]
 
 
 def test_a_touched_thing_is_not_retired():

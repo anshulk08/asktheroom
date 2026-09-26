@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import threading
 import time
@@ -47,6 +48,7 @@ from core.types import Event
 log = logging.getLogger(__name__)
 
 MAX_UNMARKED = 8
+MOVED_CM = 5.0                                            # a belief starts over past this
 SIGHTED = ("agree", "relabel", "named", "unmarked")      # verdicts whose label and position lookup() trusts
 
 
@@ -323,7 +325,7 @@ class GrokCheck:
             try:
                 for e in st.get("entities") or []:
                     top = self.belief(e.get("name") or "")[:3]
-                    if top:
+                    if top and not e.get("label"):
                         e["belief"] = top
                 st["grok_check"] = self.status()
             except Exception:
@@ -535,7 +537,10 @@ class GrokCheck:
             ent = r["entity"]
             if not (ent or "").startswith("thing:") or r["world_label"] is not None:
                 continue
-            b = self._belief.setdefault(ent, {"a": {}, "wall": wall, "n": 0})
+            b = self._belief.setdefault(ent, {"a": {}, "wall": wall, "n": 0, "xy": None})
+            xy = (r["x_cm"], r["y_cm"]) if r["x_cm"] is not None else None
+            if xy and b["xy"] and math.dist(xy, b["xy"]) > MOVED_CM:
+                b.update(a={}, n=0)             # carried, or the tracker moved its name to another object
             fade = 0.5 ** (max(0.0, wall - b["wall"]) / self.c.half_life_s)
             a = {k: v * fade for k, v in b["a"].items()}
             got = json.loads(r["guesses"] or "[]")
@@ -547,8 +552,9 @@ class GrokCheck:
             no = r["not_object"] or 0.0
             if r["verdict"] == "phantom":
                 no = max(no, r["confidence"])
-            a[NOT_OBJECT] = a.get(NOT_OBJECT, 0.0) + no
-            b.update(a=a, wall=wall, n=b["n"] + 1)
+            if no > 0:
+                a[NOT_OBJECT] = a.get(NOT_OBJECT, 0.0) + no
+            b.update(a=a, wall=wall, n=b["n"] + 1, xy=xy or b["xy"])
             top = self.belief(ent)
             if b["n"] < self.c.min_obs or not top:
                 continue

@@ -242,7 +242,7 @@ class ThingRules:
         self._things: list[str] = []                   # every thing ever confirmed, oldest first
         self._born: dict[str, float] = {}              # thing -> wall time it was confirmed
         self._alias_by: dict[str, str] = {}             # alias -> who bound it ('grok'), absent = taught
-        self._vetoes: list[tuple] = []                  # (centre cm, until wall): retired clutter's spots
+        self._vetoes: list[tuple] = []                  # (box cm, until wall, margin cm): retired clutter
         self._cands: list[Candidate] = []
         self._banks: dict[str, ExemplarBank] = {}
         self._aliases: dict[str, str] = {}              # normalised alias -> thing
@@ -334,7 +334,8 @@ class ThingRules:
         """Drop an unnamed thing judged not an object (Grok, over several settle checks: a cable, part of
         the desk). Only one lying VISIBLE on the table, without a taught name, holding nothing, with no hand
         contact since monotonic time `since` (the judged frame). It leaves the state (merged_into itself,
-        history kept) and no new thing is born within veto_cm of it for veto_s. No event: nothing moved."""
+        history kept) and no new thing is born on its box, grown by veto_cm, for veto_s (a cable is long:
+        a radius around its centre misses the rest of it). No event: nothing moved."""
         with self.lock:
             e = self.entities.get(name)
             if e is None or not is_thing(name) or e.merged_into is not None or e.status != Status.VISIBLE \
@@ -343,7 +344,8 @@ class ThingRules:
                     or max(self._contacts.get(name, {}).values(), default=NEG) > since:
                 return False
             now = self._wall if self._wall is not None else time.time()
-            self._vetoes = [v for v in self._vetoes if v[1] > now] + [(tuple(e.pos_cm), now + veto_s, veto_cm)]
+            box = tuple(e.box_cm) if e.box_cm is not None else (*e.pos_cm, *e.pos_cm)
+            self._vetoes = [v for v in self._vetoes if v[1] > now] + [(box, now + veto_s, veto_cm)]
             for a in list(e.aliases):
                 self._aliases.pop(a, None)
                 self._alias_by.pop(a, None)
@@ -622,8 +624,8 @@ class ThingRules:
         """A proposal may start a NEW identity only inside the tabletop outline, clear of its edge
         band (table_area:), and only if it is not flagged occluded (mostly inside a person box: a
         finger, a knee, a carried object). Otherwise it can still be an existing thing (rules a-c)."""
-        if self._vetoes and any(until > (self._wall or 0) and geom.dist(d.center_cm, c) <= r
-                                for c, until, r in self._vetoes):
+        if self._vetoes and any(until > (self._wall or 0) and b[0] - r <= d.center_cm[0] <= b[2] + r
+                                and b[1] - r <= d.center_cm[1] <= b[3] + r for b, until, r in self._vetoes):
             return False                    # where retired clutter lay (retire_thing)
         return not d.occluded and self._area.interior(d.center_cm)
 
