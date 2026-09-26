@@ -388,3 +388,14 @@ table_tag:
   size_cm: 16.0               # black square side as printed
   frames: 15                  # corner positions averaged over this many consecutive frames
   max_cm: 250                 # cap on the tracked area (a steep camera sees far across the plane)
+
+# Tabletop outline (core/table_area.py). The calibrated area is all the camera sees of the table plane,
+# floor, chairs and knees beside the table included; this outline says where the tabletop is. Proposals
+# (change and yoloe) whose centre is outside it are never made, and a NEW thing:N is created only inside
+# it at least edge_cm from its edge. Inside that edge band existing things are still followed, so one
+# slid off the table still leaves with its exit event. Set it on the rig: python -m core.table --outline
+# (writes table_area.json next to table_cal.json; used while that calibration stands, and read at start).
+# polygon_cm here applies when no valid saved outline exists. Empty: the camera's whole view (as before).
+table_area:
+  polygon_cm: []              # [[x, y], ...] tabletop corners in table cm, in order around the table
+  edge_cm: 3.0                # band inside the outline where existing things are followed but none is born
