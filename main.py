@@ -69,6 +69,19 @@ class FlatTable:
         return False
 
 
+def laser_older_than_table(fit, table_cal_path: str) -> bool:
+    """True if the table was calibrated after the laser was fitted (laser fits map table cm to pulses, so
+    a new table frame shifts where they point)."""
+    import json
+    try:
+        with open(table_cal_path) as f:
+            t = float(json.load(f).get("t") or 0.0)
+    except (OSError, ValueError):
+        return False
+    ts = float(getattr(fit, "timestamp", 0.0) or 0.0)
+    return bool(t and ts and t > ts + 1.0)
+
+
 def camera_source(s: str):
     """--camera: an index ('2') or a device path. Indices move when cameras are replugged; the
     /dev/v4l/by-id/ path names one camera for good (scripts/dock.sh passes /dev/v4l into the container)."""
@@ -252,13 +265,45 @@ class Room:
         self._off_timer.daemon = True
         self._off_timer.start()
 
-    def recalibrate(self) -> None:
+    def recalibrate(self, timeout_s: Optional[float] = None) -> bool:
+        """Refit the table frame from fresh frames. One-tag mode averages the tag over table_tag.frames
+        consecutive frames, so this feeds new frames until it fits or timeout_s runs out."""
         f = self.frames.latest() if self.frames is not None else None
         if f is None or f.img is None:
             log.warning("recalibrate: no camera frame")
-            return
+            return False
+        tag = bool(getattr(self.table, "tag_mode", False))
+        if timeout_s is None:
+            timeout_s = max(2.0, getattr(self.table, "tag_frames", 1) / 10.0) if tag else 0.0
+        before = self._frame_probe()
+        deadline = time.monotonic() + timeout_s
         ok = self.table.calibrate(f.img)
-        log.info("table recalibration %s", "ok" if ok else "failed (markers 0-3 not all visible)")
+        while not ok and time.monotonic() < deadline:
+            f = self.frames.wait_new(f.idx, timeout=max(0.05, deadline - time.monotonic())) or f
+            if f.img is not None:
+                ok = self.table.calibrate(f.img)
+        if not ok:
+            log.warning("table recalibration failed (%s)", f"tag {self.table.tag_id} not held in view"
+                        if tag else "markers 0-3 not all visible")
+            return False
+        after = self._frame_probe()
+        moved = float(np.abs(after - before).max()) if before is not None and after is not None else 0.0
+        log.info("table recalibration ok%s", f" (the table frame moved {moved:.1f} cm)" if moved >= 0.1 else "")
+        if moved > 2.0 and self.laser is not None and getattr(self.laser, "fit", None) is not None:
+            log.warning("the table frame moved %.1f cm: recalibrate the laser (python -m act.calibrate) "
+                        "or it will point off", moved)
+        return True
+
+    def _frame_probe(self) -> Optional[np.ndarray]:
+        """Where three fixed image points land on the table (cm), to tell how far a refit moved the frame."""
+        if not getattr(self.table, "ok", True):
+            return None
+        try:
+            w, h = self.cfg.get("frame_size_px", (1280, 720))
+            return np.asarray(self.table.px_to_cm([[w / 4, h / 4], [3 * w / 4, h / 4], [w / 2, 3 * h / 4]]),
+                              dtype=float)
+        except Exception:
+            return None
 
     # -- threads
 
@@ -577,6 +622,9 @@ def build(cfg: dict, fake: bool = False, camera: int = 0, with_voice: bool = Tru
         if laser.fit is None:
             log.warning("laser not calibrated (%s missing); answers will be spoken only",
                         cfg["paths"]["laser_cal"])
+        elif laser_older_than_table(laser.fit, table.cal_path):
+            log.warning("laser_cal.json was fitted before the last table calibration: the laser may point "
+                        "off; recalibrate it (python -m act.calibrate)")
 
     netmon = net.NetMonitor(cfg).start()
     cleanup.append(netmon.stop)

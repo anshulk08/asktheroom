@@ -516,3 +516,62 @@ def test_camera_is_an_index_or_a_stable_device_path():
     assert main.camera_source("2") == 2 and main.camera_source(" 0 ") == 0
     by_id = "/dev/v4l/by-id/usb-046d_0809_A1C0DC94-video-index0"
     assert main.camera_source(by_id) == by_id and main.camera_source("/dev/video2") == "/dev/video2"
+
+
+class _TagTable:
+    """One-tag table stand-in: fits after `need` calibrate() calls, then shifts the frame by `shift` cm."""
+    tag_mode, tag_id, tag_frames = True, 0, 5
+
+    def __init__(self, need=5, shift=0.0):
+        self.need, self.shift, self.calls, self.ok = need, shift, 0, True
+
+    def calibrate(self, img):
+        self.calls += 1
+        return self.calls >= self.need
+
+    def px_to_cm(self, pts):
+        import numpy as np
+        return np.asarray(pts, dtype=float) / 10 + (self.shift if self.calls >= self.need else 0.0)
+
+
+class _NewFrames:
+    def __init__(self):
+        import numpy as np
+        from core.types import Frame
+        self.Frame, self.img, self.i = Frame, np.zeros((4, 4, 3), np.uint8), 0
+
+    def latest(self):
+        return self.Frame(0.0, 0.0, self.img, self.i)
+
+    def wait_new(self, after_idx, timeout=1.0):
+        time.sleep(0.005)
+        self.i = after_idx + 1
+        return self.Frame(0.0, 0.0, self.img, self.i)
+
+
+def test_recalibrate_feeds_fresh_frames_until_the_tag_fits(tmp_path, caplog):
+    room, _ = make_room(tmp_path)
+    room.frames, room.table = _NewFrames(), _TagTable(need=5, shift=3.0)
+    room.laser.fit = object()
+    with caplog.at_level("WARNING"):
+        assert room.recalibrate(timeout_s=2.0) is True
+    assert room.table.calls == 5
+    assert "recalibrate the laser" in caplog.text           # the frame moved 3 cm under a fitted laser
+
+
+def test_recalibrate_gives_up_when_the_tag_stays_hidden(tmp_path, caplog):
+    room, _ = make_room(tmp_path)
+    room.frames, room.table = _NewFrames(), _TagTable(need=10 ** 6)
+    with caplog.at_level("WARNING"):
+        assert room.recalibrate(timeout_s=0.1) is False
+    assert "tag 0 not held in view" in caplog.text
+
+
+def test_laser_fitted_before_the_table_calibration_is_flagged(tmp_path):
+    import json
+    from types import SimpleNamespace
+    p = tmp_path / "table_cal.json"
+    p.write_text(json.dumps({"H": [[1, 0, 0], [0, 1, 0], [0, 0, 1]], "t": 2000.0}))
+    assert main.laser_older_than_table(SimpleNamespace(timestamp=1000.0), str(p))
+    assert not main.laser_older_than_table(SimpleNamespace(timestamp=3000.0), str(p))
+    assert not main.laser_older_than_table(SimpleNamespace(timestamp=1000.0), str(tmp_path / "none.json"))
