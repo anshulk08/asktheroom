@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Ask the Room</title>
+<link rel="preload" href="/static/fonts/atkinson-next-latin-wght.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/static/app.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%2316302A'/%3E%3Ccircle cx='8' cy='8' r='3' fill='%23FF5B45'/%3E%3C/svg%3E">
+</head>
+<body>
+<div class="app">
+
+  <header class="head">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <h1>Ask the Room</h1>
+    </div>
+    <ul class="status" aria-label="System status">
+      <li id="st-link" class="st" data-state="wait"><span class="dot" aria-hidden="true"></span><span class="st-text">Connecting</span></li>
+      <li id="st-fps" class="st"><span class="st-k">Vision</span> <span class="st-v">&ndash;</span></li>
+      <li id="st-net" class="st"><span class="st-k">Answers</span> <span class="st-v">&ndash;</span></li>
+      <li id="st-lat" class="st"><span class="st-k">Last answer</span> <span class="st-v">&ndash;</span></li>
+      <li id="st-laser" class="st st-laser" data-on="false"><span class="beam" aria-hidden="true"></span><span class="st-v">Laser off</span></li>
+    </ul>
+  </header>
+
+  <section class="panel video" aria-labelledby="h-video">
+    <h2 id="h-video">Overhead camera</h2>
+    <div class="frame">
+      <span class="fid f0" aria-hidden="true"></span><span class="fid f1" aria-hidden="true"></span>
+      <span class="fid f2" aria-hidden="true"></span><span class="fid f3" aria-hidden="true"></span>
+      <img id="video" alt="Live overhead view of the table with tracked objects labelled" src="/video">
+      <p id="video-off" class="video-off" hidden>Camera stream interrupted. Reconnecting&hellip;</p>
+    </div>
+  </section>
+
+  <section class="panel graph" aria-labelledby="h-graph">
+    <div class="panel-head">
+      <h2 id="h-graph">What&rsquo;s where</h2>
+      <ul class="legend" aria-label="Legend">
+        <li><i class="sw s-visible"></i>On the table</li>
+        <li><i class="sw s-held"></i>Held</li>
+        <li><i class="sw s-hidden"></i>Inside or under</li>
+        <li><i class="sw s-gone"></i>Gone or lost</li>
+        <li class="lg-conf"><i class="ramp"></i>Brighter is more certain</li>
+      </ul>
+    </div>
+    <div id="graph" class="graph-canvas" role="img" aria-label="Graph of which object is inside, under, held, or on the table"></div>
+    <p class="graph-hint">Select an object to see only its history.</p>
+  </section>
+
+  <section class="panel feed" aria-labelledby="h-feed">
+    <div class="panel-head">
+      <h2 id="h-feed">What happened</h2>
+      <button id="filter-clear" class="chip-btn" type="button" hidden></button>
+    </div>
+    <ol id="events" class="events" aria-live="polite"></ol>
+    <p id="events-empty" class="empty">Nothing has moved yet. Pick something up and it will show here.</p>
+  </section>
+
+  <section class="panel ask" aria-labelledby="h-ask">
+    <h2 id="h-ask" class="sr-only">Ask a question</h2>
+    <div class="ask-in">
+      <form id="ask-form" class="ask-form" autocomplete="off">
+        <label for="ask-input" class="sr-only">Your question</label>
+        <input id="ask-input" name="text" type="text" maxlength="300" placeholder="Where are my keys?" required>
+        <button id="ask-btn" type="submit">Ask</button>
+      </form>
+      <div class="suggest" id="suggest" aria-label="Example questions">
+        <button type="button">Where are my keys?</button>
+        <button type="button">Where are my pills?</button>
+        <button type="button">Where did my phone go?</button>
+      </div>
+    </div>
+    <figure id="answer" class="answer idle" aria-live="polite">
+      <blockquote id="answer-text">Answers show up here, and the laser points at the spot.</blockquote>
+      <figcaption id="answer-meta"></figcaption>
+    </figure>
+    <div id="asked-wrap" class="asked-wrap" hidden>
+      <h3>Asked earlier</h3>
+      <ol id="asked" class="asked"></ol>
+    </div>
+  </section>
+
+</div>
+<script src="/static/vendor/vis-network.min.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

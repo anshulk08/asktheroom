@@ -1,0 +1,573 @@
+"""Dashboard + phone server (spec V7, V8, V11).
+
+create_app(cfg, world, events, frames=None, ask_fn=None, table=None) -> FastAPI
+
+  GET  /                 dashboard (server/web/index.html; everything served locally, works offline)
+  GET  /video            MJPEG of the latest frame with the world drawn on it (server/overlay.py)
+  WS   /ws             WorldState JSON at server.push_hz plus new events since the last push
+  GET  /events?since=t   events with wall >= t (oldest first), each with a snapshot_url
+  GET  /snapshots/{name} one event snapshot jpg (snapshot dir only)
+  POST /ask              {"text"} -> {"text", "point_at", "action", "latency_ms"}
+  POST /sms              Twilio webhook (signature checked, whitelist only)
+
+Run the dev version with fake data:  python -m server.app --fake
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import logging
+import math
+import os
+import re
+import threading
+import time
+from dataclasses import asdict
+from pathlib import Path
+from typing import Any, Callable, Optional
+from xml.sax.saxutils import escape
+
+import cv2
+import numpy as np
+from fastapi import FastAPI, HTTPException, Request, WebSocket
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+
+from core.types import Answer, Event, Status
+from server import overlay
+
+log = logging.getLogger("askroom.server")
+
+WEB_DIR = Path(__file__).resolve().parent / "web"
+BOUNDARY = "askroomframe"
+SNAP_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.(jpg|jpeg|png)$")
+ASK_TIMEOUT_S = 10.0          # dashboard: ask_fn has its own 4 s LLM timeout; this is a backstop
+SMS_TIMEOUT_S = 10.0          # Twilio gives a webhook 15 s
+INITIAL_EVENTS = 200          # events sent on a fresh WS connection
+EMPTY_TWIML = '<?xml version="1.0" encoding="UTF-8"?><Response></Response>'
+AskFn = Callable[[str, str], Answer]
+
+
+# ---------------------------------------------------------------- helpers
+
+def _json_default(o: Any):
+    if isinstance(o, np.generic):
+        return o.item()
+    if isinstance(o, np.ndarray):
+        return o.tolist()
+    if isinstance(o, (Status,)):
+        return o.value
+    if isinstance(o, (set, tuple)):
+        return list(o)
+    return str(o)
+
+
+def dumps(obj: Any) -> str:
+    return json.dumps(obj, default=_json_default)
+
+
+def _event_key(ev: Event) -> tuple:
+    return (ev.wall, ev.obj, ev.type)
+
+
+class EventCursor:
+    """Tracks what one client has already seen, so each push carries only new events."""
+
+    def __init__(self, since: float = 0.0):
+        self.since = since
+        self.seen_at_edge: set[tuple] = set()
+
+    def poll(self, events, limit: Optional[int] = None) -> list[Event]:
+        evs = events.since(self.since)
+        out = [e for e in evs if _event_key(e) not in self.seen_at_edge]
+        if limit is not None and len(out) > limit:
+            out = out[-limit:]
+        if evs:
+            top = max(e.wall for e in evs)
+            if top > self.since:
+                self.since = top
+                self.seen_at_edge = set()
+            self.seen_at_edge |= {_event_key(e) for e in evs if e.wall == top}
+        return out
+
+
+def canned_ask(cfg: dict, world) -> AskFn:
+    """A stand-in for voice/answers: finds an object name in the question and reads the world."""
+    syn = {k.lower(): v for k, v in (cfg.get("synonyms") or {}).items()}
+    names = list((cfg.get("objects") or {}).keys())
+
+    def spoken(n: Optional[str]) -> str:
+        if not n:
+            return "something"
+        if n.startswith("hand"):
+            return "someone's hand"
+        return (cfg.get("display_names") or {}).get(n, n.replace("_", " "))
+
+    def ask(text: str, source: str) -> Answer:
+        q = " " + re.sub(r"[^a-z ]", " ", text.lower()) + " "
+        obj = None
+        for phrase in sorted(syn, key=len, reverse=True):
+            if f" {phrase} " in q:
+                obj = syn[phrase]
+                break
+        if obj is None:
+            for n in names:
+                if f" {n.replace('_', ' ')} " in q or f" {n} " in q:
+                    obj = n
+                    break
+        if obj is None:
+            return Answer("Ask me where something is, like: where are my keys?")
+        try:
+            e = world.get(obj)
+        except KeyError:
+            return Answer(f"I'm not tracking the {spoken(obj)}.")
+        st = e.status.value if hasattr(e.status, "value") else str(e.status)
+        name = spoken(obj)
+        is_ = "are" if name.endswith("s") else "is"
+        if st == "VISIBLE":
+            return Answer(f"The {name} {is_} on the table. I'm pointing at it.", point_at=obj, action="point")
+        if st == "INSIDE":
+            return Answer(f"The {name} {is_} inside the {spoken(e.parent)}.", point_at=obj, action="point")
+        if st == "UNDER":
+            return Answer(f"The {name} {is_} under the {spoken(e.parent)}.", point_at=obj, action="point")
+        if st == "HELD":
+            return Answer(f"Someone is holding the {name} right now.")
+        if st == "GONE":
+            side = e.edge or "edge"
+            return Answer(f"The {name} {'were' if is_ == 'are' else 'was'} carried off the {side} side of the table.",
+                          action=f"sweep:{e.edge}" if e.edge else None)
+        return Answer(f"I lost track of the {name}. I last saw {'them' if is_ == 'are' else 'it'} here.", point_at=obj, action="circle")
+
+    return ask
+
+
+# ---------------------------------------------------------------- app
+
+def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = None,
+               table=None) -> FastAPI:
+    scfg = cfg.get("server") or {}
+    push_period = 1.0 / float(scfg.get("push_hz", 5) or 5)
+    mjpeg_period = 1.0 / float(scfg.get("mjpeg_fps", 10) or 10)
+    whitelist = {str(n).strip() for n in ((cfg.get("sms") or {}).get("whitelist") or [])}
+    snap_dir = Path(getattr(events, "snap_dir", None) or (cfg.get("paths") or {}).get("snapshots", "data/snapshots"))
+    snap_root = snap_dir.resolve()
+    ask = ask_fn or canned_ask(cfg, world)
+
+    app = FastAPI(title="Ask the Room", docs_url=None, redoc_url=None)
+    app.state.last_answer = None
+    placeholder_img = overlay.placeholder()
+
+    # -- snapshot urls
+    def snapshot_url(path: Optional[str]) -> Optional[str]:
+        if not path:
+            return None
+        p = Path(path)
+        try:
+            if p.resolve().parent != snap_root:
+                return None
+        except OSError:
+            return None
+        if not SNAP_NAME_RE.match(p.name):
+            return None
+        return f"/snapshots/{p.name}"
+
+    def event_json(ev: Event) -> dict:
+        d = asdict(ev)
+        d["snapshot_url"] = snapshot_url(ev.snapshot)
+        d.pop("snapshot", None)          # don't leak filesystem paths to the browser
+        d["id"] = f"{ev.wall:.4f}:{ev.obj}:{ev.type}"
+        return d
+
+    def meta() -> dict:
+        return {"last_answer": app.state.last_answer, "server_t": time.time()}
+
+    # -- pages
+    @app.get("/", response_class=HTMLResponse)
+    def index():
+        return FileResponse(WEB_DIR / "index.html", media_type="text/html",
+                            headers={"Cache-Control": "no-cache"})
+
+    @app.get("/healthz")
+    def healthz():
+        return {"ok": True}
+
+    # -- video
+    def render_jpeg() -> bytes:
+        f = None
+        if frames is not None:
+            try:
+                f = frames.latest()
+            except Exception:
+                log.exception("frames.latest() failed")
+        img = f.img if f is not None and getattr(f, "img", None) is not None else placeholder_img
+        try:
+            state = world.state_json()
+        except Exception:
+            state = None
+        dets = None
+        get_dets = getattr(frames, "latest_dets", None)
+        if callable(get_dets):
+            try:
+                dets = get_dets()
+            except Exception:
+                dets = None
+        try:
+            out = overlay.draw(img, state, table=table, dets=dets)
+        except Exception:
+            log.exception("overlay.draw failed")
+            out = cv2.resize(img, (960, int(img.shape[0] * 960 / img.shape[1])))
+        ok, buf = cv2.imencode(".jpg", out, [cv2.IMWRITE_JPEG_QUALITY, 70])
+        return buf.tobytes() if ok else b""
+
+    async def mjpeg(request: Request, max_frames: Optional[int] = None):
+        # Starlette cancels this generator when the client goes away; the disconnect check is a
+        # second guard for servers that don't.
+        n = 0
+        while max_frames is None or n < max_frames:
+            t0 = time.monotonic()
+            if await request.is_disconnected():
+                break
+            jpg = await asyncio.to_thread(render_jpeg)
+            yield (b"--" + BOUNDARY.encode() + b"\r\nContent-Type: image/jpeg\r\nContent-Length: "
+                   + str(len(jpg)).encode() + b"\r\n\r\n" + jpg + b"\r\n")
+            n += 1
+            await asyncio.sleep(max(0.0, mjpeg_period - (time.monotonic() - t0)))
+
+    @app.get("/video")
+    async def video(request: Request, frames_n: Optional[int] = None):
+        return StreamingResponse(
+            mjpeg(request, frames_n),
+            media_type=f"multipart/x-mixed-replace; boundary={BOUNDARY}",
+            headers={"Cache-Control": "no-cache, no-store", "Pragma": "no-cache",
+                     "X-Accel-Buffering": "no"},
+        )
+
+    @app.get("/frame.jpg")
+    async def frame_jpg():
+        jpg = await asyncio.to_thread(render_jpeg)
+        return Response(jpg, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+    # -- live state
+    @app.websocket("/ws")
+    async def ws(websocket: WebSocket):
+        await websocket.accept()
+        try:
+            since = float(websocket.query_params.get("since", 0) or 0)
+        except ValueError:
+            since = 0.0
+        cursor = EventCursor(since)
+        first = True
+        try:
+            while True:
+                t0 = time.monotonic()
+                state = await asyncio.to_thread(world.state_json)
+                new = await asyncio.to_thread(cursor.poll, events, INITIAL_EVENTS if first else None)
+                msg = {"type": "state", "state": state, "events": [event_json(e) for e in new],
+                       "initial": first, **meta()}
+                await websocket.send_text(dumps(msg))
+                first = False
+                await asyncio.sleep(max(0.0, push_period - (time.monotonic() - t0)))
+        except Exception:
+            # client went away (WebSocketDisconnect / closed transport) or the app is shutting down
+            pass
+
+    @app.get("/state")
+    async def state_route():
+        st = await asyncio.to_thread(world.state_json)
+        return Response(dumps({"state": st, **meta()}), media_type="application/json")
+
+    # -- events + snapshots
+    @app.get("/events")
+    async def events_route(since: float = 0.0, limit: int = 500):
+        evs = await asyncio.to_thread(events.since, since)
+        if limit and len(evs) > limit:
+            evs = evs[-limit:]
+        return Response(dumps([event_json(e) for e in evs]), media_type="application/json")
+
+    @app.get("/snapshots/{name:path}")
+    def snapshot(name: str):
+        if not SNAP_NAME_RE.match(name) or ".." in name:
+            raise HTTPException(400, "bad snapshot name")
+        p = (snap_root / name).resolve()
+        if p.parent != snap_root or not p.is_file():
+            raise HTTPException(404, "no such snapshot")
+        return FileResponse(p, media_type="image/jpeg", headers={"Cache-Control": "max-age=86400"})
+
+    # -- ask
+    async def run_ask(text: str, source: str, timeout: float) -> tuple[Answer, int]:
+        t0 = time.perf_counter()
+        try:
+            ans = await asyncio.wait_for(asyncio.to_thread(ask, text, source), timeout)
+        except asyncio.TimeoutError:
+            ans = Answer("Sorry, that took too long. Please ask again.")
+        except Exception:
+            log.exception("ask_fn failed")
+            ans = Answer("Sorry, something went wrong answering that.")
+        ms = int((time.perf_counter() - t0) * 1000)
+        app.state.last_answer = {"question": text, "text": ans.text, "point_at": ans.point_at,
+                                 "action": ans.action, "latency_ms": ms, "source": source,
+                                 "t": time.time()}
+        return ans, ms
+
+    @app.post("/ask")
+    async def ask_route(request: Request):
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(400, "expected JSON {\"text\": ...}")
+        text = str((body or {}).get("text", "")).strip() if isinstance(body, dict) else ""
+        if not text:
+            raise HTTPException(400, "text is required")
+        ans, ms = await run_ask(text[:500], "dashboard", ASK_TIMEOUT_S)
+        return JSONResponse({"text": ans.text, "point_at": ans.point_at, "action": ans.action,
+                             "latency_ms": ms})
+
+    # -- sms (Twilio)
+    def _public_urls(request: Request) -> list[str]:
+        urls = [str(request.url)]
+        base = os.environ.get("ASKROOM_PUBLIC_URL")
+        if base:
+            q = f"?{request.url.query}" if request.url.query else ""
+            urls.insert(0, base.rstrip("/") + request.url.path + q)
+        proto = request.headers.get("x-forwarded-proto")
+        host = request.headers.get("x-forwarded-host") or request.headers.get("host")
+        if proto and host:
+            q = f"?{request.url.query}" if request.url.query else ""
+            urls.append(f"{proto.split(',')[0].strip()}://{host}{request.url.path}{q}")
+        return urls
+
+    def twiml(text: str) -> Response:
+        body = ('<?xml version="1.0" encoding="UTF-8"?><Response><Message>'
+                + escape(text[:1500]) + "</Message></Response>")
+        return Response(body, media_type="application/xml")
+
+    @app.post("/sms")
+    async def sms(request: Request):
+        form = await request.form()
+        params = {k: str(v) for k, v in form.items()}
+        if os.environ.get("ASKROOM_SMS_INSECURE") != "1":
+            token = os.environ.get("TWILIO_AUTH_TOKEN")
+            sig = request.headers.get("x-twilio-signature", "")
+            if not token or not sig:
+                raise HTTPException(403, "missing Twilio signature")
+            from twilio.request_validator import RequestValidator
+            v = RequestValidator(token)
+            if not any(v.validate(u, params, sig) for u in _public_urls(request)):
+                raise HTTPException(403, "bad Twilio signature")
+        sender = params.get("From", "").strip()
+        if sender not in whitelist:
+            log.info("sms from non-whitelisted number ignored")
+            return Response(EMPTY_TWIML, media_type="application/xml")
+        text = params.get("Body", "").strip()
+        if not text:
+            return twiml("Text me a question, like: where are my keys?")
+        ans, _ = await run_ask(text[:500], "sms", SMS_TIMEOUT_S)
+        return twiml(ans.text)
+
+    app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
+    return app
+
+
+# ---------------------------------------------------------------- --fake dev run
+
+class FakeTable:
+    """Linear table cm -> frame px for the synthetic frame (90x60 cm table inset in 1280x720)."""
+
+    def __init__(self, cfg: dict, w: int = 1280, h: int = 720):
+        tw, th = (cfg.get("table") or {}).get("size_cm", [90, 60])
+        self.tw, self.th = float(tw), float(th)
+        self.sx = (w - 220) / self.tw
+        self.sy = (h - 120) / self.th
+        self.s = min(self.sx, self.sy)
+        self.ox = (w - self.tw * self.s) / 2
+        self.oy = (h - self.th * self.s) / 2
+
+    def cm_to_px(self, pts: np.ndarray) -> np.ndarray:
+        pts = np.asarray(pts, dtype=np.float32).reshape(-1, 2)
+        return np.stack([self.ox + pts[:, 0] * self.s, self.oy + pts[:, 1] * self.s], axis=1)
+
+
+class TestPatternFrames:
+    """Synthetic camera: a tabletop with a cm grid, objects drawn where the fake world has them,
+    and a hand drifting across. Rendered on demand at most ~15 fps."""
+
+    __test__ = False   # not a pytest class
+
+    OBJ_BGR = {"keys": (60, 200, 230), "pill_bottle": (70, 110, 240), "wallet": (60, 80, 120),
+               "glasses": (200, 200, 90), "phone": (40, 40, 40), "remote": (90, 90, 90),
+               "box": (80, 140, 190), "notebook": (230, 225, 215)}
+    SIZE = {"box": (15, 11), "notebook": (13, 10), "remote": (4, 12), "phone": (5, 9),
+            "wallet": (7, 5), "glasses": (9, 3), "pill_bottle": (3, 3), "keys": (3, 3)}
+
+    def __init__(self, world, table: FakeTable):
+        from core.types import Frame
+        self._Frame = Frame
+        self.world = world
+        self.table = table
+        self.idx = 0
+        self._last: Any = None
+        self._lock = threading.Lock()
+        self._bg = self._background()
+
+    def _background(self) -> np.ndarray:
+        img = np.empty((720, 1280, 3), np.uint8)
+        img[:] = (58, 62, 66)
+        t = self.table
+        (x1, y1), (x2, y2) = t.cm_to_px(np.array([[0, 0], [t.tw, t.th]]))
+        cv2.rectangle(img, (int(x1), int(y1)), (int(x2), int(y2)), (70, 98, 44), -1)
+        for cx in range(0, int(t.tw) + 1, 5):
+            (px, _), = t.cm_to_px(np.array([[cx, 0]]))
+            cv2.line(img, (int(px), int(y1)), (int(px), int(y2)), (84, 116, 58) if cx % 10 else (98, 132, 70), 1)
+        for cy in range(0, int(t.th) + 1, 5):
+            (_, py), = t.cm_to_px(np.array([[0, cy]]))
+            cv2.line(img, (int(x1), int(py)), (int(x2), int(py)), (84, 116, 58) if cy % 10 else (98, 132, 70), 1)
+        for (mx, my) in ((0, 0), (t.tw, 0), (t.tw, t.th), (0, t.th)):   # ArUco-ish corner markers
+            (px, py), = t.cm_to_px(np.array([[mx, my]]))
+            cv2.rectangle(img, (int(px) - 18, int(py) - 18), (int(px) + 18, int(py) + 18), (20, 20, 20), -1)
+            cv2.rectangle(img, (int(px) - 10, int(py) - 10), (int(px) + 2, int(py) + 2), (235, 235, 235), -1)
+        return img
+
+    def _render(self):
+        img = self._bg.copy()
+        t = time.time()
+        s = self.table.s
+        order = sorted(self.world.entities.values(), key=lambda e: {"container": 0, "target": 1, "cover": 2}[e.kind])
+        for e in order:
+            if e.status.value not in ("VISIBLE",) or not e.pos_cm:
+                continue
+            (px, py), = self.table.cm_to_px(np.array([e.pos_cm]))
+            w, h = self.SIZE.get(e.name, (5, 5))
+            x1, y1 = int(px - w * s / 2), int(py - h * s / 2)
+            x2, y2 = int(px + w * s / 2), int(py + h * s / 2)
+            cv2.rectangle(img, (x1, y1), (x2, y2), self.OBJ_BGR.get(e.name, (200, 200, 200)), -1)
+            cv2.rectangle(img, (x1, y1), (x2, y2), (25, 25, 25), 1)
+        # a hand drifting in a slow figure eight, plus whatever it holds
+        hx = 640 + 380 * math.sin(t * 0.5)
+        hy = 380 + 150 * math.sin(t * 1.0)
+        cv2.ellipse(img, (int(hx), int(hy)), (46, 60), math.degrees(math.sin(t)) * 0.3, 0, 360, (150, 175, 215), -1)
+        for e in self.world.entities.values():
+            if e.status.value == "HELD":
+                cv2.rectangle(img, (int(hx) - 10, int(hy) - 30), (int(hx) + 10, int(hy) + 20),
+                              self.OBJ_BGR.get(e.name, (200, 200, 200)), -1)
+        cv2.putText(img, time.strftime("%H:%M:%S") + "  test pattern", (18, 704),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 1, cv2.LINE_AA)
+        self.idx += 1
+        return self._Frame(t=time.monotonic(), wall=t, img=img, idx=self.idx)
+
+    def latest(self):
+        with self._lock:
+            if self._last is None or time.monotonic() - self._last.t > 1 / 15:
+                self._last = self._render()
+            return self._last
+
+
+def _fake_animator(world, events, frames: TestPatternFrames, stop: threading.Event, period: float = 4.0):
+    """Cycle a short scene forever so the dashboard's graph and timeline visibly change."""
+    import random
+
+    def ev(obj, typ, **kw):
+        now = time.time()
+        e = Event(t=time.monotonic(), wall=now, obj=obj, type=typ, **kw)
+        events.add(e, frames.latest())
+
+    steps = [
+        lambda: (world.set("remote", status=Status.VISIBLE, parent=None, pos_cm=(52.0, 20.0),
+                           last_seen=time.time(), confidence=1.0),
+                 ev("remote", "MOVED", from_cm=(50.0, 45.0), to_cm=(52.0, 20.0), confidence=1.0)),
+        lambda: (world.set("wallet", status=Status.HELD, parent="hand:1", confidence=0.9),
+                 ev("wallet", "PICKED_UP", from_cm=(60.0, 15.0), parent="hand:1", confidence=0.9)),
+        lambda: (world.set("wallet", status=Status.INSIDE, parent="box", pos_cm=(70.4, 38.1), confidence=0.85),
+                 ev("wallet", "PUT_INSIDE", to_cm=(70.4, 38.1), parent="box", confidence=0.85)),
+        lambda: (world.set("glasses", status=Status.VISIBLE, parent=None, pos_cm=(80.0, 50.0),
+                           last_seen=time.time(), confidence=1.0),
+                 ev("glasses", "CORRECTED", to_cm=(80.0, 50.0), confidence=1.0)),
+        lambda: (world.set("wallet", status=Status.VISIBLE, parent=None, pos_cm=(60.0, 15.0),
+                           last_seen=time.time(), confidence=1.0),
+                 ev("wallet", "TAKEN_OUT", from_cm=(70.4, 38.1), to_cm=(60.0, 15.0), confidence=1.0)),
+        lambda: (world.set("glasses", status=Status.UNKNOWN, parent="unknown", confidence=0.4),
+                 ev("glasses", "LOST_TRACK", from_cm=(80.0, 50.0), confidence=0.4)),
+        lambda: (world.set("remote", status=Status.HELD, parent="hand:2", pos_cm=(52.0, 20.0), confidence=0.9),
+                 ev("remote", "PICKED_UP", from_cm=(52.0, 20.0), parent="hand:2", confidence=0.9)),
+        lambda: (world.set("remote", status=Status.VISIBLE, parent=None, pos_cm=(50.0, 45.0),
+                           last_seen=time.time(), confidence=1.0),
+                 ev("remote", "PUT_BACK", to_cm=(50.0, 45.0), confidence=1.0)),
+        lambda: (world.set("remote", status=Status.HELD, parent="hand:2", confidence=0.9),
+                 ev("remote", "PICKED_UP", from_cm=(50.0, 45.0), parent="hand:2", confidence=0.9)),
+    ]
+    i = 0
+    next_step = time.monotonic() + period
+    while not stop.is_set():
+        world.online = True
+        world.fps = round(12.0 + random.uniform(-0.8, 0.8), 1)
+        # decay confidence of things we can't see, like the real engine would
+        for e in world.entities.values():
+            if e.status.value in ("INSIDE", "UNDER", "UNKNOWN"):
+                e.confidence = max(0.45, e.confidence * 0.9998)
+        las = getattr(world, "_laser_until", 0)
+        if world.laser.get("on") and time.time() > las:
+            world.laser = {"on": False, "target": None, "err_cm": None}
+        if time.monotonic() >= next_step:
+            try:
+                steps[i % len(steps)]()
+            except Exception:
+                log.exception("fake step failed")
+            i += 1
+            next_step = time.monotonic() + period
+        stop.wait(0.2)
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description="Ask the Room dashboard server")
+    ap.add_argument("--fake", action="store_true", help="demo world + synthetic camera + canned answers")
+    ap.add_argument("--host")
+    ap.add_argument("--port", type=int)
+    ap.add_argument("--config")
+    args = ap.parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+
+    import uvicorn
+    from core.config import load_config
+    cfg = load_config(args.config)
+    host = args.host or cfg["server"]["host"]
+    port = args.port or cfg["server"]["port"]
+
+    if not args.fake:
+        raise SystemExit("Only --fake is runnable standalone; the main loop builds the app with "
+                         "create_app(cfg, world, events, frames, ask_fn).")
+
+    import tempfile
+    from core.events import EventLog
+    from core.fakeworld import demo_world
+    snap = tempfile.mkdtemp(prefix="askroom_fake_snaps_")
+    events = EventLog(":memory:", snap)
+    world = demo_world(events)
+    world.online, world.fps = True, 12.0
+    table = FakeTable(cfg)
+    frames = TestPatternFrames(world, table)
+    # the real router: intents + answer templates, Grok for OTHER when online
+    from net import NetMonitor
+    from voice.pipeline import make_ask
+    net = NetMonitor(cfg)
+    net.start()
+    base_ask = make_ask(cfg, world, events, net=net)
+
+    def ask_fn(text: str, source: str) -> Answer:
+        ans = base_ask(text, source)
+        if ans.point_at:
+            world.laser = {"on": True, "target": ans.point_at, "err_cm": 0.8}
+            world._laser_until = time.time() + cfg.get("laser_timeout_s", 10)
+        return ans
+
+    stop = threading.Event()
+    threading.Thread(target=_fake_animator, args=(world, events, frames, stop), daemon=True).start()
+    app = create_app(cfg, world, events, frames=frames, ask_fn=ask_fn, table=table)
+    log.info("fake dashboard on http://%s:%s  (snapshots in %s)", host, port, snap)
+    try:
+        uvicorn.run(app, host=host, port=port, log_level="info", timeout_graceful_shutdown=2)
+    finally:
+        stop.set()
+
+
+if __name__ == "__main__":
+    main()
