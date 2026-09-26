@@ -6,10 +6,12 @@
 #   scripts/dock.sh python3 -m core.detect --export          # rebuild the engine after changing prompts
 #   scripts/dock.sh bash                                      # a shell
 set -euo pipefail
+# The host's time zone is passed in so spoken times ("put there at 8:05 PM") are local.
 cd "$(dirname "$0")/.."
-IMAGE="${ASKROOM_IMAGE:-ultralytics/ultralytics:latest-jetson-jetpack6}"
+IMAGE="${ASKROOM_IMAGE:-askroom:latest}"   # docker/Dockerfile: the Ultralytics image + app packages
 devs=()
 for d in /dev/video* /dev/i2c-7 /dev/snd /dev/input; do [ -e "$d" ] && devs+=(--device "$d"); done
 tty=(); [ -t 0 ] && tty=(-it)
 exec docker run --rm "${tty[@]}" --runtime=nvidia --ipc=host --network=host "${devs[@]}" \
+  -v /etc/localtime:/etc/localtime:ro -v /etc/timezone:/etc/timezone:ro \
   -v "$PWD":/askroom -w /askroom -e PYTHONPATH=/askroom "$IMAGE" "$@"

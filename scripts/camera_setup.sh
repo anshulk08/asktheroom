@@ -9,17 +9,19 @@
 # table is well exposed without clipping, then pass that value here.
 #
 # Measured on the icSpring camera (32e6:9221): auto exposure drops it to 7.5-15 fps indoors; manual exposure
-# holds 30 fps at 1280x720 MJPG. It has no focus control (fixed focus).
+# holds 30 fps at 1280x720 MJPG. It has no focus control (fixed focus). Its sensor is dim: in a well-lit
+# room, 33 ms at gain 32 gave 33/255; gain 63 + gamma 160 gives ~144/255 with little extra grain.
 set -euo pipefail
 
-EXPOSURE="${1:-166}"
+EXPOSURE="${1:-333}"          # 33 ms: the longest that holds 30 fps
 DEV="${2:-/dev/video0}"
 
 v4l2-ctl -d "$DEV" \
   -c power_line_frequency=2 \
   -c auto_exposure=1 \
   -c exposure_time_absolute="$EXPOSURE" \
-  -c gain=32 \
+  -c gain=63 \
+  -c gamma=160 \
   -c white_balance_automatic=0 \
   -c backlight_compensation=0
 # white_balance_temperature only takes effect once automatic white balance is off

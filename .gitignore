@@ -39,3 +39,32 @@ models/**/*.bin
 
 # spoken-question recordings (people's voices) stay local
 tests/stt_audio/*.wav
+
+# TensorRT engine / profile / timing caches (onnxruntime TensorRT EP, core/embed.py)
+models/cache/
+
+# Offline container build inputs (downloaded wheels, host libraries copied from the Jetson)
+docker/wheels/
+docker/libs/
+
+# Third-party source and builds (whisper.cpp is fetched and built by scripts/build_whisper.sh)
+third_party/*
+!third_party/stt_bench.py
+
+# Training data and runs (large; regenerate with scripts/finetune/)
+data/dataset/
+data/trials/
+runs/
+
+# Experiments: keep only scripts and notes (packages, weights, stock test images and outputs stay local)
+experiments/**
+!experiments/**/
+!experiments/**/*.py
+!experiments/**/*.sh
+!experiments/**/*.md
+experiments/**/pylib/
+experiments/**/weights/
+experiments/**/frames/
+
+# Stray local session files
+*.ses
