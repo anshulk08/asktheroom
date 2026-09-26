@@ -21,7 +21,9 @@ weighted score, so every decision can be explained in one sentence:
     (b)    a thing lost in place (no hand involved) seen again at the same spot
     (c)    appearance resurrects an archived thing only above resurrect_sim AND by resurrect_margin
            over every other thing (a twin on the table blocks it)
-    (d)    a new thing, with maybe_same_as links to archived things that look similar
+    (d)    a new thing, with maybe_same_as links to archived things that look similar; only inside
+           the tabletop outline clear of its edge band (table_area:, core/table_area.py). In the band
+           a proposal can still be an existing thing, so one slid off the table leaves as itself
 Exemplars (per-thing appearance banks) are learned only from isolated, confident, unambiguous
 views, so an ambiguous association can never drift an identity.
 
@@ -38,6 +40,7 @@ import cv2
 import numpy as np
 
 from core import geom, relations
+from core.table_area import TableArea
 from core.types import Detection, Entity, EventType, Status
 
 THING = 'thing'                    # Detection.cls of a class-agnostic proposal
@@ -195,6 +198,7 @@ class ThingRules:
 
     def _reset_things(self) -> None:
         self._tcfg = ThingsConfig.from_config(self.cfg)
+        self._area = TableArea.from_dict(getattr(self.cfg, 'table_area', None))   # tabletop outline, or none
         # Never reuse an id: the event log outlives RESET and the process, and a new thing:N would
         # inherit an old thing:N's history. Duck-typed sinks without max_number start at 0.
         logged = getattr(self.events, 'max_number', None)
@@ -493,7 +497,7 @@ class ThingRules:
         MOVED as for a configured object) or a new thing."""
         d = c.det
         vec = self._embed(d.box_px)
-        verdict, links = self._identify(d, vec, seen)
+        verdict, links = self._identify(d, vec, seen, self._may_create(d))
         if verdict == 'skip':
             return []
         if verdict is not None:
@@ -502,9 +506,15 @@ class ThingRules:
             return []
         return self._new_thing(d, c.bits, vec, links, seen)
 
-    def _identify(self, d: Detection, vec, seen):
+    def _may_create(self, d: Detection) -> bool:
+        """A proposal may start a NEW identity only inside the tabletop outline, clear of its edge
+        band (table_area:). Anywhere else it can still be an existing thing (rules a-c)."""
+        return self._area.interior(d.center_cm)
+
+    def _identify(self, d: Detection, vec, seen, may_create: bool = True):
         """Ordered identity rules (a) causal, (b) continuity, (c) decisive appearance; returns
-        (thing, []) / ('skip', []) / (None, maybe_same_as links) for a new thing."""
+        (thing, []) / ('skip', []) / (None, maybe_same_as links) for a new thing. may_create False: no
+        new thing, so 'skip' where one would be made (and no confidence is spent on an ambiguity)."""
         tc = self._tcfg
         # a configured object under a cover reappearing at its spot is the class detector's to confirm
         for n in self.cfg.names('target'):
@@ -530,6 +540,8 @@ class ThingRules:
             if blind and all(self.entities[n].parent == 'unknown' for n in cause):
                 return min(blind, key=lambda n: (geom.dist(d.center_cm, self.entities[n].pos_cm),
                                                  -self._hidden_at.get(n, NEG))), []
+            if not may_create:
+                return 'skip', []
             for n in cause:        # one of them came out, but which is unknown
                 self.entities[n].confidence *= self.cfg.ambiguity_penalty
             return None, [(n, self._look_score(vec, n)) for n in cause]
@@ -553,6 +565,8 @@ class ThingRules:
         if pick:
             return pick, []
         # (d) new, linked to archived things it resembles
+        if not may_create:
+            return 'skip', []
         links = sorted(((n, self._look_score(vec, n)) for n in archived), key=lambda x: -x[1])
         return None, [(n, s) for n, s in links if s >= tc.maybe_sim][:tc.maybe_max]
 

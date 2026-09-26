@@ -538,3 +538,63 @@ def test_thing_ids_continue_after_the_event_log_and_across_reset(cfg, scene, tmp
     assert [e.obj for e in appear(scene, world, 'book', (20, 20))] == ['thing:12']
     assert [e.type for e in world.history('thing:12', 5)] == [EventType.APPEARED]
     events.close()
+
+
+# ----- the tabletop outline (table_area:): where new things may be born ----------------------------
+# The scene frame is 128 x 72 cm; the tabletop is 10..118 x 5..67 cm, and with edge_cm 3 new things are
+# born only in 13..115 x 8..64. Off the tabletop (the floor, a chair beside it) nothing is proposed on
+# the rig, but the world must hold the line on its own too.
+
+TABLETOP = [[10, 5], [118, 5], [118, 67], [10, 67]]
+
+
+@pytest.fixture
+def table_world(cfg, scene):
+    import dataclasses
+    return World(dataclasses.replace(cfg, table_area={'polygon_cm': TABLETOP, 'edge_cm': 3}), embed=scene.embed)
+
+
+def test_a_new_thing_is_born_only_inside_the_tabletop_outline(scene, table_world):
+    scene.thing('knee', 5, 30)                     # beside the table
+    scene.thing('rim', 11.5, 30)                   # in the edge band
+    scene.thing('mug', 60, 30)
+    events = scene.run(table_world, 3.0)
+    assert [(e.obj, e.type) for e in events] == [('thing:1', EventType.APPEARED)]
+    assert table_world.get('thing:1').pos_cm == pytest.approx((60, 30))
+
+
+def test_without_an_outline_the_whole_view_is_the_table(scene, world):
+    scene.thing('rim', 11.5, 30)
+    assert types(scene.run(world, 3.0)) == [EventType.APPEARED]
+
+
+def test_a_thing_slid_into_the_edge_band_is_followed_and_leaves_with_its_exit_event(scene, table_world):
+    appear(scene, table_world, 'mug', (20, 30))
+    scene.hand(1, 20, 30)
+    scene.run(table_world, 0.3)
+    for x in range(19, 10, -1):                    # slid to the table's edge ...
+        scene.thing('mug', x, 30)
+        scene.hand(1, x, 30)
+        table_world.update(*scene.step())
+    assert table_world.get('thing:1').pos_cm == pytest.approx((11, 30))
+    scene.remove('mug')                            # ... and off it, into the hand
+    scene.run(table_world, 1.0)
+    scene.hand(1, 3, 30)
+    scene.run(table_world, 0.3)
+    scene.hand_off(1)
+    events = scene.run(table_world, 1.0)
+    assert of(events, 'thing:1') == [EventType.EXITED_VIEW]
+    assert things(table_world) == ['thing:1']
+
+
+def test_a_thing_lost_in_the_edge_band_comes_back_as_itself(scene, table_world):
+    appear(scene, table_world, 'mug', (20, 30))
+    for x in range(19, 10, -1):                    # nudged to the edge, no hand seen
+        scene.thing('mug', x + 0.5, 30)
+        table_world.update(*scene.step())
+    scene.miss('mug')
+    assert types(scene.run(table_world, 1.5)) == [EventType.LOST_TRACK]
+    scene.miss('mug', False)
+    events = scene.run(table_world, 1.0)
+    assert [(e.obj, e.type) for e in events] == [('thing:1', EventType.CORRECTED)]
+    assert things(table_world) == ['thing:1']
