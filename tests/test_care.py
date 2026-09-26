@@ -73,7 +73,7 @@ def test_end_to_end_condition_reminder_speaks_and_points(tmp_path, cal_path):
     events = EventLog(":memory:", str(tmp_path / "s"))
     world = real_world(events)
     now = [at(8, 30)]
-    care = Care(CFG, world, events, make_ask(CFG, world, events, net=None, grok=no_grok), clock=lambda: now[0])
+    care = Care(CFG, world, events, make_ask(CFG, world, events, net=None, other=no_grok), clock=lambda: now[0])
     rig = SimRig(CFG)
     room = main.Room(CFG, world, events, SimTable(CFG), None, rig.make_laser(cal_path), care.ask, tts=SpeakLog())
     room.laser_timeout_s = 60
@@ -108,7 +108,7 @@ def test_pickup_before_deadline_stays_silent(tmp_path):
     world = real_world(events)
     now = [at(8, 30)]
     spoken = []
-    care = Care(CFG, world, events, make_ask(CFG, world, events, grok=no_grok), clock=lambda: now[0])
+    care = Care(CFG, world, events, make_ask(CFG, world, events, other=no_grok), clock=lambda: now[0])
     care.on_notice = spoken.append
     care.morning.mark_delivered(now[0])
     care.ask("remind me if I haven't picked up my pills by 9", "voice")
@@ -122,7 +122,7 @@ def test_state_notices_ack_and_report_routes(tmp_path):
     events = EventLog(":memory:", str(tmp_path / "s"))
     world = real_world(events)
     now = [at(8, 0)]
-    care = Care(CFG, world, events, make_ask(CFG, world, events, grok=no_grok), clock=lambda: now[0])
+    care = Care(CFG, world, events, make_ask(CFG, world, events, other=no_grok), clock=lambda: now[0])
     care.morning.mark_delivered(now[0])
     care.ask("remind me at 9 to call Sarah", "voice")
     events.add(Event(t=at(8, 5), wall=at(8, 5), obj="pill_bottle", type="PICKED_UP"))
@@ -158,8 +158,8 @@ def test_morning_report_on_first_question(tmp_path):
     world = real_world(events)
     events.add(Event(t=at(18, day=24), wall=at(18, day=24), obj="pill_bottle", type="COVERED", parent="notebook"))
     now = [at(7, 30)]
-    care = Care(CFG, world, events, make_ask(CFG, world, events, grok=no_grok), clock=lambda: now[0])
-    base = make_ask(CFG, world, events, grok=no_grok)
+    care = Care(CFG, world, events, make_ask(CFG, world, events, other=no_grok), clock=lambda: now[0])
+    base = make_ask(CFG, world, events, other=no_grok)
     a = care.ask("where are my pills?", "voice")
     report = ("Good morning. Yesterday your pill bottle was last seen under the notebook at 6 PM. "
               "You don't have any reminders today.")
@@ -173,7 +173,7 @@ def test_morning_report_on_first_question(tmp_path):
 def test_morning_report_not_for_text_sources(tmp_path):
     events = EventLog(":memory:", str(tmp_path / "s"))
     world = real_world(events)
-    care = Care(CFG, world, events, make_ask(CFG, world, events, grok=no_grok), clock=lambda: at(7, 30))
+    care = Care(CFG, world, events, make_ask(CFG, world, events, other=no_grok), clock=lambda: at(7, 30))
     assert not care.ask("where are my pills?", "sms").text.startswith("Good morning")
     assert care.ask("where are my pills?", "voice").text.startswith("Good morning")
     events.close()
@@ -184,7 +184,7 @@ def test_morning_report_on_activity(tmp_path):
     world = real_world(events)
     now = [at(7, 10)]
     spoken = []
-    care = Care(CFG, world, events, make_ask(CFG, world, events, grok=no_grok), clock=lambda: now[0])
+    care = Care(CFG, world, events, make_ask(CFG, world, events, other=no_grok), clock=lambda: now[0])
     care.on_notice = spoken.append
     assert care.tick() == []
     events.add(Event(t=at(7, 12), wall=at(7, 12), obj="keys", type="PICKED_UP"))
@@ -201,7 +201,7 @@ def test_voice_summary(tmp_path):
     events = EventLog(":memory:", str(tmp_path / "s"))
     world = real_world(events)
     events.add(Event(t=at(8, 5), wall=at(8, 5), obj="pill_bottle", type="PICKED_UP"))
-    care = Care(CFG, world, events, make_ask(CFG, world, events, grok=no_grok), clock=lambda: at(14))
+    care = Care(CFG, world, events, make_ask(CFG, world, events, other=no_grok), clock=lambda: at(14))
     a = care.ask("Give me today's summary.", "voice")
     assert a.text.startswith("Today the pill bottle was picked up at 8:05 AM.")
     assert not pill_claim(a.text)
@@ -211,7 +211,7 @@ def test_voice_summary(tmp_path):
 def test_scheduler_thread_starts_and_stops(tmp_path):
     events = EventLog(":memory:", str(tmp_path / "s"))
     world = real_world(events)
-    care = Care(CFG, world, events, make_ask(CFG, world, events, grok=no_grok))
+    care = Care(CFG, world, events, make_ask(CFG, world, events, other=no_grok))
     care.tick_s = 0.05
     ticks = []
     orig = care.tick
@@ -228,7 +228,7 @@ def test_scheduler_thread_starts_and_stops(tmp_path):
 def test_care_ask_never_raises(tmp_path):
     events = EventLog(":memory:", str(tmp_path / "s"))
     world = real_world(events)
-    care = Care(CFG, world, events, make_ask(CFG, world, events, grok=no_grok), clock=lambda: at(14))
+    care = Care(CFG, world, events, make_ask(CFG, world, events, other=no_grok), clock=lambda: at(14))
     care.reminders.handle = lambda *a, **k: 1 / 0                          # a bug in the care layer ...
     assert care.ask("where is my pill bottle?", "voice").point_at == "pill_bottle"   # ... never costs an answer
     events.close()
@@ -240,7 +240,7 @@ def test_room_wiring_attach(tmp_path, cal_path):
     world = real_world(events)
     rig = SimRig(CFG)
     room = main.Room(CFG, world, events, SimTable(CFG), None, rig.make_laser(cal_path),
-                     make_ask(CFG, world, events, grok=no_grok), tts=SpeakLog())
+                     make_ask(CFG, world, events, other=no_grok), tts=SpeakLog())
     from voice.care import attach_care
     care = attach_care(room, CFG)
     assert room.care is care and room.base_ask == care.ask
@@ -253,7 +253,7 @@ def test_text_sources_cannot_acknowledge_or_state_facts(tmp_path):
     events = EventLog(":memory:", str(tmp_path / "s"))
     world = real_world(events)
     now = [at(14)]
-    care = Care(CFG, world, events, make_ask(CFG, world, events, grok=no_grok), clock=lambda: now[0])
+    care = Care(CFG, world, events, make_ask(CFG, world, events, other=no_grok), clock=lambda: now[0])
     care.ask("remind me at 3 pm to call Sarah", "sms")                     # a caregiver may set one by text
     now[0] = at(15, 0, 5)
     (n,) = care.tick()
@@ -270,7 +270,7 @@ def test_morning_report_said_once_under_concurrency(tmp_path):
     import threading
     events = EventLog(":memory:", str(tmp_path / "s"))
     world = real_world(events)
-    care = Care(CFG, world, events, make_ask(CFG, world, events, grok=no_grok), clock=lambda: at(7, 30))
+    care = Care(CFG, world, events, make_ask(CFG, world, events, other=no_grok), clock=lambda: at(7, 30))
     got = []
     ts = [threading.Thread(target=lambda: got.append(care.morning.deliver(at(7, 30)))) for _ in range(8)]
     [t.start() for t in ts]

@@ -617,13 +617,28 @@ def test_uuids_follow_the_spec():
     assert P.LOCAL_NAME == "AskTheRoom"
 
 
-def test_bridge_source_is_spoken_and_aimed():
-    """The bridge's /ask source must be accepted by server/app.py and not be a text-only source in main.py."""
-    import re
-    root = os.path.join(os.path.dirname(__file__), "..")
-    app_src = open(os.path.join(root, "server", "app.py")).read()
-    main_src = open(os.path.join(root, "main.py")).read()
-    sources = re.search(r"ASK_SOURCES\s*=\s*\{([^}]*)\}", app_src).group(1)
-    text_only = re.search(r"TEXT_ONLY\s*=\s*\(([^)]*)\)", main_src).group(1)
-    assert f'"{B.ASK_SOURCE}"' in sources
-    assert f'"{B.ASK_SOURCE}"' not in text_only
+def test_bridge_questions_are_spoken_and_aimed():
+    """A question the bridge POSTs to /ask reaches Room.ask_and_act with a source that is spoken and
+    aimed (not a text-only source like sms). Checked by behaviour, so renaming server internals is fine."""
+    from types import SimpleNamespace
+
+    from fastapi.testclient import TestClient
+
+    import main
+    from core.config import load_config
+    from core.fakeworld import demo_world
+    from core.types import Answer
+    from server.app import create_app
+
+    seen = []
+    world = demo_world()
+    app = create_app(load_config(), world, world.events,
+                     ask_fn=lambda text, source: seen.append(source) or Answer("ok"))
+    r = TestClient(app).post("/ask", json={"text": "where are my keys?", "source": B.ASK_SOURCE})
+    assert r.status_code == 200 and seen, r.text
+
+    responded = []
+    room = SimpleNamespace(ask=lambda text, source: Answer("ok", point_at="keys", action="point"),
+                           respond=responded.append)
+    main.Room.ask_and_act(room, "where are my keys?", seen[0])
+    assert responded, f"source {seen[0]!r} is answered as text only"
