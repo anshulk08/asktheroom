@@ -78,7 +78,7 @@ rules can't read and of open questions (with a compact world state).
 | `core/types.py` | Shared data contracts: Frame, Detection(s), Entity, Event, Intent, Answer. **Change only as a team.** |
 | `core/config.py`, `config.yaml` | Config loaded as a plain dict (`load_config()`); the world also reads a typed `Config` view. All thresholds are here. |
 | `core/capture.py` | Camera `FrameBuffer`, plus `VideoFileSource` with the same API for replays. |
-| `core/table.py` | ArUco homography mapping pixels to table cm (`table_cal.json`). |
+| `core/table.py`, `core/table_area.py` | ArUco / one-tag homography mapping pixels to table cm (`table_cal.json`); the operator's tabletop outline, where objects may appear (`table_area.json`, `python -m core.table --outline`). |
 | `core/detect.py` | YOLO-World (zero-shot, path A) or fine-tuned YOLO11 (path B, the plan), exported to TensorRT. |
 | `core/hands.py` | Stable `hand:N` ids across frames. |
 | `core/world.py`, `core/relations.py`, `core/geom.py` | Deterministic, rule-based world model (covers, containers, holds, edges, parent chains). About 200 tests. |

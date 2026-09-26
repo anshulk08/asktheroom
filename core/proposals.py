@@ -45,6 +45,7 @@ import cv2
 import numpy as np
 
 from core import geom
+from core.table_area import TableArea
 from core.types import BoxPx
 from core.yoloe_fast import is_reduced
 
@@ -60,6 +61,7 @@ class Proposal:
     conf: float                          # evidence strength 0-1, not a probability
     area_px: int = 0                     # changed pixels inside the box, full-resolution px
     mask: Optional[np.ndarray] = None    # bool, box-sized (YOLOE seg models only)
+    occluded: bool = False               # mostly inside a person box: never a new thing (core/things.py)
 
 
 class Proposer(Protocol):
@@ -545,7 +547,8 @@ class _quiet_nan:
 # ================================================================================ YOLOE adapter
 
 # Prompt-free vocabularies name the table, people and hands too; none of them is a thing on the table.
-PEOPLE = ['person', 'man', 'woman', 'child', 'hand', 'arm', 'finger']   # a box mostly inside one of these is them
+PEOPLE = ['person', 'man', 'woman', 'child', 'hand', 'arm', 'finger']   # a box mostly inside one: occluded
+PERSON_INSIDE = 0.6                     # share of a box inside a person box that flags it occluded
 DEFAULT_IGNORE = ['person', 'man', 'woman', 'child', 'hand', 'arm', 'finger', 'table', 'dining table', 'desk',
                   'coffee table', 'tabletop', 'countertop', 'floor', 'wall', 'wood', 'wood floor', 'hardwood']
 
@@ -578,7 +581,9 @@ def _np(x) -> np.ndarray:
 class YOLOEProposer:
     """Prompt-free YOLOE, class-agnostic: every box above conf that is plausible in size, inside the
     table and not an ignored class (table, person, hand) is a proposal. Classes are only used to drop
-    those; the world never sees them."""
+    those and to flag a box lying mostly inside a person box as occluded (a finger or bracelet boxed on
+    its own, or an object being carried): kept, so the world can follow an existing thing through it,
+    but never the start of a new thing. The world never sees the class names."""
 
     def __init__(self, cfg: Optional[dict | YOLOEConfig] = None, model=None):
         self.cfg = cfg if isinstance(cfg, YOLOEConfig) else YOLOEConfig.from_dict(cfg)
@@ -620,8 +625,7 @@ class YOLOEProposer:
         for j, (b, s, k) in enumerate(zip(xyxy, conf, cls)):
             if s < c.conf or str(names.get(int(k), '')).lower() in self.ignore:
                 continue
-            if any(geom.overlap_frac(p, tuple(float(v) for v in b)) >= 0.6 for p in people):
-                continue                         # a finger / bracelet boxed on its own: part of the person
+            occluded = any(geom.overlap_frac(p, tuple(float(v) for v in b)) >= PERSON_INSIDE for p in people)
             box = tuple(int(round(v)) for v in b)
             if not lo <= geom.area(box) <= hi:
                 continue
@@ -631,7 +635,7 @@ class YOLOEProposer:
             if any(x1 <= cx <= x2 and y1 <= cy <= y2 for x1, y1, x2, y2 in c.ignore_px):
                 continue
             m = masks[j][box[1]:box[3], box[0]:box[2]].copy() if masks is not None else None
-            cands.append(Proposal(box_px=box, conf=round(float(s), 3), mask=m))
+            cands.append(Proposal(box_px=box, conf=round(float(s), 3), mask=m, occluded=occluded))
         out = dedupe(cands, [], [], DedupeConfig())     # agnostic NMS once more, across the classes
         self.last_ms = 1000 * (time.perf_counter() - t0)
         return out
@@ -661,14 +665,17 @@ def make_proposer(cfg: dict) -> Optional[Proposer]:
 
 
 def table_roi(table, cfg: dict) -> Optional[list[tuple[float, float]]]:
-    """The table outline in frame px, grown by proposals.roi_margin_cm, or None without a calibrated
-    table that can map cm to px (then the whole frame is used)."""
+    """The proposers' ROI in frame px: the operator's tabletop outline (table_area.polygon_cm, see
+    core/table_area.py) when one is set, else the calibrated area grown by proposals.roi_margin_cm; None
+    without a calibrated table that can map cm to px (then the whole frame is used)."""
     if table is None or not getattr(table, 'ok', False) or not hasattr(table, 'cm_to_px'):
         return None
+    area = TableArea.from_dict(cfg.get('table_area'))
     w, h = (cfg.get('table') or {}).get('size_cm', (90, 60))
     m = float((cfg.get('proposals') or {}).get('roi_margin_cm', 2.0))
     try:
-        pts = table.cm_to_px([[-m, -m], [w + m, -m], [w + m, h + m], [-m, h + m]])
+        pts = table.cm_to_px(area.polygon_cm if area.defined else
+                             [[-m, -m], [w + m, -m], [w + m, h + m], [-m, h + m]])
     except Exception:
         log.warning("proposals: table outline unavailable; using the whole frame", exc_info=True)
         return None

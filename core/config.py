@@ -83,6 +83,8 @@ class Config:
     # new thing is shown to be named ('this is my charger'), or None for 'most recently put down'.
     openworld: dict = field(default_factory=dict)
     teach_zone_cm: tuple[float, float, float, float] | None = None
+    # The tabletop outline (core/table_area.py, table_area: section): new things are born only inside it.
+    table_area: dict = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, raw: dict) -> "Config":

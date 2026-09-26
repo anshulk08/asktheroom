@@ -205,9 +205,14 @@ def main(argv=None) -> int:
     ap.add_argument("--device", default="0")
     ap.add_argument("--image")
     ap.add_argument("--frames", type=int, default=40, help="live: try this many frames")
+    ap.add_argument("--outline", nargs="*", metavar="X,Y", help="tabletop corners in table cm (none: how to set it)")
+    ap.add_argument("--outline-px", nargs="+", metavar="X,Y", help="tabletop corners in image px")
     a = ap.parse_args(argv)
     cfg = load_config()
     table = Table(cfg)
+    if a.outline is not None or a.outline_px:        # core/table_area.py: where objects may appear
+        from core.table_area import outline_main
+        return outline_main(table, cfg, a.outline, a.outline_px, a.image)
     if a.image:
         imgs = [cv2.imread(a.image)]
     else:

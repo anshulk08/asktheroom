@@ -9,7 +9,7 @@ import pytest
 from core.config import load_config
 from core.detect import Detector
 from core.proposals import (ChangeProposer, DedupeConfig, Proposal, YOLOEProposer, dedupe,
-                            make_proposer)
+                            make_proposer, table_roi)
 from core.types import Frame
 from tests.synth import skin, texture
 
@@ -341,15 +341,32 @@ def test_yoloe_respects_the_table_roi():
     assert [q.box_px for q in y.propose(np.zeros((H, W, 3), np.uint8), [], [])] == [(600, 300, 690, 380)]
 
 
-def test_yoloe_drops_boxes_that_are_part_of_a_person():
+def test_yoloe_flags_boxes_that_are_part_of_a_person():
     """Prompt-free YOLOE sees a hand as 'person' and boxes pieces of it as objects ('battery',
-    'bracelet', 'gadget' on the rig). Anything mostly inside a person box is the person."""
+    'bracelet', 'gadget' on the rig). A box mostly inside a person box is kept but flagged occluded:
+    it may be a finger, or an object being carried. The world never starts a new thing from it, but an
+    existing thing can still be followed through it (dropping it lost carried objects)."""
     m = FakeYOLOE([(1, 0.8, (300, 200, 700, 700)),          # person: the arm and hand
                    (3, 0.5, (420, 480, 500, 540)),          # 'charger': a finger, inside the person
-                   (0, 0.6, (650, 600, 760, 690)),          # cup: only its corner under the arm, kept
-                   (0, 0.6, (900, 300, 990, 380))])         # cup far away: kept
+                   (0, 0.6, (650, 600, 760, 690)),          # cup: only its corner under the arm
+                   (0, 0.6, (900, 300, 990, 380))])         # cup far away
     props = YOLOEProposer({'conf': 0.15}, model=m).propose(np.zeros((H, W, 3), np.uint8), [], [])
-    assert sorted(q.box_px for q in props) == [(650, 600, 760, 690), (900, 300, 990, 380)]
+    flags = {q.box_px: q.occluded for q in props}
+    assert flags == {(420, 480, 500, 540): True, (650, 600, 760, 690): False, (900, 300, 990, 380): False}
+
+
+def test_the_occluded_flag_reaches_the_world_on_the_detection():
+    class Fixed:
+        def set_roi(self, poly):
+            pass
+
+        def propose(self, img, known, hands):
+            return [Proposal((600, 300, 690, 380), 0.6, occluded=True), Proposal((900, 300, 990, 380), 0.6)]
+
+    det = Detector(CFG, table=TenPxPerCm(), backend=FakeBackend(), proposer=Fixed(), crops=None)
+    d = det.detect(Frame(t=0, wall=0, img=np.zeros((H, W, 3), np.uint8), idx=0))
+    assert {x.box_px: x.occluded for x in d.items} == {(600, 300, 690, 380): True, (900, 300, 990, 380): False}
+    assert all(not x.occluded for x in d.hands)
 
 
 def test_yoloe_never_proposes_inside_ignored_regions():
@@ -481,6 +498,60 @@ def test_a_failing_proposer_never_costs_the_known_objects():
     det = Detector(CFG, table=TenPxPerCm(), backend=FakeBackend([('keys', 0.9, (0, 0, 10, 10))]), proposer=Broken())
     d = det.detect(Frame(t=0, wall=0, img=np.zeros((H, W, 3), np.uint8), idx=0))
     assert [x.cls for x in d.items] == ['keys']
+
+
+
+# ------------------------------------------------------------------ the tabletop outline (table_area:)
+
+class Calibrated(TenPxPerCm):
+    H = np.eye(3)
+
+    def cm_to_px(self, pts):
+        return np.asarray(pts, dtype=float).reshape(-1, 2) * 10.0
+
+
+OUTLINE = [[30, 10], [110, 10], [110, 65], [30, 65]]     # the tabletop; x < 30 cm is the floor beside it
+CHAIR, MUG = (100, 300, 190, 380), (600, 300, 690, 380)  # px: centres at 14.5 cm and 64.5 cm
+
+
+def outlined(**proposals):
+    cfg = cfg_with(**proposals)
+    cfg['table_area'] = {'polygon_cm': OUTLINE, 'edge_cm': 3}
+    return cfg
+
+
+def test_the_proposal_roi_is_the_operator_outline_when_one_is_set():
+    assert table_roi(Calibrated(), outlined()) == [(300, 100), (1100, 100), (1100, 650), (300, 650)]
+    m = 10 * CFG['proposals']['roi_margin_cm']            # without one: the calibrated area, as before
+    assert table_roi(Calibrated(), CFG)[0] == pytest.approx((-m, -m))
+
+
+def test_the_change_proposer_never_proposes_beside_the_tabletop():
+    """On the rig the calibrated view took in the floor, a chair and a knee beside the table."""
+    tab = Table()
+    det = Detector(outlined(), table=Calibrated(), backend=FakeBackend(), proposer=proposer(), crops=None)
+    for i in range(6):
+        det.detect(Frame(t=i, wall=i, img=tab.frame(), idx=i))
+    tab.things['chair'], tab.things['mug'] = CHAIR, MUG
+    for i in range(6, 9):
+        d = det.detect(Frame(t=i, wall=i, img=tab.frame(), idx=i))
+    assert [x.box_px for x in d.items if x.cls == 'thing'] == [pytest.approx(MUG, abs=12)]
+
+
+def test_yoloe_never_proposes_beside_the_tabletop():
+    m = FakeYOLOE([(0, 0.6, CHAIR), (0, 0.6, MUG)])
+    det = Detector(outlined(), table=Calibrated(), backend=FakeBackend(),
+                   proposer=YOLOEProposer({}, model=m), crops=None)
+    d = det.detect(Frame(t=0, wall=0, img=np.zeros((H, W, 3), np.uint8), idx=0))
+    assert [x.box_px for x in d.items if x.cls == 'thing'] == [MUG]
+
+
+def test_ignored_regions_still_apply_inside_the_outline():
+    m = FakeYOLOE([(0, 0.6, (400, 300, 490, 380)), (0, 0.6, MUG)])
+    det = Detector(outlined(), table=Calibrated(), backend=FakeBackend(),
+                   proposer=YOLOEProposer({'ignore_px': [[300, 0, 500, 720]]}, model=m), crops=None)
+    d = det.detect(Frame(t=0, wall=0, img=np.zeros((H, W, 3), np.uint8), idx=0))
+    assert [x.box_px for x in d.items if x.cls == 'thing'] == [MUG]
 
 
 # ---------------------------------------------------------------- warm-up before the reference

@@ -538,3 +538,115 @@ def test_thing_ids_continue_after_the_event_log_and_across_reset(cfg, scene, tmp
     assert [e.obj for e in appear(scene, world, 'book', (20, 20))] == ['thing:12']
     assert [e.type for e in world.history('thing:12', 5)] == [EventType.APPEARED]
     events.close()
+
+
+# ----- the tabletop outline (table_area:): where new things may be born ----------------------------
+# The scene frame is 128 x 72 cm; the tabletop is 10..118 x 5..67 cm, and with edge_cm 3 new things are
+# born only in 13..115 x 8..64. Off the tabletop (the floor, a chair beside it) nothing is proposed on
+# the rig, but the world must hold the line on its own too.
+
+TABLETOP = [[10, 5], [118, 5], [118, 67], [10, 67]]
+
+
+@pytest.fixture
+def table_world(cfg, scene):
+    import dataclasses
+    return World(dataclasses.replace(cfg, table_area={'polygon_cm': TABLETOP, 'edge_cm': 3}), embed=scene.embed)
+
+
+def test_a_new_thing_is_born_only_inside_the_tabletop_outline(scene, table_world):
+    scene.thing('knee', 5, 30)                     # beside the table
+    scene.thing('rim', 11.5, 30)                   # in the edge band
+    scene.thing('mug', 60, 30)
+    events = scene.run(table_world, 3.0)
+    assert [(e.obj, e.type) for e in events] == [('thing:1', EventType.APPEARED)]
+    assert table_world.get('thing:1').pos_cm == pytest.approx((60, 30))
+
+
+def test_without_an_outline_the_whole_view_is_the_table(scene, world):
+    scene.thing('rim', 11.5, 30)
+    assert types(scene.run(world, 3.0)) == [EventType.APPEARED]
+
+
+def test_a_thing_slid_into_the_edge_band_is_followed_and_leaves_with_its_exit_event(scene, table_world):
+    appear(scene, table_world, 'mug', (20, 30))
+    scene.hand(1, 20, 30)
+    scene.run(table_world, 0.3)
+    for x in range(19, 10, -1):                    # slid to the table's edge ...
+        scene.thing('mug', x, 30)
+        scene.hand(1, x, 30)
+        table_world.update(*scene.step())
+    assert table_world.get('thing:1').pos_cm == pytest.approx((11, 30))
+    scene.remove('mug')                            # ... and off it, into the hand
+    scene.run(table_world, 1.0)
+    scene.hand(1, 3, 30)
+    scene.run(table_world, 0.3)
+    scene.hand_off(1)
+    events = scene.run(table_world, 1.0)
+    assert of(events, 'thing:1') == [EventType.EXITED_VIEW]
+    assert things(table_world) == ['thing:1']
+
+
+def test_a_thing_lost_in_the_edge_band_comes_back_as_itself(scene, table_world):
+    appear(scene, table_world, 'mug', (20, 30))
+    for x in range(19, 10, -1):                    # nudged to the edge, no hand seen
+        scene.thing('mug', x + 0.5, 30)
+        table_world.update(*scene.step())
+    scene.miss('mug')
+    assert types(scene.run(table_world, 1.5)) == [EventType.LOST_TRACK]
+    scene.miss('mug', False)
+    events = scene.run(table_world, 1.0)
+    assert [(e.obj, e.type) for e in events] == [('thing:1', EventType.CORRECTED)]
+    assert things(table_world) == ['thing:1']
+
+
+# ----- proposals inside a person box (flagged occluded by the proposer) ------------------------------
+# A box mostly inside YOLOE's 'person' box may be a finger, a knee, or an object being carried. It never
+# starts a new thing; it can still be an existing one. The flag says nothing about hand contact.
+
+def test_a_region_inside_a_person_box_never_becomes_a_thing(scene, world):
+    scene.thing('knee', 60, 30, w=10, h=8, occluded=True)
+    assert scene.run(world, 3.0) == []
+    assert things(world) == []
+
+
+def test_a_finger_inside_a_person_box_never_becomes_a_thing(scene, world):
+    scene.thing('finger', 60, 30, w=2.0, h=2.5, occluded=True)     # 5 cm^2: a plausible object size
+    assert scene.run(world, 3.0) == []
+    assert things(world) == []
+
+
+def test_an_object_left_where_a_person_was_becomes_a_thing_once_the_person_moves_away(scene, world):
+    scene.thing('mug', 60, 30, occluded=True)
+    assert scene.run(world, 2.0) == []
+    scene.thing('mug', 60, 30)
+    assert types(scene.run(world, 1.0)) == [EventType.APPEARED]
+
+
+def test_a_carried_thing_inside_a_person_box_stays_itself(scene, world):
+    appear(scene, world, 'mug', (40, 30))
+    scene.hand(1, 40, 30)
+    scene.run(world, 0.3)
+    for x in range(41, 61):                        # carried 20 cm, the person box around it all the way
+        scene.thing('mug', x, 30, occluded=True)
+        scene.hand(1, x, 30)
+        world.update(*scene.step())
+    assert world.get('thing:1').pos_cm == pytest.approx((60, 30))
+    scene.hand_off(1)
+    scene.thing('mug', 60, 30)
+    events = scene.run(world, 1.5)
+    assert of(events, 'thing:1') == [EventType.MOVED] and things(world) == ['thing:1']
+
+
+def test_a_held_thing_seen_again_in_the_hand_inside_a_person_box_is_matched(scene, world):
+    appear(scene, world, 'mug', (40, 30))
+    scene.hand(1, 40, 30)
+    scene.run(world, 0.3)
+    scene.remove('mug')                            # lifted: hidden by the hand
+    scene.run(world, 1.0)
+    assert world.get('thing:1').status == Status.HELD
+    scene.hand(1, 70, 30)
+    scene.thing('mug', 72, 30, occluded=True)      # in view again, in the hand, inside the person box
+    scene.run(world, 1.0)
+    assert world.get('thing:1').pos_cm == pytest.approx((72, 30))
+    assert things(world) == ['thing:1']

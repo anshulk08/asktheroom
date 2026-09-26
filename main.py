@@ -491,6 +491,8 @@ def build(cfg: dict, fake: bool = False, camera: int = 0, with_voice: bool = Tru
     if not fake:
         import core.table
         core.table.apply_saved_size(cfg)            # one-tag mode: the saved tracked area, before anything reads it
+        import core.table_area
+        core.table_area.apply_saved_area(cfg)       # the tabletop outline (python -m core.table --outline), if still valid
     if fake:
         snap = tempfile.mkdtemp(prefix="askroom_fake_snaps_")
         events = core.events.EventLog(":memory:", snap)

@@ -24,6 +24,7 @@ venv/
 data/events.db*
 data/snapshots/
 table_cal.json
+table_area.json
 laser_cal.json
 room_map.json
 *.log
