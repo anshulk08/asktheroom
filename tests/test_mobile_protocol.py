@@ -610,6 +610,8 @@ def test_read_config_table_size(tmp_path):
     size, tcal, lcal = B.read_config(str(tmp_path))
     assert size == (120.0, 80.0) and tcal == str(tmp_path / "t.json") and lcal.endswith("laser_cal.json")
     assert B.read_config(str(tmp_path / "missing"))[0] == (90.0, 60.0)
+    (tmp_path / "t.json").write_text('{"H": [[1,0,0],[0,1,0],[0,0,1]], "size_cm": [70.5, 48.0]}')
+    assert B.read_config(str(tmp_path))[0] == (70.5, 48.0)       # one-tag calibration: the area it saved
 
 
 def test_uuids_follow_the_spec():

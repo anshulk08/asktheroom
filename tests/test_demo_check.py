@@ -165,3 +165,38 @@ def test_helpers():
     locked, detail = dc.exposure_mode(0)
     if not dc.sys.platform.startswith("linux"):
         assert locked is None and "Linux" in detail
+
+
+# ---------------------------------------------------------------- one-tag calibration
+
+def tag_rig(tmp_path, tag_img, cal_img):
+    """A rig whose table was calibrated from one AprilTag (cal_img); the camera now shows tag_img."""
+    import sys
+    from types import SimpleNamespace
+
+    from core.table import Table
+    sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    cfg = dict(CFG, table_tag=dict(CFG.get("table_tag") or {}, enabled=True, frames=3),
+               paths=dict(CFG["paths"], table_cal=str(tmp_path / "table_cal.json")))
+    t = Table(cfg)
+    for _ in range(3):
+        t.calibrate(cal_img)
+    assert t.ok
+    frames = SimpleNamespace(latest=lambda: SimpleNamespace(img=tag_img))
+    return SimpleNamespace(part=lambda name: {"table": t, "frames": frames}[name])
+
+
+def test_one_tag_markers_check_passes_with_the_tag_removed_and_catches_drift(tmp_path):
+    import sys
+    sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
+    import test_table as tt
+    h = tt.true_h()
+    cal = tt.render_tag(h)
+    ok, msg = dc.check_markers(tag_rig(tmp_path / "a", tt.render_tag(h, present=False), cal))
+    assert ok and "not in view" in msg                            # tag picked up after calibrating: fine
+    ok, msg = dc.check_markers(tag_rig(tmp_path / "b", cal, cal))
+    assert ok and "drift" in msg                                  # still in place: no drift
+    moved = tt.render_tag(h @ np.array([[1, 0, 6.0], [0, 1, 0], [0, 0, 1]]))     # camera knocked 6 cm
+    ok, msg = dc.check_markers(tag_rig(tmp_path / "c", moved, cal))
+    assert not ok and "recalibrate" in msg

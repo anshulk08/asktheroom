@@ -99,7 +99,15 @@ def read_config(repo: str) -> tuple[tuple[float, float], str, str]:
             pass
     except Exception as ex:
         log.warning("config.yaml not read (%s); table %sx%s cm", ex, *size)
-    return size, os.path.join(repo, tcal), os.path.join(repo, lcal)
+    tcal = os.path.join(repo, tcal)
+    try:                                   # the calibration's own size wins (one-tag mode measures the area)
+        with open(tcal) as f:
+            s = json.load(f).get("size_cm")
+        if s:
+            size = (float(s[0]), float(s[1]))
+    except (OSError, ValueError, TypeError, IndexError):
+        pass
+    return size, tcal, os.path.join(repo, lcal)
 
 
 # ---------------------------------------------------------------- controller workaround

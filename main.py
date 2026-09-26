@@ -270,9 +270,12 @@ class Room:
             last_idx = frame.idx
             if not self.table.ok:
                 if not warned:
-                    log.warning("table not calibrated; trying markers 0-3 every frame (python -m core.table)")
+                    what = ("the table tag" if getattr(self.table, "tag_mode", False) else "markers 0-3")
+                    log.warning("table not calibrated; looking for %s every frame (python -m core.table)", what)
                     warned = True
-                self.table.calibrate(frame.img)
+                if self.table.calibrate(frame.img) and getattr(self.table, "tag_mode", False):
+                    log.warning("table calibrated: tracked area %.0f x %.0f cm; restart the app so every part "
+                                "uses that size", *self.table.size_cm)
                 continue
             try:
                 if self._clear_ev.is_set():        # here, not in ask: the proposer isn't thread-safe
@@ -485,6 +488,9 @@ def build(cfg: dict, fake: bool = False, camera: int = 0, with_voice: bool = Tru
     import voice.understand
 
     cleanup: list[Callable[[], None]] = []
+    if not fake:
+        import core.table
+        core.table.apply_saved_size(cfg)            # one-tag mode: the saved tracked area, before anything reads it
     if fake:
         snap = tempfile.mkdtemp(prefix="askroom_fake_snaps_")
         events = core.events.EventLog(":memory:", snap)
@@ -514,6 +520,7 @@ def build(cfg: dict, fake: bool = False, camera: int = 0, with_voice: bool = Tru
             frames = core.capture.FrameBuffer(camera)
         cleanup.append(frames.stop)
         table = core.table.Table(cfg)                  # loads table_cal.json; table.ok says if calibrated
+        # (one-tag mode: the saved tracked-area size went into cfg at the top of build())
         if video and not table.ok:
             log.warning("table not calibrated; using frame == table for the recording")
             table = FlatTable(cfg)

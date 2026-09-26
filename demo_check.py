@@ -64,7 +64,7 @@ FAKE_MARKER_CM = 4.5
 def fake_cfg(cfg: dict) -> dict:
     """The rendered frame is the table (server.sim), with markers inset so they stay in view."""
     t = dict(cfg.get("table") or {}, markers={k: list(v) for k, v in FAKE_MARKERS_CM.items()})
-    return dict(cfg, table=t)
+    return dict(cfg, table=t, table_tag=dict(cfg.get("table_tag") or {}, enabled=False))   # the fake draws 0-3
 
 
 def fake_layout(cfg: dict) -> dict[str, tuple[float, float]]:
@@ -308,6 +308,8 @@ def check_markers(rig: Rig) -> Result:
     import core.table
     table = rig.part("table")
     img = rig.part("frames").latest().img
+    if getattr(table, "tag_mode", False):
+        return _check_tag(table, img)
     found = core.table.find_markers(img)
     ids = [i for i in core.table.TABLE_IDS if i in found]
     if len(ids) < 4:
@@ -320,6 +322,28 @@ def check_markers(rig: Rig) -> Result:
     if err.max() >= MAX_MARKER_CM:
         msg += ": recalibrate (python -m core.table, or say 'recalibrate')"
     return bool(err.max() < MAX_MARKER_CM), msg
+
+
+def _check_tag(table, img) -> Result:
+    """One-tag mode: the tag is usually picked up after calibrating, so it need not be in view. If it is,
+    its corners must land where they did during calibration (else the camera or table moved)."""
+    import json
+
+    import core.table
+    w, h = table.size_cm
+    c = core.table.tag_corners(img, table.tag_id, table._det)
+    try:
+        saved = json.loads(open(table.cal_path).read()).get("markers_px", {}).get("tag")
+    except (OSError, ValueError):
+        saved = None
+    if c is None or saved is None:
+        return True, (f"one-tag calibration loaded ({w:g} x {h:g} cm); tag not in view, drift not checked "
+                      f"(put it down and say 'recalibrate' if the camera moved)")
+    err = float(np.linalg.norm(table.px_to_cm(c) - table.px_to_cm(np.array(saved)), axis=1).max())
+    msg = f"tag {table.tag_id}, max drift {err:.2f} cm"
+    if err >= MAX_MARKER_CM:
+        msg += ": recalibrate (python -m core.table, or say 'recalibrate')"
+    return err < MAX_MARKER_CM, msg
 
 
 def check_laser(rig: Rig) -> Result:
