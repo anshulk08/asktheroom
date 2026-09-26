@@ -76,4 +76,4 @@ Owners are TBD until the team assigns them.
 - Detector throttling while Qwen generates, if F2 shows GPU contention.
 - Streaming action-first answers.
 - Qwen3-4B-Instruct-2507, only if `tegrastats` shows headroom.
-- Lamp-head enclosure. Floor search camera and room map (config `floor_zones`, `room_map`); room calibration with laser-guided tag placement is specced in `docs/specs/0005-room-calibration.md`.
+- Lamp-head enclosure. Floor search camera and room map (config `floor_zones`, `room_map`); room calibration with laser-guided tag placement is specced in `docs/specs/0005-room-calibration.md`; room pointing without depth (dot map + pixel-space loop) is built off by default on branch `room-pointing`, spec `docs/specs/0006-room-pointing.md`.

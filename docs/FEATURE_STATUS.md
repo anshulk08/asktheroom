@@ -6,7 +6,7 @@ Status meanings:
 - **implemented**: the code exists and runs, but hasn't been tested or measured on the real rig.
 - **planned**: a spec or roadmap item with no code yet.
 
-Test suite at time of writing (Sat 26 Sep, after the overnight merge): `.venv/bin/python -m pytest -q` gives 1432 passed, 25 skipped on the laptop (branch `grok-settle-check`) (the skips need optional models or hardware). Branch `thing-identity` (spec 0008): 1574 passed, 27 skipped. Jetson measurements are labelled "Jetson". See PLANS.md checkpoints F1–F6.
+Test suite at time of writing (Sat 26 Sep, branch `integration`: overnight + thing-identity + teammate-tasks + room-pointing): `.venv/bin/python -m pytest -q` gives 1649 passed, 25 skipped on the laptop (the skips need optional models or hardware)
 
 ## Perception and world model
 
@@ -63,6 +63,7 @@ Test suite at time of writing (Sat 26 Sep, after the overnight merge): `.venv/bi
 | — | Actuators: serial, PCA9685, sim; clamp, easing, laser timeout (`act/actuator.py`) | validated (unit) | `tests/test_actuator.py` |
 | — | Hardware kill switch | implemented | `demo_check.py` check 8 prompts for a manual check |
 | — | Laser `trace`, `tour`, `find_new` | planned | Roadmap in PLANS.md |
+| 0006 | Room pointing without depth: dot-map sweep, pixel-space closed loop with Broyden updates, averaged dot finding, zones, hand/person beam gate, dwell cap (`act/room_map.py`, `Laser.aim_px`, `main.Room._aim_room`, `room:` in config, off by default; branch `room-pointing`) | validated (sim) | `tests/test_room_map.py`: aims converge on floor, table, coffee table, wall and a bottle on a shelf for pivot offsets 3/10/25 cm, including with a 2× wrong Jacobian; blocked dot is never reported as on target; `demo_check.py` check 10. Not on the rig; `detect`/`world` changes for room entities are proposals (spec 0006, 2b) |
 
 ## Interfaces and ops
 

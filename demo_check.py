@@ -210,6 +210,23 @@ class Rig:
         self._cleanup.append(laser.off)
         return laser
 
+    def _make_room(self):
+        """(laser, frames) for room pointing: the laser with the room map loaded. --fake: the simulated
+        room (act/sim.py RoomRig), swept here."""
+        from act.room_map import RoomMap, sweep
+        if self.fake:
+            from act.sim import RoomRig
+            rig = RoomRig(seed=0)
+            laser = rig.make_laser()
+            laser.room_map = sweep(laser, grid=(12, 9), n_pairs=1)
+            return laser, rig.frames
+        path = self.cfg.get("room_map", "room_map.json")
+        if not os.path.exists(path):
+            raise RuntimeError(f"no {path}: run python -m act.room_map --sweep (nobody in view)")
+        laser = self.part("laser")
+        laser.room_map = RoomMap.load(path)
+        return laser, self.part("frames")
+
     def close(self) -> None:
         for fn in reversed(self._cleanup):
             try:
@@ -477,6 +494,38 @@ def check_clock(rig: Rig) -> Result:
     return True, time.strftime("%a %b %d %H:%M %Z")
 
 
+def check_room(rig: Rig) -> Result:
+    """Room pointing (spec 0006), when enabled: the map matches the camera, has zones, and three mapped
+    dots spread over the room are hit again. The first look (the map's open-loop guess) must land within
+    2 x tol_px: the loop would converge anyway, so that's what catches a moved camera or head."""
+    if not (rig.cfg.get("room") or {}).get("enabled"):
+        return None, "room pointing off (room.enabled: false)"
+    laser, frames = rig.part("room")
+    rm = laser.room_map
+    f = frames.latest()
+    if f is not None and f.img is not None and (f.img.shape[1], f.img.shape[0]) != rm.size_px:
+        return False, f"map is {rm.size_px[0]}x{rm.size_px[1]}, camera is {f.img.shape[1]}x{f.img.shape[0]}: sweep again"
+    idx = np.nonzero(rm.seen)[0]
+    if len(idx) < 10:
+        return False, f"only {len(idx)} dots in the map: sweep again with the room lit normally"
+    picks = [rm.px[idx[int(q * (len(idx) - 1))]] for q in (0.2, 0.5, 0.8)]
+    errs = []
+    try:
+        for uv in picks:
+            r = laser.aim_px(uv)
+            errs.append(r.first_err_px if r.on_target and r.first_err_px is not None else math.inf)
+    finally:
+        laser.off()
+    shown = ", ".join("not hit" if math.isinf(e) else f"{e:.1f}" for e in errs)
+    zones = ", ".join(rm.zones) or "none"
+    if any(e > 2 * laser.tol_px for e in errs):
+        return False, (f"map guess off by {shown} px: camera or head moved? sweep again "
+                       "(python -m act.room_map --sweep)")
+    if not rm.zones and not rig.fake:
+        return False, f"re-hit {shown} px, but no zones: draw them (python -m act.room_map --zone NAME --poly ...)"
+    return True, f"{rm.n_seen} dots, zones: {zones}; re-hit {shown} px"
+
+
 CHECKS: list[tuple[str, Callable[[Rig], Result]]] = [
     ("camera", check_camera),
     ("detector", check_detector),
@@ -487,6 +536,7 @@ CHECKS: list[tuple[str, Callable[[Rig], Result]]] = [
     ("world", check_world),
     ("kill switch", check_kill_switch),
     ("clock", check_clock),
+    ("room", check_room),
 ]
 
 

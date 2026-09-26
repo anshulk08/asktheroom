@@ -667,10 +667,20 @@ class VisualQA:
             return Answer(text)
         px = point_to_px(point, orig_wh) if isinstance(point, dict) else None
         c = px_to_cm(self.table, [px]) if px is not None and getattr(self.table, "ok", True) is not False else None
+        if px is not None and (self.cfg.get("room") or {}).get("enabled") and not self._on_table(c):
+            return Answer(text, action=f"room:{px[0]:.0f},{px[1]:.0f}")    # off the table: the image spot (spec 0006)
         hit = self._mark_at(float(c[0][0]), float(c[0][1]), marks) if c is not None else None
         if hit is None:
             return Answer(_with_note(text, UNSURE_WHERE, where))
         return self._verified(text, hit, where)
+
+    def _on_table(self, c) -> bool:
+        """A point in table cm (px_to_cm's output) lies on the table, within 5 cm of its edge."""
+        if c is None:
+            return False
+        x, y = float(c[0][0]), float(c[0][1])
+        w, h = ((self.cfg.get("table") or {}).get("size_cm") or [90, 60])
+        return -5 <= x <= w + 5 and -5 <= y <= h + 5
 
     @staticmethod
     def _mark_at(x: float, y: float, marks: list[Mark]) -> Optional[Mark]:

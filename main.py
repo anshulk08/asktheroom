@@ -129,6 +129,14 @@ class Room:
         self.max_fps = float(m.get("perception_max_fps", 15))
         self.net_copy_s = float(m.get("net_copy_s", 5))
         self.laser_timeout_s = float(cfg.get("laser_timeout_s", 10))
+        room = cfg.get("room") or {}
+        self.room_enabled = bool(room.get("enabled", False))
+        self.room_dwell_s = float(room.get("room_dwell_s", 5))
+        self.room_require_zone = bool(room.get("require_zone", True))
+        self.room_head_px = room.get("head_px")
+        self.room_hand_s = float(room.get("hand_recent_s", 2))
+        self.room_person_check = bool(room.get("person_check", True))
+        self._hand_boxes: deque = deque(maxlen=64)   # (monotonic t, box_px): recent hands block room aims
         n8n = cfg.get("n8n") or {}
         self.webhook_url = str(n8n.get("webhook_url") or "")
         self.webhook_token = str(n8n.get("token") or "")
@@ -228,6 +236,12 @@ class Room:
             try:
                 if action.startswith("sweep:"):
                     self.laser.sweep_edge(action.split(":", 1)[1])
+                elif action.startswith("room:"):
+                    if not self._aim_room(action):
+                        return None
+                    self.world.laser = dict(self.laser.state)
+                    self._schedule_off(min(self.laser_timeout_s, self.room_dwell_s))
+                    return None
                 else:
                     if ans.point_at is None and ans.target_cm is not None:   # visual Q&A: a raw table spot
                         pos, chain = tuple(ans.target_cm), ["table"]
@@ -253,9 +267,46 @@ class Room:
             self._schedule_off()
         return err
 
-    def _schedule_off(self) -> None:
+    def _aim_room(self, action: str) -> bool:
+        """'room:u,v' or 'room:u,v,x1,y1,x2,y2' (image px, optional object box): the gates, then
+        Laser.aim_px (spec 0006). True if the dot is on target; otherwise the laser is off."""
+        from act.room_map import beam_blocked, people_boxes_hog
+        v = [float(x) for x in action.split(":", 1)[1].split(",")]
+        uv, box = (v[0], v[1]), (tuple(v[2:6]) if len(v) >= 6 else None)
+        rm = getattr(self.laser, "room_map", None)
+        why = None
+        if not self.room_enabled or rm is None:
+            why = "room pointing is off or there is no room map"
+        elif self.room_require_zone and rm.zone_at(uv) is None:
+            why = f"({uv[0]:.0f}, {uv[1]:.0f}) is outside every room zone"
+        else:
+            now = time.monotonic()
+            blockers = [b for t, b in list(self._hand_boxes) if now - t <= self.room_hand_s]
+            f = self.frames.latest() if self.frames is not None else None
+            if f is not None and f.img is not None and (f.img.shape[1], f.img.shape[0]) != rm.size_px:
+                why = f"the room map was recorded at {rm.size_px[0]}x{rm.size_px[1]}; sweep again"
+            elif self.room_person_check and f is not None and f.img is not None:
+                people = people_boxes_hog(f.img)
+                if people is None:
+                    log.warning("no person detector in this OpenCV; room aim gated by hands and zones only")
+                blockers += people or []
+            if why is None and beam_blocked(uv, box, blockers, self.room_head_px):
+                why = "a person or hand is in the way"
+        if why is not None:
+            log.info("room aim refused: %s", why)
+            return False
+        r = self.laser.aim_px(uv, box)
+        log.info("laser -> room px (%.0f, %.0f): %s after %d tries, err %.1f px", uv[0], uv[1], r.reason,
+                 r.tries, r.err_px)
+        if not r.on_target:                   # never leave the dot somewhere it wasn't confirmed
+            self.laser.off()
+            self.world.laser = dict(OFF)
+        return r.on_target
+
+    def _schedule_off(self, timeout_s: Optional[float] = None) -> None:
         """Show the laser as off once the actuator's auto-off would have fired (and turn it off,
-        which the fake actuators need; real ones have already done it)."""
+        which the fake actuators need; real ones have already done it). A shorter timeout_s (room
+        aims' dwell cap) turns it off early."""
         self._aim_gen += 1
         gen = self._aim_gen
         if self._off_timer is not None:
@@ -271,7 +322,7 @@ class Room:
                     log.exception("laser off failed")
                 self.world.laser = dict(OFF)
 
-        self._off_timer = threading.Timer(self.laser_timeout_s, off)
+        self._off_timer = threading.Timer(self.laser_timeout_s if timeout_s is None else timeout_s, off)
         self._off_timer.daemon = True
         self._off_timer.start()
 
@@ -353,6 +404,8 @@ class Room:
             self.detector.reset_proposals()
         dets = self.detector.detect(frame)
         dets.hands = self.hands.update(dets.hands, dets.t)
+        if self.room_enabled:
+            self._hand_boxes.extend((time.monotonic(), h.box_px) for h in dets.hands)
         return dets, self.world.update(dets, frame)
 
     def perception_loop(self) -> None:
@@ -682,6 +735,15 @@ def build(cfg: dict, fake: bool = False, camera: int = 0, with_voice: bool = Tru
         elif laser_older_than_table(laser.fit, table.cal_path):
             log.warning("laser_cal.json was fitted before the last table calibration: the laser may point "
                         "off; recalibrate it (python -m act.calibrate)")
+        if (cfg.get("room") or {}).get("enabled"):
+            from act.room_map import RoomMap
+            path = cfg.get("room_map", "room_map.json")
+            if os.path.exists(path):
+                laser.room_map = RoomMap.load(path)
+                log.info("room map: %d dots, zones: %s", laser.room_map.n_seen,
+                         ", ".join(laser.room_map.zones) or "none (room aims refused)")
+            else:
+                log.warning("room.enabled but no %s; run python -m act.room_map --sweep", path)
 
     netmon = net.NetMonitor(cfg).start()
     cleanup.append(netmon.stop)
