@@ -454,12 +454,15 @@ def read_wav(path) -> np.ndarray:
 
 class STT:
     def __init__(self, cfg: dict, clicker=None, backend: Optional[Backend] = None,
-                 vad: Optional[SileroVAD] = None):
+                 vad: Optional[SileroVAD] = None, tts=None):
         """clicker: anything with pressed() -> bool; a press while recording ends it. backend and
-        vad default to the cfg stt settings and are loaded on first use (or by warm())."""
+        vad default to the cfg stt settings and are loaded on first use (or by warm()). tts: anything
+        with a `.speaking` bool (voice.tts.TTS); when the rig starts talking mid-recording, the clip
+        (its own voice from now on) is dropped."""
         s = (cfg or {}).get("stt") or {}
         self.cfg = cfg
         self.clicker = clicker
+        self.tts = tts
         self.max_s = float(s.get("max_s", 6))
         self.silence_ms = float(s.get("silence_ms", 700))
         self.threshold = float(s.get("vad_threshold", 0.5))
@@ -472,7 +475,7 @@ class STT:
         self.prompt = initial_prompt(cfg or {}, synonyms=bool(s.get("prompt_synonyms", False)))
         self._backend, self._vad = backend, vad
         self.last_speech = False            # did the last recording contain speech?
-        self.last_stop = ""                 # why it ended: silence | max_s | click | no speech | no audio
+        self.last_stop = ""                 # why it ended: silence | max_s | click | no speech | no audio | tts
         self.log_text = True                # always-on mic: main.py turns this off, so chatter isn't logged
         self.last_ms: dict[str, float] = {}
 
@@ -499,7 +502,10 @@ class STT:
                              no_speech_s: Optional[float] = None) -> np.ndarray:
         """Record 16 kHz mono float32 until silence_ms of non-speech follows speech, max_s passes,
         a clicker press, or no_speech_s with no speech at all. Returns the speech plus a little
-        padding, or an empty array if nobody spoke."""
+        padding, or an empty array if nobody spoke. If the TTS starts speaking while this records (a care
+        notice, a dashboard or phone answer), the recording ends and the clip is discarded (empty array,
+        last_stop 'tts'): the mic would hear the rig and answer itself. Speech already playing when the
+        recording starts (a clicked answer still cutting off) doesn't count until it has stopped once."""
         max_s = self.max_s if max_s is None else max_s
         silence_ms = self.silence_ms if silence_ms is None else silence_ms
         no_speech_s = self.no_speech_s if no_speech_s is None else no_speech_s
@@ -513,6 +519,7 @@ class STT:
         first = last = None                 # first / last speech block index
         quiet = 0
         stop = "max_s"
+        was_quiet = not self._tts_speaking()    # the rig's voice counts once it has been off
         t0 = time.monotonic()
         src = open_input(RATE, BLOCK, self.device)
         try:
@@ -542,17 +549,32 @@ class STT:
                 if self.clicker is not None and self.clicker.pressed():
                     stop = "click"
                     break
+                if self._tts_speaking():
+                    if was_quiet:
+                        stop = "tts"
+                        break
+                else:
+                    was_quiet = True
         finally:
             src.close()
+        if stop == "tts":
+            first = None                        # the rig talking over it: nothing here is a question
         self.last_ms["record"] = 1000 * (time.monotonic() - t0)
         self.last_speech = first is not None
         self.last_stop = stop
-        log.info("recorded %.2f s, stopped by %s, speech=%s", len(blocks) * block_s, stop, self.last_speech)
+        log.info("recorded %.2f s, stopped by %s, speech=%s%s", len(blocks) * block_s, stop, self.last_speech,
+                 " (the rig started speaking: discarded)" if stop == "tts" else "")
         if first is None:
             return np.zeros(0, dtype=np.float32)
         a = max(0, first - int(PREROLL_S / block_s))
         b = min(len(blocks), last + 1 + int(TAIL_S / block_s))
         return np.concatenate(blocks[a:b]).astype(np.float32)
+
+    def _tts_speaking(self) -> bool:
+        try:
+            return bool(getattr(self.tts, "speaking", False))
+        except Exception:
+            return False
 
     def transcribe(self, audio: np.ndarray, force: bool = False) -> str:
         """Whisper base.en with the object-name prompt and a clip-sized audio_ctx. Empty audio
