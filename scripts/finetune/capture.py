@@ -208,6 +208,8 @@ def main(argv=None) -> int:
     ap.add_argument("--poses", type=int, default=8)
     ap.add_argument("--only", nargs="*", help="object names (and/or 'hand') to (re)capture")
     ap.add_argument("--no-hands", action="store_true")
+    ap.add_argument("--roi", help="x1,y1,x2,y2: the tabletop in camera px; changes outside it (floor, chair, "
+                                  "the person capturing) are ignored")
     ap.add_argument("--hand-seconds", type=float, default=40.0)
     ap.add_argument("--hand-len", type=int, default=Params.hand_len_px,
                     help="px of an arm kept as the hand box (about 18 cm of arm at this camera height)")
@@ -225,7 +227,8 @@ def main(argv=None) -> int:
     from core.capture import FrameBuffer
     fb = FrameBuffer(int(a.device) if a.device.isdigit() else a.device)
     try:
-        cap = Capture(fb, Path(a.data), names, poses=a.poses, params=Params(hand_len_px=a.hand_len),
+        cap = Capture(fb, Path(a.data), names, poses=a.poses, params=Params(hand_len_px=a.hand_len,
+                                  roi_px=tuple(int(v) for v in a.roi.split(",")) if a.roi else None),
                       display=cfg.get("display_names") or {})
         cap.run(a.only, hands=not a.no_hands, hand_seconds=a.hand_seconds)
     finally:

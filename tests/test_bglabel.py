@@ -3,7 +3,7 @@ import cv2
 import numpy as np
 import pytest
 
-from scripts.finetune.bglabel import (Background, Stability, contact_sheet, cutout, hand_part, label_hands,
+from scripts.finetune.bglabel import (Background, Params, Stability, contact_sheet, cutout, hand_part, label_hands,
                                       label_object, read_yolo, save_sample, yolo_line)
 
 W, H = 1280, 720
@@ -180,3 +180,32 @@ def test_contact_sheet_tiles_thumbnails():
     img = table(1)
     sheet = contact_sheet([(img, [("keys", (100, 100, 300, 300))], "a")] * 7, cols=3, thumb_w=320)
     assert sheet.shape == (3 * 180, 3 * 320, 3)
+
+
+# ---------------------------------------------------------------- table region (the rest of the view ignored)
+
+ROI = (300, 60, 1000, 660)          # the tabletop in camera px; outside it are the floor, a chair, legs
+
+
+@pytest.fixture(scope="module")
+def rbg():
+    return Background([table(i) for i in range(12)], Params(roi_px=ROI))
+
+
+def test_changes_outside_the_table_region_are_ignored(rbg):
+    img = put(table(90), (600, 300, 700, 380), (40, 40, 200))       # the object, on the table
+    put(img, (40, 400, 200, 600), (200, 200, 60))                   # someone's leg beside the table
+    lab = label_object(rbg, img)
+    assert lab.ok and near(lab.box, (600, 300, 700, 380)), lab.reason
+
+
+def test_an_object_touching_the_region_edge_is_rejected(rbg):
+    lab = label_object(rbg, put(table(91), (302, 300, 400, 380), (40, 40, 200)))
+    assert not lab.ok and "edge" in lab.reason
+
+
+def test_a_hand_entering_from_the_region_edge_keeps_only_its_end(rbg):
+    img = put(table(92), (100, 330, 800, 400), SKIN)                 # arm from off-table on the left, over the table
+    [h] = label_hands(rbg, img)
+    assert h.edge == "left"
+    assert near(h.box, (800 - h_len(rbg), 330, 800, 400))

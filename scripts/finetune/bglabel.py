@@ -33,6 +33,8 @@ class Params:
     split_frac: float = 0.2        # a second piece this big (vs the object) means two things are there
     hand_min_frac: float = 0.004   # hand session: smaller changes are not a hand
     hand_len_px: int = 260         # an arm entering from an edge is cut to its last this-many px (the hand)
+    roi_px: Optional[tuple] = None  # (x1, y1, x2, y2) the tabletop in camera px; changes outside it (the floor,
+                                    # a chair, the person capturing) are ignored and its edges count as the frame's
 
 
 @dataclass
@@ -77,7 +79,19 @@ class Background:
     def changed(self, img: np.ndarray) -> np.ndarray:
         m = (self.diff(img) > self.thresh).astype(np.uint8)
         m = cv2.morphologyEx(m, cv2.MORPH_OPEN, _kernel(self.p.open_px))
-        return cv2.morphologyEx(m, cv2.MORPH_CLOSE, _kernel(self.p.close_px))
+        m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, _kernel(self.p.close_px))
+        x1, y1, x2, y2 = region(self.p, *m.shape[:2])
+        out = np.zeros_like(m)
+        out[y1:y2, x1:x2] = m[y1:y2, x1:x2]
+        return out
+
+
+def region(p: Params, h: int, w: int) -> tuple[int, int, int, int]:
+    """The part of the frame labels come from: the tabletop (roi_px) or the whole frame."""
+    if not p.roi_px:
+        return 0, 0, w, h
+    x1, y1, x2, y2 = (int(v) for v in p.roi_px)
+    return max(0, x1), max(0, y1), min(w, x2), min(h, y2)
 
 
 def _groups(mask: np.ndarray, min_px: int, merge_px: int) -> list[np.ndarray]:
@@ -107,8 +121,9 @@ def label_object(bg: Background, img: np.ndarray) -> Label:
     h, w = img.shape[:2]
     m = bg.changed(img)
     b = p.border_px
+    rx1, ry1, rx2, ry2 = region(p, h, w)
     inner = np.zeros_like(m)
-    inner[b:h - b, b:w - b] = 1
+    inner[ry1 + b:ry2 - b, rx1 + b:rx2 - b] = 1
     groups = _groups(m & inner, int(p.min_blob_frac * h * w), p.merge_px)
     if not groups:
         return Label(False, "nothing new on the table (is the object there? is it darker/lighter than the table?)")
@@ -122,7 +137,7 @@ def label_object(bg: Background, img: np.ndarray) -> Label:
     if area > p.max_area_frac * h * w:
         return Label(False, f"change too large ({100 * area / (h * w):.0f}% of frame): light changed or camera moved?")
     box = _bbox(main)
-    if box[0] <= b or box[1] <= b or box[2] >= w - b or box[3] >= h - b:
+    if box[0] <= rx1 + b or box[1] <= ry1 + b or box[2] >= rx2 - b or box[3] >= ry2 - b:
         return Label(False, "touches the frame edge: move the object inward and keep hands/arms out of view")
     return Label(True, box=box, mask=main)
 
@@ -160,9 +175,10 @@ def label_hands(bg: Background, img: np.ndarray, max_hands: int = 2) -> list[Lab
     p = bg.p
     h, w = img.shape[:2]
     out = []
+    x1, y1, x2, y2 = region(p, h, w)
     for g in _groups(bg.changed(img), int(p.hand_min_frac * h * w), p.close_px)[:max_hands]:
         g = _fill(g)
-        edge = _entry_edge(g)
+        edge = _entry_edge(g[y1:y2, x1:x2])          # the arm comes in over the table region's edge
         out.append(Label(True, box=_bbox(hand_part(g, edge, p.hand_len_px)), mask=g, edge=edge))
     return out
 
