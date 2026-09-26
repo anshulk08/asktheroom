@@ -5,6 +5,9 @@ import SwiftUI
 struct HelperSettings: View {
     let store: RoomStore
     @AppStorage(Speaker.enabledKey) private var readAloud = false
+    @AppStorage(Speaker.voiceIDKey) private var voiceID = ""
+    @State private var keyDraft = ""
+    @State private var hasKey = Speaker.apiKey != nil
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -25,6 +28,30 @@ struct HelperSettings: View {
                     Text("Answers")
                 } footer: {
                     Text("The rig already says its answers out loud. Read aloud is for using the phone away from the table.")
+                }
+
+                Section {
+                    TextField("Voice ID", text: $voiceID)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    SecureField(hasKey ? "API key (saved)" : "API key", text: $keyDraft)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .onSubmit(saveKey)
+                    if hasKey {
+                        Button("Forget the key", role: .destructive) {
+                            Speaker.apiKey = nil
+                            hasKey = false
+                        }
+                    }
+                    Button("Try the voice") {
+                        saveKey()
+                        Speaker.shared.speak("Your keys are inside the box.")
+                    }
+                } header: {
+                    Text("The rig's voice")
+                } footer: {
+                    Text("Use the same ElevenLabs voice ID as the rig (ELEVENLABS_VOICE_ID) so the phone sounds like the room. The key stays in this phone's Keychain. When read aloud is on, answer text goes to ElevenLabs; without a key or internet the iPhone's own voice reads it.")
                 }
 
                 Section("The room") {
@@ -57,6 +84,7 @@ struct HelperSettings: View {
                          : "\(store.dismissedNotices.count) put away with “Got it”.")
                 }
             }
+            .onDisappear(perform: saveKey)
             .navigationTitle("Helper settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -65,6 +93,14 @@ struct HelperSettings: View {
                 }
             }
         }
+    }
+
+    private func saveKey() {
+        let key = keyDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { return }
+        Speaker.apiKey = key
+        keyDraft = ""
+        hasKey = true
     }
 
     private var connection: String {
