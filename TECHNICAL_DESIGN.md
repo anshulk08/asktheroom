@@ -85,13 +85,14 @@ mic ─▶ Silero VAD ─▶ whisper.cpp base.en ─▶ overheard filter ─▶ 
    - Anything that fails becomes `IGNORE`. It is dropped with no log, no storage and no n8n report.
 4. **Understanding** (`voice/understand.Understander`).
    - The rule parser (`voice/intents.py`) answers when it found both the question type and the object it needs.
-   - Otherwise it asks Qwen3-1.7B through llama-server. The request uses the `json_schema` response format `{kind, object}` with enums, `enable_thinking: false` (llama.cpp skips grammar enforcement while thinking), `temperature: 0` and a static system prompt so the prompt cache holds.
-   - An object the rules recognised wins over Qwen's. Qwen's object must pass `sounds_like`, which checks it against the words actually said, so a model can't invent an object.
+   - Otherwise it asks Grok (`understand.backend: grok`, the default; `voice/understand.Grok`) when online. The request uses the `json_schema` response format `{kind, object}` with enums and a static system prompt. Local Qwen3-1.7B through llama-server (`backend: qwen`, or `auto` for Grok online and Qwen offline) is optional and not installed on the Jetson; it uses `enable_thinking: false` (llama.cpp skips grammar enforcement while thinking) and `temperature: 0`.
+   - An object the rules recognised wins over the model's. The model's object must pass `sounds_like`, which checks it against the words actually said, so a model can't invent an object.
    - RESET and RECAL come from the rules only.
-   - If Qwen is down, slower than `understand.timeout_s` (1.5 s), or returns bad output, the rules' answer stands.
+   - If the model is down or offline, slower than its timeout, or returns bad output, the rules' answer stands.
 5. **Routing** (`voice/pipeline.make_ask`).
    - WHERE, HISTORY, HANDLED and CHANGES go to the templates in `voice/answers.py`, which are deterministic and instant.
-   - OTHER goes to `voice/local_llm.ask_local`. It first tries templates for common open questions: what is in or under something, what is hidden, what is on the table, privacy, help, and "did I take my meds". For the rest it makes one Qwen call. The prompt holds `compact_state` plus the last 12 events from the past 30 minutes. The schema is action-first `{action: point|circle|none, point_at: <object enum>|none, text}`.
+   - Questions about what the camera sees go to `voice/visual.py` first (set-of-marks look, pick, recall). With the Grok settle check on (spec 0007), "where is my X" for something the world has no position for answers from Grok's last sighting.
+   - OTHER goes to `voice/llm.ask_other`. It first tries templates for common open questions: what is in or under something, what is hidden, what is on the table, privacy, help, and "did I take my meds". For the rest it makes one Grok call when online (local Qwen through `voice/local_llm.ask_local` with `backend: qwen`), else the fallback sentence. The prompt holds `compact_state` plus the last 12 events from the past 30 minutes. The schema is action-first `{action: point|circle|none, point_at: <object enum>|none, text}`.
    - The model's output goes through `voice/llm.to_answer`, which caps it at two sentences, strips markdown and applies the pill-wording filter. The laser moves only if the sentence names the object it points at.
    - Any failure returns a fixed fallback sentence.
    - Accepted questions are logged to the `questions` table.
