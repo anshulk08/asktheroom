@@ -49,6 +49,7 @@ class Table:
         self.Hinv: Optional[np.ndarray] = None    # cm -> px
         self.found: list[int] = []
         self._det = detector()
+        self._warned: tuple = (None, -1e9)        # (markers seen, time) of the last failure warning
         self.load()
 
     @property
@@ -60,7 +61,12 @@ class Table:
         found = find_markers(frame_img, self._det)
         self.found = sorted(i for i in found if i in TABLE_IDS)
         if len(self.found) < 4:
-            log.warning("table calibration: found markers %s, need %s", self.found, list(TABLE_IDS))
+            # Callers retry every frame until the markers appear: warn when what's visible changes, or
+            # every 10 s, not 30 times a second.
+            now = time.monotonic()
+            if self.found != self._warned[0] or now - self._warned[1] >= 10:
+                log.warning("table calibration: found markers %s, need %s", self.found, list(TABLE_IDS))
+                self._warned = (list(self.found), now)
             return False
         px = np.float32([found[i] for i in TABLE_IDS])
         cm = np.float32([self.markers_cm[i] for i in TABLE_IDS])

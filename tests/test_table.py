@@ -101,3 +101,13 @@ def test_in_bounds_uses_the_table_size(table):
     assert table.in_bounds((10, 10)) and table.in_bounds((90, 60))
     assert not table.in_bounds((-3, 10)) and not table.in_bounds((50, 70))
     assert table.size_cm == (90, 60)
+
+
+def test_failed_calibration_warns_once_until_markers_change(table, caplog):
+    import logging
+    caplog.set_level(logging.WARNING, logger="core.table")
+    for _ in range(30):
+        table.calibrate(render(true_h(), ids=(0, 1)))
+    assert len(caplog.records) == 1
+    table.calibrate(render(true_h(), ids=(0, 1, 2)))
+    assert len(caplog.records) == 2
