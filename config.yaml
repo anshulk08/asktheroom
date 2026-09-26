@@ -263,7 +263,7 @@ main:
   net_copy_s: 5
 
 demo_check:
-  camera: 0
+  camera: /dev/v4l/by-id/usb-046d_Logitech_BRIO_3675F8D2-video-index0   # the rig's Brio; an index moves on replug
   home_cm: {}                 # object: [x, y] table cm of the demo layout; empty = check 7 only needs VISIBLE
   home_tol_cm: 5
 

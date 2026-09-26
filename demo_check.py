@@ -35,7 +35,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import Callable, Optional
+from typing import Callable, Optional, Union
 from urllib.parse import urlparse
 
 import numpy as np
@@ -132,7 +132,7 @@ class Rig:
     """Lazily builds and caches each part. A part that fails to build raises the same error again,
     so every check that needs a missing camera reports the camera, not a knock-on error."""
 
-    def __init__(self, cfg: dict, fake: bool = False, camera: int = 0, manual: bool = True,
+    def __init__(self, cfg: dict, fake: bool = False, camera: Union[int, str] = 0, manual: bool = True,
                  ask: Callable[[str], str] = input):
         self.fake = fake
         self.cfg = fake_cfg(cfg) if fake else cfg
@@ -276,13 +276,14 @@ def run_frames(rig: Rig, seconds: float, fn: Callable) -> tuple[int, float]:
 
 # ---------------------------------------------------------------- checks
 
-def exposure_mode(device: int) -> tuple[Optional[bool], str]:
+def exposure_mode(device: Union[int, str]) -> tuple[Optional[bool], str]:
     """(locked?, detail) from v4l2-ctl. auto_exposure 1 is manual on UVC cameras."""
     if not sys.platform.startswith("linux"):
         return None, "exposure lock only readable on Linux (v4l2)"
     if shutil.which("v4l2-ctl") is None:
         return None, "v4l2-ctl missing (apt install v4l-utils)"
-    out = subprocess.run(["v4l2-ctl", "-d", f"/dev/video{device}", "-C", "auto_exposure",
+    dev = device if isinstance(device, str) else f"/dev/video{device}"
+    out = subprocess.run(["v4l2-ctl", "-d", dev, "-C", "auto_exposure",
                           "-C", "exposure_time_absolute"], capture_output=True, text=True, timeout=5).stdout
     vals = dict(ln.split(":", 1) for ln in out.splitlines() if ":" in ln)
     mode = vals.get("auto_exposure", "").strip()
@@ -557,13 +558,15 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--fake", action="store_true", help="no hardware: rendered layout, simulated laser")
     ap.add_argument("--skip-manual", action="store_true", help="no prompts; the kill switch is skipped")
-    ap.add_argument("--camera", type=int, default=None, help="camera index (default: config demo_check.camera)")
+    ap.add_argument("--camera", default=None,
+                    help="camera index or /dev/v4l/by-id/ path (default: config demo_check.camera)")
     ap.add_argument("--only", type=int, nargs="*", help="run only these check numbers")
     ap.add_argument("--config")
     a = ap.parse_args(argv)
 
     cfg = load_config(a.config)
-    camera = a.camera if a.camera is not None else int((cfg.get("demo_check") or {}).get("camera", 0))
+    camera = str(a.camera if a.camera is not None else (cfg.get("demo_check") or {}).get("camera", 0)).strip()
+    camera = int(camera) if camera.isdigit() else camera       # an index moves on replug; a by-id path does not
     manual = not a.skip_manual and sys.stdin.isatty()
     color = sys.stdout.isatty()
     rig = Rig(cfg, fake=a.fake, camera=camera, manual=manual)
