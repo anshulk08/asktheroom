@@ -7,7 +7,13 @@ little-endian mono, so no mp3 decoder). eleven_flash_v2_5 is the ~75 ms model.
   https://elevenlabs.io/docs/overview/models
 Piper: piper-tts 1.8 `PiperVoice.load(model.onnx)`; `voice.synthesize(text)` yields one
 AudioChunk per sentence (sample_rate, audio_int16_bytes). Voices live in models/piper/
-(scripts/get_piper_voice.sh).
+(scripts/get_piper_voice.sh). A Piper voice that won't load is retried on every answer; meanwhile
+espeak-ng (apt install espeak-ng), if installed, says it, robotic but not silent.
+
+Every utterance plays on a worker thread under a deadline (playback_budget_s: 0.1 s per character + 3 s
+from the moment the speaker opens). A speaker that stops taking audio blocks write/close forever; past the
+deadline the stream is aborted (itself bounded, abort can hang too), a warning is logged and `speaking`
+goes False, so the always-on mic, which waits while TTS.speaking, reopens.
 
 Audio goes through two seams tests can patch: `open_output(rate, device)` (a streaming int16 mono
 sink) and `play_pcm(pcm, rate, device)` (whole buffer, blocking).
@@ -35,6 +41,7 @@ import numpy as np
 import requests
 
 from core.config import ROOT
+from net import call_with_deadline
 
 log = logging.getLogger(__name__)
 
@@ -162,7 +169,8 @@ _voice_lock = threading.Lock()
 
 
 def load_piper(name: str, model_dir: Path = PIPER_DIR):
-    """Load and cache a PiperVoice by name (e.g. en_US-lessac-medium)."""
+    """Load and cache a PiperVoice by name (e.g. en_US-lessac-medium). A failed load is not cached,
+    so the next answer tries again."""
     path = Path(model_dir) / f"{name}.onnx"
     with _voice_lock:
         v = _voice_cache.get(str(path))
@@ -181,10 +189,76 @@ def piper_chunks(voice, text: str) -> Iterator[tuple[bytes, int]]:
         yield chunk.audio_int16_bytes, chunk.sample_rate
 
 
+# ---------------------------------------------------------------- espeak (last resort)
+
+ESPEAK_TIMEOUT_S = 5.0
+
+
+def espeak_pcm(text: str) -> Optional[tuple[bytes, int]]:
+    """(int16 mono bytes, rate) from espeak-ng / espeak, or None when neither is installed or it fails.
+    The robotic last resort when Piper can't load: better than a silent rig."""
+    import io
+    import shutil
+    import subprocess
+    import wave
+    exe = shutil.which("espeak-ng") or shutil.which("espeak")
+    if exe is None:
+        return None
+    try:
+        wav = subprocess.run([exe, "--stdout", "--", text], capture_output=True, check=True,
+                             timeout=ESPEAK_TIMEOUT_S).stdout
+        with wave.open(io.BytesIO(wav), "rb") as w:
+            if w.getsampwidth() != 2 or w.getnchannels() != 1:
+                return None
+            return w.readframes(w.getnframes()), w.getframerate()
+    except Exception as ex:
+        log.warning("espeak failed: %s: %s", type(ex).__name__, ex)
+        return None
+
+
 # ---------------------------------------------------------------- TTS
+
+# Playback deadline per utterance, from the moment the speaker is opened: a USB speaker that stops taking
+# audio blocks AudioOut.write/close forever, and while TTS.speaking the always-on mic stays shut. Speech
+# runs about 15 characters a second, so 0.1 s per character is ~1.5x the real length, plus slack for the
+# drain at the end. Before any audio (ElevenLabs first byte, Piper load and first sentence) PREPARE_MAX_S.
+PLAY_S_PER_CHAR = 0.1
+PLAY_SLACK_S = 3.0
+PREPARE_MAX_S = 15.0
+ABORT_S = 1.0               # stream.abort() can hang on a wedged device too
+WATCH_S = 0.05              # how often speak() checks the deadline
+
+
+def playback_budget_s(text: str) -> float:
+    return len(text) * PLAY_S_PER_CHAR + PLAY_SLACK_S
+
+
+def _abort_quietly(out) -> None:
+    """out.abort(), given ABORT_S at most (on its own thread) and never raising."""
+    if out is None:
+        return
+    try:
+        call_with_deadline(out.abort, ABORT_S, name="tts-abort")
+    except TimeoutError:
+        log.warning("speaker abort hung for %.1f s; leaving it", ABORT_S)
+    except Exception:
+        pass
+
 
 class _ElevenFailed(Exception):
     pass
+
+
+class _Utterance:
+    """One speak() call's state. A hung utterance's worker thread may outlive speak(); keeping its stop
+    flag and stream here (not on the TTS) means it can't touch the next utterance's."""
+
+    def __init__(self):
+        self.stop = threading.Event()
+        self.t0 = time.monotonic()
+        self.t_audio: Optional[float] = None    # when the speaker was opened
+        self.out: Optional[AudioOut] = None
+        self.resp = None
 
 
 class TTS:
@@ -197,12 +271,11 @@ class TTS:
         self.eleven_model: str = t.get("elevenlabs_model", "eleven_flash_v2_5")
         self.eleven_voice_cfg: str = t.get("elevenlabs_voice_id") or ""
         self.output_device = t.get("output_device")      # index | name substring | None (default)
-        self._stop = threading.Event()
         self._lock = threading.Lock()          # one utterance at a time
-        self._out: Optional[AudioOut] = None
-        self._resp = None
-        self.last_engine: Optional[str] = None  # 'elevenlabs' | 'piper' | None
+        self._utt: Optional[_Utterance] = None
+        self.last_engine: Optional[str] = None  # 'elevenlabs' | 'piper' | 'espeak' | None
         self.last_first_audio_s: Optional[float] = None
+        self.last_timed_out = False             # the last utterance hit its playback deadline
 
     # -- routing
 
@@ -222,31 +295,67 @@ class TTS:
             return False
 
     def speak(self, text: str) -> None:
-        """Speak text; blocks until playback ends or stop() is called. Never raises."""
+        """Speak text; blocks until playback ends, stop() is called, or the playback deadline passes
+        (a hung speaker: the stream is aborted and speaking goes False, so the mic reopens). Never raises."""
         text = (text or "").strip()
         if not text:
             return
         with self._lock:
-            self._stop.clear()
+            u = self._utt = _Utterance()
             self.last_engine = None
             self.last_first_audio_s = None
+            self.last_timed_out = False
+            worker = threading.Thread(target=self._say, args=(text, u), name="tts", daemon=True)
+            worker.start()
+            budget = playback_budget_s(text)
+            while True:
+                worker.join(WATCH_S)
+                if not worker.is_alive():
+                    return
+                now = time.monotonic()
+                if u.t_audio is not None and now - u.t_audio > budget:
+                    what = f"playback still running {budget:.1f} s after the speaker opened"
+                    break
+                if u.t_audio is None and now - u.t0 > PREPARE_MAX_S:
+                    what = f"no audio after {PREPARE_MAX_S:.0f} s"
+                    break
+            log.warning("speech output hung (%s); aborting it so the microphone reopens", what)
+            self.last_timed_out = True
+            self._cut(u)
+
+    def _say(self, text: str, u: _Utterance) -> None:
+        """The utterance itself, on the worker thread: ElevenLabs, else Piper, else espeak."""
+        try:
             creds = self._eleven_creds()
             if creds and self._online():
                 try:
-                    self._speak_eleven(text, *creds)
+                    self._speak_eleven(text, *creds, u=u)
                     self.last_engine = "elevenlabs"
                     return
                 except _ElevenFailed as ex:
                     log.warning("ElevenLabs failed (%s); using Piper", ex)
                 except Exception:
                     log.exception("ElevenLabs failed; using Piper")
-            if self._stop.is_set():
+            if u.stop.is_set():
                 return
             try:
-                self._speak_piper(text)
+                self._speak_piper(text, u)
                 self.last_engine = "piper"
-            except Exception:
-                log.exception("Piper failed; nothing spoken")
+                return
+            except Exception as ex:
+                if u.t_audio is not None:           # broke mid-answer: part of it was said, don't repeat it
+                    log.warning("Piper broke mid-utterance: %s: %s", type(ex).__name__, ex)
+                    return
+                log.error("Piper failed (%s: %s); trying espeak", type(ex).__name__, ex)
+            if u.stop.is_set():
+                return
+            if self._speak_espeak(text, u):
+                self.last_engine = "espeak"
+            else:
+                log.error("no voice could speak (Piper failed, espeak-ng not installed or failed): %r "
+                          "was not said", text[:60])
+        except Exception:
+            log.exception("speech failed")
 
     @property
     def speaking(self) -> bool:
@@ -254,26 +363,36 @@ class TTS:
         return self._lock.locked()
 
     def stop(self) -> None:
-        """Cut off current speech (safe from any thread)."""
-        self._stop.set()
-        out, resp = self._out, self._resp
+        """Cut off current speech (safe from any thread; returns within about ABORT_S)."""
+        u = self._utt
+        if u is not None:
+            self._cut(u)
+
+    def _cut(self, u: _Utterance) -> None:
+        u.stop.set()
+        resp, out = u.resp, u.out
         if resp is not None:
             try:
                 resp.close()
             except Exception:
                 pass
-        if out is not None:
-            try:
-                out.abort()
-            except Exception:
-                pass
+        _abort_quietly(out)
 
     # -- engines
 
-    def _speak_eleven(self, text: str, key: str, voice_id: str) -> None:
+    def _open(self, rate: int, u: _Utterance) -> AudioOut:
+        """Open the speaker for u; the playback deadline runs from here (opening can hang too)."""
+        u.t_audio = time.monotonic()
+        self.last_first_audio_s = u.t_audio - u.t0
+        u.out = open_output(rate, self._device())
+        if u.stop.is_set():                    # cut while the device was opening
+            _abort_quietly(u.out)
+        return u.out
+
+    def _speak_eleven(self, text: str, key: str, voice_id: str, u: Optional[_Utterance] = None) -> None:
         """Stream PCM to the speaker as it arrives. Raises _ElevenFailed before any audio is
         played (so the caller can fall back); errors after first audio just end the utterance."""
-        t0 = time.monotonic()
+        u = u or _Utterance()
         q: "queue.Queue[object]" = queue.Queue()
         DONE = object()
         abandon = threading.Event()
@@ -289,12 +408,12 @@ class TTS:
                     stream=True, timeout=(FIRST_BYTE_S, 5.0))
                 if abandon.is_set():
                     return
-                self._resp = r
+                u.resp = r
                 if r.status_code != 200:
                     q.put(_ElevenFailed(f"HTTP {r.status_code}: {r.text[:200]}"))
                     return
                 for chunk in r.iter_content(chunk_size=CHUNK_BYTES):
-                    if self._stop.is_set() or abandon.is_set():
+                    if u.stop.is_set() or abandon.is_set():
                         break
                     if chunk:
                         q.put(chunk)
@@ -303,8 +422,8 @@ class TTS:
                 q.put(_ElevenFailed(f"{type(ex).__name__}: {ex}"))
             finally:
                 if r is not None:
-                    if self._resp is r:
-                        self._resp = None
+                    if u.resp is r:
+                        u.resp = None
                     try:
                         r.close()
                     except Exception:
@@ -315,17 +434,16 @@ class TTS:
             first = q.get(timeout=FIRST_BYTE_S)
         except queue.Empty:
             abandon.set()
-            self._close_resp()
+            self._close_resp(u)
             raise _ElevenFailed(f"no audio after {FIRST_BYTE_S} s")
         if isinstance(first, Exception):
             raise first
         if first is DONE:
             raise _ElevenFailed("empty audio stream")
-        self.last_first_audio_s = time.monotonic() - t0
-        out = self._out = open_output(ELEVEN_RATE, self._device())
+        out = self._open(ELEVEN_RATE, u)
         try:
             out.write(first)  # type: ignore[arg-type]
-            while not self._stop.is_set():
+            while not u.stop.is_set():
                 try:
                     item = q.get(timeout=5.0)
                 except queue.Empty:
@@ -339,36 +457,49 @@ class TTS:
                 out.write(item)  # type: ignore[arg-type]
         finally:
             abandon.set()
-            self._finish(out)
+            self._finish(out, u)
 
-    def _speak_piper(self, text: str) -> None:
-        t0 = time.monotonic()
+    def _speak_piper(self, text: str, u: Optional[_Utterance] = None) -> None:
+        u = u or _Utterance()
         voice = load_piper(self.piper_voice)
         out: Optional[AudioOut] = None
         try:
             for pcm, rate in piper_chunks(voice, text):
-                if self._stop.is_set():
+                if u.stop.is_set():
                     break
                 if out is None:
-                    self.last_first_audio_s = time.monotonic() - t0
-                    out = self._out = open_output(rate, self._device())
+                    out = self._open(rate, u)
                 out.write(pcm)
         finally:
             if out is not None:
-                self._finish(out)
+                self._finish(out, u)
 
-    def _finish(self, out: AudioOut) -> None:
-        self._out = None
+    def _speak_espeak(self, text: str, u: _Utterance) -> bool:
+        got = espeak_pcm(text)
+        if got is None or u.stop.is_set():
+            return False
+        pcm, rate = got
+        out = self._open(rate, u)
         try:
-            if self._stop.is_set():
-                out.abort()
-            else:
-                out.close()
+            out.write(pcm)
+        finally:
+            self._finish(out, u)
+        return True
+
+    def _finish(self, out: AudioOut, u: _Utterance) -> None:
+        if u.out is out:
+            u.out = None
+        if u.stop.is_set():
+            _abort_quietly(out)
+            return
+        try:
+            out.close()
         except Exception:
             pass
 
-    def _close_resp(self) -> None:
-        r = self._resp
+    @staticmethod
+    def _close_resp(u: _Utterance) -> None:
+        r = u.resp
         if r is not None:
             try:
                 r.close()
@@ -399,12 +530,22 @@ class TTS:
         audio = np.concatenate(parts) if parts else np.zeros(0, dtype=np.int16)
         return audio, rate, (first if first is not None else time.monotonic() - t0)
 
-    def warm(self) -> None:
-        """Load the Piper voice now so the first offline answer is not slow."""
+    def warm(self) -> bool:
+        """Load the Piper voice now so the first offline answer is not slow. False (with an error log)
+        if it failed: every answer then tries Piper again, and espeak-ng if Piper still won't load."""
         try:
             load_piper(self.piper_voice)
-        except Exception:
-            log.exception("Piper warm-up failed")
+            return True
+        except Exception as ex:
+            log.error("Piper voice %s failed to load (%s: %s). Offline answers will retry it each time, "
+                      "then fall back to espeak-ng (%s).", self.piper_voice, type(ex).__name__, ex,
+                      "installed" if _espeak_available() else "NOT installed: offline answers will be silent")
+            return False
+
+
+def _espeak_available() -> bool:
+    import shutil
+    return bool(shutil.which("espeak-ng") or shutil.which("espeak"))
 
 
 def main(argv=None) -> int:
