@@ -495,19 +495,24 @@ class VisualQA:
         return out
 
     def _pointed(self, text: str, point, orig_wh: tuple) -> Answer:
-        """The answer, pointing where the VLM pointed: a tracked entity it lands on, else the spot."""
-        if not isinstance(point, dict) or getattr(self.table, "ok", True) is False:
+        """The answer, pointing where the VLM pointed: a tracked entity it lands on, else the spot.
+        Off the table, with room pointing on (spec 0006), the image spot itself: action "room:u,v"."""
+        if not isinstance(point, dict):
             return Answer(text)
         px = point_to_px(point, orig_wh)
         if px is None:
             return Answer(text)
+        off = (Answer(text, action=f"room:{px[0]:.0f},{px[1]:.0f}")
+               if (self.cfg.get("room") or {}).get("enabled") else Answer(text))
+        if getattr(self.table, "ok", True) is False:
+            return off
         c = px_to_cm(self.table, [px])
         if c is None:
-            return Answer(text)
+            return off
         x, y = float(c[0][0]), float(c[0][1])
         w, h = ((self.cfg.get("table") or {}).get("size_cm") or [90, 60])
         if not (-5 <= x <= w + 5 and -5 <= y <= h + 5):
-            return Answer(text)
+            return off
         ent = self._entity_at(x, y)
         if ent is not None:
             return Answer(text, point_at=ent, action="point")
