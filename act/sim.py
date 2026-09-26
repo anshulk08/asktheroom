@@ -230,6 +230,9 @@ class SimCamera:
             if -1.0 <= x <= w + 1 and -1.0 <= y <= h + 1:
                 px, py = rig.table.cm_to_px([[x, y]])[0]
                 self._draw_dot(img, px, py, rng.uniform(0.85, 1.0))
+        if on and rig.ghost_cm is not None:        # a glint of the beam elsewhere, brighter than the dot
+            px, py = rig.table.cm_to_px([rig.ghost_cm])[0]
+            self._draw_dot(img, px, py, 1.3)
         return np.clip(img, 0, 255).astype(np.uint8)
 
     @staticmethod
@@ -267,6 +270,7 @@ class SimRig:
         self.latency_s, self.backlash_deg = latency_s, backlash_deg
         self.pulse_noise_us, self.noise_sigma = pulse_noise_us, noise_sigma
         self.blocked = False                 # something between laser and table
+        self.ghost_cm: Optional[tuple[float, float]] = None   # a second, brighter dot while the laser is on
         size = tuple(((cfg or {}).get("table") or {}).get("size_cm", (90, 60)))
         self.table = SimTable(size)
         self.geom = geom or HeadGeometry(table=self.table.size_cm)

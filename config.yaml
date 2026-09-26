@@ -176,7 +176,7 @@ pca9685_address: 0x40
 serial_port: /dev/ttyUSB0
 serial_baud: 115200
 serial_timeout_s: 0.1
-camera_latency_s: 0.06       # measure on the rig with act.calibrate.measure_latency, then set
+camera_latency_s: 0.15       # safe default; python -m act.calibrate --rig measures it: put its value in config.local.yaml
 laser_channel: 15
 laser_timeout_s: 10
 laser_tol_cm: 2.0             # closed-loop aim stops within this (1 cm makes SG90-class servos hunt)
