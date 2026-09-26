@@ -71,7 +71,7 @@ Rules:
 - Image 1 has numbered yellow boxes (marks) around objects the tracker follows; the text lists them. If the answer is about one visible thing and a mark is on it, set mark to that number and point to null.
 - If the thing has no mark, set mark to null and point to its centre in image 1 as {"x": fraction of the width, "y": fraction of the height}, each 0 to 1.
 - If the answer is not about one visible thing, mark and point are both null.
-- Never mention the marks, their numbers or the yellow boxes in the answer: the listener can't see them. Describe places the way a person would ("on the left, next to the cup").
+- Never mention the marks, their numbers or the yellow boxes in the answer: the listener can't see them. Describe places on the table, not the image, the way a person would ("on the left, next to the cup").
 - confidence: 0 to 1.
 Reply with the JSON object only."""
 

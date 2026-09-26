@@ -268,6 +268,7 @@ def test_look_marks_visible_entities_and_points_at_the_chosen_mark(log):
     assert "numbered" in s and "mark" in s and "medication" in s and "beyond the table" in s
     assert "box_2d" not in s
     assert "never mention the marks" in s                   # the listener can't see them
+    assert "not the image" in s                              # 'near the top of the image' means nothing aloud
 
 
 def test_marks_skip_hidden_and_unboxed_entities(log):
