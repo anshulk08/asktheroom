@@ -341,6 +341,17 @@ def test_yoloe_respects_the_table_roi():
     assert [q.box_px for q in y.propose(np.zeros((H, W, 3), np.uint8), [], [])] == [(600, 300, 690, 380)]
 
 
+def test_yoloe_drops_boxes_that_are_part_of_a_person():
+    """Prompt-free YOLOE sees a hand as 'person' and boxes pieces of it as objects ('battery',
+    'bracelet', 'gadget' on the rig). Anything mostly inside a person box is the person."""
+    m = FakeYOLOE([(1, 0.8, (300, 200, 700, 700)),          # person: the arm and hand
+                   (3, 0.5, (420, 480, 500, 540)),          # 'charger': a finger, inside the person
+                   (0, 0.6, (650, 600, 760, 690)),          # cup: only its corner under the arm, kept
+                   (0, 0.6, (900, 300, 990, 380))])         # cup far away: kept
+    props = YOLOEProposer({'conf': 0.15}, model=m).propose(np.zeros((H, W, 3), np.uint8), [], [])
+    assert sorted(q.box_px for q in props) == [(650, 600, 760, 690), (900, 300, 990, 380)]
+
+
 # ------------------------------------------------------------------ Detector integration
 
 class FakeBackend:

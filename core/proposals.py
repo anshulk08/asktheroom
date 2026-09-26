@@ -545,6 +545,7 @@ class _quiet_nan:
 # ================================================================================ YOLOE adapter
 
 # Prompt-free vocabularies name the table, people and hands too; none of them is a thing on the table.
+PEOPLE = ['person', 'man', 'woman', 'child', 'hand', 'arm', 'finger']   # a box mostly inside one of these is them
 DEFAULT_IGNORE = ['person', 'man', 'woman', 'child', 'hand', 'arm', 'finger', 'table', 'dining table', 'desk',
                   'coffee table', 'tabletop', 'countertop', 'floor', 'wall', 'wood', 'wood floor', 'hardwood']
 
@@ -612,10 +613,14 @@ class YOLOEProposer:
         masks = _np(r.masks.data) > 0.5 if (c.masks and getattr(r, 'masks', None) is not None) else None
         fh, fw = img.shape[:2]
         lo, hi = c.min_area_frac * fh * fw, c.max_area_frac * fh * fw
+        people = [tuple(float(v) for v in b) for b, s, k in zip(xyxy, conf, cls)
+                  if s >= c.conf and str(names.get(int(k), '')).lower() in PEOPLE]
         cands = []
         for j, (b, s, k) in enumerate(zip(xyxy, conf, cls)):
             if s < c.conf or str(names.get(int(k), '')).lower() in self.ignore:
                 continue
+            if any(geom.overlap_frac(p, tuple(float(v) for v in b)) >= 0.6 for p in people):
+                continue                         # a finger / bracelet boxed on its own: part of the person
             box = tuple(int(round(v)) for v in b)
             if not lo <= geom.area(box) <= hi:
                 continue
