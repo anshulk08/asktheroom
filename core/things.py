@@ -12,7 +12,8 @@ weighted score, so every decision can be explained in one sentence:
   per batch, while the thing is in view or in a hand (continuity):
     merge  one proposal covering two visible things' last boxes: both are kept where they were, at
            ambiguity_penalty, until they come apart (then nearest, or appearance if decisive)
-    (b)    a visible thing: the nearest proposal within gate_cm
+    (b)    a visible thing: the nearest proposal within gate_cm, of a size like its latest box (or,
+           while an arm hides part of it, over the box it rests in: the whole of it again)
     (b)    a HELD thing: a proposal at its holding hand's recent boxes
   otherwise the proposal is a candidate; after the k-of-n debounce, clear of hands:
     (a)    causal: it came out of a container / cover that holds hidden things (a hand touched that
@@ -54,6 +55,7 @@ PLACED = {EventType.APPEARED, EventType.MOVED, EventType.PUT_BACK, EventType.TAK
 STARTUP_S = 3.0     # configured objects first seen this soon after the first batch were not put down
 ARTICLES = {'my', 'the', 'a', 'an', 'your', 'our', 'this', 'that', 'his', 'her', 'their'}
 NEG = float('-inf')
+REST_IOU = 0.5      # a proposal this much over the box a partly hidden thing rests in: the whole of it
 
 
 @dataclass
@@ -392,7 +394,7 @@ class ThingRules:
             for n in names:
                 ent = self.entities[n]
                 dd = geom.dist(d.center_cm, ent.pos_cm)
-                if dd <= tc.gate_cm and self._size_ok(d.box_cm, ent.box_cm):
+                if dd <= tc.gate_cm and self._size_fits(n, d.box_cm):
                     pairs.append((dd, i, n))
         taken = self._greedy(pairs, props, seen)
         self._resolve_splits(taken, props, seen)
@@ -562,7 +564,7 @@ class ThingRules:
                 and self.entities[n].merged_into is None and self.entities[n].pre_pickup_pos is None
                 and self.entities[n].pos_cm is not None
                 and geom.dist(d.center_cm, self.entities[n].pos_cm) <= tc.same_spot_cm
-                and self._size_ok(d.box_cm, self.entities[n].box_cm)]
+                and self._size_fits(n, d.box_cm)]
         if len(spot) == 1:
             return spot[0], []
         # (c) appearance: only a strict, clear match brings an archived thing back
@@ -759,7 +761,7 @@ class ThingRules:
             for f in ('status', 'parent', 'pos_cm', 'box_cm', 'last_seen', 'confidence', 'candidates',
                       'edge', 'pre_pickup_pos', 'zone', 'held_since'):
                 setattr(ek, f, getattr(ed, f))
-            for d in (self._seen_t, self._rest, self._carry, self._box_px, self._hidden_at,
+            for d in (self._seen_t, self._rest, self._rest_box, self._carry, self._box_px, self._hidden_at,
                       self._placed_t, self._lifted_at, self._learn_t, self._unsure_until):
                 if drop in d:
                     d[keep] = d.pop(drop)
@@ -797,6 +799,17 @@ class ThingRules:
             return True
         aa, ab = geom.area(a), geom.area(b)
         return aa > 0 and ab > 0 and max(aa, ab) / min(aa, ab) <= self._tcfg.size_ratio_max
+
+    def _size_fits(self, name: str, box) -> bool:
+        """Size gate for a proposal to be this thing: a size like its latest box or, while that has shrunk
+        (part of the thing hidden), the box it rests in again. An arm over most of a big thing leaves a
+        proposal for the uncovered part, and the thing follows it; when the arm goes, the whole thing is
+        still itself, not a new thing (hands_1: a tub)."""
+        last, rest = self.entities[name].box_cm, self._rest_box.get(name)
+        if self._size_ok(box, last):
+            return True
+        return (rest is not None and last is not None and geom.area(last) < geom.area(rest)
+                and geom.iou(box, rest) >= REST_IOU)
 
     def _thing_json(self, ent: Entity, out: dict) -> dict:
         if is_thing(ent.name):

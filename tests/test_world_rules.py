@@ -580,3 +580,18 @@ def test_keys_gone_when_the_waving_hand_moves_on_are_picked_up_by_it(scene, worl
     events += wave(scene, world, [75, 85, 90, 90, 90])
     assert types(events) == [EventType.PICKED_UP]
     assert (world.get('keys').status, world.get('keys').parent) == (Status.HELD, 'hand:1')
+
+
+def test_a_hand_over_part_of_the_box_is_not_a_pick_up(scene, world):
+    """The detector's box shrinks to the part of the box the hand leaves uncovered: its centre moves 6 cm
+    with a hand on it, but the box has not left where it lay. Partly hidden, not carried."""
+    scene.place('box', 40, 30)                      # 20 x 15 cm: x 30-50, y 22.5-37.5
+    scene.run(world, 1.0)
+    scene.hand(1, 40, 30)
+    scene.place('box', 34, 30, w=8, h=15)           # only the left end shows
+    events = scene.run(world, 1.0)
+    scene.hand_off(1)
+    scene.place('box', 40, 30)
+    events += scene.run(world, 1.0)
+    assert events == []
+    assert world.get('box').status == Status.VISIBLE
