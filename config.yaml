@@ -443,7 +443,10 @@ grok_check:                   # Grok checks the tracker each time the table sett
   timeout_s: 8
   min_conf: 0.6               # below: stored as 'unsure', no effect
   bind_names: true            # an unnamed thing:N takes Grok's label (never over a taught name) ...
-  bind_conf: 0.7              # ... at or above this confidence
+  bind_conf: 0.9              # ... at or above this confidence (on the rig, 0.7-0.8 named one thing
+                              # 'phone' and 'phone charger' on two checks; at 0.9 names held up)
+  merge_same: true            # one per kind: a new thing Grok names what a lost thing answers to is that
+                              # thing (never two seen at once, never one holding another)
   sighting_max_age_s: 900     # WHERE falls back to a sighting no older than this
   keep_h: 24                  # rows older than this are deleted on start
 

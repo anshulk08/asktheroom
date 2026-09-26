@@ -69,6 +69,7 @@ class GrokCheckConfig:
     min_conf: float = 0.6                   # below this a verdict is stored as 'unsure' and has no effect
     bind_names: bool = True
     bind_conf: float = 0.7                  # an unnamed thing takes Grok's label at or above this
+    merge_same: bool = False                # one per kind: a thing named what a lost thing answers to is it
     sighting_max_age_s: float = 900.0       # lookup() ignores older sightings
     keep_h: float = 24.0                    # rows older than this are deleted on start
 
@@ -436,11 +437,17 @@ class GrokCheck:
         if not self.c.bind_names or self.world is None or not hasattr(self.world, "bind_alias"):
             return []
         out = []
+        marked = {r["entity"] for r in rows if r["entity"]}
         for r in rows:
             ent = r["entity"]
             if r["verdict"] != "named" or not (ent or "").startswith("thing:") or r["confidence"] < self.c.bind_conf:
                 continue
-            if self._finds(r["grok_label"]) is not None:
+            owner = self._finds(r["grok_label"])
+            if owner is not None:
+                if self._one_of_kind(r, rows) and owner not in marked:
+                    kept = self._merge(owner, ent)
+                    if kept:
+                        out.append(f"{ent} = {r['grok_label']} ({kept})")
                 continue
             try:
                 if self.world.bind_alias(ent, r["grok_label"]):
@@ -449,6 +456,24 @@ class GrokCheck:
             except Exception:
                 log.exception("bind_alias failed")
         return out
+
+    def _one_of_kind(self, r: dict, rows: list[dict]) -> bool:
+        """Grok saw only one of this kind in the frame: no other real mark with a label like it."""
+        return self.c.merge_same and not any(
+            o is not r and o["entity"] and o["verdict"] in ("agree", "relabel", "named")
+            and same_thing(o["grok_label"] or "", r["grok_label"]) for o in rows)
+
+    def _merge(self, owner: str, ent: str) -> Optional[str]:
+        if not hasattr(self.world, "merge_same_kind"):
+            return None
+        try:
+            kept = self.world.merge_same_kind(owner, ent)
+        except Exception:
+            log.exception("merge_same_kind failed")
+            return None
+        if kept:
+            log.info("grok check: %s is %s again (one '%s')", ent, kept, owner)
+        return kept
 
     @staticmethod
     def _summary(rows: list[dict], wall: float, latency_ms: int, bound: list[str], n_marks: int) -> dict:

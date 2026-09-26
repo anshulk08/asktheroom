@@ -112,3 +112,90 @@ def test_the_nearest_of_two_lost_things_comes_back():
     assert world.get('thing:2').status == Status.VISIBLE
     assert world.get('thing:1').status == Status.UNKNOWN and things(world) == ['thing:1', 'thing:2']
     assert world.get('thing:2').pos_cm == pytest.approx((44, 30), abs=0.5)
+
+
+# ----- one per kind: Grok names a new thing what a lost thing answers to --------------------------
+
+def grok_names(world, ent, label, others=(), conf=0.95, merge_same=True):
+    """One settle check whose reply names the mark on `ent` `label` (plus `others`: (entity, label))."""
+    import json
+
+    import numpy as np
+
+    import tempfile
+
+    from core.config import load_config
+    from core.events import EventLog
+    from core.grok_check import GrokCheck
+    from core.narration import FakeProvider
+    from server.sim import SimTable
+    raw = load_config()
+    marks = [(ent, (100, 100, 160, 160))] + [(o, (300 + 80 * i, 100, 360 + 80 * i, 160))
+                                             for i, (o, _) in enumerate(others)]
+    rep = json.dumps({"marks": [dict(mark=i, real=True, label=lab, confidence=conf)
+                                for i, lab in enumerate([label] + [lab for _, lab in others], 1)],
+                      "unmarked": []})
+    g = GrokCheck({**raw, "grok_check": dict(enabled=True, merge_same=merge_same)},
+                  EventLog(":memory:", tempfile.mkdtemp()),
+                  table=SimTable(raw), provider=FakeProvider(rep), online=lambda: True, start=False)
+    g.world = world
+    return g.check(np.full((720, 1280, 3), 170, np.uint8), 2000.0, marks=marks,
+                   names={n: None for n, _ in marks})
+
+
+def lost_mug_then_new(scene, world, second_at=(70, 30)):
+    """thing:1 'mug' (taught) is carried off unseen; later a mug-sized thing:2 is put down elsewhere."""
+    picked_up_and_lost(scene, world)
+    world.bind_alias('thing:1', 'mug')
+    scene.run(world, 3.0)
+    scene.thing('mug', *second_at)
+    scene.run(world, 2.0)
+    assert things(world) == ['thing:1', 'thing:2']
+
+
+def test_a_new_thing_grok_names_like_a_lost_one_is_that_one():
+    scene, world = make(rebirth_s=0.0)
+    lost_mug_then_new(scene, world)
+    s = grok_names(world, 'thing:2', 'mug')
+    assert things(world) == ['thing:1'] and world.get('thing:2').merged_into == 'thing:1'
+    assert world.get('thing:1').status == Status.VISIBLE
+    assert world.get('thing:1').pos_cm == pytest.approx((70, 30), abs=0.5)
+    assert world.find('mug') == 'thing:1' and s['bound'] == ['thing:2 = mug (thing:1)']
+
+
+def test_two_of_a_kind_in_one_frame_stay_two():
+    scene, world = make(rebirth_s=0.0)
+    lost_mug_then_new(scene, world)
+    scene.thing('mug2', 20, 20)
+    scene.run(world, 2.0)
+    grok_names(world, 'thing:2', 'mug', others=[('thing:3', 'blue mug')])
+    assert things(world) == ['thing:1', 'thing:2', 'thing:3']
+
+
+def test_seen_together_once_they_stay_two():
+    """The mug was on the table while the second one was put down, then carried off: two mugs."""
+    scene, world = make(rebirth_s=0.0)
+    scene.thing('mug', 40, 30)
+    scene.thing('cup', 70, 30)
+    scene.run(world, 2.0)
+    world.bind_alias('thing:1', 'mug')
+    scene.remove('mug')
+    scene.run(world, 4.0)
+    assert world.get('thing:1').status == Status.UNKNOWN
+    grok_names(world, 'thing:2', 'mug')
+    assert things(world) == ['thing:1', 'thing:2']
+
+
+def test_off_or_unsure_nothing_merges():
+    scene, world = make(rebirth_s=0.0)
+    lost_mug_then_new(scene, world)
+    grok_names(world, 'thing:2', 'mug', merge_same=False)
+    grok_names(world, 'thing:2', 'mug', conf=0.65)
+    assert things(world) == ['thing:1', 'thing:2']
+
+
+def test_a_lost_thing_still_on_the_marks_is_not_merged():
+    scene, world = make(rebirth_s=0.0)
+    lost_mug_then_new(scene, world)
+    grok_names(world, 'thing:2', 'mug', others=[('thing:1', 'tape')])
+    assert things(world) == ['thing:1', 'thing:2']

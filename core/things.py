@@ -240,6 +240,7 @@ class ThingRules:
         logged = getattr(self.events, 'max_number', None)
         self._thing_n = max(getattr(self, '_thing_n', 0), logged(PREFIX) if logged else 0)
         self._things: list[str] = []                   # every thing ever confirmed, oldest first
+        self._born: dict[str, float] = {}              # thing -> wall time it was confirmed
         self._cands: list[Candidate] = []
         self._banks: dict[str, ExemplarBank] = {}
         self._aliases: dict[str, str] = {}              # normalised alias -> thing
@@ -341,6 +342,23 @@ class ThingRules:
                 self._now, self._wall = time.monotonic(), time.time()
             self._absorb(keep, drop)
             return keep
+
+    def merge_same_kind(self, older: str, newer: str) -> str | None:
+        """One object per kind: the thing `newer` was just named what `older` answers to (Grok's label on
+        the settle check). Fold newer into older only when they cannot be two objects: older lost (UNKNOWN
+        / GONE) since before newer was confirmed, so never seen together; newer lying on the table; and
+        nothing inside or under either. Two of a kind seen at once stay two. Returns the survivor or None."""
+        with self.lock:
+            a, b = self._survivor(older), self._survivor(newer)
+            if a == b or not (is_thing(a) and is_thing(b)) or a not in self.entities or b not in self.entities:
+                return None
+            ea, eb, born = self.entities[a], self.entities[b], self._born.get(b)
+            if ea.status not in ARCHIVED or eb.status != Status.VISIBLE or born is None \
+                    or ea.last_seen is None or ea.last_seen >= born:
+                return None
+            if any(e.parent in (a, b) for e in self.entities.values()):
+                return None
+            return self.confirm_same(a, b)
 
     def similar_to(self, name: str) -> list[tuple[str, float]]:
         """Things that may be the same object as name (their maybe_same_as links to it), best first."""
@@ -707,6 +725,7 @@ class ThingRules:
         ent.maybe_same_as = [(n, float(s) if s != NEG else 0.0) for n, s in links]
         self.entities[name] = ent
         self._things.append(name)
+        self._born[name] = self._wall if self._wall is not None else time.time()
         self._path[name] = deque(maxlen=60)
         self._bits[name] = deque(list(bits)[:-1], maxlen=self.cfg.present_n)
         self._present[name] = False
