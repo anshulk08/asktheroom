@@ -22,8 +22,9 @@ weighted score, so every decision can be explained in one sentence:
     (c)    appearance resurrects an archived thing only above resurrect_sim AND by resurrect_margin
            over every other thing (a twin on the table blocks it)
     (d)    a new thing, with maybe_same_as links to archived things that look similar; only inside
-           the tabletop outline clear of its edge band (table_area:, core/table_area.py). In the band
-           a proposal can still be an existing thing, so one slid off the table leaves as itself
+           the tabletop outline clear of its edge band (table_area:, core/table_area.py), and never
+           from a proposal flagged occluded (inside a person box). Either can still be an existing
+           thing, so one slid off the table leaves as itself and a carried one stays itself
 Exemplars (per-thing appearance banks) are learned only from isolated, confident, unambiguous
 views, so an ambiguous association can never drift an identity.
 
@@ -508,8 +509,9 @@ class ThingRules:
 
     def _may_create(self, d: Detection) -> bool:
         """A proposal may start a NEW identity only inside the tabletop outline, clear of its edge
-        band (table_area:). Anywhere else it can still be an existing thing (rules a-c)."""
-        return self._area.interior(d.center_cm)
+        band (table_area:), and only if it is not flagged occluded (mostly inside a person box: a
+        finger, a knee, a carried object). Otherwise it can still be an existing thing (rules a-c)."""
+        return not d.occluded and self._area.interior(d.center_cm)
 
     def _identify(self, d: Detection, vec, seen, may_create: bool = True):
         """Ordered identity rules (a) causal, (b) continuity, (c) decisive appearance; returns

@@ -39,11 +39,12 @@ def _px(box: BoxCm) -> tuple[int, int, int, int]:
     return tuple(int(round(v * PX_PER_CM)) for v in box)
 
 
-def _det(cls: str, box: BoxCm, conf: float = 0.9, shift_px: tuple[int, int] = (0, 0)) -> Detection:
+def _det(cls: str, box: BoxCm, conf: float = 0.9, shift_px: tuple[int, int] = (0, 0),
+         occluded: bool = False) -> Detection:
     x1, y1, x2, y2 = _px(box)
     dx, dy = shift_px
     return Detection(cls=cls, conf=conf, box_px=(x1 + dx, y1 + dy, x2 + dx, y2 + dy),
-                     center_cm=((box[0] + box[2]) / 2, (box[1] + box[3]) / 2), box_cm=box)
+                     center_cm=((box[0] + box[2]) / 2, (box[1] + box[3]) / 2), box_cm=box, occluded=occluded)
 
 
 def texture(key: str, h: int, w: int) -> np.ndarray:
@@ -91,6 +92,7 @@ class Scene:
         self.overlays: dict[str, BoxCm] = {}       # drawn, never detected
         self.things: dict[str, BoxCm] = {}         # open-world objects: detected as cls 'thing'
         self.looks: dict[str, np.ndarray] = {}     # thing key -> look vector (default look(key))
+        self.occluded: set[str] = set()            # things proposed inside a person box (flagged)
         self._tex: dict[tuple, np.ndarray] = {}
 
     def place(self, name: str, x: float, y: float, w: float | None = None, h: float | None = None) -> None:
@@ -101,11 +103,14 @@ class Scene:
         self.objects.pop(name, None)
         self.things.pop(name, None)
 
-    def thing(self, key: str, x: float, y: float, w: float = 6.0, h: float = 4.0, look=None) -> None:
-        """Place (or move) an open-world object; the detector reports it only as a 'thing' proposal."""
+    def thing(self, key: str, x: float, y: float, w: float = 6.0, h: float = 4.0, look=None,
+              occluded: bool = False) -> None:
+        """Place (or move) an open-world object; the detector reports it only as a 'thing' proposal,
+        flagged occluded when it lies inside a person box (YOLOE's 'person')."""
         self.things[key] = _box(x, y, w, h)
         if look is not None:
             self.looks[key] = look
+        (self.occluded.add if occluded else self.occluded.discard)(key)
 
     def embed(self, img, box_px) -> np.ndarray | None:
         """Fake appearance embedder: the look of the thing whose pixel box is centred nearest box_px."""
@@ -141,7 +146,8 @@ class Scene:
         dets = Detections(
             t=self.t, frame_idx=self.idx,
             items=[_det(n, b, shift_px=shift) for n, b in self.objects.items() if n not in self.missed]
-            + [_det('thing', b, THING_CONF, shift) for k, b in self.things.items() if k not in self.missed],
+            + [_det('thing', b, THING_CONF, shift, k in self.occluded)
+               for k, b in self.things.items() if k not in self.missed],
             hands=[_det(f'hand:{i}', b) for i, b in self.hands.items()],
         )
         return dets, Frame(t=self.t, wall=self.t, img=self.draw() if self.render else None, idx=self.idx)

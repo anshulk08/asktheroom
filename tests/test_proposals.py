@@ -341,15 +341,32 @@ def test_yoloe_respects_the_table_roi():
     assert [q.box_px for q in y.propose(np.zeros((H, W, 3), np.uint8), [], [])] == [(600, 300, 690, 380)]
 
 
-def test_yoloe_drops_boxes_that_are_part_of_a_person():
+def test_yoloe_flags_boxes_that_are_part_of_a_person():
     """Prompt-free YOLOE sees a hand as 'person' and boxes pieces of it as objects ('battery',
-    'bracelet', 'gadget' on the rig). Anything mostly inside a person box is the person."""
+    'bracelet', 'gadget' on the rig). A box mostly inside a person box is kept but flagged occluded:
+    it may be a finger, or an object being carried. The world never starts a new thing from it, but an
+    existing thing can still be followed through it (dropping it lost carried objects)."""
     m = FakeYOLOE([(1, 0.8, (300, 200, 700, 700)),          # person: the arm and hand
                    (3, 0.5, (420, 480, 500, 540)),          # 'charger': a finger, inside the person
-                   (0, 0.6, (650, 600, 760, 690)),          # cup: only its corner under the arm, kept
-                   (0, 0.6, (900, 300, 990, 380))])         # cup far away: kept
+                   (0, 0.6, (650, 600, 760, 690)),          # cup: only its corner under the arm
+                   (0, 0.6, (900, 300, 990, 380))])         # cup far away
     props = YOLOEProposer({'conf': 0.15}, model=m).propose(np.zeros((H, W, 3), np.uint8), [], [])
-    assert sorted(q.box_px for q in props) == [(650, 600, 760, 690), (900, 300, 990, 380)]
+    flags = {q.box_px: q.occluded for q in props}
+    assert flags == {(420, 480, 500, 540): True, (650, 600, 760, 690): False, (900, 300, 990, 380): False}
+
+
+def test_the_occluded_flag_reaches_the_world_on_the_detection():
+    class Fixed:
+        def set_roi(self, poly):
+            pass
+
+        def propose(self, img, known, hands):
+            return [Proposal((600, 300, 690, 380), 0.6, occluded=True), Proposal((900, 300, 990, 380), 0.6)]
+
+    det = Detector(CFG, table=TenPxPerCm(), backend=FakeBackend(), proposer=Fixed(), crops=None)
+    d = det.detect(Frame(t=0, wall=0, img=np.zeros((H, W, 3), np.uint8), idx=0))
+    assert {x.box_px: x.occluded for x in d.items} == {(600, 300, 690, 380): True, (900, 300, 990, 380): False}
+    assert all(not x.occluded for x in d.hands)
 
 
 def test_yoloe_never_proposes_inside_ignored_regions():

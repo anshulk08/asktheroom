@@ -32,6 +32,9 @@ class Detection:
     box_px: tuple[int, int, int, int]            # x1, y1, x2, y2
     center_cm: Point
     box_cm: tuple[float, float, float, float]    # x1, y1, x2, y2
+    # A 'thing' proposal lying mostly inside a person box (core/proposals.py): it may be a finger or a
+    # carried object, so it never starts a new thing but may be an existing one. Says nothing of contact.
+    occluded: bool = False
 
 
 @dataclass

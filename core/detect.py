@@ -159,17 +159,17 @@ class Detector:
         hand_boxes = [h.box_px for h in hands]
         props = dedupe(self.proposer.propose(img, known, hand_boxes), known, hand_boxes, self.dedupe_cfg)
         self.last_proposal_ms = 1000 * (time.perf_counter() - t0)
-        return [self._to_det(THING, p.conf, p.box_px) for p in props]
+        return [self._to_det(THING, p.conf, p.box_px, p.occluded) for p in props]
 
     __call__ = detect
 
-    def _to_det(self, obj: str, conf: float, box) -> Detection:
+    def _to_det(self, obj: str, conf: float, box, occluded: bool = False) -> Detection:
         x1, y1, x2, y2 = box
         pts = self.table.px_to_cm([[x1, y1], [x2, y2], [(x1 + x2) / 2, (y1 + y2) / 2]])
         (cx1, cy1), (cx2, cy2), (cx, cy) = (tuple(float(v) for v in p) for p in pts)
         return Detection(cls=obj, conf=round(conf, 3), box_px=(x1, y1, x2, y2),
                          center_cm=(cx, cy),
-                         box_cm=(min(cx1, cx2), min(cy1, cy2), max(cx1, cx2), max(cy1, cy2)))
+                         box_cm=(min(cx1, cx2), min(cy1, cy2), max(cx1, cx2), max(cy1, cy2)), occluded=occluded)
 
 
 def export_engine(cfg: dict, pt: Optional[str] = None) -> str:
