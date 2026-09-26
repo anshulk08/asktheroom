@@ -340,6 +340,76 @@ def test_look_sends_upscaled_crops_of_named_entities(log, monkeypatch):
     assert "keys: visible" in texts[-1] and "Question: are my keys next to the box?" in texts[-1]
 
 
+def test_close_ups_say_when_they_were_taken(log, monkeypatch):
+    """A close-up is evidence from its own moment: the prompt gives its age next to image 1, so an old
+    view is never passed off as the table now."""
+    import core.crops as crops
+    from core.crops import Crop, CropTrack
+    ages = {"keys": 0.0, "box": 42.0}
+
+    class Store:
+        def for_entity(self, ent):
+            c = Crop(img=np.full((40, 30, 3), 90, np.uint8), box_px=(0, 0, 30, 40), box_cm=ent.box_cm,
+                     t=0.0 - ages[ent.name], score=1)
+            return CropTrack(ent.name, ent.name, (0, 0, 30, 40), ent.box_cm, c.t, best=c)
+
+    monkeypatch.setattr(crops, "active", lambda: Store())
+    q, prov = qa(log, look_reply())
+    q.look("are my keys next to the box?", parse("are my keys next to the box?", CFG))
+    texts = [p[1] for p in prov.calls[0].parts if p[0] == "text"]
+    keys = next(t for t in texts if "close-up of the keys" in t)
+    box = next(t for t in texts if "close-up of the box" in t)
+    assert "same time as image 1" in keys
+    assert "42 seconds before image 1" in box and "may have changed" in box
+    assert "when it was taken" in prov.calls[0].system
+
+
+def test_attach_binds_crops_to_the_things_the_world_saw(log, monkeypatch):
+    """After every world.update the crop store learns which thing each view was (so close-ups follow
+    identity, not position): a swap at the same spot between two frames keeps each thing's own view."""
+    import core.crops as crops
+    from core.crops import CropStore
+
+    store = CropStore(recent_every_s=0, swap_de=1e9)            # no colour check: identity alone
+    monkeypatch.setattr(crops, "active", lambda: store)
+
+    class World:
+        def __init__(self):
+            self.ents = {}
+
+        def update(self, dets, frame):
+            for name, d in zip(self.names, dets.items):
+                self.ents[name] = Entity(name, "target", Status.VISIBLE, pos_cm=d.center_cm, box_cm=d.box_cm,
+                                         last_seen=frame.wall)
+            return []
+
+        def thing_labels(self):
+            return {n: None for n in self.ents}
+
+        def get(self, name):
+            return self.ents[name]
+
+        def state_json(self):
+            return {"entities": []}
+
+    world = World()
+    q, _ = qa(log, look_reply(), world=FakeWorld([], log))
+    q.attach(world)
+    block = np.full((80, 80, 3), 60, np.uint8)
+    block[::8] = 250
+    im = img(block=block, at=(600, 300), size=80)
+    for i, name in enumerate(["thing:1", "thing:1", "thing:2"]):
+        d = Detection("thing", 0.8, (600, 300, 680, 380), (64.0, 34.0),
+                      tuple(float(v) for v in (60, 30, 68, 38)))       # a new box object per view, as the detector's
+        f = frame(1.0 + i / 10, im)
+        store.update(im, [d], [], f.t)
+        world.names = [name]
+        world.update(Detections(t=f.t, frame_idx=f.idx, items=[d]), f)
+    one = store.for_entity(world.get("thing:1"))
+    assert one is not None and one.owner == "thing:1" and one.best.t <= 1.1 + 1e-9
+    assert store.for_entity(world.get("thing:2")) is None       # nothing confirmed as thing:2 yet
+
+
 # ---------------------------------------------------------------- B: recalling
 
 def recall_reply(answer="A red mug was on the table from about 9:10 to 9:40.", conf=0.8):

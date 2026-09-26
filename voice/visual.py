@@ -14,7 +14,9 @@ still answers everything else). Over the hourly cap, route() returns None and th
 
 look(): set-of-marks grounding. Every VISIBLE tracked entity with a box (known objects and thing:N) is
 drawn on the current frame (<= look_px) as a numbered yellow box; that marked frame, upscaled close-ups of
-entities the question names (from core.crops.active()), the compact world state and the question go to
+entities the question names (from core.crops.active(): only views the store knows were of that entity, each
+labelled with when it was taken; attach() binds views to things after every world.update), the compact
+world state and the question go to
 the VLM, which replies with strict JSON {answer, confidence, mark: null | number, point: null | {x, y}
 fractions of image 1}. A mark points at its entity (the laser then follows it through world.resolve); a
 point (for something no mark covers) is mapped to table cm (frame px -> table homography), attached to a
@@ -40,7 +42,7 @@ import logging
 import re
 import time
 from collections import deque
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 import numpy as np
 
@@ -49,6 +51,9 @@ from core.narration import NarrationConfig, NarrationError, ProviderError, _pars
 from core.narration_store import parse_window, redact_meds
 from core.types import Answer, Intent
 from core.visual_memory import VisualArchive, VisualConfig, digest_text, make_embedder
+
+if TYPE_CHECKING:
+    from core.crops import Crop
 
 log = logging.getLogger(__name__)
 
@@ -69,7 +74,7 @@ SCENE = re.compile(r"\b(?:table|desk|here|this|that|these|those|see|seen|saw|loo
 THING_Q = re.compile(r"^(?:is|are) (?:the|my|your|our|a|an|there)\b")     # 'is the charger plugged in'
 NOT_THING = re.compile(r"\b(?:weather|time|date|day|news|temperature)\b")  # 'is the weather nice'
 
-LOOK_SYSTEM = """You answer spoken questions about a tabletop seen by an overhead camera that looks straight down. You see the table surface, the objects on it and sometimes hands; nothing beyond the table's edge, no faces, no room. Image 1 is the whole table right now. Any later images are enlarged close-ups of objects the question names. You also get what an object tracker believes about known objects; it remembers hidden ones (an object INSIDE the box or UNDER the notebook can't be seen but is there).
+LOOK_SYSTEM = """You answer spoken questions about a tabletop seen by an overhead camera that looks straight down. You see the table surface, the objects on it and sometimes hands; nothing beyond the table's edge, no faces, no room. Image 1 is the whole table right now. Any later images are enlarged close-ups of objects the question names; each says when it was taken, and an older close-up shows how the object looked then, not necessarily now. You also get what an object tracker believes about known objects; it remembers hidden ones (an object INSIDE the box or UNDER the notebook can't be seen but is there).
 
 Rules:
 - Answer in one or two short spoken sentences: plain words, no lists, no coordinates, no markdown.
@@ -202,6 +207,24 @@ def _jpeg(img: np.ndarray, long_side: Optional[int] = None, upscale: bool = Fals
 def _clock(wall: float) -> str:
     lt = time.localtime(wall)
     return f"{lt.tm_hour % 12 or 12}:{lt.tm_min:02d} {'AM' if lt.tm_hour < 12 else 'PM'}"
+
+
+def _crop_store():
+    try:
+        from core.crops import active
+        return active()
+    except Exception:
+        return None
+
+
+def _taken(dt: float) -> str:
+    """When a close-up was taken, relative to image 1 (dt = image 1's time minus the crop's, s)."""
+    if abs(dt) <= 1.0:
+        return "taken at the same time as image 1"
+    if dt < 0:
+        return "taken just after image 1"
+    n = f"{dt / 60:.0f} minutes" if dt >= 90 else f"{dt:.0f} seconds"
+    return f"taken {n} before image 1 (it may have changed since)"
 
 
 def _spoken(text: str) -> str:
@@ -357,9 +380,10 @@ class VisualQA:
         parts: list = [("text", "Image 1: the whole table now, from above."), ("image", full)]
         focus = self._focus(intent, question)
         crops = self._crops(focus)
-        for i, (n, img) in enumerate(crops, 2):
-            parts += [("text", f"Image {i}: close-up of the {names.get(n) or 'unnamed object'}."),
-                      ("image", _jpeg(img, self.c.crop_px, upscale=True)[0])]
+        for i, (n, crop) in enumerate(crops, 2):
+            parts += [("text", f"Image {i}: close-up of the {names.get(n) or 'unnamed object'}, "
+                               f"{_taken(f.t - crop.t)}."),
+                      ("image", _jpeg(crop.img, self.c.crop_px, upscale=True)[0])]
         listed = ", ".join(f"{i} = {names.get(n) or 'unnamed object'}" for i, (n, _) in enumerate(marks, 1))
         parts.append(("text", f"Marks: {listed or 'none'}.\nTracker: {self._state_text()}.\n"
                               f"Question: {question}"))
@@ -398,12 +422,10 @@ class VisualQA:
                 out.append((d["name"], px))
         return out
 
-    def _crops(self, focus: list[str]) -> list[tuple[str, np.ndarray]]:
-        try:
-            from core.crops import active
-            store = active()
-        except Exception:
-            store = None
+    def _crops(self, focus: list[str]) -> list[tuple[str, Crop]]:
+        """(entity, crop) close-ups of focus entities: only crops the store knows were of that entity
+        (core.crops ownership), each with its capture time."""
+        store = _crop_store()
         out = []
         for n in focus:
             try:
@@ -412,8 +434,20 @@ class VisualQA:
                 tr = None
             crop = (tr.best or tr.recent) if tr is not None else None
             if crop is not None and crop.img is not None:
-                out.append((n, crop.img))
+                out.append((n, crop))
         return out
+
+    @staticmethod
+    def _bind_crops(world) -> None:
+        """Tell the crop store which view each thing was in the frame the world just processed."""
+        store = _crop_store()
+        if store is None or not hasattr(world, "thing_labels"):
+            return
+        try:
+            for n in world.thing_labels():
+                store.bind(world.get(n))
+        except Exception:
+            log.debug("binding crops to things failed", exc_info=True)
 
     def _pointed(self, text: str, point, orig_wh: tuple) -> Answer:
         """The answer, pointing where the VLM pointed: a tracked entity it lands on, else the spot."""
@@ -591,7 +625,17 @@ class VisualQA:
                                f"device for {self.c.keep_h:g} h.")}
 
     def attach(self, world) -> "VisualQA":
+        """Adds the visual status to world.state_json and, after every world.update, binds the crop
+        store's views to the things the world saw in them (so close-ups follow identity)."""
         state = world.state_json
+        update = getattr(world, "update", None)
+        if callable(update):
+            def update_and_bind(dets, frame):
+                out = update(dets, frame)
+                self._bind_crops(world)
+                return out
+
+            world.update = update_and_bind
 
         def state_json(*a, **kw):
             st = state(*a, **kw)
