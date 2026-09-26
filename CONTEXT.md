@@ -67,8 +67,8 @@ start); overheard speech that isn't a question for the rig is dropped without be
 leaves the device: answer text to ElevenLabs for the voice when online, texts via Twilio for /sms,
 and the question log to the team's own n8n on the laptop. Grok (xAI) does all LLM/VLM work when
 online: visual questions send the current frame (and for "earlier" questions a few saved frames),
-narration sends short clips' keyframes; both are off by default in `config.yaml` and the dashboard
-shows a disclosure when on. The local Qwen interpreter is being replaced by Grok.
+narration sends short clips' keyframes. Visual questions are on in `config.yaml` (Sat), narration is
+off; the dashboard shows a disclosure for whatever is on. The local Qwen interpreter is being replaced by Grok.
 
 ## Repo map
 

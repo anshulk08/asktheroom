@@ -92,7 +92,7 @@ All LLM/VLM work goes through Grok (grok-4.3 via the xAI API, `XAI_API_KEY`). Ev
 | Spec | Feature | Status | Evidence |
 |---|---|---|---|
 | — | Look now, set-of-marks: tracked objects drawn as numbered boxes, Grok picks a mark (the laser follows that entity) or gives a point (`voice/visual.py`) | validated (laptop, desk photos) | `tests/test_visual.py`; real Grok with 23 unnamed marks on two desk photos: 20/23 right (misses: two sugar packets it declined to name, a notepad under a calculator), about 1.0 s median. Not yet on rig frames |
-| — | Recall: saved keyframes found by MobileCLIP2 text search, then Grok answers with times (`voice/visual.py`, `core/visual_memory.py`, `core/clip_tokenizer.py`) | validated (unit) | `tests/test_visual.py`; one real Grok recall on desk photos, 1.0 s, abstained correctly. Off by default (`visual_memory.enabled`) |
+| — | Recall: saved keyframes found by MobileCLIP2 text search, then Grok answers with times (`voice/visual.py`, `core/visual_memory.py`, `core/clip_tokenizer.py`) | validated (unit) | `tests/test_visual.py`; one real Grok recall on desk photos, 1.0 s, abstained correctly. On in `config.yaml` since Sat (`visual_memory.enabled`) |
 | — | Episode narration: Grok describes what happened in a short clip; "what was I doing this morning?" (`core/narration.py`, `core/narration_store.py`) | validated (unit) | `tests/test_narration.py`, `tests/test_narration_answers.py`; real Grok self-test 15.6 s with reasoning "low" for 4 frames (laptop). Off by default |
 | — | Qwen interpreter and answerer replaced by Grok | planned | Teammate task; rules and templates stay first |
 

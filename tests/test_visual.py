@@ -500,9 +500,12 @@ def test_status_discloses_what_is_sent(log):
     assert st["enabled"] and "sent to fake" in st["disclosure"] and st["archive"]["frames"] == 0
 
 
-def test_from_config_is_off_by_default(log):
+def test_from_config_is_off_unless_enabled(log):
+    """The code default is off (no frames leave the device unless config.yaml says so)."""
     from voice.visual import from_config
-    assert from_config(CFG, None, log) is None
+    assert VisualConfig.from_dict({}).enabled is False and VisualConfig.from_dict(None).enabled is False
+    assert from_config(dict(CFG, visual_memory=dict(CFG["visual_memory"], enabled=False)), None, log) is None
+    assert from_config({k: v for k, v in CFG.items() if k != "visual_memory"}, None, log) is None
 
 
 # ---------------------------------------------------------------- main.Room points at a raw spot

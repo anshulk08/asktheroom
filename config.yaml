@@ -324,9 +324,10 @@ narration:
 # Visual memory (core/visual_memory.py, voice/visual.py): questions about what the camera sees now
 # ('what does the note say?') or saw before ('was there a red mug here this morning?'). PRIVACY: when
 # enabled, the current frame and (for past questions) up to recall_frames saved frames are sent to the
-# provider below; the archive itself stays on this device. Off by default.
+# provider below; the archive itself stays on this device. On for the demo (Sat 26 Sep); needs
+# XAI_API_KEY and internet, and offline these questions say they need the connection.
 visual_memory:
-  enabled: false
+  enabled: true
   provider: grok
   model: grok-4.3
   base_url: https://api.x.ai/v1
