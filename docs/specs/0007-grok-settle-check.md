@@ -1,6 +1,6 @@
 # 0007: Grok settle check (Grok audits the table, YOLO stays Stage 1)
 
-Status: implemented, off by default (`grok_check.enabled: false`). Supersedes 0003 (b) second opinion and (c) `find_new` in the form below. Not measured on rig frames yet (C2).
+Status: implemented, off by default (`grok_check.enabled: false`). Supersedes 0003 (b) second opinion and (c) `find_new` in the form below. Measured Sat on 20 rig frames from the Jetson (below).
 
 ## Question
 
@@ -51,12 +51,27 @@ YOLO is finicky on the rig: hands come out as objects, there are phantom objects
 
 With `grok_check.enabled: true` and online, one still frame of the table (objects, sometimes hands) goes to Grok each time the table settles. No frame is kept; only the verdict rows are, for `keep_h`. The README privacy statement says so, and `status()["disclosure"]` shows it on the dashboard.
 
+## Measurement (Sat 26 Sep, Jetson, real Grok)
+
+`python -m core.grok_check --eval data/grok_eval --n 20`, run on the Jetson over its current network (not the hotspot). The frames were 20 rig captures from `data/finetune` (4 camera setups): 12 with one prop (notebook, phone, wallet; the labelled box is the mark), 4 empty tables and 4 with only a hand. Whole camera frames, so the desk, monitor, cables and chair are in view and the frame counts as the table.
+
+| Measure | Result |
+|---|---|
+| Marks confirmed (`agree`) | 12/12 (wallet 4/4, phone 4/4, notebook 4/4) |
+| Real marks called `phantom` | 0/12 |
+| Latency per frame | p50 1482 ms, p90 2089 ms, max 2446 ms |
+| Prompt tokens per frame | 1605 (about $0.05 for the 20 frames at the earlier estimate) |
+| Unmarked finds | 49 over 20 frames, almost all real non-props: monitor, cables, USB hub, power strip, chair, once "wooden table" |
+| Hand listed as an object | 1 of 4 hand-only frames ("hand" as unmarked) |
+
+What it shows: Grok reliably confirms real marks, and a call finishes inside 2.5 s. What it doesn't show yet: whether Grok catches a real phantom, because no mark was false (next: add deliberately wrong marks, about $0.02). The unmarked list is mostly clutter. It is harmless for sightings, which are looked up by name, but it inflates the dashboard's "to review" count, so leave out non-prop labels (hand, cables, monitor, table) or drop unmarked from that count before enabling.
+
 ## Acceptance tests
 
 | # | Test | Pass | Status |
 |---|---|---|---|
 | G1 | `.venv/bin/python -m pytest -q tests/test_grok_check.py` | 22 pass: one call per settle and none during hand activity; none offline, over the cap or inside `min_gap_s`; stale frames dropped; `feed` never blocks on a stalled call; rows with cm and times; phantom leaves the world unchanged; binding rules; sighting fallback only when the world has no position; pill wording neutral | pass (laptop) |
-| G2 | `python main.py --fake` with `grok_check: {enabled: true, provider: fake}` and the network up | one check per sim settle, none while the sim hand moves | pass (laptop, 6 checks in 40 s) |
+| G2 | `python main.py --fake` with `grok_check: {enabled: true, provider: fake}` and the network up | one check per sim settle, none while the sim hand moves | pass (laptop and Jetson, 6 checks in 40 s each) |
 | G3 | Network unplugged, enabled | no calls; answers unchanged; no perception stall over 100 ms (0003 C5) | unit-tested (`build` in fake mode, offline); not run on the rig |
-| G4 | Team OK for spend, then `--eval` on 20 rig frames after the Track A model is in | latency p50 under 2 s on the hotspot; numbers added to this spec and `docs/FEATURE_STATUS.md` | not run |
+| G4 | Team OK for spend, then `--eval` on 20 rig frames after the Track A model is in | latency p50 under 2 s on the hotspot; numbers added to this spec and `docs/FEATURE_STATUS.md` | partly: p50 1.48 s on the Jetson's current network with labelled marks (above); not yet on the hotspot or with the Track A model's live boxes |
 | G5 | Decide whether to enable for judging | only if G4 passes and the team accepts a still frame per settle leaving the device | not decided |
