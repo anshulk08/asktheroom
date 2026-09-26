@@ -29,12 +29,14 @@ and the model; the table falls back to frame == table when table_cal.json is mis
 from __future__ import annotations
 
 import argparse
+import difflib
 import logging
 import os
 import signal
 import tempfile
 import threading
 import time
+from collections import deque
 from typing import Callable, Optional
 
 import numpy as np
@@ -65,6 +67,14 @@ class FlatTable:
 
     def calibrate(self, img) -> bool:
         return False
+
+
+PHONE_ECHO_S = 3.0      # a voice question matching a phone question this recent is the same question
+
+
+def _norm(text: str) -> str:
+    from voice.intents import normalize
+    return normalize(text)
 
 
 class Room:
@@ -100,6 +110,8 @@ class Room:
         self._aim_gen = 0
         self._off_timer: Optional[threading.Timer] = None
         self.server = None
+        self.record_answer: Optional[Callable[[str, Answer, str], None]] = None   # server log, for the phone
+        self._phone_qs: deque = deque(maxlen=5)    # (monotonic t, normalized text) of recent phone questions
         self.threads: list[threading.Thread] = []
         self.cleanup: list[Callable[[], None]] = []
         self.last_timing: dict = {}
@@ -131,10 +143,19 @@ class Room:
 
     def ask_and_act(self, text: str, source: str) -> Answer:
         """ask_fn for the server: dashboard questions are spoken and aimed, texts only answered."""
+        if source == "phone":
+            self._phone_qs.append((time.monotonic(), _norm(text)))
         ans = self.ask(text, source)
         if source != "sms":
             self.respond(ans)
         return ans
+
+    def _heard_from_phone(self, text: str) -> bool:
+        """The mic heard a question the phone asked in the last PHONE_ECHO_S (a judge dictating next to
+        the rig): answer it once, on the phone's request."""
+        now, t = time.monotonic(), _norm(text)
+        return any(now - t0 <= PHONE_ECHO_S and difflib.SequenceMatcher(None, t, q).ratio() >= 0.85
+                   for t0, q in list(self._phone_qs))
 
     def respond(self, ans: Answer) -> tuple[threading.Thread, threading.Thread]:
         """Speak and aim at the same time, on two threads."""
@@ -321,7 +342,15 @@ class Room:
         """Answer, speak and aim; report to n8n. Asked: t0 is the click. Overheard: the end of speech.
         Waits until the answer has been spoken plus echo_tail_s, so the mic doesn't hear the rig;
         a clicker press cuts the answer short (and is kept for the next question)."""
+        if self._heard_from_phone(text):
+            log.info("heard %r: the phone just asked it; answered once", text)
+            return
         ans = self.ask(text, "voice")
+        if self.record_answer is not None:
+            try:
+                self.record_answer(text, ans, "voice")
+            except Exception:
+                log.exception("record_answer failed")
         t_ans = time.monotonic()
         intent = self.interpret(text)
         say, aim = self.respond(ans)
@@ -381,6 +410,7 @@ class Room:
         from server.app import create_app
         app = create_app(self.cfg, self.world, self.events, frames=self.frames,
                          ask_fn=self.ask_and_act, table=self.table, care=getattr(self, "care", None))
+        self.record_answer = app.state.record_answer
         self.server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level="warning",
                                                     timeout_graceful_shutdown=2))
         self.server.install_signal_handlers = lambda: None     # the main thread handles Ctrl-C

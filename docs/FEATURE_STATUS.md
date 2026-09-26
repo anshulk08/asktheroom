@@ -6,7 +6,7 @@ Status meanings:
 - **implemented**: the code exists and runs, but hasn't been tested or measured on the real rig.
 - **planned**: a spec or roadmap item with no code yet.
 
-Test suite at time of writing (Sat 26 Sep, after the overnight merge): `.venv/bin/python -m pytest -q` gives 1287 passed, 21 skipped on the laptop (the skips need optional models or hardware). Jetson measurements are labelled "Jetson". See PLANS.md checkpoints F1–F6.
+Test suite at time of writing (Sat 26 Sep, after the overnight merge): `.venv/bin/python -m pytest -q` gives 1342 passed, 21 skipped on the laptop (the skips need optional models or hardware). Jetson measurements are labelled "Jetson". See PLANS.md checkpoints F1–F6.
 
 ## Perception and world model
 

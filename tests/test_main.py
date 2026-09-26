@@ -415,3 +415,34 @@ def test_reset_clears_the_detectors_proposals_and_crops_on_the_perception_thread
     t.join(2)
     i = calls.index(("perception", "reset"))
     assert calls[i + 1:i + 2] in ([], [("perception", "detect")]) and calls.count(("perception", "reset")) == 1
+
+
+def test_voice_answers_are_logged_for_the_phone(tmp_path):
+    room, _ = make_room(tmp_path)
+    logged = []
+    room.record_answer = lambda q, ans, src: logged.append((q, ans.text, src))
+    room._answer("where is my wallet?", time.monotonic(), time.monotonic(), {"mode": "asked"})
+    assert logged and logged[0][0] == "where is my wallet?" and logged[0][2] == "voice"
+
+
+def test_a_phone_question_heard_by_the_mic_is_answered_once(tmp_path):
+    """P1: the judge dictates into the phone next to the rig; the always-on mic hears it too."""
+    room, _ = make_room(tmp_path)
+    room.ask_and_act("Where is my wallet?", "phone")
+    assert wait_for(lambda: len(room.tts.said) == 1)
+    room._answer("where is my wallet", time.monotonic(), time.monotonic(), {"mode": "overheard"})
+    room._answer("where's my wallet?", time.monotonic(), time.monotonic(), {"mode": "overheard"})
+    time.sleep(0.2)
+    assert len(room.tts.said) == 1
+    room._answer("where are my keys?", time.monotonic(), time.monotonic(), {"mode": "overheard"})
+    assert wait_for(lambda: len(room.tts.said) == 2)                      # a different question still counts
+
+
+def test_the_same_question_by_voice_after_the_window_is_answered(tmp_path, monkeypatch):
+    room, _ = make_room(tmp_path)
+    now = [100.0]
+    monkeypatch.setattr(main.time, "monotonic", lambda: now[0])
+    room.ask_and_act("where is my wallet?", "phone")
+    now[0] += 3.5
+    room._answer("where is my wallet?", now[0], now[0], {"mode": "overheard"})
+    assert wait_for(lambda: len(room.tts.said) == 2)
