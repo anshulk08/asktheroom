@@ -6,7 +6,7 @@ Status meanings:
 - **implemented**: the code exists and runs, but hasn't been tested or measured on the real rig.
 - **planned**: a spec or roadmap item with no code yet.
 
-Test suite at time of writing (Sat 26 Sep, after the overnight merge): `.venv/bin/python -m pytest -q` gives 1342 passed, 21 skipped on the laptop (the skips need optional models or hardware). Jetson measurements are labelled "Jetson". See PLANS.md checkpoints F1–F6.
+Test suite at time of writing (Sat 26 Sep, after the overnight merge): `.venv/bin/python -m pytest -q` gives 1351 passed, 21 skipped on the laptop (the skips need optional models or hardware). Jetson measurements are labelled "Jetson". See PLANS.md checkpoints F1–F6.
 
 ## Perception and world model
 
@@ -33,8 +33,8 @@ Test suite at time of writing (Sat 26 Sep, after the overnight merge): `.venv/bi
 |---|---|---|---|
 | — | Silero VAD + whisper.cpp base.en (`voice/stt.py`) | validated | `tests/test_stt.py`; 20/20 of the recorded test questions parsed correctly (`stt20` set, laptop) |
 | — | Rule parser (`voice/intents.py`) | validated | `tests/test_intents.py`; rules alone 48/64 on `tests/understand_eval.json` |
-| 0001 | Local interpreter: rules then Qwen3-1.7B, schema, `sounds_like` guard (`voice/understand.py`) | validated (laptop) | `tests/test_understand.py`; `scripts/eval_understand.py` 58/64, median 114 ms on the laptop. Not measured on the Jetson (F1, F2) |
-| 0001 | Local answerer for open questions: templates, then one-shot Qwen, action-first (`voice/local_llm.py`) | validated (unit) | `tests/test_local_llm.py`. There is no accuracy eval of free-form answers |
+| 0001 | Interpreter: rules, then Grok (default since Sat) or local Qwen3-1.7B (`understand.backend: qwen`), schema, `sounds_like` guard (`voice/understand.py`) | validated (laptop) | Grok: `scripts/eval_understand.py` 58/64, median 853 ms (Sat, laptop on campus Wi-Fi). Qwen: `tests/test_understand.py`; `scripts/eval_understand.py` 58/64, median 114 ms on the laptop. Not measured on the Jetson (F1, F2) |
+| 0001 | Open questions: templates, then Grok with the world state and lookup tools (`voice/llm.ask_other`); local Qwen answerer kept as an option (`voice/local_llm.py`) | validated (unit) | `tests/test_pipeline.py`; real Grok on the demo world 1.3–3.2 s, grounded answers. `tests/test_local_llm.py`. There is no accuracy eval of free-form answers |
 | 0001 | Template answers for WHERE/HISTORY/HANDLED/CHANGES, confidence wording (`voice/answers.py`) | validated | `tests/test_answers.py` |
 | 0001 | Pill-wording filter (`voice/llm.to_answer`) | validated | `tests/test_local_llm.py`, `tests/test_answers.py` |
 | 0002 | Always listening, overheard filter, wake and click modes (`main.py`, `voice/understand.py`) | validated (unit) | `tests/test_main.py` (answers questions and drops chatter, waits while speaking, clicker is listen-now); overheard set 16/16 on the laptop. The 10-minute hall-noise run hasn't been done yet (F3) |
@@ -94,7 +94,7 @@ All LLM/VLM work goes through Grok (grok-4.3 via the xAI API, `XAI_API_KEY`). Ev
 | — | Look now, set-of-marks: tracked objects drawn as numbered boxes, Grok picks a mark (the laser follows that entity) or gives a point (`voice/visual.py`) | validated (laptop, desk photos) | `tests/test_visual.py`; real Grok with 23 unnamed marks on two desk photos: 20/23 right (misses: two sugar packets it declined to name, a notepad under a calculator), about 1.0 s median. Not yet on rig frames |
 | — | Recall: saved keyframes found by MobileCLIP2 text search, then Grok answers with times (`voice/visual.py`, `core/visual_memory.py`, `core/clip_tokenizer.py`) | validated (unit) | `tests/test_visual.py`; one real Grok recall on desk photos, 1.0 s, abstained correctly. On in `config.yaml` since Sat (`visual_memory.enabled`) |
 | — | Episode narration: Grok describes what happened in a short clip; "what was I doing this morning?" (`core/narration.py`, `core/narration_store.py`) | validated (unit) | `tests/test_narration.py`, `tests/test_narration_answers.py`; real Grok self-test 15.6 s with reasoning "low" for 4 frames (laptop). Off by default |
-| — | Qwen interpreter and answerer replaced by Grok | planned | Teammate task; rules and templates stay first |
+| — | Qwen interpreter and answerer replaced by Grok | validated (laptop) | `tests/test_understand.py`, `tests/test_pipeline.py`; eval numbers above. Rules and templates stay first; offline, rules and the fallback sentence |
 
 ## Phone app
 

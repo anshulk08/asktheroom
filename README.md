@@ -31,10 +31,11 @@ camera ─▶ core/capture.FrameBuffer (30 fps thread)
 mic (always on, audio in RAM only)
   ─▶ voice/stt: Silero VAD ─▶ whisper.cpp base.en
   ─▶ voice/understand: "was that for me?" (keyword gate + addressed check; else dropped, not logged)
-        ─▶ voice/intents rule parser ─▶ local Qwen3-1.7B (llama-server) for what the rules can't read
+        ─▶ voice/intents rule parser ─▶ Grok (online) for what the rules can't read
   ─▶ voice/pipeline.make_ask
+        ├─ about what the camera sees ─▶ voice/visual: Grok with the frame (set-of-marks) or saved frames
         ├─ WHERE / HISTORY / HANDLED / CHANGES ─▶ voice/answers (templates)
-        └─ OTHER ─▶ voice/local_llm (templates, then one-shot Qwen: {action, point_at, text})
+        └─ OTHER ─▶ voice/llm.ask_other (templates, then Grok with the world state and tools)
   ─▶ Answer(text, point_at, action)
         ├─ voice/tts: ElevenLabs online, Piper offline (mic stays shut while speaking + a short tail)
         └─ act/laser: closed-loop aim on the camera's view of the dot; circle; edge sweep
@@ -77,7 +78,7 @@ A judge runs it, and it resets in under a minute:
 | Detection | YOLO-World v2 (`models/yolov8s-worldv2-askroom.engine`), YOLO11 fine-tune planned; Ultralytics container (`scripts/dock.sh`) |
 | World model | Rule-based, deterministic (`core/world.py`, `core/relations.py`) |
 | Speech in | Silero VAD (ONNX) + whisper.cpp base.en (`pywhispercpp` on the laptop, `whisper-cli` on the Jetson) |
-| Understanding | Rule parser + Qwen3-1.7B Q4_K_M via llama.cpp `llama-server` (port 8081, `scripts/qwen_server.sh`) |
+| Understanding | Rule parser, then Grok (`grok-4.3`, reasoning none) for what the rules can't read; local Qwen3-1.7B via `llama-server` is an offline option (`understand.backend: qwen`) |
 | Speech out | ElevenLabs `eleven_flash_v2_5` online, Piper `en_US-lessac-medium` offline |
 | Laser | Pan-tilt servos (PCA9685, serial or bus servo) + laser diode, 2nd-order poly fit + closed-loop correction |
 | Server | FastAPI + uvicorn, vanilla JS dashboard, served locally so it works offline |
@@ -127,15 +128,15 @@ Everything lives in `config.yaml`. All thresholds are starting values: tune them
 | world keys (`present_k_of_n` … `answer_hedge`) | World model rule thresholds and confidences |
 | `table`, `servo_limits`, `actuator`, `laser_*` | Table size and markers, pan-tilt driver and limits |
 | `stt` | Whisper backend and VAD settings |
-| `understand` | Qwen on/off, llama-server URL, model, timeouts (1.5 s for intents, 4 s for open answers) |
+| `understand` | Model on/off, `backend: grok \| qwen`, llama-server URL and model (qwen), intent timeout 1.5 s |
 | `listen` | `mode: always \| wake \| click` (default `always`), `wake_words: [room]`, `idle_s`, `echo_tail_s` |
 | `n8n` | `webhook_url` for the question log (empty turns it off), shared `token` |
 | `sms` | `whitelist` of E.164 numbers allowed to text questions |
 | `paths` | Event DB, snapshot folder, calibration files |
 
-The `llm` section configures Grok (`grok-4.3`). Nothing on the voice path uses it any more. It stays for the planned detection-side helper ([spec 0003](docs/specs/0003-grok-detection-assist.md)).
+The `llm` section configures Grok (`grok-4.3`): it reads questions the rules can't (`understand.backend: grok`) and answers open questions (4 s budget, `llm.timeout_s`). `narration` and `visual_memory` configure Grok with images.
 
-Secrets come from environment variables: `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID`, `TWILIO_AUTH_TOKEN`, `ASKROOM_PUBLIC_URL` (for the Twilio signature check behind a tunnel), and `XAI_API_KEY` (only for `scripts/grok_smoke.py`).
+Secrets come from environment variables (`.env`, passed into the container by `scripts/dock.sh`): `XAI_API_KEY` (Grok), `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID`, `TWILIO_AUTH_TOKEN`, `ASKROOM_PUBLIC_URL` (for the Twilio signature check behind a tunnel).
 
 ## Running the system
 
@@ -150,7 +151,7 @@ python main.py --no-voice              # dashboard and /ask only
 python demo_check.py                   # pre-demo check: one green or red line per check
 ```
 
-Start `scripts/qwen_server.sh` next to `main.py`. If it is down, the rule parser reads questions alone and open questions get a fixed fallback sentence.
+Put `XAI_API_KEY` in `.env`. Offline (or without the key), the rule parser reads questions alone, open questions get a fixed fallback sentence, and questions about what the camera sees say they need the connection. Where things are and what happened to them always work.
 
 Tools for single parts:
 
@@ -223,7 +224,7 @@ TECHNICAL_DESIGN.md  world model, perception, voice pipeline, laser loop
 
 ## Prototype boundaries and operational notes
 
-**Privacy, stated plainly.** Video and audio stay on the device. Audio is never written to disk, and speech not meant for the rig is dropped unlogged. Accepted questions (text) and event snapshots are kept; snapshots for 24 hours. Answer text goes to ElevenLabs for the voice when online, and SMS answers go through Twilio. (Planned: a single still frame to Grok only when you ask about something the local detector can't see.)
+**Privacy, stated plainly.** Audio stays on the device and is never written to disk, and speech not meant for the rig is dropped unlogged. Accepted questions (text) and event snapshots are kept; snapshots and saved table frames for 24 hours. When online: the text of a question the rules can't read, or an open question with a compact world state, goes to Grok (xAI); a question about what the camera sees sends the current table frame (and for "earlier" questions up to 6 saved frames) to Grok; answer text goes to ElevenLabs for the voice; SMS answers go through Twilio. The camera looks straight down at the tabletop, so frames show the table, objects and hands.
 
 More detail:
 - Audio exists only in memory and is never written to disk. Overheard speech the rig decides is not for it is dropped without being logged or stored. Only accepted questions (text, intent, answer, latency) go to the `questions` table.
@@ -239,7 +240,7 @@ More detail:
 - Eight known objects on one table. Objects outside that list are not detected (see spec 0003 for the planned helper).
 - Every object is assumed to lie on the table plane, so the top of a tall object maps a few cm off.
 - The synthetic eval (255/300) measures the world rules on generated detections. It says nothing about how well the real detector works.
-- Qwen timings so far are from a laptop. Jetson numbers are still to be measured.
+- Grok timings are from the laptop on campus Wi-Fi: about 0.85 s to read a question, 1.3–3.2 s for an open answer, about 1 s for a look at the table.
 - A loud hall can defeat the keyword gate. Fallbacks are `listen.mode: wake` or `click`.
 
 ## Prior art and how we differ
@@ -264,14 +265,14 @@ Details and owners are in [`PLANS.md`](PLANS.md), and per-feature status is in [
 
 **Interpreter** (`scripts/eval_understand.py` on `tests/understand_eval.json`, 64 items). Measured on an M-series MacBook. Jetson numbers are TBD.
 
-| Set | Items | Rules only | Rules + Qwen3-1.7B |
-|---|---|---|---|
-| stt20 (the 20 recorded test questions) | 20 | 20/20 | 20/20 |
-| loose (free phrasing) | 28 | 14/28 | 22/28 |
-| overheard (IGNORE or not) | 16 | 14/16 | 16/16 |
-| **all** | 64 | **48/64** | **58/64** |
+| Set | Items | Rules only | Rules + Qwen3-1.7B | Rules + Grok (Sat) |
+|---|---|---|---|---|
+| stt20 (the 20 recorded test questions) | 20 | 20/20 | 20/20 | 20/20 |
+| loose (free phrasing) | 28 | 14/28 | 22/28 | 22/28 |
+| overheard (IGNORE or not) | 16 | 14/16 | 16/16 | 16/16 |
+| **all** | 64 | **48/64** | **58/64** | **58/64** |
 
-Qwen2.5-1.5B-Instruct also scored 58/64. The median Qwen call took 114 ms for Qwen3-1.7B and 142 ms for Qwen2.5-1.5B, on the laptop. Qwen3-1.7B is the default because it was faster at the same accuracy.
+Grok (`grok-4.3`, reasoning none, the default since Sat) was asked 15 times: median 853 ms, max 1.1 s. Rules alone now score 47/64: taught names count as sure, so "where are my kiss" stays a question about something called "kiss". Qwen2.5-1.5B-Instruct also scored 58/64. The median Qwen call took 114 ms for Qwen3-1.7B and 142 ms for Qwen2.5-1.5B, on the laptop. Qwen3-1.7B is the default because it was faster at the same accuracy.
 
 **World model vs baselines** (`eval.replay` and `eval.report`). The baselines are current-frame, last-seen and nearest-object-to-the-last-seen-spot.
 

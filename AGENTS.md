@@ -27,7 +27,7 @@ An overhead camera on a Jetson tracks tabletop objects, including hidden ones (u
 - **Spoken answers** are 1–2 short sentences with no markdown. Pill-bottle wording stays neutral: never say or imply that medication was "taken". The pill filter in `voice/llm.py` (`to_answer`, `PILLS_SAFE`) runs on every LLM answer.
 - **Shared types** in `core/types.py` change only as a team.
 - **Owned files.** Don't edit `core/capture.py`, `core/detect.py`, `core/hands.py`, `core/table.py`, `core/world.py`, `core/relations.py` or `core/events.py`. A teammate owns them, so propose changes to them instead. (Exception on record: the Friday-night open-world work changed `core/world.py`, `core/detect.py` and `core/table.py` with the lead's approval; `git log -- <file>` shows each change.)
-- **Grok does all LLM/VLM work** (team decision Fri night, for the xAI track): visual questions (`voice/visual.py`: set-of-marks look, recall over saved frames), episode narration (`core/narration.py`), and open questions. The local Qwen interpreter and answerer are being replaced by Grok; until then they stay as they are. Rules and templates always answer first, and offline the rig falls back to them. The key is `XAI_API_KEY` in `.env` (never committed, never printed). Every Grok answer passes the pill filter (`voice/llm.to_answer` or `core/narration_store.redact_meds`).
+- **Grok does all LLM/VLM work** (team decision Fri night, for the xAI track): visual questions (`voice/visual.py`: set-of-marks look, recall over saved frames), episode narration (`core/narration.py`), and open questions. Grok also reads spoken questions the rules can't (`voice/understand.py`, `understand.backend: grok`) and answers open questions (`voice/llm.ask_other`); local Qwen stays as an offline option (`backend: qwen`). Rules and templates always answer first, and offline the rig falls back to them. The key is `XAI_API_KEY` in `.env` (never committed, never printed). Every Grok answer passes the pill filter (`voice/llm.to_answer` or `core/narration_store.redact_meds`).
 - **Privacy.** Audio stays in memory only. Overheard speech the rig ignores is never logged or stored. Only accepted questions go to the `questions` table. Keep the privacy statement in `README.md` accurate whenever data handling changes.
 - **Jetson.** The Orin Nano has 8 GB of RAM shared with the GPU and runs out of memory easily. Ask before running anything heavy there (engine builds, llama.cpp builds, model downloads, evals with everything loaded). The limit is RAM, not disk. The Jetson is `guru@192.168.55.1` over USB-C. Build TensorRT engines inside the container that runs them (`scripts/dock.sh`).
 - **Tests.** Keep them passing: `.venv/bin/python -m pytest -q`. None need hardware. Add tests with new behaviour.
@@ -42,8 +42,7 @@ An overhead camera on a Jetson tracks tabletop objects, including hidden ones (u
 .venv/bin/python -m pytest -q                       # all tests
 python main.py --fake                               # whole program without hardware
 python -m server.sim                                # dashboard on a synthetic camera
-scripts/qwen_server.sh                              # local Qwen on :8081
-python scripts/eval_understand.py                   # interpreter accuracy (needs llama-server)
+python scripts/eval_understand.py                   # interpreter accuracy (Grok by default; --backend qwen)
 python scripts/overheard_test.py hall.wav           # always-on false triggers
 python demo_check.py                                # before every judge
 set -a && . ./.env && set +a && python -m voice.visual --selftest   # one real Grok look (needs XAI_API_KEY)

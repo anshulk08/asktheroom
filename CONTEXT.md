@@ -46,13 +46,13 @@ camera ─▶ core/capture.FrameBuffer (30 fps thread)
                      │
 always-on mic ─▶ voice/stt (Silero VAD + whisper.cpp; audio only in memory; muted while the rig speaks)
           ─▶ voice/understand: meant for the rig? (keyword gate, then wake word "room" or a question
-             opening; chatter is dropped, never logged) ─▶ voice/intents.parse, then Qwen3 1.7B
-             (llama.cpp on the Jetson, scripts/qwen_server.sh) for what the rules can't read
+             opening; chatter is dropped, never logged) ─▶ voice/intents.parse, then Grok (online,
+             ~0.85 s) for what the rules can't read
           ─▶ voice/care (reminders, profile facts, morning report, follow-ups) ─▶ voice/pipeline.make_ask
                      ├─ visual questions ─▶ voice/visual: Grok look (set-of-marks) / recall (saved frames)
                      ├─ WHERE / HANDLED / CHANGES / ... ─▶ voice/answers (templates)
-                     └─ OTHER ─▶ voice/local_llm (templates for the common ones, else one Qwen call
-                                 with the world state; same pill-wording filter)
+                     └─ OTHER ─▶ voice/llm.ask_other (templates for the common ones, else Grok with
+                                 the world state and lookup tools; same pill-wording filter)
           ─▶ Answer(speech, point_at, action)
                      ├─ voice/tts: ElevenLabs when online, Piper offline
                      └─ act/laser.Laser.aim_object: closed-loop aim, corrects on the camera's view of the dot
@@ -68,7 +68,8 @@ leaves the device: answer text to ElevenLabs for the voice when online, texts vi
 and the question log to the team's own n8n on the laptop. Grok (xAI) does all LLM/VLM work when
 online: visual questions send the current frame (and for "earlier" questions a few saved frames),
 narration sends short clips' keyframes. Visual questions are on in `config.yaml` (Sat), narration is
-off; the dashboard shows a disclosure for whatever is on. The local Qwen interpreter is being replaced by Grok.
+off; the dashboard shows a disclosure for whatever is on. Grok also gets the text of questions the
+rules can't read and of open questions (with a compact world state).
 
 ## Repo map
 
@@ -130,8 +131,9 @@ real detector works.
 
 Also built, tested on the laptop, not yet on the Jetson: the clicker, `main.py` wiring all threads
 together, the fine-tuning scripts (zero-shot YOLO-World mistook the Jetson case for a phone; the plan is
-model-free background-difference labels plus copy-paste synthesis), `demo_check.py`, Qwen question
-understanding (being replaced by Grok), and the always-on mic. On the Jetson: whisper.cpp base.en on the
+model-free background-difference labels plus copy-paste synthesis), `demo_check.py`, and the always-on mic.
+Grok now reads what the rules can't (58/64 on the interpreter eval, the same as Qwen, median 853 ms) and
+answers open questions (1.3–3.2 s); local Qwen is an offline option. On the Jetson: whisper.cpp base.en on the
 GPU, 22/22 test questions, median 139 ms; DINOv2 re-id at 3.7–4.7 ms per crop.
 
 Built overnight (Fri → Sat), unit-tested: open-world `thing:N` identity and teaching by voice, object
