@@ -30,6 +30,7 @@ LABEL_ON_THING_IOU = 0.5    # a configured label on a thing's box overlapping th
 ESTABLISHED_S = 2.0         # ... in place this long before the object was last seen elsewhere: the thing
 PARTLY_HIDDEN_INSIDE = 0.8  # a smaller box this much inside the box an object rests in: part of it is hidden
 THING_COVER_AREA = 1.5      # a thing at least this many times an object's footprint can lie over it
+OUTLINE_IOU = 0.5           # a class-agnostic proposal this much like a configured object's box outlines it
 
 # A rule verdict is (Status, parent, confidence, EventType[, candidates]), or NO_CHANGE: the rule
 # claims the object this update (later rules are skipped) but leaves the belief as it is and emits
@@ -119,6 +120,7 @@ class World(ThingRules):
             self._decay(dets.t)
             self._now, self._wall, self._frame = dets.t, frame.wall if frame else dets.t, frame
             self._gray_img = None
+            self._batch_things = [d for d in dets.items if d.cls == 'thing']
             out: list[Event] = []
             seen = self._best_detections(dets.items, dets.hands)
             self._track_covers(seen)
@@ -241,9 +243,12 @@ class World(ThingRules):
                 or geom.dist(ent.pos_cm, d.center_cm) < self.cfg.moved_min_cm
                 or any(geom.overlap_frac(h.box_cm, d.box_cm) > 0 for h in hands)):
             return False
+        in_place = self._visible_things() + [    # or hidden where it lay (a blanket just lifted off it)
+            n for n in self._things if self.entities[n].status == Status.UNDER
+            and self.entities[n].merged_into is None and self.entities[n].box_cm is not None]
         return any(geom.iou(self.entities[n].box_cm, d.box_cm) >= LABEL_ON_THING_IOU
                    and self._placed_t.get(n, seen) + ESTABLISHED_S <= seen
-                   for n in self._visible_things())
+                   for n in in_place)
 
     def _debounce(self, name: str, ent: Entity, det: Detection | None) -> None:
         """Push this batch's presence bit; refresh position while detected (even before a flip)."""
@@ -422,8 +427,20 @@ class World(ThingRules):
         a shifted crop decorrelates. Checked before the hand rule too: a touch within the contact
         window followed by a detector miss must not read as a pick-up."""
         gray, box = self._gray(), self._look_px.get(name)
-        return (gray is not None and box is not None
-                and self._looks.still_there(name, gray, box, self.cfg.appearance_match))
+        return self._outlined(name) or (gray is not None and box is not None
+                                        and self._looks.still_there(name, gray, box, self.cfg.appearance_match))
+
+    def _outlined(self, name: str) -> bool:
+        """A visible configured object the detector no longer names while a class-agnostic proposal still
+        outlines its box (OUTLINE_IOU), with no hand on it: it is still there. On blanket_1t the phone's
+        screen lit up, the fine-tuned detector called the tape roll 'phone' instead, the patch no longer
+        matched, and the phone was lost and reborn as a thing, though YOLOE still proposed its box."""
+        ent = self.entities[name]
+        if is_thing(name) or ent.status != Status.VISIBLE or ent.box_cm is None:
+            return False
+        if any(geom.overlap_frac(self._hands[h][2], ent.box_cm) > 0 for h in self._hands_now):
+            return False
+        return any(geom.iou(d.box_cm, ent.box_cm) >= OUTLINE_IOU for d in getattr(self, '_batch_things', ()))
 
     def _last_evidence(self, name: str) -> float:
         """When the object was last detected or its patch last matched. An absence no rule explains is

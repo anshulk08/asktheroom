@@ -330,3 +330,25 @@ def test_objects_seen_again_when_the_blanket_is_lifted_were_not_put_down(rscene,
     placed = dict(world._placed_t)                 # when each was last put down in view
     lift_blanket(rscene, world)
     assert world._placed_t == placed
+
+
+def test_a_label_read_on_a_thing_uncovered_in_place_is_not_the_object_moving(cfg, world):
+    """blanket_1t, as the blanket came off: the detector read 'phone' on the tape roll (a thing) in the
+    frame before the tape was seen again. The tape was hidden where it had lain since before the phone was
+    last seen, so that label is the tape misnamed; the phone did not move onto it."""
+    from tests.synth import DEFAULT_SIZE_CM
+    s = Scene(cfg, fps=10, t0=1000.0, render=True)
+    s.place('keys', *KEYS_AT)
+    s.thing('tape', 56, 30, 6, 6)
+    s.run(world, 3.5)
+    for k in ('keys', 'tape'):
+        s.remove(k)
+    s.overlay('blanket', *BLANKET)
+    s.run(world, cfg.lost_grace_s + 1.5)
+    assert [world.get(n).status for n in ('keys', 'thing:1')] == [Status.UNDER] * 2
+    del s.overlays['blanket']
+    s.overlay('real keys', *KEYS_AT, *DEFAULT_SIZE_CM['target'])     # drawn, not named by the detector
+    s.place('keys', 56, 30, 6, 6)                  # 'keys' read on the tape's box ...
+    s.thing('tape', 56, 30, 6, 6)                  # ... which the proposer sees too
+    s.run(world, 2.0)
+    assert world.get('keys').pos_cm == pytest.approx(KEYS_AT, abs=1.0)
