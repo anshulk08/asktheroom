@@ -1,0 +1,174 @@
+# All thresholds are starting values (spec section 2). Tune from replays, never by guessing live.
+
+objects:
+  keys: target
+  pill_bottle: target
+  wallet: target
+  glasses: target
+  phone: target
+  remote: target
+  box: container
+  notebook: cover
+
+# Text prompts for YOLO-World (path A), per object
+prompts:
+  keys: [keys, key ring]
+  pill_bottle: [pill bottle, medicine bottle]
+  wallet: [wallet]
+  glasses: [glasses, eyeglasses]
+  phone: [phone, smartphone]
+  remote: [remote control, tv remote]
+  box: [cardboard box, small box]
+  notebook: [notebook]
+  hand: [hand]
+
+# Detector (spec 3.3). model: a .pt or a .engine built in the Jetson container (python -m core.detect
+# --export). Path B swaps in the fine-tuned model; its class names must be the object names + hand.
+detect:
+  model: models/yolov8s-worldv2-askroom.engine   # built on the Jetson from the .pt below (scripts/dock.sh)
+  world_pt_baked: models/yolov8s-worldv2-askroom.pt   # prompts baked in on the Mac, CLIP removed
+  world_pt: models/yolov8s-worldv2.pt
+  imgsz: 640
+  half: true
+  min_conf: 0.05             # model floor; per-object cut-offs are conf_threshold below
+
+# Spoken names -> object names (used by intents and answers)
+synonyms:
+  key: keys
+  car keys: keys
+  keychain: keys
+  pills: pill_bottle
+  pill: pill_bottle
+  pill bottle: pill_bottle
+  medicine: pill_bottle
+  medication: pill_bottle
+  meds: pill_bottle
+  purse: wallet
+  billfold: wallet
+  spectacles: glasses
+  specs: glasses
+  eyeglasses: glasses
+  reading glasses: glasses
+  cell phone: phone
+  cellphone: phone
+  cell: phone
+  mobile: phone
+  iphone: phone
+  remote control: remote
+  tv remote: remote
+  clicker: remote
+  the box: box
+  container: box
+  book: notebook
+  notepad: notebook
+
+# How each object is spoken
+display_names:
+  pill_bottle: pill bottle
+
+conf_threshold:
+  default: 0.35
+
+present_k_of_n: [6, 10]      # frames to count as present
+absent_k_of_n: [1, 10]       # at most this many of the window to count as absent
+contact_overlap: 0.30        # hand box covering object box
+contact_window_s: 1.0        # touch must be this recent for HELD
+cover_overlap: 0.60          # cover box over last object box
+cover_moved_window_s: 3.0    # cover must have moved this recently
+container_dwell_s: 0.3       # hand inside container box
+reappear_wait_s: 2.0         # wait before concluding INSIDE
+edge_margin: 0.05            # fraction of frame counted as edge
+held_timeout_s: 30
+moved_min_cm: 5              # below this, PUT_BACK not MOVED
+settle_s: 0.5                # carried in view: untouched this long ...
+settle_cm: 1.5               # ... and moved less than this since => set down
+hand_lost_s: 0.5             # holding hand unseen this long counts as lost
+cover_moved_min_cm: 2.0      # cover centre must shift this much to count as "moved"
+lifted_overlap_max: 0.2      # cover now overlaps less than this of the child's last box => lifted
+max_nesting: 3
+
+# Confidence assigned by each world rule (spec 3.5)
+conf_held: 0.9
+conf_under: 0.85
+conf_under_unknown: 0.6
+conf_inside: 0.85
+lifted_cover_penalty: 0.5
+
+# Background / appearance model (world.py): catches unknown covers and detector misses
+bg_frames: 30
+bg_change_threshold: 25.0    # mean abs diff (0-255) inside a box; tune on replays
+appearance_match: 0.7        # normalized correlation with last-seen patch => still there
+bg_update_every_s: 1.0       # refresh period (~25 ms each at 320 px)
+ambiguity_penalty: 0.7
+decay_per_min: 0.99
+answer_plain: 0.7
+answer_hedge: 0.5
+
+frame_size_px: [1280, 720]
+table:
+  size_cm: [90, 60]
+  # ArUco 0-3 (DICT_4X4_50) marker centres in table cm, clockwise from top-left. Measure these.
+  markers:
+    0: [0, 0]
+    1: [90, 0]
+    2: [90, 60]
+    3: [0, 60]
+
+# Pulse microseconds per axis. Must be the MEASURED range that just covers the table (H1), not
+# full servo travel: calibrate() spreads its grid over these limits, so wide limits miss the table.
+servo_limits:
+  pan: [600, 2400]
+  tilt: [600, 2400]
+actuator: fake               # pca9685 | serial | bus | fake
+pan_channel: 0
+tilt_channel: 1
+pca9685_address: 0x40
+serial_port: /dev/ttyUSB0
+serial_baud: 115200
+serial_timeout_s: 0.1
+camera_latency_s: 0.06       # measure on the rig with act.calibrate.measure_latency, then set
+laser_channel: 15
+laser_timeout_s: 10
+shiny_objects: [phone, keys]  # aim 3 cm to the side
+shiny_offset_cm: 3
+
+# Stretch (D15, D16)
+floor_zones: {}               # per zone: table edge, ArUco 4-7 positions in table cm, head preset pan/tilt
+edge_drop_cm: 10
+search_k_of_n: [4, 6]
+search_timeout_s: 8
+room_map: room_map.json
+room_targets: [phone, wallet, remote, glasses]
+laser_max_height_cm: 100
+
+# Runtime
+paths:
+  events_db: data/events.db
+  snapshots: data/snapshots
+  table_cal: table_cal.json
+  laser_cal: laser_cal.json
+
+llm:
+  base_url: https://api.x.ai/v1
+  model: grok-4.3
+  reasoning_effort: none
+  timeout_s: 4
+
+tts:
+  elevenlabs_voice_id: ""     # set in .env as ELEVENLABS_VOICE_ID to override
+  elevenlabs_model: eleven_flash_v2_5
+  piper_voice: en_US-lessac-medium
+
+net:
+  check_host: https://api.x.ai
+  interval_s: 5
+  timeout_s: 0.3
+
+server:
+  host: 0.0.0.0
+  port: 8000
+  push_hz: 5
+  mjpeg_fps: 10
+
+sms:
+  whitelist: []               # E.164 numbers allowed to text questions, e.g. "+14045550123"

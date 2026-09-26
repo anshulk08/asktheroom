@@ -1,0 +1,9 @@
+[project]
+name = "askroom"
+version = "0.1.0"
+description = "Ask the Room: tabletop object permanence with voice Q&A and a laser pointer"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

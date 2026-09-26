@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments and local secrets
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+
+# Editor and OS files
+.DS_Store
+.idea/
+.vscode/
+
+# Runtime state and hardware calibration
+data/events.db*
+data/snapshots/
+table_cal.json
+laser_cal.json
+room_map.json
+*.log
+
+# Downloaded/generated model artifacts
+models/**/*.pt
+models/**/*.engine
+models/**/*.onnx
+models/**/*.onnx.json
