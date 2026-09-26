@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS questions (id INTEGER PRIMARY KEY, t REAL, text TEXT,
   answer TEXT, online INTEGER, latency_ms INTEGER);
 CREATE INDEX IF NOT EXISTS events_obj_t ON events(obj, t);
 CREATE INDEX IF NOT EXISTS events_wall ON events(wall);
+CREATE INDEX IF NOT EXISTS events_obj_wall ON events(obj, wall);
 """
 
 _COLS = 't, wall, obj, type, from_x, from_y, to_x, to_y, parent, edge, confidence, snapshot'
@@ -163,8 +164,9 @@ class EventLog:
             return self._conn().execute(sql, args).fetchall()
 
     def last(self, obj: str, n: int = 3) -> list[Event]:
-        """Most recent n events for obj, newest first."""
-        rows = self._rows(f'SELECT {_COLS} FROM events WHERE obj = ? ORDER BY t DESC, id DESC LIMIT ?',
+        """Most recent n events for obj, newest first. Newest by wall time: t is monotonic and restarts at
+        every boot, and the log outlives the process."""
+        rows = self._rows(f'SELECT {_COLS} FROM events WHERE obj = ? ORDER BY wall DESC, id DESC LIMIT ?',
                           (obj, n))
         return [_row_to_event(r) for r in rows]
 
@@ -186,7 +188,7 @@ class EventLog:
             return None
         marks = ','.join('?' * len(names))
         rows = self._rows(f'SELECT {_COLS} FROM events WHERE obj = ? AND type IN ({marks}) '
-                          'ORDER BY t DESC, id DESC LIMIT 1', (obj, *names))
+                          'ORDER BY wall DESC, id DESC LIMIT 1', (obj, *names))
         return _row_to_event(rows[0]) if rows else None
 
     def log_question(self, text: str, intent: str, obj: str | None, answer: str,
