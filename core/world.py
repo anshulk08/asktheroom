@@ -5,7 +5,10 @@ in order once per detection batch and returns the events it emitted. Spatial and
 Open-world objects (class-agnostic 'thing' proposals -> entities thing:1, thing:2, ...) are matched
 to identities by core/things.py (mixed in), then run through these same rules.
 
-Readers (answers, llm, server, eval) use only get / resolve / history / state_json (WorldAPI), plus
+Room memory (spec 0009: props carried off the table into drawn room zones) is core/room_world.py
+(mixed in): room_update() applies a zone visit, _observe() hands a room entity back to the table.
+
+Readers (answers, llm, server, eval) use only get / resolve / history / state_json / place (WorldAPI), plus
 find / teach / bind_alias / confirm_same / similar_to for named things (duck-typed: FakeWorld has
 only the read API, for tests and --fake runs)."""
 from __future__ import annotations
@@ -19,6 +22,7 @@ import cv2
 
 from core import geom, relations
 from core.config import Config
+from core.room_world import RoomRules
 from core.things import ThingRules
 from core.types import Detection, Detections, Entity, Event, EventType, Frame, Point, Status
 
@@ -54,12 +58,15 @@ class WorldAPI(Protocol):
 
     def state_json(self) -> dict: ...
 
+    def place(self, name: str, now: float | None = None): ...   # -> core.room_types.Place
 
-class World(ThingRules):
+
+class World(ThingRules, RoomRules):
     def __init__(self, cfg: Union[Config, dict], events=None, embed=None):
         """embed(frame_img, box_px) -> unit vector | None: appearance evidence for things (e.g. a
         CLIP / DINO crop embedding; core.things.hsv_embed is an offline stand-in). None: no appearance."""
         self.cfg = cfg if isinstance(cfg, Config) else Config.from_dict(cfg)
+        self._room_raw = None if isinstance(cfg, Config) else cfg.get('room_memory')   # Config: room defaults
         self.events = events
         self.embed = embed
         self.lock = threading.RLock()
@@ -102,6 +109,7 @@ class World(ThingRules):
             self._bg_t: float | None = None             # last background / appearance refresh
             self._gray_img = None                       # this update's grey frame, made on demand
             self._reset_things()
+            self._reset_room()
 
     def get(self, name: str) -> Entity:
         with self.lock:
@@ -144,9 +152,14 @@ class World(ThingRules):
     def resolve(self, name: str) -> tuple[tuple[float, float] | None, list[str]]:
         """Follow parent links through entity names (up to max_nesting). Returns the outermost
         entity's last position and the chain, e.g. ((60, 40), ['keys', 'box', 'notebook']).
-        Children never move themselves: a carried or moved parent carries them by this lookup."""
+        Children never move themselves: a carried or moved parent carries them by this lookup.
+        An outermost entity off the table (a room zone) gives (None, chain): no table-cm path may use its
+        stale table spot. Keyed on the zone, not pos_cm, which one table flicker can rewrite."""
         with self.lock:
-            return relations.resolve_chain(name, self.entities, self.cfg.max_nesting)
+            pos, chain = relations.resolve_chain(name, self.entities, self.cfg.max_nesting)
+            if chain and self.entities[chain[-1]].zone != 'table':
+                return None, chain
+            return pos, chain
 
     def state_json(self) -> dict:
         with self.lock:
@@ -155,7 +168,8 @@ class World(ThingRules):
                                  if ent.merged_into is None],
                     'edges': self._edges(), 'laser': dict(self.laser),
                     'aliases': dict(self._aliases),
-                    'merged': {n: e.merged_into for n, e in self.entities.items() if e.merged_into}}
+                    'merged': {n: e.merged_into for n, e in self.entities.items() if e.merged_into},
+                    'room': self.room_json()}
 
     def history(self, name: str, n: int = 3) -> list[Event]:
         """Latest n events for name, newest first."""
@@ -254,12 +268,15 @@ class World(ThingRules):
 
     def _observe(self, name: str, ent: Entity) -> list[Event]:
         prev, origin, known = ent.status, ent.pre_pickup_pos, name in self._confirmed
+        from_room = ent.zone != 'table' and name in self._room
         ent.status, ent.parent, ent.candidates, ent.confidence, ent.edge = Status.VISIBLE, None, [], 1.0, None
         ent.zone, ent.pre_pickup_pos, ent.held_since = 'table', None, None
         self._confirmed.add(name)
         self._rest[name], self._rest_box[name] = ent.pos_cm, ent.box_cm
         self._carry.pop(name, None)
         self._waiting.pop(name, None)
+        if from_room:                       # back from a room zone: Return (core/room_world.py)
+            return self._room_return(name, ent)
         if prev == Status.HELD:
             moved = origin is not None and geom.dist(ent.pos_cm, origin) >= self.cfg.moved_min_cm
             etype = EventType.MOVED if moved else EventType.PUT_BACK
@@ -597,11 +614,15 @@ class World(ThingRules):
 
     # ----- events -------------------------------------------------------------------------------
 
-    def _emit(self, name: str, etype: EventType, **fields) -> Event:
-        ev = Event(t=self._now, wall=self._wall, obj=name, type=etype,
-                   confidence=self.entities[name].confidence, **fields)
+    def _emit(self, name: str, etype: EventType, t=None, wall=None, img=None, **fields) -> Event:
+        """t / wall / img: a room event's capture time and zone crop (its snapshot, never the last table
+        frame); by default this update's time and frame."""
+        frame = self._frame if t is None else (Frame(t, wall, img, -1) if img is not None else None)
+        ev = Event(t=self._now if t is None else t, wall=self._wall if wall is None else wall, obj=name,
+                   type=etype, confidence=self.entities[name].confidence, **fields)
+        self._room_departure(ev)
         if self.events is not None:
-            self.events.add(ev, self._frame)
+            self.events.add(ev, frame)
         else:
             self._history.append(ev)
         return ev
