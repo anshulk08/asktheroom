@@ -4,7 +4,7 @@
     python -m eval.record --trial-id 18 --category inside --object keys --truth box --from-file clip.mov
     python -m eval.record --trial-id 17 --detect-only        # (re)run the detector on a saved trial
 
-Records from a camera (default index 0; the Mac webcam is fine for testing) or copies a video
+Records from a camera (default index 0, or a /dev/v4l/by-id/ path; the Mac webcam is fine for testing) or copies a video
 file, at 1280x720, for --seconds or until Enter / q. Writes trials/<id>/video.mp4,
 timestamps.json (seconds since the first frame, per frame) and truth.json. Ask the question at the
 end of the clip; the truth is what is true at that moment. See eval/trial.py for --truth.
@@ -26,7 +26,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 from core.config import load_config
 from core.types import Detections, Frame
@@ -50,7 +50,13 @@ def _fit(img):
     return img
 
 
-def record_camera(index: int, out: Path, seconds: Optional[float], preview: bool = True) -> list[float]:
+def camera_arg(s: str) -> Union[int, str]:
+    """--camera: an index ('0') or a device path; the /dev/v4l/by-id/ path names the Brio for good."""
+    s = str(s).strip()
+    return int(s) if s.isdigit() else s
+
+
+def record_camera(index: Union[int, str], out: Path, seconds: Optional[float], preview: bool = True) -> list[float]:
     """Record until seconds elapse, Enter on stdin, or q/Enter in the preview window."""
     import cv2
 
@@ -187,7 +193,7 @@ def main(argv=None) -> int:
     ap.add_argument("--truth", help="notebook | box | left|right|top|bottom | x,y | visible | held")
     ap.add_argument("--trials", default="trials")
     src = ap.add_mutually_exclusive_group()
-    src.add_argument("--camera", type=int, default=0)
+    src.add_argument("--camera", type=camera_arg, default=0, help="index or /dev/v4l/by-id/ path")
     src.add_argument("--from-file")
     ap.add_argument("--seconds", type=float, default=None)
     ap.add_argument("--question", default=None)
