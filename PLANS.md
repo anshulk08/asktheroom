@@ -50,8 +50,8 @@ Owners are TBD until the team assigns them.
 
 | # | Checkpoint | Done when | Owner |
 |---|---|---|---|
-| F1 | llama.cpp built on the Jetson, Qwen3-1.7B served | `scripts/qwen_server.sh` answers `/health` on the Jetson. Ask before building | TBD |
-| F2 | Jetson timing with everything loaded | `tegrastats` peak RAM, `scripts/eval_understand.py` median Qwen ms, and perception fps recorded in `docs/FEATURE_STATUS.md` | TBD |
+| F1 | ~~llama.cpp built on the Jetson, Qwen3-1.7B served~~ | **Dropped** (Sat 26 Sep): the rig is Grok-only (`understand.backend: grok`); offline, rules and templates answer, and a phone hotspot covers venue Wi-Fi drops. `scripts/qwen_server.sh` stays as an option only | — |
+| F2 | Jetson timing with everything loaded | `tegrastats` peak RAM, `scripts/eval_understand.py` median Grok ms, and perception fps recorded in `docs/FEATURE_STATUS.md` | TBD |
 | F3 | Hall-noise acceptance (spec 0002) | `scripts/overheard_test.py` on 10 min of recorded hall noise: 0–1 false triggers, or switch the default to `wake` | TBD |
 | F4 | whisper.cpp `whisper-cli` on the Jetson | `stt.backend: cli` transcribes the 20 test clips | TBD |
 | F5 | Real recorded trials | At least 3 per core category recorded with `eval.record`, replayed against the baselines | TBD |
