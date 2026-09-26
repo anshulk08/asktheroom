@@ -71,6 +71,16 @@ scripts/dock.sh python3 -m eval.replay_video --video trials/<id>/video.mp4 --mod
 It reports fps, per-object detection rate and every disappearance event (PICKED_UP, COVERED,
 PUT_INSIDE, EXITED_VIEW, LOST_TRACK) of an object no hand touched; pass = none at >= 10 fps.
 
+Then score the guided clips (eval/guided.py) against the old detector, with the rig's config:
+```
+for c in still_1 hands_1 place_1 shell_1 exit_1; do
+  scripts/dock.sh python3 -m eval.score_clip data/clips/$c --config config.yaml --detect-model models/askroom-yolo26s.engine
+done
+```
+Revisit the rig's per-class `conf_threshold` (wallet / phone are at 0.6 because the first model called
+unknown things by those names at up to 0.72): with distractors in training the confusions should
+score lower, and a lower cut-off confirms placements sooner.
+
 ## Slow path (label trial-video frames by hand)
 
 Classes are exactly the config objects in order, then `hand`:
