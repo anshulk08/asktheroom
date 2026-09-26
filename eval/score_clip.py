@@ -63,7 +63,9 @@ Metrics, each with a PASS / FAIL line (Bars below; n/a when the clip has nothing
                              not a pickup / put (uncover, move), plus scene rebirths; changes at place /
                              pickup / putdown / put_inside are listed as excused
   missed placements          a place / putdown step no entity arrived for within resolve_s
-  confirmation delay         step t -> the entity visible (median over placements)
+  confirmation delay         step t -> the entity visible (median over placements). Timed from the
+                             spoken cue, so it includes the person: 2.7-4.9 s from cue to hand off on
+                             the rig clips, the world's own share ~0.4 s (TECHNICAL_DESIGN.md)
   untouched disappearances   PICKED_UP / COVERED / PUT_INSIDE / EXITED_VIEW / LOST_TRACK on a prop's
                              entity while no step involved the prop
   checkpoint states          state and (inside / under) parent of every expected prop at each checkpoint
@@ -129,7 +131,7 @@ class Bars:
     false_births_per_min: float = 0.5
     identity_changes: int = 0
     missed_placements: int = 0
-    confirm_median_s: float = 3.0
+    confirm_median_s: float = 5.0        # from the spoken cue: the person takes 2.7-4.9 s to act; the world ~0.4 s
     false_disappearances: int = 0
     checkpoint_accuracy: float = 0.9
     question_accuracy: float = 1.0
