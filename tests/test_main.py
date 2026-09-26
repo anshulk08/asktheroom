@@ -612,6 +612,47 @@ def test_laser_fitted_before_the_table_calibration_is_flagged(tmp_path):
     assert not main.laser_older_than_table(SimpleNamespace(timestamp=1000.0), str(tmp_path / "none.json"))
 
 
+def test_camera_defaults_to_the_configured_stable_path_when_it_exists(tmp_path):
+    dev = tmp_path / "usb-046d_Logitech_BRIO-video-index0"
+    assert main.default_camera({"demo_check": {"camera": str(dev)}}) == 0          # not plugged in
+    dev.write_text("")
+    assert main.default_camera({"demo_check": {"camera": str(dev)}}) == str(dev)
+    assert main.default_camera({"demo_check": {"camera": "3"}}) == 3
+    assert main.default_camera({}) == 0
+
+
+def test_a_servo_driver_that_cannot_import_disables_the_laser_but_not_the_app(tmp_path, monkeypatch, caplog):
+    import sys
+    from act.actuator import FakeActuator
+    monkeypatch.setitem(sys.modules, "adafruit_servokit", None)       # import fails, as in an image without it
+    cfg = dict(CFG, actuator="pca9685", paths=dict(CFG["paths"], laser_cal=str(tmp_path / "laser_cal.json")))
+    with caplog.at_level("ERROR"):
+        laser = main.make_laser(cfg, None, SimTable(CFG))
+    assert type(laser.act) is FakeActuator and "adafruit_servokit" in laser.disabled
+    assert "LASER DISABLED" in caplog.text
+    with pytest.raises(RuntimeError, match="disabled"):
+        laser.aim((10, 10))
+    events = EventLog(":memory:", str(tmp_path))
+    world = demo_world(events)
+    room = main.Room(CFG, world, events, SimTable(CFG), None, laser,
+                     make_ask(CFG, world, events, net=None, other=no_model), tts=SpeakLog())
+    say, aim = room.respond(room.ask("where's my wallet", "voice"))
+    say.join(2)
+    aim.join(2)
+    assert "wallet" in room.tts.said[0].lower() and not room.world.laser.get("on")
+
+
+def test_the_mic_does_not_wait_forever_for_a_stuck_aim(tmp_path, cal_path):
+    room, _ = make_room(tmp_path, cal_path)
+    room.aim_join_s = 0.2
+    release = threading.Event()
+    room.aim = lambda ans: release.wait(10)                 # an aim that never finishes by itself
+    t0 = time.monotonic()
+    room._answer("where's my wallet", t0, t0, {"mode": "asked"})
+    assert time.monotonic() - t0 < 2.0
+    release.set()
+
+
 def test_the_ask_timeout_matches_the_server():
     import main
     from server.app import ASK_TIMEOUT_S

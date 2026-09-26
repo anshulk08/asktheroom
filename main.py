@@ -89,6 +89,17 @@ def camera_source(s: str):
     return int(s) if s.isdigit() else s
 
 
+def default_camera(cfg: dict):
+    """No --camera: the rig's Brio by its stable path (config demo_check.camera) when that path exists,
+    else index 0 (a laptop). An index is a guess on the rig: /dev/video2 is the Brio's infrared node."""
+    path = str((cfg.get("demo_check") or {}).get("camera") or "").strip()
+    if path and not path.isdigit() and os.path.exists(path):
+        return path
+    if path:
+        log.info("camera %s not found; using camera 0", path)
+    return camera_source(path) if path.isdigit() else 0
+
+
 def warm_on_connect(netmon, warm: Callable[[], object]) -> None:
     """Warm the connection to Grok (core.xai.warm) now if online, and every time the network comes back:
     otherwise the first question after a start or a drop pays for the TLS handshake and can run past its
@@ -129,6 +140,7 @@ class Room:
         self.max_fps = float(m.get("perception_max_fps", 15))
         self.net_copy_s = float(m.get("net_copy_s", 5))
         self.laser_timeout_s = float(cfg.get("laser_timeout_s", 10))
+        self.aim_join_s = float(cfg.get("laser_aim_join_s", 4.0))   # the mic waits this long for the aim, at most
         room = cfg.get("room") or {}
         self.room_enabled = bool(room.get("enabled", False))
         self.room_dwell_s = float(room.get("room_dwell_s", 5))
@@ -350,9 +362,14 @@ class Room:
         after = self._frame_probe()
         moved = float(np.abs(after - before).max()) if before is not None and after is not None else 0.0
         log.info("table recalibration ok%s", f" (the table frame moved {moved:.1f} cm)" if moved >= 0.1 else "")
-        if moved > 2.0 and self.laser is not None and getattr(self.laser, "fit", None) is not None:
-            log.warning("the table frame moved %.1f cm: recalibrate the laser (python -m act.calibrate) "
-                        "or it will point off", moved)
+        fit = getattr(self.laser, "fit", None) if self.laser is not None else None
+        if moved > 2.0 and fit is not None:
+            if getattr(fit, "table_px_to_cm", None) is not None:
+                log.info("the table frame moved %.1f cm: laser aims are remapped through the camera (recalibrate "
+                         "the laser only if the camera or the laser head moved)", moved)
+            else:
+                log.warning("the table frame moved %.1f cm: recalibrate the laser (python -m act.calibrate --rig) "
+                            "or it will point off", moved)
         return True
 
     def _recalibrate_and_tell(self, speak: bool) -> Optional[str]:
@@ -512,7 +529,9 @@ class Room:
         t_ans = time.monotonic()
         intent = self.interpret(text)
         say, aim = self.respond(ans)
-        aim.join()
+        aim.join(timeout=self.aim_join_s)
+        if aim.is_alive():
+            log.warning("laser still aiming after %.0f s; listening again without waiting for it", self.aim_join_s)
         overheard = extra.get("mode") == "overheard"
         self.last_timing = {"record_transcribe_s": round(t_heard - t0, 2),
                             "ask_s": round(t_ans - t_heard, 2),
@@ -657,6 +676,34 @@ def warn_if_clock_behind(cfg: dict) -> Optional[float]:
     return behind
 
 
+def make_laser(cfg: dict, frames, table):
+    """The rig's Laser. An actuator that can't start (e.g. adafruit_servokit missing) doesn't stop the app:
+    the laser is disabled, logged loudly, and answers are spoken only."""
+    import act.actuator
+    import act.laser
+    actuator, why = act.actuator.make_actuator_or_fake(cfg)   # cfg["actuator"]: fake | pca9685 | serial
+    if why is None and str(cfg.get("actuator", "fake")).lower() == "fake":
+        log.warning("actuator is 'fake': the servos will not move. On the rig set `actuator: pca9685` "
+                    "(or serial/bus) in config.local.yaml")
+    laser = act.laser.Laser(actuator, frames, table, cfg["paths"]["laser_cal"], cfg=cfg)
+    laser.disabled = why
+    if why is not None:
+        pass                                            # make_actuator_or_fake logged it
+    elif laser.fit is None:
+        log.warning("laser not calibrated (%s missing); answers will be spoken only. Run "
+                    "python -m act.calibrate --rig", cfg["paths"]["laser_cal"])
+    elif laser.fit.table_px_to_cm is None:
+        if laser_older_than_table(laser.fit, getattr(table, "cal_path", "")):
+            log.warning("laser_cal.json was fitted before the last table calibration: the laser may point "
+                        "off; recalibrate it (python -m act.calibrate --rig)")
+    else:
+        moved = laser.refit_moved_cm()
+        if moved is not None and moved > 0.5:
+            log.info("table refitted since the laser fit (frame moved %.1f cm): aims are remapped through the "
+                     "camera; recalibrate the laser only if the camera or the laser head moved", moved)
+    return laser
+
+
 def build(cfg: dict, fake: bool = False, camera: int = 0, with_voice: bool = True,
           video: Optional[str] = None, keyboard: Optional[bool] = None) -> tuple[Room, bool]:
     """Construct everything. Returns (room, needs_perception_thread)."""
@@ -721,20 +768,8 @@ def build(cfg: dict, fake: bool = False, camera: int = 0, with_voice: bool = Tru
         laser.off()
         log.info("fake laser: simulated rig calibrated (%s)", cal)
     else:
-        import act.actuator
-        import act.laser
-        actuator = act.actuator.make_actuator(cfg)     # cfg["actuator"]: fake | pca9685 | serial
-        cleanup.append(actuator.close)
-        if str(cfg.get("actuator", "fake")).lower() == "fake":
-            log.warning("actuator is 'fake': the servos will not move. On the rig set `actuator: pca9685` "
-                        "(or serial/bus) in config.local.yaml")
-        laser = act.laser.Laser(actuator, frames, table, cfg["paths"]["laser_cal"], cfg=cfg)
-        if laser.fit is None:
-            log.warning("laser not calibrated (%s missing); answers will be spoken only",
-                        cfg["paths"]["laser_cal"])
-        elif laser_older_than_table(laser.fit, table.cal_path):
-            log.warning("laser_cal.json was fitted before the last table calibration: the laser may point "
-                        "off; recalibrate it (python -m act.calibrate)")
+        laser = make_laser(cfg, frames, table)
+        cleanup.append(laser.act.close)
         if (cfg.get("room") or {}).get("enabled"):
             from act.room_map import RoomMap
             path = cfg.get("room_map", "room_map.json")
@@ -797,8 +832,9 @@ def main(argv=None) -> int:
     ap.add_argument("--fake", action="store_true", help="no hardware: sim camera, simulated laser, Enter to ask")
     ap.add_argument("--no-voice", action="store_true", help="dashboard and /ask only")
     ap.add_argument("--listen", choices=["always", "wake", "click"], help="override listen.mode")
-    ap.add_argument("--camera", type=camera_source, default=0,
-                    help="camera index, or a stable path like /dev/v4l/by-id/usb-046d_0809_...-video-index0")
+    ap.add_argument("--camera", type=camera_source, default=None,
+                    help="camera index, or a stable path like /dev/v4l/by-id/usb-046d_...-video-index0 "
+                         "(default: config demo_check.camera if it exists, else 0)")
     ap.add_argument("--video", help="play this recording instead of the camera (through the real detector)")
     ap.add_argument("--host")
     ap.add_argument("--port", type=int)
@@ -811,7 +847,8 @@ def main(argv=None) -> int:
     cfg = load_config(args.config)
     if args.listen:
         cfg["listen"] = dict(cfg.get("listen") or {}, mode=args.listen)
-    room, perception = build(cfg, fake=args.fake, camera=args.camera, with_voice=not args.no_voice,
+    camera = args.camera if args.camera is not None else default_camera(cfg)
+    room, perception = build(cfg, fake=args.fake, camera=camera, with_voice=not args.no_voice,
                              video=args.video)
     host = args.host or cfg["server"]["host"]
     port = args.port or cfg["server"]["port"]
