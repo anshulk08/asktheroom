@@ -88,3 +88,18 @@ def test_online_never_blocks_and_stop_joins_quickly(monkeypatch):
     m.stop()
     assert time.perf_counter() - t0 < 0.1
     assert m._thread is None
+
+
+def test_clock_behind_the_newest_saved_file_is_flagged(tmp_path):
+    import os
+    f = tmp_path / "events.db"
+    f.write_text("")
+    os.utime(f, (net.CLOCK_FLOOR + 7200, net.CLOCK_FLOOR + 7200))
+    assert net.clock_behind([str(f)], now=net.CLOCK_FLOOR + 3600) == 3600
+    assert net.clock_behind([str(f)], now=net.CLOCK_FLOOR + 7200 + 5) is None
+    assert net.clock_behind([str(f)], now=net.CLOCK_FLOOR + 7200 - 30) is None     # within slack
+
+
+def test_clock_before_the_hackathon_is_flagged_even_with_no_files():
+    assert net.clock_behind(["", "/no/such/file"], now=0.0) == net.CLOCK_FLOOR
+    assert net.clock_behind([], now=net.CLOCK_FLOOR + 1) is None

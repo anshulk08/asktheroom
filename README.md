@@ -61,7 +61,7 @@ Walk through the key files in the order data flows:
 
 A judge runs it, and it resets in under a minute:
 
-1. All eight objects start on the table. Run `python demo_check.py` first: it should print all green.
+1. All eight objects start on the table. Run `python demo_check.py` first: it should print all green. A red `clock` line means the Jetson booted offline with a stale clock: join the phone hotspot so NTP sets it, or `sudo date -s "..."` on the host.
 2. The judge puts the keys on the table, slides the notebook over them, puts the notebook into the box, and slides the box across the table.
 3. The judge asks "where are my keys?". The rig answers something like "Your keys are under the notebook, which is inside the box" and the laser points at the box.
 4. Follow-up questions: "what happened to my keys?" (the history), and "did anyone touch my pills?" (the pill-bottle wording stays neutral).

@@ -580,6 +580,23 @@ class Room:
 
 # ---------------------------------------------------------------- construction
 
+def clock_files(cfg: dict) -> list[str]:
+    """Files whose mtimes the wall clock can't be behind: the last run's event DB, calibrations, config."""
+    paths = cfg.get("paths") or {}
+    return [paths.get("events_db", ""), paths.get("table_cal", ""), paths.get("laser_cal", ""),
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.yaml")]
+
+
+def warn_if_clock_behind(cfg: dict) -> Optional[float]:
+    import net
+    behind = net.clock_behind(clock_files(cfg))
+    if behind is not None:
+        log.warning("the clock is %.0f min behind the last saved file: spoken times and the n8n log will be "
+                    "wrong until it is set. Join the phone hotspot so NTP sets it (timedatectl), or "
+                    "`sudo date -s` on the Jetson", behind / 60)
+    return behind
+
+
 def build(cfg: dict, fake: bool = False, camera: int = 0, with_voice: bool = True,
           video: Optional[str] = None, keyboard: Optional[bool] = None) -> tuple[Room, bool]:
     """Construct everything. Returns (room, needs_perception_thread)."""
@@ -595,6 +612,7 @@ def build(cfg: dict, fake: bool = False, camera: int = 0, with_voice: bool = Tru
     if not fake:
         import core.table
         core.table.apply_saved_size(cfg)            # one-tag mode: the saved tracked area, before anything reads it
+        warn_if_clock_behind(cfg)
     if fake:
         snap = tempfile.mkdtemp(prefix="askroom_fake_snaps_")
         events = core.events.EventLog(":memory:", snap)

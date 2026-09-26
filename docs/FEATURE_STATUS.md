@@ -70,6 +70,7 @@ Test suite at time of writing (Sat 26 Sep, after the overnight merge): `.venv/bi
 | — | Network monitor, never blocks (`net.py`) | validated | `tests/test_net.py` |
 | — | "Recalibrate" in one-tag mode: feeds fresh frames until the tag fit completes (about 2 s), warns if the table frame moved over 2 cm under a fitted laser; startup warns when `laser_cal.json` is older than `table_cal.json` (`main.py`). A spoken recalibrate that fails says so, and one that measures a new tracked area asks for a restart (the world, laser and detector read the size at startup); the BLE bridge follows the new size on its own | validated (unit) | `tests/test_main.py` (`test_recalibrate_*`, `test_a_*recalibrate*`, `test_laser_fitted_before_the_table_calibration_is_flagged`), `tests/test_mobile_protocol.py` (`test_the_bridge_follows_a_recalibrated_table_size`) |
 | — | Pre-judge checklist (`demo_check.py`) | validated (fake rig) | `tests/test_demo_check.py`. Not run on the real rig yet |
+| — | Clock check: `main.py` warns at startup and `demo_check.py` check 9 fails when the wall clock is behind the last saved file (event DB, calibrations, config) or before Sep 25; a Jetson offline with no RTC battery boots stale and every spoken time and n8n timestamp is off (`net.clock_behind`) | validated (unit) | `tests/test_net.py`, `tests/test_demo_check.py` |
 | — | Whole program without hardware (`main.py --fake`, `server.sim`) | validated | `tests/test_main.py::test_build_fake_runs_without_hardware`, `tests/test_sim.py` |
 
 ## Evaluation
