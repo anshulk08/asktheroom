@@ -286,15 +286,27 @@ class RoomRules:
         # the new arrival and the carried thing's departure stayed open (rig run, Sat 26 Sep).
         cands = self._thing_candidates(trk, visit)
         mismatch = False
-        if len(cands) == 1:
-            name, dep_t = cands[0]
-            others = [p for tid, p in self._pending_things.items()
-                      if tid != trk.tid and p.role == 'pending' and p.first_seen > dep_t]
-            mine, theirs = trk.guess, self.thing_guess(name)
-            if not others and mine is not None and theirs is not None:
-                if names_match(mine, theirs, rc.name_match_min):
+        mine = trk.guess
+        if cands and mine is not None:
+            # Candidates whose Grok name matches are one object: from a corner camera a hand placing it
+            # makes the table re-birth it (thing:126..129 in one placement, trial run), each named
+            # separately. The latest departure is the one carried; the others are its duplicates.
+            same = [(n, t) for n, t in cands if self.thing_guess(n) is not None
+                    and names_match(mine, self.thing_guess(n), rc.name_match_min)]
+            named = [(n, t) for n, t in cands if self.thing_guess(n) is not None]
+            if same:
+                name, dep_t = max(same, key=lambda c: c[1])
+                first = min(t for _, t in same)
+                others = [p for tid, p in self._pending_things.items()
+                          if tid != trk.tid and p.role == 'pending' and p.first_seen > first
+                          and (p.guess is None or names_match(p.guess, mine, rc.name_match_min))]
+                if not others:
+                    for n, _ in same:
+                        if n != name:
+                            self._departures.pop(n, None)      # its duplicates: never handed off again
                     return 'acquire', name
-                mismatch = True           # a shoe left the table; this is a remote: never that thing
+            elif named and len(named) == len(cands):
+                mismatch = True           # every candidate is named and none fits: a shoe left, this is a remote
         name = self._thing_reacquire(trk, visit)
         if name is not None:
             return 'reacquire', name

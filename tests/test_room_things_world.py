@@ -164,18 +164,17 @@ def test_a_room_track_first_seen_before_the_departure_is_not_the_thing(scene, wo
     assert world.get('thing:1').zone == 'table' and 'thing:1' in world._departures
 
 
-def test_two_departed_candidates_hand_over_nothing(scene, world):
+def test_two_same_named_departed_things_are_one_object_the_latest_is_handed_over(scene, world):
+    """Two departed things both named remote are taken for duplicates of one remote (the corner camera
+    re-births an object while a hand places it; one of each object is the M0 demo assumption): the latest
+    is handed over and the other's departure dropped. Revised after the trial run (was: nothing)."""
     namer = namer_for(world, REMOTE, {"name": "remote", "also": ["tv remote"], "confidence": 0.8})
     named_thing_leaves(scene, world, namer, key='remote', at=(40, 30))
     named_thing_leaves(scene, world, namer, key='remote2', at=(40, 50), thing='thing:2',
                        guess={"name": "remote", "also": ["tv remote"], "confidence": 0.8})
     trk = room_thing(scene, world, 'r:1')
-    assert seen(scene, world, trk, zone='couch') == []
-    assert trk.role == 'pending'
-    assert {world.get(n).zone for n in ('thing:1', 'thing:2')} == {'table'}
-    world.room_cfg.thing_name_wait_s = 0.5
-    assert seen(scene, world, trk, zone='couch') == []
-    assert trk.role == 'ignored'
+    assert [(e.type, e.obj) for e in seen(scene, world, trk, zone='couch')] == [(EventType.FOUND, 'thing:2')]
+    assert world.get('thing:1').zone == 'table' and 'thing:1' not in world._departures
 
 
 def test_two_new_room_tracks_hand_over_nothing(scene, world):
@@ -305,3 +304,15 @@ def test_a_carried_thing_is_handed_off_before_a_stale_room_copy_reacquires(scene
     evs = seen(scene, world, new, zone='couch')
     assert [(e.type, e.obj) for e in evs] == [(EventType.FOUND, 'thing:2')]
     assert 'thing:2' not in world._departures
+
+
+def test_same_named_duplicates_count_as_one_candidate(scene, world):
+    """Trial run: one placement made thing:1 and thing:2 (both 'remote control'); both left the table.
+    A couch track named remote is the latest of them, and the other's departure is dropped."""
+    namer = namer_for(world, REMOTE)
+    named_thing_leaves(scene, world, namer)
+    named_thing_leaves(scene, world, namer, key='remote2', thing='thing:2')
+    trk = room_thing(scene, world, 'r:1', guess=dict(REMOTE))
+    evs = seen(scene, world, trk, zone='couch')
+    assert [(e.type, e.obj) for e in evs] == [(EventType.FOUND, 'thing:2')]
+    assert world._departures == {}

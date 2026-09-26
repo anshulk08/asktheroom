@@ -534,3 +534,14 @@ M5 (per pointable zone):
   the table's closed-loop dot finding is red-only today (section 5, Dot colour): it cannot see a green dot.
 - Floor zones that touch the table edge: where does the table rectangle end for handoff?
 - Phone zone map: after M3.
+
+## Rig findings (Sat 26 Sep evening, corner camera)
+
+- The fine-tuned prop detector does not recognise props from the corner (the remote read as a wallet): on
+  that rig prop labels are off (`conf_threshold` 0.9) and unnamed things named by Grok carry the demo.
+- Unnamed things are handed from the table to a zone by departure + Grok name. Room crops go to Grok only
+  while a handoff is possible, boxed in red with context, as "is it one of these?", and a yes counts only
+  at confidence 0.7 with Grok's own description fitting.
+- A hand placing an object makes the table re-birth it several times; departed candidates with the same
+  Grok name are one object (the latest is handed over). Like one-per-class for props, this is a demo
+  assumption, not identity evidence.
