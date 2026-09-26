@@ -68,3 +68,6 @@ experiments/**/frames/
 
 # Stray local session files
 *.ses
+
+# per-device config overlay (core/config.py)
+config.local.yaml

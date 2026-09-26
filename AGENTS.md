@@ -21,7 +21,7 @@ An overhead camera on a Jetson tracks tabletop objects, including hidden ones (u
 ## Working rules
 
 - **Python 3.10.** The Jetson runs JetPack 6. Don't use `match` statements or 3.11+ stdlib (`tomllib`, `ExceptionGroup`, `typing.Self` and so on).
-- **Config.** Add new config keys in new sections at the end of `config.yaml`. Never rename existing keys. Tune thresholds from recorded replays (`eval.replay`, `scripts/eval_understand.py`, `scripts/overheard_test.py`), never by guessing during a live run.
+- **Config.** Add new config keys in new sections at the end of `config.yaml`. Never rename existing keys. Tune thresholds from recorded replays (`eval.replay`, `scripts/eval_understand.py`, `scripts/overheard_test.py`), never by guessing during a live run. Per-device values (actuator driver, webhook URL) go in the gitignored `config.local.yaml`, not in `config.yaml`.
 - **Units.** Positions are table centimetres (origin at ArUco marker 0, x right, y down). A field is in pixels only if its name says so (`box_px`).
 - **World readers** (answers, LLM prompts, server, eval) use only `get`, `resolve`, `history` and `state_json` (`WorldAPI` in `core/world.py`).
 - **Spoken answers** are 1–2 short sentences with no markdown. Pill-bottle wording stays neutral: never say or imply that medication was "taken". The pill filter in `voice/llm.py` (`to_answer`, `PILLS_SAFE`) runs on every LLM answer.

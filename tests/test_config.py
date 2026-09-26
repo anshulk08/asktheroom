@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from core.config import Config
+from core.config import Config, load_config
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -50,3 +50,45 @@ def test_typed_view_reads_the_shared_yaml_layout(cfg):
 def test_from_dict_ignores_other_modules_keys():
     c = Config.from_dict({'objects': {'keys': 'target'}, 'llm': {'model': 'x'}, 'present_k_of_n': [4, 8]})
     assert c.names() == ['keys'] and (c.present_k, c.present_n) == (4, 8)
+
+
+def _write(d, name, text):
+    (d / name).write_text(text)
+    return d / name
+
+
+def test_a_local_file_overrides_config_yaml_key_by_key(tmp_path, monkeypatch):
+    monkeypatch.delenv("ASKROOM_NO_LOCAL_CONFIG", raising=False)
+    base = _write(tmp_path, "config.yaml", "actuator: fake\nn8n:\n  webhook_url: ''\n  token: t\nlist: [1, 2]\n")
+    _write(tmp_path, "config.local.yaml", "actuator: pca9685\nn8n:\n  webhook_url: http://x\nlist: [3]\n")
+    cfg = load_config(base)
+    assert cfg["actuator"] == "pca9685"
+    assert cfg["n8n"] == {"webhook_url": "http://x", "token": "t"}     # the untouched key survives
+    assert cfg["list"] == [3]                                           # lists replace, not append
+
+
+def test_no_local_file_is_just_config_yaml(tmp_path, monkeypatch):
+    monkeypatch.delenv("ASKROOM_NO_LOCAL_CONFIG", raising=False)
+    base = _write(tmp_path, "config.yaml", "actuator: fake\n")
+    assert load_config(base) == {"actuator": "fake"}
+
+
+def test_the_opt_out_ignores_the_local_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("ASKROOM_NO_LOCAL_CONFIG", "1")
+    base = _write(tmp_path, "config.yaml", "actuator: fake\n")
+    _write(tmp_path, "config.local.yaml", "actuator: pca9685\n")
+    assert load_config(base)["actuator"] == "fake"
+
+
+def test_the_typed_view_sees_the_local_file(tmp_path, monkeypatch):
+    monkeypatch.delenv("ASKROOM_NO_LOCAL_CONFIG", raising=False)
+    base = _write(tmp_path, "config.yaml", "present_k_of_n: [6, 10]\n")
+    _write(tmp_path, "config.local.yaml", "present_k_of_n: [4, 8]\n")
+    assert (Config.load(base).present_k, Config.load(base).present_n) == (4, 8)
+
+
+def test_the_example_local_file_parses_and_names_real_keys():
+    import yaml
+    ex = yaml.safe_load((ROOT / "config.local.yaml.example").read_text())
+    base = load_config(ROOT / "config.yaml")
+    assert set(ex) <= set(base)

@@ -119,7 +119,9 @@ Then calibrate the laser: on the rig, `act.calibrate.calibrate(Laser(...))` is c
 
 ## Configuration
 
-Everything lives in `config.yaml`. All thresholds are starting values: tune them from replays, never live. The sections you are most likely to touch:
+Everything lives in `config.yaml`. All thresholds are starting values: tune them from replays, never live.
+
+What differs per device goes in a gitignored `config.local.yaml` next to it, merged over `config.yaml` at startup (nested sections merge key by key). Copy `config.local.yaml.example`: on the rig it sets `actuator: pca9685`, since the committed default is `fake` and `main.py` warns at startup when the servos are fake. The sections you are most likely to touch:
 
 | Section | What it controls |
 |---|---|

@@ -618,6 +618,9 @@ def build(cfg: dict, fake: bool = False, camera: int = 0, with_voice: bool = Tru
         import act.laser
         actuator = act.actuator.make_actuator(cfg)     # cfg["actuator"]: fake | pca9685 | serial
         cleanup.append(actuator.close)
+        if str(cfg.get("actuator", "fake")).lower() == "fake":
+            log.warning("actuator is 'fake': the servos will not move. On the rig set `actuator: pca9685` "
+                        "(or serial/bus) in config.local.yaml")
         laser = act.laser.Laser(actuator, frames, table, cfg["paths"]["laser_cal"], cfg=cfg)
         if laser.fit is None:
             log.warning("laser not calibrated (%s missing); answers will be spoken only",

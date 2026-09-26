@@ -78,7 +78,7 @@ rules can't read and of open questions (with a compact world state).
 | Path | What it holds |
 |---|---|
 | `core/types.py` | Shared data contracts: Frame, Detection(s), Entity, Event, Intent, Answer. **Change only as a team.** |
-| `core/config.py`, `config.yaml` | Config loaded as a plain dict (`load_config()`); the world also reads a typed `Config` view. All thresholds are here. |
+| `core/config.py`, `config.yaml` | Config loaded as a plain dict (`load_config()`); the world also reads a typed `Config` view. All thresholds are here. A gitignored `config.local.yaml` (per device, e.g. the rig's `actuator: pca9685`) is merged over it; tests skip it (`ASKROOM_NO_LOCAL_CONFIG`). |
 | `core/capture.py` | Camera `FrameBuffer`, plus `VideoFileSource` with the same API for replays. |
 | `core/table.py` | ArUco homography mapping pixels to table cm (`table_cal.json`). |
 | `core/detect.py` | YOLO-World (zero-shot, path A) or fine-tuned YOLO11 (path B, the plan), exported to TensorRT. |
