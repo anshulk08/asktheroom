@@ -22,10 +22,12 @@ struct RoomView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text("Ask the Room").font(.title2.bold())
+                Text("Ask the Room").font(.title2.bold()).minimumScaleFactor(0.6)
                 Spacer()
                 StatusPill(store: store)
             }
+            .lineLimit(1)
+            .dynamicTypeSize(...DynamicTypeSize.accessibility1)
             .padding(.horizontal, 16)
             .padding(.top, 8)
 
