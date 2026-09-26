@@ -79,6 +79,11 @@ class Config:
     edge_drop_cm: float = 10.0
     floor_zones: list[dict] = field(default_factory=list)
 
+    # Open world (core/things.py): the openworld: section, read there; a square on the table where a
+    # new thing is shown to be named ('this is my charger'), or None for 'most recently put down'.
+    openworld: dict = field(default_factory=dict)
+    teach_zone_cm: tuple[float, float, float, float] | None = None
+
     @classmethod
     def from_dict(cls, raw: dict) -> "Config":
         """Map the shared config.yaml layout onto the world's fields; other modules' keys are ignored."""

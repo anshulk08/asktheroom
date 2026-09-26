@@ -70,6 +70,7 @@ class EventType(str, Enum):
     LOST_TRACK = "LOST_TRACK"
     CORRECTED = "CORRECTED"
     FOUND = "FOUND"          # stretch: search camera found a lost object
+    APPEARED = "APPEARED"    # open world: a new thing:N was confirmed from class-agnostic proposals
 
 
 EVENT_TYPES = [e.value for e in EventType]
@@ -90,6 +91,10 @@ class Entity:
     pre_pickup_pos: Optional[Point] = None
     zone: str = "table"                  # 'table' or a floor/room surface name (stretch)
     held_since: Optional[float] = None   # time.monotonic() when the current HELD began
+    # Open world (things only; empty for the configured objects):
+    aliases: list[str] = field(default_factory=list)          # taught names, newest first
+    maybe_same_as: list[tuple[str, float]] = field(default_factory=list)  # (earlier thing, look score)
+    merged_into: Optional[str] = None    # set when this identity was folded into another one
 
 
 @dataclass
@@ -106,14 +111,15 @@ class Event:
     snapshot: Optional[str] = None       # path to jpg
 
 
-INTENT_KINDS = ["WHERE", "HISTORY", "HANDLED", "CHANGES", "RESET", "RECAL", "OTHER"]
+INTENT_KINDS = ["WHERE", "HISTORY", "HANDLED", "CHANGES", "RESET", "RECAL", "TEACH", "OTHER"]
 
 
 @dataclass
 class Intent:
     kind: str                            # one of INTENT_KINDS
-    obj: Optional[str]                   # canonical object name, after synonyms
+    obj: Optional[str]                   # canonical object name, after synonyms (or a taught alias)
     raw: str                             # the question as heard
+    name: Optional[str] = None           # spoken name not in the config ('charger'); TEACH: the new name
 
 
 @dataclass
@@ -121,6 +127,7 @@ class Answer:
     text: str                            # what to speak
     point_at: Optional[str] = None       # entity name for the laser
     action: Optional[str] = None         # 'point' | 'sweep:left' | 'circle' | None
+    target_cm: Optional[Point] = None    # a raw table position to point at when no entity fits (visual Q&A)
 
 
 def entity_json(e: Entity, resolved_cm: Optional[Point]) -> dict:

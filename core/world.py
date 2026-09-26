@@ -2,8 +2,12 @@
 in order once per detection batch and returns the events it emitted. Spatial and image helpers
 (covers, container dwell, parent chains, background / appearance) live in relations.py.
 
-Readers (answers, llm, server, eval) use only get / resolve / history / state_json (WorldAPI);
-core/fakeworld.py:FakeWorld has the same read API for tests and --fake runs."""
+Open-world objects (class-agnostic 'thing' proposals -> entities thing:1, thing:2, ...) are matched
+to identities by core/things.py (mixed in), then run through these same rules.
+
+Readers (answers, llm, server, eval) use only get / resolve / history / state_json (WorldAPI), plus
+find / teach / bind_alias / confirm_same / similar_to for named things (duck-typed: FakeWorld has
+only the read API, for tests and --fake runs)."""
 from __future__ import annotations
 
 import threading
@@ -15,6 +19,7 @@ import cv2
 
 from core import geom, relations
 from core.config import Config
+from core.things import ThingRules
 from core.types import Detection, Detections, Entity, Event, EventType, Frame, Point, Status
 
 HISTORY_MAX = 1000
@@ -45,10 +50,13 @@ class WorldAPI(Protocol):
     def state_json(self) -> dict: ...
 
 
-class World:
-    def __init__(self, cfg: Union[Config, dict], events=None):
+class World(ThingRules):
+    def __init__(self, cfg: Union[Config, dict], events=None, embed=None):
+        """embed(frame_img, box_px) -> unit vector | None: appearance evidence for things (e.g. a
+        CLIP / DINO crop embedding; core.things.hsv_embed is an offline stand-in). None: no appearance."""
         self.cfg = cfg if isinstance(cfg, Config) else Config.from_dict(cfg)
         self.events = events
+        self.embed = embed
         self.lock = threading.RLock()
         # Set by the app, not the rules; carried in state_json for the dashboard and Grok.
         self.online = False
@@ -85,6 +93,7 @@ class World:
             self._look_px: dict[str, tuple] = {}        # obj -> box_px its remembered patch came from
             self._bg_t: float | None = None             # last background / appearance refresh
             self._gray_img = None                       # this update's grey frame, made on demand
+            self._reset_things()
 
     def get(self, name: str) -> Entity:
         with self.lock:
@@ -98,6 +107,7 @@ class World:
             out: list[Event] = []
             seen = self._best_detections(dets.items)
             self._track_covers(seen)
+            out += self._associate_things(dets, seen)     # adds thing:N -> proposal to seen
             fell: list[str] = []
             for name, ent in self.entities.items():
                 was = self._present[name]
@@ -120,6 +130,7 @@ class World:
                     out += self._update_held(name, ent)
             out += self._lifted_covers()
             self._refresh_images(seen, dets.hands)
+            self._after_things(out)
             return out
 
     def resolve(self, name: str) -> tuple[tuple[float, float] | None, list[str]]:
@@ -132,15 +143,20 @@ class World:
     def state_json(self) -> dict:
         with self.lock:
             return {'t': self._wall, 'online': self.online, 'fps': self.fps,
-                    'entities': [self._entity_json(ent) for ent in self.entities.values()],
-                    'edges': self._edges(), 'laser': dict(self.laser)}
+                    'entities': [self._entity_json(ent) for ent in self.entities.values()
+                                 if ent.merged_into is None],
+                    'edges': self._edges(), 'laser': dict(self.laser),
+                    'aliases': dict(self._aliases),
+                    'merged': {n: e.merged_into for n, e in self.entities.items() if e.merged_into}}
 
     def history(self, name: str, n: int = 3) -> list[Event]:
         """Latest n events for name, newest first."""
         with self.lock:
+            names = {name} | {m for m, e in self.entities.items() if e.merged_into == name}
             if self.events is not None:
-                return list(self.events.last(name, n))
-            return [ev for ev in reversed(self._history) if ev.obj == name][:n]
+                evs = [ev for m in names for ev in self.events.last(m, n)]
+                return sorted(evs, key=lambda ev: ev.t, reverse=True)[:n] if len(names) > 1 else evs
+            return [ev for ev in reversed(self._history) if ev.obj in names][:n]
 
     def observe_external(self, name: str, pos_cm, zone: str) -> list[Event]:
         """Stretch: the search camera found the object off the table (or anywhere)."""
@@ -158,14 +174,17 @@ class World:
 
     def _entity_json(self, ent: Entity) -> dict:
         resolved, _ = self.resolve(ent.name)
-        return {'name': ent.name, 'kind': ent.kind, 'status': ent.status.value, 'parent': ent.parent,
-                'pos_cm': _list(ent.pos_cm), 'resolved_cm': _list(resolved), 'confidence': ent.confidence,
-                'candidates': list(ent.candidates), 'last_seen': ent.last_seen, 'zone': ent.zone,
-                'edge': ent.edge}
+        return self._thing_json(ent, {
+            'name': ent.name, 'kind': ent.kind, 'status': ent.status.value, 'parent': ent.parent,
+            'pos_cm': _list(ent.pos_cm), 'resolved_cm': _list(resolved), 'confidence': ent.confidence,
+            'candidates': list(ent.candidates), 'last_seen': ent.last_seen, 'zone': ent.zone,
+            'edge': ent.edge})
 
     def _edges(self) -> list[list[str]]:
         edges = []
         for ent in self.entities.values():
+            if ent.merged_into is not None:
+                continue
             if ent.parent in self.entities or _is_hand(ent.parent):
                 edges.append([ent.name, ent.status.value, ent.parent])
             elif ent.status == Status.VISIBLE:
