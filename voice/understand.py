@@ -14,17 +14,21 @@ Two ways speech arrives (listen.mode in config.yaml):
   overheard  the mic is always on; most speech near the table is people talking to each other.
 
 Asked: rules first, then Qwen.
-  - The rules answer when they found a question word and the object it needs. They are exact on
-    the phrasings they know and on synonyms ("clicker" is the remote), where a small model slips.
+  - The rules answer when they found a question word and the object it needs, named as such. They
+    are exact on the phrasings they know and on synonyms ("clicker" is the remote), where a small
+    model slips. An object the rules only guessed from a mishearing ("where are my kiss" -> keys) or a
+    name nobody taught ("where is my kiss") goes to the model, which may know better; if it names no
+    object, the rules' guess or name stands (world.find resolves names).
     RESET and RECAL act on the room, so only the explicit words count: a misheard "reset"
     mid-demo would wipe the world model.
-  - So do TEACH, WHAT_DOING and questions about a name outside the config ("where is my charger",
-    kept as Intent.name for world.find); Qwen knows neither those kinds nor taught names.
+  - So do TEACH, WHAT_DOING and questions about a taught name ("where is my charger" once someone
+    said "this is my charger": Intent.name, for world.find); the model knows neither.
   - Otherwise (rules say OTHER, or found no object) Qwen decides the kind. An object the rules
     recognised still wins over Qwen's.
   - Qwen's object must sound like something that was said (sounds_like), so "my coffee mug"
     doesn't become the glasses.
-  - Qwen down, slower than understand.timeout_s, or bad output: the rules' answer stands.
+  - Qwen down, slower than understand.timeout_s (a wall-clock limit on the whole call, DNS included),
+    or bad output: the rules' answer stands.
 
 Which model (understand.backend): grok (the default; offline, the rules answer: use a phone hotspot
 if the venue Wi-Fi drops), qwen (the local llama-server, asked online or not), or auto (Grok online,
@@ -40,7 +44,9 @@ Overheard: decide "was that for me?" without the model, then read it like an ask
   - Then the asked path (rules, then Qwen). Two more guards, because a wrong answer to people
     talking to each other breaks the illusion more than silence: RESET/RECAL need the wake word
     ("let's reset after this" must not wipe the world), and OTHER needs the wake word or an
-    object ("where are you guys from" is for the team, "what's in the box" is for the rig).
+    object ("where are you guys from" is for the team, "what's in the box" is for the rig), and so
+    does a WHERE with nothing to look for. screen() makes every check that needs no model, so the
+    voice loop can drop chatter before starting its thinking cue.
   - Qwen isn't asked to judge IGNORE: on tests/understand_eval.json it got 8/16 overheard lines
     right, the checks above 14/16 with nothing to load.
 
@@ -62,7 +68,8 @@ import requests
 
 from core.config import load_config
 from core.types import INTENT_KINDS, Intent
-from voice.intents import _vocab, normalize, parse
+from net import call_with_deadline
+from voice.intents import _vocab, fuzzy_match, matched_exactly, normalize, parse
 
 log = logging.getLogger(__name__)
 
@@ -139,17 +146,29 @@ def addressed(text: str, cfg: dict) -> bool:
 
 def sounds_like(obj: str, text: str, cfg: dict) -> bool:
     """Was something like obj said? Keeps Qwen from inventing an object ("my coffee mug" -> glasses)
-    while letting it fix mishearings the rules can't ("wears my wall it" -> wallet)."""
+    while letting it fix mishearings the rules can't ("wears my wall it" -> wallet, "my kiss" -> keys)."""
     names = [obj.replace("_", " ")] + [str(k) for k, v in (cfg.get("synonyms") or {}).items() if v == obj]
     words = normalize(text).split()
     spans = [" ".join(words[i:i + n]) for n in (1, 2) for i in range(len(words) - n + 1)]
-    return any(difflib.SequenceMatcher(None, s, n).ratio() >= SOUNDS_LIKE for s in spans for n in names)
+    return any(difflib.SequenceMatcher(None, s, n).ratio() >= SOUNDS_LIKE or fuzzy_match(s, n) > 0
+               for s in spans for n in names)
 
 
-def rules_sure(i: Intent) -> bool:
-    """A kind only the rules produce, or a question with its object or spoken name ('where is my
-    charger': world.find resolves taught names Qwen has never heard of)."""
-    return i.kind in NO_OBJECT or i.kind in RULES_ONLY or (i.kind != "OTHER" and (i.obj or i.name) is not None)
+def _taught(name: Optional[str], aliases) -> bool:
+    return bool(name) and normalize(name) in {normalize(a) for a in aliases}
+
+
+def rules_sure(i: Intent, cfg: Optional[dict] = None, aliases=()) -> bool:
+    """A kind only the rules produce, or a question with its object named as such (with cfg: not
+    guessed from a mishearing) or a taught name ('where is my charger' once 'charger' was taught:
+    world.find resolves it, and the model has never heard of it)."""
+    if i.kind in NO_OBJECT or i.kind in RULES_ONLY:
+        return True
+    if i.kind == "OTHER":
+        return False
+    if i.obj is not None:
+        return cfg is None or matched_exactly(i.raw, i.obj, cfg)
+    return _taught(i.name, aliases)
 
 
 def to_intent(raw: str, text: str, cfg: dict, obj_hint: Optional[str] = None) -> Optional[Intent]:
@@ -257,7 +276,9 @@ class Understander:
     Remembers the last transcript, so main.Room (RESET/RECAL) and the ask pipeline share one call."""
 
     def __init__(self, cfg: dict, model=None, qwen=None, online: Optional[Callable[[], bool]] = None,
-                 local=None):
+                 local=None, aliases: Optional[Callable[[], list]] = None):
+        """aliases: names people taught ("this is my charger"; world.alias_phrases), which the rules
+        trust without asking the model."""
         u = cfg.get("understand") or {}
         self.cfg = cfg
         self.enabled = bool(u.get("enabled", True))
@@ -272,6 +293,7 @@ class Understander:
         self.model = model
         self.local = local if self.enabled else None
         self.online = online or (lambda: True)
+        self.aliases = aliases or (lambda: [])
         self._lock = threading.Lock()
         self._last: tuple[tuple[str, bool], Intent] | None = None
         self.last_ms: float = 0.0
@@ -333,38 +355,64 @@ class Understander:
             self._last = (key, intent)
             return intent
 
-    def _overheard(self, text: str) -> Intent:
-        ignore = Intent(kind=IGNORE, obj=None, raw=text)
-        taught = parse(text, self.cfg)
-        if taught.kind == "TEACH":             # "this is my vaseline": only a whole teaching sentence parses so
-            self.last_by, self.last_ms = "rules", 0.0     # (idioms like "call it a day" don't), and it
-            return taught                      # has no question opening or known object for the gate
-        woke = has_wake_word(text, self.cfg)
+    def screen(self, text: str) -> bool:
+        """Overheard speech: could it be for the rig? Every check that needs no model (fast, never
+        blocks); False means IGNORE. The voice loop calls it before starting the thinking cue."""
+        with self._lock:
+            return self._screen(text)
+
+    def _screen(self, text: str) -> bool:
+        rules = parse(text, self.cfg)
+        if rules.kind == "TEACH":              # "this is my vaseline": only a whole teaching sentence parses so
+            return True                        # (idioms like "call it a day" don't), and it has no question
+        woke = has_wake_word(text, self.cfg)   # opening or known object for the gate
         if (not text.strip() or not gate(text, self.cfg) or not addressed(text, self.cfg)
                 or (self.wake_only and not woke)):
+            return False
+        if rules.kind in ACTS and not woke:    # "let's reset after this"
+            return False
+        # "where are you guys from": nothing to look for, and not said to the rig
+        return woke or rules.obj is not None or rules.name is not None or rules.kind not in ("OTHER", "WHERE")
+
+    def _overheard(self, text: str) -> Intent:
+        ignore = Intent(kind=IGNORE, obj=None, raw=text)
+        if not self._screen(text):
             self.last_by, self.last_ms = "gate", 0.0
             return ignore
         i = self._interpret(text)
+        if i.kind == "TEACH":
+            return i
+        woke = has_wake_word(text, self.cfg)
         if i.kind in ACTS and not woke:
             return ignore
-        if i.kind == "OTHER" and not (woke or names_object(text, self.cfg)):
+        if i.kind in ("OTHER", "WHERE") and not (woke or i.obj or i.name or names_object(text, self.cfg)):
             return ignore
         return i
 
     def _interpret(self, text: str) -> Intent:
         rules = parse(text, self.cfg)
-        model = None if rules_sure(rules) or not text.strip() else self._pick()
+        try:
+            taught = list(self.aliases() or [])
+        except Exception:
+            log.exception("taught names unavailable")
+            taught = []
+        model = None if rules_sure(rules, self.cfg, taught) or not text.strip() else self._pick()
         if model is None:
             self.last_by, self.last_ms = "rules", 0.0
             return rules
         name = self._name(model)
+        hint = rules.obj if matched_exactly(text, rules.obj, self.cfg) else None   # not a guessed one
         t0 = time.monotonic()
         try:
-            got = to_intent(model.ask(text, self.timeout_s), text, self.cfg, rules.obj)
+            # requests' timeout is per phase and skips DNS: bound the whole call (Wi-Fi at a venue)
+            raw = call_with_deadline(model.ask, self.timeout_s + 0.2, text, self.timeout_s, name=f"understand-{name}")
+            got = to_intent(raw, text, self.cfg, hint)
         except Exception as ex:
             log.warning("%s failed (%s: %s); using the rule parser", name, type(ex).__name__, ex)
             got = None
         self.last_ms = 1000 * (time.monotonic() - t0)
+        if got is not None and got.obj is None and rules.kind != "OTHER" and (rules.obj or rules.name):
+            got = None                         # the model found nothing better than the rules' guess or name
         if got is None:
             self.last_by = "rules"
             return rules

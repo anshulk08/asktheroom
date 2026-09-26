@@ -46,8 +46,8 @@ def test_rules_answer_what_they_are_sure_of_without_qwen():
 
 def test_qwen_reads_what_the_rules_cannot():
     u = understander(kind="HANDLED", obj="pill_bottle")
-    i = u("has anybody messed with my meds")
-    assert (i.kind, i.obj, i.raw) == ("HANDLED", "pill_bottle", "has anybody messed with my meds")
+    i = u("has somebody been bothering my meds")
+    assert (i.kind, i.obj, i.raw) == ("HANDLED", "pill_bottle", "has somebody been bothering my meds")
     assert u.last_by == "qwen"
 
 
@@ -59,10 +59,55 @@ def test_qwen_reads_what_the_rules_cannot():
     ("what was I doing this morning", "WHAT_DOING", None),        # Qwen has no such kind
     ("this is my charger", "TEACH", "charger"),
 ])
-def test_rules_keep_names_and_rule_only_kinds_without_qwen(text, kind, name):
-    u = understander(kind="OTHER", obj="none")
+def test_rules_keep_taught_names_and_rule_only_kinds_without_qwen(text, kind, name):
+    u = Understander(CFG, qwen=StubQwen(kind="OTHER", obj="none"), aliases=lambda: ["charger"])
     i = u(text)
     assert (i.kind, i.name) == (kind, name) and u.last_by == "rules" and u.qwen.asked == []
+
+
+@pytest.mark.parametrize("text, kind, name", [
+    ("where is my charger", "WHERE", "charger"),
+    ("what happened to my charger", "HISTORY", "charger"),
+    ("did anyone touch my charger", "HANDLED", "charger"),
+])
+def test_an_untaught_name_asks_the_model_and_keeps_the_name_when_it_has_no_object(text, kind, name):
+    u = understander(kind="WHERE", obj="none")
+    i = u(text)
+    assert (i.kind, i.name) == (kind, name) and u.last_by == "rules" and u.qwen.asked == [text]
+
+
+def test_a_misheard_name_the_rules_dont_know_goes_to_the_model():
+    """'where are my kids' is no taught name: before, the rules trusted it and said "I don't know what
+    your kids are yet" without asking the model, which can hear it as keys."""
+    u = understander(kind="WHERE", obj="keys")
+    i = u("where are my kees")
+    assert (i.kind, i.obj, u.last_by) == ("WHERE", "keys", "qwen")
+
+
+def test_a_guessed_object_is_checked_by_the_model_online_and_stands_offline():
+    net = {"online": True}
+    stub = StubQwen(kind="WHERE", obj="none")
+    u = Understander(CFG, model=stub, online=lambda: net["online"])
+    assert (u("where are my kiss").obj, u.last_by) == ("keys", "rules")      # the model named nothing
+    assert stub.asked == ["where are my kiss"]
+    net["online"] = False
+    assert (u("wheres my wall it").obj, u.last_by) == ("wallet", "rules") and len(stub.asked) == 1
+
+
+def test_a_hung_model_is_cut_off_at_the_deadline():
+    """requests' timeout is per phase and skips DNS; a stalled resolver must not hold the answer."""
+    import time as _t
+
+    class Hung(StubQwen):
+        def ask(self, text, timeout):
+            self.asked.append(text)
+            _t.sleep(5)
+            return self.raw
+
+    u = Understander(dict(CFG, understand=dict(CFG["understand"], timeout_s=0.1)), qwen=Hung())
+    t0 = _t.monotonic()
+    i = u("what about the pill bottle")
+    assert _t.monotonic() - t0 < 1.0 and u.last_by == "rules" and (i.kind, i.obj) == ("OTHER", "pill_bottle")
 
 
 def test_qwen_may_not_teach():
@@ -93,20 +138,20 @@ def test_qwen_object_must_sound_like_what_was_said(text, obj, keep):
 ])
 def test_rules_answer_when_qwen_cannot(stub):
     u = understander(**stub)
-    i = u("can you point at the pill bottle")
+    i = u("what about the pill bottle")
     assert (i.kind, i.obj) == ("OTHER", "pill_bottle") and u.last_by == "rules"
 
 
 def test_last_transcript_is_cached():
     u = understander(kind="WHERE", obj="keys")
-    assert u("show me my keys") is u("show me my keys")
-    assert u.qwen.asked == ["show me my keys"]
+    assert u("what about my keys") is u("what about my keys")
+    assert u.qwen.asked == ["what about my keys"]
 
 
 def test_disabled_uses_rules_only():
     cfg = dict(CFG, understand=dict(CFG["understand"], enabled=False))
     u = Understander(cfg)
-    assert u.qwen is None and u("show me my keys").kind == "OTHER" and not u.warm()
+    assert u.qwen is None and u("what about my keys").kind == "OTHER" and not u.warm()
 
 
 def test_to_intent_normalizes():
@@ -128,7 +173,7 @@ def test_pipeline_answers_with_qwens_reading(tmp_path):
     events = EventLog(":memory:", str(tmp_path))
     world = demo_world(events)
     ask = make_ask(CFG, world, events, net=None, interpret=understander(kind="WHERE", obj="keys"))
-    ans = ask("show me my keys", "voice")                   # the rules alone say OTHER
+    ans = ask("what about my keys", "voice")                # the rules alone say OTHER
     assert ans.point_at == "keys" and "box" in ans.text
 
 
@@ -244,8 +289,8 @@ def test_offline_the_model_is_not_asked(monkeypatch):
     monkeypatch.setenv("XAI_API_KEY", "k")
     stub = StubQwen(kind="WHERE", obj="wallet")
     u = Understander(CFG, model=stub, online=lambda: False)
-    i = u("wears my wall it")
-    assert stub.asked == [] and u.last_by == "rules" and i.kind == "OTHER"
+    i = u("wears my wall it")                               # the rules' guess, from how it sounds
+    assert stub.asked == [] and u.last_by == "rules" and (i.kind, i.obj) == ("WHERE", "wallet")
 
 
 def test_an_overheard_teaching_sentence_is_for_the_rig():

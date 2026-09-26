@@ -293,7 +293,7 @@ def test_always_listening_waits_while_the_rig_speaks(tmp_path, cal_path):
 
 def test_clicker_is_listen_now_in_always_mode(tmp_path, cal_path):
     clicker = FakeClicker()
-    room, _ = make_room(tmp_path, cal_path, stt=FakeSTT("show me my keys"), clicker=clicker)
+    room, _ = make_room(tmp_path, cal_path, stt=FakeSTT("tell me a joke"), clicker=clicker)
     clicker.press()
     t = always_on(room)
     assert wait_for(lambda: room.tts.said)
