@@ -70,10 +70,10 @@ final class RoomStore {
     var showRoomVoiceAnswers = UserDefaults.standard.bool(forKey: RoomStore.voiceAnswersKey) {
         didSet { UserDefaults.standard.set(showRoomVoiceAnswers, forKey: Self.voiceAnswersKey) }
     }
-    /// The bridge gives up on the room after 12 s and sends its own "took too long" answer
-    /// (PROTOCOL.md section 6), so the phone waits a little longer than that. Retrying sooner would
-    /// only queue the same question behind the one still being answered.
-    var answerTimeout: Duration = .seconds(14)
+    /// Outermost of the ask timeouts (server 10 s < bridge 12 s < this, PROTOCOL.md section 6), so the
+    /// rig's own "took too long" reaches the phone first. Retrying sooner would only queue the same
+    /// question behind the one still being answered.
+    var answerTimeout: Duration = .seconds(15)
     /// Open questions answered by Grok can take several seconds.
     var slowAfter: Duration = .seconds(5)
     var highlightDuration: Duration = .seconds(5)
