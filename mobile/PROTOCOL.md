@@ -158,7 +158,7 @@ A full snapshot every time; there are no diffs. It is sent:
 3. at least every **5 s**, as a heartbeat
 
 "Changed" ignores detector jitter: a position has to move more than 0.5 cm, or confidence more than 0.05,
-or a status, parent, edge, alias or `maybe_same_as` value has to change, or an entity has to be added or
+or a status, parent, edge, alias, `maybe_same_as` or guess value has to change, or an entity has to be added or
 removed, or `online` or `laser` has to change. A visible object's `ls` ticking does not count.
 
 ```json
@@ -187,6 +187,7 @@ removed, or `online` or `laser` has to change. A visible object's `ls` ticking d
 | `e[].edge` | str | `left`/`right`/`top`/`bottom`: the edge a GONE object left by |
 | `e[].a` | [str] | taught names (aliases), newest first. **Things only**, and present for every thing (may be `[]`) |
 | `e[].m` | [[name, score]] | "maybe the same as" an earlier thing (score 2 decimals). Optional |
+| `e[].g` | str | an automatic guess of what an unnamed thing is (`deodorant stick`; `core/auto_name.py`). Not a taught name: show it hedged ("deodorant stick?"). Things only, optional |
 | `e[].ls` | float | last-seen wall time (Unix s, 1 decimal) |
 
 Keys whose value is null are **omitted**, except `n`, `k` and `s`. Unknown extra keys may appear in later

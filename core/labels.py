@@ -1,6 +1,7 @@
 """What to call an entity when showing or saying it. A thing the person named is called by that name
 ('charger'), an unnamed one 'unnamed object 7'; the internal id thing:7 never reaches a person.
-Read from state_json (the world emits label / aliases / maybe_same_as per thing, and merged ids), so
+Read from state_json (the world emits label / aliases / maybe_same_as per thing, and merged ids; the
+auto-namer adds a guess), so
 the overlay, Grok's world state and the dashboard (server/web/app.js mirrors this) say the same thing.
 Configured objects keep their names; callers space them out as before.
 """
@@ -11,20 +12,27 @@ from typing import Optional
 PREFIX = 'thing:'
 
 
-def thing_label(name: str, label: Optional[str] = None) -> str:
-    """'thing:7' -> the taught label, else 'unnamed object 7'. Any other name comes back as is."""
+def thing_label(name: str, label: Optional[str] = None, guess: Optional[str] = None) -> str:
+    """'thing:7' -> the taught label, else 'unnamed object 7', with an automatic guess of what it is
+    (core/auto_name.py) as 'unnamed object 7 (deodorant stick?)'. Any other name comes back as is."""
     if label:
         return str(label)
     if isinstance(name, str) and name.startswith(PREFIX):
-        return f'unnamed object {name[len(PREFIX):]}'
+        base = f'unnamed object {name[len(PREFIX):]}'
+        return f'{base} ({guess}?)' if guess else base
     return name
+
+
+def _guess(e: dict) -> Optional[str]:
+    g = e.get('guess')
+    return str(g['name']) if isinstance(g, dict) and g.get('name') else None
 
 
 def thing_labels(state: Optional[dict]) -> dict[str, str]:
     """Every thing in a state_json dict -> what to call it, including ids merged into another thing
     (their old events and parents then read as the survivor)."""
     state = state or {}
-    out = {e['name']: thing_label(e['name'], e.get('label'))
+    out = {e['name']: thing_label(e['name'], e.get('label'), _guess(e))
            for e in state.get('entities') or [] if str(e.get('name', '')).startswith(PREFIX)}
     for old, into in (state.get('merged') or {}).items():
         seen = set()

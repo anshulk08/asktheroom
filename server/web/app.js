@@ -21,7 +21,8 @@
   function learnNames(state) {
     const m = new Map();
     for (const e of state.entities || []) {
-      if (String(e.name).indexOf("thing:") === 0) m.set(e.name, e.label || String(e.name).replace(/^thing:/, "unnamed object "));
+      if (String(e.name).indexOf("thing:") === 0) m.set(e.name, e.label || (String(e.name).replace(/^thing:/, "unnamed object ")
+        + (e.guess && e.guess.name ? " (" + e.guess.name + "?)" : "")));
     }
     const merged = state.merged || {};
     for (const old of Object.keys(merged)) {
@@ -481,13 +482,13 @@
     lz.dataset.on = L.on ? "true" : "false";
     setText(lz, L.on ? (L.target ? "Laser on " + nice(L.target) : "Laser on") : "Laser off");
     // Narration / visual memory (off by default): shown only when on; the tooltip is the privacy disclosure.
-    const N = state.narration, V = state.visual_memory, mem = $("st-memory");
-    mem.hidden = !(N || V);
-    if (N || V) {
-      setText(mem, [N && ("narration" + (N.queued ? " (" + N.queued + " queued)" : "")), V && "visual"]
-        .filter(Boolean).join(" + ") + " \u2192 " + ((N || V).provider || "cloud"));
-      mem.title = [N && N.disclosure, V && V.disclosure, N && N.last_summary && ("Last: " + N.last_summary)]
-        .filter(Boolean).join("\n");
+    const N = state.narration, V = state.visual_memory, A = state.auto_name, mem = $("st-memory");
+    mem.hidden = !(N || V || A);
+    if (N || V || A) {
+      setText(mem, [N && ("narration" + (N.queued ? " (" + N.queued + " queued)" : "")), V && "visual", A && "naming"]
+        .filter(Boolean).join(" + ") + " \u2192 " + ((N || V || A).provider || "cloud"));
+      mem.title = [N && N.disclosure, V && V.disclosure, A && A.disclosure,
+        N && N.last_summary && ("Last: " + N.last_summary)].filter(Boolean).join("\n");
     }
   }
 

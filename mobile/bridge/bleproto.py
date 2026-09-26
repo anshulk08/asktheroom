@@ -231,6 +231,9 @@ def compact_entity(e: dict) -> dict:
                     continue
         if mm:
             out["m"] = mm
+    g = e.get("guess")
+    if isinstance(g, dict) and g.get("name"):              # automatic name guess (core/auto_name.py)
+        out["g"] = str(g["name"])
     ls = _r1(e.get("last_seen"))
     if ls is not None:
         out["ls"] = ls
@@ -273,7 +276,7 @@ def state_changed(prev: Optional[dict], cur: dict) -> bool:
         return True
     for n, c in ce.items():
         p = pe[n]
-        for k in ("k", "s", "p", "edge", "a", "m"):
+        for k in ("k", "s", "p", "edge", "a", "m", "g"):
             if p.get(k) != c.get(k):
                 return True
         if _moved(p.get("xy"), c.get("xy")) or _moved(p.get("r"), c.get("r")):

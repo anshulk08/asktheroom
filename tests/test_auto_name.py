@@ -11,9 +11,11 @@ import core.crops
 from core.auto_name import AutoNameConfig, AutoNamer, clean_name, from_config, match_score
 from core.config import Config, load_config
 from core.events import EventLog
+from core.labels import thing_labels
 from core.narration import ProviderError, Reply
 from core.types import Status
 from core.world import World
+from mobile.bridge import bleproto as P
 from tests.synth import Scene
 from voice.answers import answer
 from voice.intents import parse
@@ -324,3 +326,15 @@ def test_config_off_by_default_and_from_config():
     c = AutoNameConfig.from_dict(CFG.get("auto_name"))
     assert c.enabled and c.max_per_minute >= 1 and 0 < c.min_confidence < 1
     assert list(CFG)[-1] == "auto_name"             # a new section goes at the end (AGENTS.md)
+
+
+def test_labels_and_phone_carry_the_guess():
+    st = {"entities": [{"name": "thing:3", "label": None, "guess": {"name": "deodorant stick"}},
+                       {"name": "thing:4", "label": "charger", "guess": {"name": "cable"}}]}
+    assert thing_labels(st) == {"thing:3": "unnamed object 3 (deodorant stick?)", "thing:4": "charger"}
+    e = P.compact_entity({"name": "thing:3", "kind": "target", "status": "VISIBLE",
+                          "guess": {"name": "deodorant stick", "also": [], "confidence": 0.9}})
+    assert e["g"] == "deodorant stick"
+    assert "g" not in P.compact_entity({"name": "thing:4", "kind": "target", "status": "VISIBLE"})
+    prev = {"e": [P.compact_entity({"name": "thing:3", "kind": "target", "status": "VISIBLE"})]}
+    assert P.state_changed(prev, {"e": [e]})           # a new guess is news for the phone
