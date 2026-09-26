@@ -19,14 +19,14 @@ proposer), core.hands.HandTracker, World(cfg, events, embed=core.embed.make_embe
 in-memory EventLog, and main.Room.perceive for every frame the live loop would have taken
 (main.perception_max_fps by video time; --live-timing also drops the frames a slow detector misses).
 Frames are video.mp4 with frames.json's t / wall. truth.commands and truth.questions go at their t
-through Room.ask: the care layer (clocked by the clip's wall time) -> voice.pipeline.make_ask with
-voice.understand.Understander offline (the rule parser) -> voice.answers, so "this is my X" binds an
+through Room.ask: the care layer and voice.pipeline.make_ask (both clocked by the clip's wall time, so
+'put there 20 seconds ago' is measured on the clip) with voice.understand.Understander offline (the
+rule parser) -> voice.answers, so "this is my X" binds an
 alias exactly as it does live. They count as asked with the clicker; each record also says whether the
 always-on mic's overheard filter would have dropped it (--overheard applies that filter).
 
 Not reproduced: Grok (visual questions, open questions and the model interpreter need the network;
-the rig offline answers the same way), audio (speech is injected as text), the real clock inside
-answers ('2 minutes ago' is measured from now), and mp4 compression (the live frame was not
+the rig offline answers the same way), audio (speech is injected as text), and mp4 compression (the live frame was not
 re-encoded, so the change proposer sees slightly different pixels). Re-ID loads before the first
 frame (live, it has no appearance evidence until its engine is ready).
 
@@ -39,8 +39,12 @@ mapped to the world entity that stands for it, over time:
     (container stand-in)' is matched by position), then any unclaimed entity (one near a hand first,
     then the earliest). A prop on the table from the start binds to its configured object if the
     world ever saw it; otherwise truth has no position for it, so it is a GUESS (reported): a
-    configured object of its role ('container' -> box) or kind, else the earliest unclaimed thing of
-    the initial scene. Place each prop with a step when identity matters.
+    configured object of its role ('container' -> box) or named in its description, else (a prop
+    with no configured name only) the earliest unclaimed thing of the initial scene. Undeclared
+    configured objects (a phone lying about) are never guessed for another type, and a named prop
+    the detector never saw by name stays unmapped. Place each prop with a step when identity matters.
+  - a place / putdown / move step does not bind an unrelated entity that the detector merely found
+    again where it already lay (LOST_TRACK -> CORRECTED at the same spot, not held in between).
   - between its steps a prop resting on the table keeps its entity while that entity is visible where
     the prop is (within match_cm); another entity standing there instead takes the mapping over.
 Steps: obj is the prop moved; parent the container / cover (put_inside obj into parent; cover: obj
@@ -104,6 +108,7 @@ AFTER = {"place": "on_table", "putdown": "on_table", "uncover": "on_table", "mov
          "pickup": "held", "put_inside": "inside", "cover": "under", "exit_edge": "gone"}
 RESOLVE = ("place", "putdown", "uncover", "move")       # the prop comes to rest in view: find its entity
 MISSABLE = ("place", "putdown")
+NEW_SPOT = ("place", "putdown", "move")     # an unrelated entity found again in place is no arrival for these
 PUT = ("place", "pickup", "putdown", "put_inside")      # identity changes across these are excused
 HAND_STEPS = ("pickup", "put_inside", "cover")
 HIDDEN = ("inside", "under")
@@ -224,10 +229,11 @@ def replay_clip(clip: Clip, cfg: Optional[dict] = None, detector=None, max_fps: 
                 detector = make_model_free_detector(cfg, table) if no_model else make_detector(cfg, table)
             hands = HandTracker(frame_size=tuple(cfg.get("frame_size_px") or (1280, 720)))
             interpret = Understander(cfg, online=lambda: False)       # offline: the rule parser
-            ask = make_ask(cfg, world, events, net=None, interpret=interpret, visual=None)
+            clock = {"wall": clip.wall[0] if clip.wall else time.time()}
+            ask = make_ask(cfg, world, events, net=None, interpret=interpret, visual=None,
+                           clock=lambda: clock["wall"])                # 'ago' on clip time
             room = Room(cfg, world, events, table, None, None, ask, detector=detector, hands=hands,
                         interpret=interpret)
-            clock = {"wall": clip.wall[0] if clip.wall else time.time()}
             if (cfg.get("care") or {}).get("enabled", True):          # main.build's attach_care, on clip time
                 from voice.care import Care
                 care = Care(cfg, world, events, room.base_ask, clock=lambda: clock["wall"], online=lambda: False)
@@ -443,6 +449,25 @@ class _Scorer:
         for n in self.arr:
             self.arr[n].sort(key=lambda x: x[0])
         self.ever_visible = set(self.arr)
+        self.resighted = {n: {t for t, pos in arr if self._resighting(n, t, pos)} for n, arr in self.arr.items()}
+
+    def _resighting(self, n: str, t: float, pos) -> bool:
+        """n turns up within match_cm of where it was last VISIBLE, not held in between: the detector lost
+        and found an object that never moved (a flicker, LOST_TRACK -> CORRECTED), no arrival of anything.
+        A thing picked up and put back in its spot (HELD, PUT_BACK) did arrive."""
+        i = bisect.bisect_left(self.ts, t - 1e-9) - 1
+        while i >= 0:
+            v = self.samples[i].ents.get(n)
+            if v is None:
+                return False
+            if v[0] == "HELD":
+                return False
+            if v[0] == "VISIBLE" and v[2] is not None:
+                return _dist(v[2], pos) <= self.bars.match_cm and not any(
+                    ev["obj"] == n and ev["type"] in ("PICKED_UP", "PUT_BACK") and self.samples[i].t < ev["t"] <= t + 1e-9
+                    for ev in self.tr.events)
+            i -= 1
+        return False
 
     def _births(self) -> None:
         """What each new thing was, before knowing which props it stands for:
@@ -556,11 +581,13 @@ class _Scorer:
         for ent, arr in self.arr.items():
             if ent in claimed or not self.allowed(p, ent):
                 continue
-            hits = [(t, pos) for t, pos in arr if a <= t <= b]
+            rank = 0 if ent == self.cur[p] else (1 if ent == self.named(p) else 2)
+            # an unrelated entity found again where it already lay is not the prop coming to rest there
+            skip = self.resighted.get(ent, ()) if rank == 2 and s["event"] in NEW_SPOT else ()
+            hits = [(t, pos) for t, pos in arr if a <= t <= b and t not in skip]
             if not hits:
                 continue
             t_arr, pos = hits[0]
-            rank = 0 if ent == self.cur[p] else (1 if ent == self.named(p) else 2)
             near = any(_box_dist(pos, h) <= self.bars.hand_near_cm for h in hand_boxes)
             cands.append(((rank, 0 if near else 1, t_arr), ent, t_arr, pos))
         row = {"t": ts, "event": s["event"], "prop": p, "entity": None, "t_confirm": None, "delay_s": None,
@@ -620,7 +647,10 @@ class _Scorer:
 
     def _bind_initial(self, p: str, s: Sample, claimed: set) -> None:
         """A prop on the table from the start: its configured object by name if the world ever saw it,
-        else (truth has no positions) a GUESS: the earliest-born unclaimed thing of the initial scene."""
+        else (truth has no positions) a GUESS: a configured object of its role or named in its
+        description, else (only for a prop with no configured name) the earliest-born unclaimed thing
+        of the initial scene. Other configured objects (an undeclared phone or wallet lying about) are
+        never guessed; a named prop the detector never saw by name stays unmapped."""
         named = self.named(p)
         if named and named not in claimed and named in self.ever_visible:
             v = s.ents.get(named)
@@ -634,8 +664,10 @@ class _Scorer:
             if n in claimed or v[0] != "VISIBLE" or v[2] is None or not self.allowed(p, n) or not self.arr.get(n):
                 continue
             if n in self.objects:       # a configured object of the prop's role, or named in its description
-                rank = 0 if (role and self.objects[n] == role) or n.replace("_", " ") in " ".join(words) else 2
-            elif n in self.scene:
+                if not ((role and self.objects[n] == role) or n.replace("_", " ") in " ".join(words)):
+                    continue
+                rank = 0
+            elif n in self.scene and not named:
                 rank = 1
             else:
                 continue
@@ -689,7 +721,7 @@ class _Scorer:
                   c_acc is not None and c_acc >= b.checkpoint_accuracy, applies=bool(checks)),
             _crit("questions", f"{sum(q['correct'] for q in questions)}/{len(questions)}" + _list(
                 [q for q in questions if not q["correct"]], lambda q: f"{q['text']!r} -> {q['point_at']} "
-                f"(want {q['expected_entity']})"),
+                f"({_want(q)})"),
                   q_acc is not None and q_acc >= b.question_accuracy, applies=bool(questions)),
             _crit("hands at shell-game steps", f"{sum(handled)}/{len(handled)}" + _list(
                 [h for h, ok in zip(hand_steps, handled) if not ok], lambda h: f"{h['event']} at {h['t']:g} s: "
@@ -801,7 +833,7 @@ class _Scorer:
                 parent_ok = v is not None and self.as_prop(v[1], t) == q["expect_parent"]
             out.append({"t": t, "text": q["text"], "answer": a.get("answer"), "intent": a.get("intent"),
                         "point_at": got, "expect_prop": q.get("expect_prop"), "expected_entity": want,
-                        "parent_ok": parent_ok, "overheard_ignored": a.get("overheard_ignored"),
+                        "expect_parent": q.get("expect_parent"), "parent_ok": parent_ok, "overheard_ignored": a.get("overheard_ignored"),
                         "correct": bool(ent_ok and parent_ok is not False)})
         return out
 
@@ -867,6 +899,14 @@ class _Scorer:
         return out
 
 
+def _want(q: dict) -> str:
+    """Why a question is wrong: the entity it should point at, or (the right one) the parent the world
+    does not have it in."""
+    if q["point_at"] == q["expected_entity"] and q.get("parent_ok") is False:
+        return f"want {q['expected_entity']} in {q['expect_parent']}, the world has it elsewhere"
+    return f"want {q['expected_entity']}"
+
+
 def _crit(name: str, detail: str, ok: bool, applies: bool = True) -> dict:
     return {"name": name, "detail": detail, "result": ("PASS" if ok else "FAIL") if applies else "n/a"}
 
@@ -915,7 +955,7 @@ def print_report(r: dict) -> None:
               + (" [the always-on mic alone would drop this]" if c["overheard_ignored"] else ""))
     for q in r["questions"]:
         print(f"  asked {q['t']:5.2f} s {q['text']!r}: {q['answer']!r} -> {q['point_at']} "
-              f"({'right' if q['correct'] else 'WRONG, want ' + str(q['expected_entity'])})")
+              f"({'right' if q['correct'] else 'WRONG, ' + _want(q)})")
     for c in r["criteria"]:
         print(f"{c['result']:5s} {c['name']:28s} {c['detail']}")
     print(f"OVERALL: {'PASS' if r['pass'] else 'FAIL'}")
