@@ -15,7 +15,7 @@ After the rig connects (or in demo mode) the app opens on **Home**, an assistant
 
 - **Home**
   - the greeting, today's date and the time in large type, for orientation;
-  - **The room noticed**: things moved off the table, things the room can't see right now (with when they were last seen), and new unnamed objects. Each has a big "Help me find it" button (asks the rig, so the laser points) and "Got it" to put it away;
+  - **The room noticed**: reminders and the morning report as the rig fires them (in the rig's own words, first in the list), things moved off the table, things the room can't see right now (with when they were last seen), and new unnamed objects. Each has a big "Help me find it" button (asks the rig, so the laser points) and "Got it" to put it away;
   - **Your things**: a tile per tracked object with where it is in plain words ("Inside the box", "Someone is holding it"); tap to ask the room.
 - **Table**: the spec's Room screen, the live map with a short key under it. Tap a thing on the map and one card underneath says where it is in words, with "Ask the room" and "More about it"; otherwise the card is the latest answer. Past questions live on Recent.
 - **Recent**: what changed since the app connected and the questions asked, newest first, with clock times, under "In the last hour" and "Earlier". Changes are worked out on the phone by comparing snapshots (no protocol change). Pill wording stays neutral: "picked up", never "taken".
@@ -30,7 +30,7 @@ The map reads like Find My: each thing is a round pin with its own picture and i
 
 The map was also decluttered: no grid, one faint edge on plain things and a strong dashed edge only on hidden or held ones, a short "unnamed" label instead of "unnamed object 9 ? link", and no status words on the map. The words are one tap away (the card, and VoiceOver reads them on every chip), and a key under the map explains only the marks in use. Suggestions wrap instead of scrolling off the edge. At accessibility text sizes the key and suggestions scroll with the card so the map keeps its size. Sources: W3C COGA [Avoid too much content](https://www.w3.org/WAI/WCAG2/supplemental/patterns/o5p03-manageable-quantity/), Apple's [map decluttering](https://developer.apple.com/documentation/MapKit/decluttering-a-map-with-mapkit-annotation-clustering), and progressive disclosure (labels on demand) from map labelling practice.
 
-**Helper settings** (the gear next to the status pill) are for a family member or carer: demo mode, "Read answers aloud" (off by default, since the rig already speaks), "Show answers to questions asked in the room" (PROTOCOL_PROPOSALS.md P2), the rig's status, and "Show them again" for notices put away with "Got it".
+**Helper settings** (the gear next to the status pill) are for a family member or carer: demo mode, "Read answers aloud" (off by default, since the rig already speaks), "Show answers to questions asked in the room" (off by default: questions asked out loud, on the dashboard or by text, PROTOCOL.md 6a), the rig's status, and "Show them again" for notices put away with "Got it".
 
 **Voice.** "Read answers aloud" uses Grok's voice from xAI by default (`POST https://api.x.ai/v1/tts`). Under Helper settings → Voice a helper can:
 - pick the voice: Grok, "Same as the rig" (the rig's ElevenLabs voice ID and model `eleven_flash_v2_5`, from `voice/tts.py`) or the iPhone's own voice;
@@ -52,6 +52,16 @@ Each answer is matched to the audio output:
 If headphones or a Bluetooth speaker disconnect mid-answer, speech stops rather than carrying on out loud, per Apple's route-change guidance. Without a key, offline, or if the voice takes over 3 s, the iPhone's built-in voice reads the answer (it adapts its speed too), like the rig's Piper fallback. "Try the voice" plays a sample. Details and trade-offs are in `RESEARCH.md`.
 
 **Privacy.** The xAI and ElevenLabs keys are typed into helper settings and kept only in this phone's Keychain (this device only), never in the repo or the app. When read aloud is on with a cloud voice, the text of each answer is sent to that service (xAI for Grok, ElevenLabs for "Same as the rig") to be spoken; nothing else is sent, and no audio is saved. With the iPhone voice, or no key, speech stays on the phone.
+
+## Receiving from the Jetson
+
+Everything reaches the phone over Bluetooth from `mobile/bridge/ble_bridge.py` on the Jetson (on `main`; spec in `mobile/PROTOCOL.md`). The phone does its part as follows:
+
+- **Fewer chunks.** After connecting it reads `status` before subscribing, so the bridge learns the link's MTU before it sends the first snapshot (PROTOCOL.md section 3). It subscribes to `answer`, then `status`, then `state` last, because subscribing to `state` sends a snapshot at once.
+- **Nothing dropped.** Answers the phone didn't ask for (`id: null`) are no longer thrown away. Reminders and morning reports (`src: "notice"`) always show on Home. Questions asked out loud, on the dashboard or by SMS show as a card on the Table tab when the helper setting is on.
+- **Back quickly.** When a working link drops, the phone asks to connect to the remembered rig straight away. The system finishes that as soon as the rig advertises again. Only failed attempts back off, up to 5 s.
+- **Silent links.** The bridge sends state at least every 5 s. If nothing arrives for 15 s on a link that still looks connected (the bridge hung, or lost the subscription), the phone disconnects and reconnects.
+- **Torn messages** are dropped and logged (`RoomLink`, in Console). The next snapshot replaces them within 0.5 s.
 
 ## Tests
 
@@ -80,7 +90,7 @@ If `xcode-select` points at the Command Line Tools, prefix the command with `DEV
 | `AnswerSheet.swift` | The answer sheet over Home and Recent |
 | `HelperSettings.swift`, `Speaker.swift` | Helper settings; reading answers aloud with Grok, the rig's ElevenLabs voice or the iPhone's, matched to the audio output |
 | `RoomView.swift` | Connect and Table screens, status pill, banners, detail sheet |
-| `RoomLink.swift` | CoreBluetooth: scan, connect to the strongest rig, subscribe, reconnect with backoff |
+| `RoomLink.swift` | CoreBluetooth: scan, connect to the strongest rig, read status then subscribe, reconnect at once after a drop, reconnect if nothing arrives for 15 s |
 | `Dictation.swift` | Hold-to-talk, on-device speech recognition only |
 | `tools/make_icon.swift` | Draws `AppIcon.png` (`swift tools/make_icon.swift <out.png>`) |
 
@@ -108,3 +118,4 @@ Set `SIM=<id>` for a different simulator and `WAIT=<seconds>` to wait longer bef
 | `-mockSettings YES` | Open helper settings |
 | `-mockIconPicker YES` | With `-mockSelect`, open the picture picker over the detail sheet |
 | `-mockIcons "remote=📺"` | Show these pictures instead of the usual ones (not saved) |
+| `-mockNotice "text"` | A second after launch, the rig fires this reminder about the pill bottle |
