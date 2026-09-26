@@ -90,7 +90,7 @@ rules can't read and of open questions (with a compact world state).
 | `core/reminders.py`, `core/reports.py`, `core/profile.py` | Care layer: event-triggered reminders, morning report, profile facts (ideas from Project Memoria, MIT). |
 | `mobile/` | BLE bridge (`bridge/`), wire protocol (`PROTOCOL.md`), iPhone app (`ios/`). |
 | `assets/` | Small licensed data files the code needs (CLIP BPE vocabulary). `models/` is never committed. |
-| `voice/` | `visual` (Grok look/recall, routing), `teach` ("this is my X"), `care` + `conversation` (reminders, profile, follow-ups), `intents` (rule parser), `answers` (spoken templates), `understand` (overheard filter + Grok, or Qwen offline, reads what the rules can't), `local_llm` (open questions, Qwen offline), `pipeline` (router), `tts`, `stt` (Silero VAD + whisper.cpp), `trigger` (clicker), `llm` (Grok open answers, world-state helpers, pill filter). |
+| `voice/` | `visual` (Grok look/recall, routing), `teach` ("this is my X"), `care` + `conversation` (reminders, profile, follow-ups), `intents` (rule parser), `answers` (spoken templates), `understand` (overheard filter + Grok reads what the rules can't), `local_llm` (optional local Qwen answers, not deployed), `pipeline` (router), `tts`, `stt` (Silero VAD + whisper.cpp), `trigger` (clicker), `llm` (Grok open answers, world-state helpers, pill filter). |
 | `act/` | `actuator` (servo drivers + fake), `laser` (poly2 fit + closed-loop aim), `calibrate`, `sim` (simulated rig). |
 | `server/` | FastAPI dashboard (`app.py`), frame overlay, `sim.py` (full demo on a synthetic camera). |
 | `eval/` | Trial recording, synthetic trials, replay against baselines (last-seen, nearest-object, current-frame) and the report. |
@@ -134,7 +134,7 @@ Also built, tested on the laptop, not yet on the Jetson: the clicker, `main.py` 
 together, the fine-tuning scripts (zero-shot YOLO-World mistook the Jetson case for a phone; the plan is
 model-free background-difference labels plus copy-paste synthesis), `demo_check.py`, and the always-on mic.
 Grok now reads what the rules can't (58/64 on the interpreter eval, the same as Qwen, median 853 ms) and
-answers open questions (1.3–3.2 s); local Qwen stands in automatically offline (`understand.backend: auto`). On the Jetson: whisper.cpp base.en on the
+answers open questions (1.3–3.2 s); the rig is Grok-only (offline: rules and templates; the plan is a phone hotspot). Local Qwen is optional (`understand.backend: qwen` / `auto`) and not installed on the Jetson. On the Jetson: whisper.cpp base.en on the
 GPU, 22/22 test questions, median 139 ms; DINOv2 re-id at 3.7–4.7 ms per crop.
 
 Built overnight (Fri → Sat), unit-tested: open-world `thing:N` identity and teaching by voice, object

@@ -57,7 +57,6 @@ def ifnode(name, pos, expr, operation="true"):
 
 SET = "$('Settings').first().json"
 RIG = SET + ".rig_url"
-QWEN = SET + ".qwen_url"
 FALLBACK = "I can tell you where things are, what happened to them, or what changed."   # voice/local_llm.py
 NOT_HEARD = "Sorry, I didn't catch that."                                               # main.py
 
@@ -69,7 +68,6 @@ sched = node("Every 5 minutes", "n8n-nodes-base.scheduleTrigger", 1.2, (0, 400),
     "rule": {"interval": [{"field": "minutes", "minutesInterval": 5}]}})
 settings = setnode("Settings", (240, 200), {
     "rig_url": "http://192.168.55.1:8000",
-    "qwen_url": "http://192.168.55.1:8081",
     "webhook_token": "",           # = n8n.token in the rig's config.yaml; "" = don't check
     "discord_webhook_url": "",     # "" = alerts fail the execution instead (red under Executions)
     "gone_grace_min": "10",        # GONE (carried off the table) is only a problem after this long
@@ -107,7 +105,7 @@ const problems = [];
 if (!q.heard) problems.push('heard nothing: mic level, or the visitor spoke before the click?');
 if (q.answer === {json.dumps(FALLBACK)})
   problems.push(q.online ? 'open question got the fallback (Grok failed or timed out?)'
-                         : 'open question got the fallback (offline, and the local Qwen is not running?)');
+                         : 'open question got the fallback (rig offline: switch to the phone hotspot)');
 const asked = q.click_to_laser_s != null;
 const lat = asked ? q.click_to_laser_s : q.speech_end_to_laser_s;
 const latName = asked ? 'click to laser' : 'end of speech to laser';
@@ -142,15 +140,11 @@ state = node("Get room state", "n8n-nodes-base.httpRequest", 4.2, (680, 400), {
     "url": f"={{{{ {RIG} }}}}/state", "options": {"timeout": 5000}},
     onError="continueErrorOutput")
 link(route, state, 1)
-qwen = node("Qwen up?", "n8n-nodes-base.httpRequest", 4.2, (900, 320), {
-    "url": f"={{{{ {QWEN} }}}}/health", "options": {"timeout": 3000}},
-    onError="continueRegularOutput")
-link(state, qwen, 0)
 check = node("Check the room", "n8n-nodes-base.code", 2, (1120, 320), {"jsCode": """\
 // /state is {state: world.state_json(), last_answer, server_t}. Hidden objects (INSIDE, UNDER, HELD)
-// are normal during a demo. A stalled detector, no internet (no Grok) without the local Qwen, a lost track
-// or an object carried off the table are worth a look. state.online is the rig reaching api.x.ai
-// (net.check_host). The local Qwen only matters offline (understand.backend auto); the last two only once they've lasted (a pocketed pill bottle is part
+// are normal during a demo. A stalled detector, no internet (no Grok), a lost track or an object carried
+// off the table are worth a look. state.online is the rig reaching api.x.ai (net.check_host). Lost and
+// carried-off objects only count once they have lasted (a pocketed pill bottle is part
 // of the demo). entity.last_seen and server_t are both the rig's wall clock (time.time()).
 const cfg = $('Settings').first().json;
 const r = $('Get room state').first().json;
@@ -161,24 +155,21 @@ const goneMin = graceMin(cfg.gone_grace_min, 10), lostMin = graceMin(cfg.unknown
 const minutes = e => e.last_seen == null ? Infinity : (now - e.last_seen) / 60;
 const ago = e => e.last_seen == null ? 'never seen' : `${Math.round(minutes(e))} min`;
 const problems = [];
-const qwenUp = !$json.error;
 if ((s.fps || 0) < 10) problems.push(`perception at ${s.fps || 0} fps (want 10+): is the detector running?`);
-if (!s.online) problems.push("rig can't reach Grok (api.x.ai): "
-                             + (qwenUp ? 'the local Qwen reads and answers questions instead'
-                                       : 'and the local Qwen (llama-server) is not answering either, so only the '
-                                         + 'rule parser and templates answer; run scripts/qwen_server.sh')
-                             + ". Voice is Piper, camera questions wait for the connection, texts (SMS) can't go out");
+if (!s.online) problems.push("rig can't reach Grok (api.x.ai): only the rule parser and templates answer, "
+                             + "voice is Piper, camera questions wait, texts (SMS) can't go out. "
+                             + 'Switch the rig to the phone hotspot');
 const ents = s.entities || [];
 const lost = ents.filter(e => e.status === 'UNKNOWN' && minutes(e) > lostMin);
 if (lost.length) problems.push(`lost track of: ${lost.map(e => `${e.name} (${ago(e)})`).join(', ')}`);
 const gone = ents.filter(e => e.status === 'GONE' && minutes(e) > goneMin);
 if (gone.length) problems.push(`off the table for over ${goneMin} min: `
                                + gone.map(e => `${e.name} (${e.edge || 'edge'}, ${ago(e)})`).join(', '));
-return [{ json: { ok: problems.length === 0, problems, fps: s.fps, online: s.online, qwen: qwenUp,
+return [{ json: { ok: problems.length === 0, problems, fps: s.fps, online: s.online,
                   gone_recent: ents.filter(e => e.status === 'GONE' && minutes(e) <= goneMin).map(e => e.name),
                   checked: new Date().toISOString() } }];
 """})
-link(qwen, check)
+link(state, check, 0)
 bad = ifnode("Problems?", (1340, 320), "={{ $json.ok }}", "false")
 link(check, bad)
 rmsg = setnode("Alert text: room", (1560, 300), {
@@ -217,9 +208,9 @@ note("About", (-40, -700), 540, 640, 4, """\
 ## Ask the Room: project workflow
 Visitors **speak**; nobody types. The rig listens all the time and answers what's meant for it. Everything real-time runs on the Jetson (`main.py`), offline. n8n sits **around** it, on the laptop, and never slows an answer down.
 
-**Rig heard a question** (top): for every question it answers, the rig posts what it heard, whether it was *asked* (clicker) or *overheard*, how it understood it (rules, Grok, local Qwen or the gate), what it said and how long it took, with the median and p90 of the last 20. Overheard speech it dropped is only counted, never sent. Each question is an execution here: a live log of the demo. Nothing heard, the fallback sentence, a slow answer (over 3 s to the laser), a slow model (Grok over 2 s, Qwen over 1 s) or a laser miss raises an alert. With `webhook_token` set, posts without the matching `x-askroom-token` header are rejected.
+**Rig heard a question** (top): for every question it answers, the rig posts what it heard, whether it was *asked* (clicker) or *overheard*, how it understood it (rules, Grok or the gate), what it said and how long it took, with the median and p90 of the last 20. Overheard speech it dropped is only counted, never sent. Each question is an execution here: a live log of the demo. Nothing heard, the fallback sentence, a slow answer (over 3 s to the laser), Grok slower than 2 s to read it or a laser miss raises an alert. With `webhook_token` set, posts without the matching `x-askroom-token` header are rejected.
 
-**Every 5 min** (bottom): `GET /state` and the local Qwen's `/health` → flags a stalled detector, no internet (no Grok; worse if Qwen is down too), and objects lost (UNKNOWN over 2 min) or off the table (GONE over 10 min).
+**Every 5 min** (bottom): `GET /state` → flags a stalled detector, no internet (no Grok: switch to the hotspot), and objects lost (UNKNOWN over 2 min) or off the table (GONE over 10 min).
 
 **Alerts** go to Discord when `discord_webhook_url` is set; otherwise they fail the execution (red under *Executions*). Texts (Twilio SMS) stay on the rig's own `/sms`.""")
 note("Inside the rig", (560, -700), 780, 480, 7, """\
@@ -231,9 +222,8 @@ mic, always on ─▶ Silero VAD ─▶ whisper.cpp       "uh, show me my specs"
   (muted while the rig speaks; audio stays in RAM)
    ─▶ overheard gate: not for the rig → dropped, only counted
    ─▶ rule parser │ Grok for what it can't read   → WHERE glasses
-      (offline: Qwen3 1.7B, llama.cpp on the Jetson, :8081)
    ─▶ camera questions → Grok with the frame (set-of-marks)
-   ─▶ answer templates │ Grok (offline: Qwen) answers open questions
+   ─▶ answer templates │ Grok answers open questions (offline: templates only)
    ─▶ slow? "Let me look." first
    ─▶ voice (ElevenLabs online, Piper offline) + laser, together
    ─▶ POST this workflow's webhook
@@ -244,16 +234,16 @@ Detector model: `detect.model` in `config.yaml`; nothing here depends on it.""")
 note("Setup", (1380, -700), 480, 520, 6, """\
 ## Setup (self-hosted, laptop)
 1. `npx n8n` (or Docker), open http://localhost:5678, **Import from File** → `n8n/ask-the-room.json`, **Publish**.
-2. **Settings** node: `rig_url` and `qwen_url` are the Jetson over USB-C (`192.168.55.1`). For `main.py --fake` on this laptop use `http://127.0.0.1:8000` and `:8081`, not `localhost` (n8n tries IPv6 `::1`).
+2. **Settings** node: `rig_url` is the Jetson over USB-C (`http://192.168.55.1:8000`). For `main.py --fake` on this laptop use `http://127.0.0.1:8000`, not `localhost` (n8n tries IPv6 `::1`).
 3. Optional: `discord_webhook_url` (Discord channel → Integrations → Webhooks), `webhook_token` (same value as `n8n.token` in the rig's `config.yaml`), `gone_grace_min` / `unknown_grace_min`.
-4. On the Jetson: `XAI_API_KEY` in `.env`, `QWEN_HOST=0.0.0.0 scripts/qwen_server.sh` (the offline stand-in), and in `config.yaml` set `n8n.webhook_url: http://192.168.55.100:5678/webhook/ask-the-room` (the laptop's USB-C address).
+4. On the Jetson: `XAI_API_KEY` in `.env`, and in `config.yaml` set `n8n.webhook_url: http://192.168.55.100:5678/webhook/ask-the-room` (the laptop's USB-C address).
 No n8n credentials needed.""")
 note("Grok", (1380, -160), 480, 400, 3, """\
 ## Grok on the rig (xAI)
 - **Reads** spoken questions the rules can't ("has anybody messed with my meds") → {kind, object}.
 - **Answers** open questions from the world state, after the templates. Pill filter on every answer.
 - **Looks**: questions about what the camera sees go with the current frame and numbered marks; Grok picks a mark, the laser points at it. **Recall** asks over saved frames.
-- Offline (or no key): the local Qwen3 1.7B reads and answers instead (`understand.backend: auto`); camera questions wait.
+- Offline: rules and templates only, camera questions wait. Keep a phone hotspot ready.
 
 *Audio stays on the rig. Transcripts, and a frame for camera questions, go to Grok when online.*""")
 

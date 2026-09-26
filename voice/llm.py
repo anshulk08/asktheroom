@@ -344,15 +344,15 @@ def _run(question: str, world, events, cfg: dict, api_key: str, deadline: float)
 
 def ask_other(question: str, world, events, cfg: dict | None = None, online: bool = True) -> Answer:
     """The pipeline's answerer for OTHER: fixed templates for the common open questions, then Grok
-    when online, else the local Qwen (understand.backend auto or qwen; voice.local_llm), else the
-    fallback sentence. Never raises."""
+    when online, else the fallback sentence. understand.backend qwen (or auto, offline) uses the local
+    Qwen (voice.local_llm) instead. Never raises."""
     try:
         cfg = cfg if cfg is not None else load_config()
         from voice.local_llm import ask_local, templated
         fixed = templated(question, world, cfg)
         if fixed is not None:
             return fixed
-        backend = str((cfg.get("understand") or {}).get("backend", "auto"))
+        backend = str((cfg.get("understand") or {}).get("backend", "grok"))
         has_key = bool(os.environ.get("XAI_API_KEY", "").strip())
         if backend == "qwen" or (backend == "auto" and not (online and has_key)):
             return ask_local(question, world, events, cfg)

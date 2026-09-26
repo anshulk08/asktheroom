@@ -269,7 +269,7 @@ demo_check:
 
 understand:
   enabled: true               # false = rule parser only
-  url: http://127.0.0.1:8081/v1   # local Qwen (llama-server, scripts/qwen_server.sh): backend auto (default: Grok online, this offline) or qwen
+  url: http://127.0.0.1:8081/v1   # local Qwen (llama-server, scripts/qwen_server.sh): only for backend qwen or auto (default grok; not installed on the Jetson)
   model: Qwen3-1.7B-Q4_K_M.gguf   # in models/qwen/ (scripts/qwen_server.sh; scripts/eval_understand.py scores it)
   timeout_s: 1.5              # slower than this, the rule parser answers instead
   answer_timeout_s: 4         # open questions (voice/local_llm.py); slower = the fallback sentence

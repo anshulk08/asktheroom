@@ -24,9 +24,9 @@ Asked: rules first, then Qwen.
     doesn't become the glasses.
   - Qwen down, slower than understand.timeout_s, or bad output: the rules' answer stands.
 
-Which model (understand.backend): grok, qwen, or auto (the default): Grok while online with a key,
-the local Qwen when offline (if llama-server is up), so a dropped venue Wi-Fi costs speed, not
-understanding. Qwen is local, so it is asked online or not.
+Which model (understand.backend): grok (the default; offline, the rules answer: use a phone hotspot
+if the venue Wi-Fi drops), qwen (the local llama-server, asked online or not), or auto (Grok online,
+Qwen offline). Qwen isn't installed on the Jetson; qwen and auto need scripts/qwen_server.sh running.
 
 Overheard: decide "was that for me?" without the model, then read it like an asked question.
   - listen.mode wake: only speech with the wake word counts (a loud hall defeats the rest).
@@ -248,7 +248,7 @@ class Grok:
 
 
 class Understander:
-    """interpret(text) -> Intent. The model (understand.backend: auto = Grok online, Qwen offline) when
+    """interpret(text) -> Intent. The model (understand.backend: Grok by default) when
     the rules aren't sure and it is up and quick; the rule parser otherwise.
 
     Remembers the last transcript, so main.Room (RESET/RECAL) and the ask pipeline share one call."""
@@ -259,7 +259,7 @@ class Understander:
         self.cfg = cfg
         self.enabled = bool(u.get("enabled", True))
         self.timeout_s = float(u.get("timeout_s", 1.5))
-        self.backend = str(u.get("backend", "auto"))   # auto | grok | qwen
+        self.backend = str(u.get("backend", "grok"))   # grok | qwen | auto
         if model is None:
             model = qwen
         if model is None and self.enabled:
