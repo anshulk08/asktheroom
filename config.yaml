@@ -228,7 +228,7 @@ tts:
 net:
   check_host: https://api.x.ai
   interval_s: 5
-  timeout_s: 0.3
+  timeout_s: 1.5                # per HEAD; offline takes 2 failed probes in a row (net.py)
 
 server:
   host: 0.0.0.0
