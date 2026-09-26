@@ -82,6 +82,7 @@ def room_thing(scene, world, tid, guess=REMOTE, zone='couch', box=COUCH_BOX):
     None: not named yet)."""
     trk = appear(scene, world, tid, cls='thing', zone=zone, box=box)
     trk.guess = guess
+    trk.changed = True                 # it arrived: its spot changed when first seen
     return trk
 
 
@@ -186,15 +187,15 @@ def test_two_new_room_tracks_hand_over_nothing(scene, world):
     assert world.get('thing:1').zone == 'table'
 
 
-def test_a_new_track_in_another_zone_also_makes_it_ambiguous(scene, world):
+def test_the_first_confirmed_same_named_arrival_takes_the_handoff(scene, world):
+    """Zones are visited one at a time, so of two arrivals Grok both calls a remote the first confirmed
+    takes it; the departure is used up, so the second gets nothing (an unnamed arrival never competes)."""
     named_thing_leaves(scene, world, namer_for(world, REMOTE))
-    shelf = room_thing(scene, world, 'r:1', zone='bookshelf', box=SHELF_BOX, guess=None)
+    shelf = room_thing(scene, world, 'r:1', zone='bookshelf', box=SHELF_BOX, guess=dict(REMOTE))
     couch = room_thing(scene, world, 'r:2')
-    assert seen(scene, world, shelf, zone='bookshelf') == []
+    assert types(seen(scene, world, shelf, zone='bookshelf')) == [EventType.FOUND]
     assert seen(scene, world, couch, zone='couch') == []
-    assert (shelf.role, couch.role) == ('pending', 'pending')
-    assert world.get('thing:1').zone == 'table'
-
+    assert world.get('thing:1').zone == 'bookshelf' and couch.role != 'assoc'
 
 def test_the_departure_is_consumed_by_one_handoff(scene, world):
     handed_over(scene, world)
@@ -316,3 +317,22 @@ def test_same_named_duplicates_count_as_one_candidate(scene, world):
     evs = seen(scene, world, trk, zone='couch')
     assert [(e.type, e.obj) for e in evs] == [(EventType.FOUND, 'thing:2')]
     assert world._departures == {}
+
+
+def test_static_clutter_is_never_handed_off_even_with_a_matching_name(scene, world):
+    """Trial run: the stove panel, re-proposed every few seconds, got a Grok 'remote control'. A track
+    whose spot never changed did not arrive: no handoff, whatever its name."""
+    named_thing_leaves(scene, world, namer_for(world, REMOTE))
+    trk = room_thing(scene, world, 'r:1', zone='bookshelf', box=SHELF_BOX, guess=dict(REMOTE))
+    trk.changed = False
+    assert seen(scene, world, trk, zone='bookshelf') == []
+    assert world.get('thing:1').zone == 'table'
+
+
+def test_an_unnamed_new_track_does_not_block_a_handoff(scene, world):
+    """Trial run: stove / counter clutter Grok can't name stayed pending and blocked the couch handoff."""
+    named_thing_leaves(scene, world, namer_for(world, REMOTE))
+    clutter = room_thing(scene, world, 'r:7', zone='bookshelf', box=SHELF_BOX, guess=None)
+    seen(scene, world, clutter, zone='bookshelf')
+    trk = room_thing(scene, world, 'r:8', guess=dict(REMOTE))
+    assert types(seen(scene, world, trk, zone='couch')) == [EventType.FOUND]

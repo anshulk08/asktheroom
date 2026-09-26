@@ -90,6 +90,8 @@ class RoomTrack:
     confirmed: bool = False
     role: str = "pending"     # 'pending' | 'assoc' | 'conflict' | 'ignored'
     entity: Optional[str] = None
+    changed: bool = False          # its spot changed (frame difference) when it was first seen: it arrived,
+                                   # rather than static clutter the detector flickers on (thing handoffs need it)
     guess: Optional[dict] = None   # cls 'thing' only: Grok's {name, also, confidence} for its crop, once named
     name_asked: bool = False       # its crop was queued for Grok (at most once)
 

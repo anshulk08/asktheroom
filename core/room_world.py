@@ -287,7 +287,7 @@ class RoomRules:
         cands = self._thing_candidates(trk, visit)
         mismatch = False
         mine = trk.guess
-        if cands and mine is not None:
+        if cands and mine is not None and trk.changed:        # it arrived: its spot changed when first seen
             # Candidates whose Grok name matches are one object: from a corner camera a hand placing it
             # makes the table re-birth it (thing:126..129 in one placement, trial run), each named
             # separately. The latest departure is the one carried; the others are its duplicates.
@@ -297,9 +297,11 @@ class RoomRules:
             if same:
                 name, dep_t = max(same, key=lambda c: c[1])
                 first = min(t for _, t in same)
+                # Only another new track with the same name competes: clutter Grok can't name (stove vents
+                # re-proposed every few seconds) blocked every handoff when unnamed tracks counted (trial run).
                 others = [p for tid, p in self._pending_things.items()
-                          if tid != trk.tid and p.role == 'pending' and p.first_seen > first
-                          and (p.guess is None or names_match(p.guess, mine, rc.name_match_min))]
+                          if tid != trk.tid and p.role == 'pending' and p.first_seen > first and p.changed
+                          and p.guess is not None and names_match(p.guess, mine, rc.name_match_min)]
                 if not others:
                     for n, _ in same:
                         if n != name:

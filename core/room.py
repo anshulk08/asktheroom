@@ -86,6 +86,8 @@ class RoomTracker:
         for tr in tracks:
             o = matched.get(tr.tid)
             if o is not None:
+                if not tr.confirmed and _changed(o.box_px, changes):
+                    tr.changed = True             # placed while a hand was over it: the change shows next visit
                 tr.box_px = tuple(int(c) for c in o.box_px)
                 tr.last_seen, tr.last_wall = t, wall
                 tr.hits += 1
@@ -117,6 +119,7 @@ class RoomTracker:
             self._n += 1
             tr = RoomTrack(tid=f"r:{self._n}", zone=zone, cls=o.cls, box_px=tuple(int(c) for c in o.box_px),
                            first_seen=t, first_wall=wall, last_seen=t, last_wall=wall, hits=1)
+            tr.changed = _changed(tr.box_px, changes)
             tr.confirmed = tr.hits >= self.cfg.confirm_visits
             if tr.confirmed:
                 v.confirmed.append(tr)
@@ -274,6 +277,11 @@ class RoomNamer:
         self._wake.set()
         if self._thread is not None:
             self._thread.join(timeout=2.0)
+
+
+def _changed(box, changes: list) -> bool:
+    """Frame-difference evidence at box: a change blob covering at least a fifth of it."""
+    return any(geom.overlap_frac(ch, box) >= 0.2 for ch in changes)
 
 
 def _near_ok(tr: RoomTrack, o: RoomObservation) -> bool:

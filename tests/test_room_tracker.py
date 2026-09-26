@@ -271,3 +271,15 @@ def test_a_thing_still_matches_itself_when_it_shifts_a_little():
     r.visit(("thing", (100, 100, 160, 130)))
     v = r.visit(("thing", (112, 104, 172, 134)))          # IoU ~0.5
     assert len(v.confirmed) == 1 and len(r.tr.tracks()) == 1
+
+
+def test_a_new_track_on_changed_pixels_is_marked_arrived():
+    r = Run()
+    v = r.visit(("thing", KEYS), changes=[(90, 90, 150, 140)])
+    [tr] = r.tr.tracks()
+    assert tr.changed
+    r2 = Run()
+    r2.visit(("thing", KEYS))
+    assert not r2.tr.tracks()[0].changed                 # static: nothing moved there
+    r2.visit(("thing", KEYS), changes=[(90, 90, 150, 140)])
+    assert r2.tr.tracks()[0].changed                     # placed under a hand: the change shows a visit later
