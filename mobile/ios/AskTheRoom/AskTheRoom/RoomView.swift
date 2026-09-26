@@ -23,6 +23,7 @@ struct RoomView: View {
                 Text("Ask the Room").font(.title2.bold()).minimumScaleFactor(0.6)
                 Spacer()
                 StatusPill(store: store)
+                HelperSettingsButton(store: store)
             }
             .lineLimit(1)
             .dynamicTypeSize(...DynamicTypeSize.accessibility1)
@@ -84,7 +85,8 @@ extension View {
 
 // MARK: Status
 
-/// Connection state; long-press toggles mock mode (spec section 7).
+/// Connection state. Demo mode is switched in helper settings, not by a hidden gesture;
+/// VoiceOver keeps a direct action for it.
 struct StatusPill: View {
     let store: RoomStore
 
@@ -108,9 +110,7 @@ struct StatusPill: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
         .background(Capsule().fill(Color(.secondarySystemBackground)))
-        .onLongPressGesture(minimumDuration: 0.8) { store.setMock(!store.isMock) }
         .accessibilityElement(children: .combine)
-        .accessibilityHint("Long-press to switch demo mode \(store.isMock ? "off" : "on")")
         .accessibilityAction(named: store.isMock ? "Turn off demo mode" : "Turn on demo mode") {
             store.setMock(!store.isMock)
         }
@@ -199,6 +199,7 @@ struct ConnectView: View {
             HStack {
                 Spacer()
                 StatusPill(store: store)
+                HelperSettingsButton(store: store)
             }
             Spacer()
             if store.link == .bluetoothOff || store.link == .unauthorized || store.link == .unsupported {

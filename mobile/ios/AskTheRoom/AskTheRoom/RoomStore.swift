@@ -62,7 +62,9 @@ final class RoomStore {
     private(set) var dismissedNotices: Set<String> = []
 
     /// Off until the bridge sends voice answers; see PROTOCOL_PROPOSALS.md P2.
-    var showRoomVoiceAnswers = UserDefaults.standard.bool(forKey: RoomStore.voiceAnswersKey)
+    var showRoomVoiceAnswers = UserDefaults.standard.bool(forKey: RoomStore.voiceAnswersKey) {
+        didSet { UserDefaults.standard.set(showRoomVoiceAnswers, forKey: Self.voiceAnswersKey) }
+    }
     var answerTimeout: Duration = .seconds(6)
     var highlightDuration: Duration = .seconds(5)
 
@@ -89,7 +91,7 @@ final class RoomStore {
 
     // MARK: Source
 
-    /// Switches between the mock room and the real rig (long-press on the status pill).
+    /// Switches between the mock room and the real rig (helper settings).
     func setMock(_ on: Bool) {
         transport?.stop()
         transport = nil
@@ -172,6 +174,11 @@ final class RoomStore {
 
     func dismiss(_ notice: Notice) {
         dismissedNotices.insert(notice.id)
+    }
+
+    /// Brings back every notice put away with "Got it" (helper settings).
+    func restoreNotices() {
+        dismissedNotices = []
     }
 
     func receive(status: RigStatus) {

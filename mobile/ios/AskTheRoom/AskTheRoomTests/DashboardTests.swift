@@ -186,4 +186,16 @@ final class RoomStoreActivityTests: XCTestCase {
         store.dismiss(phone)
         XCTAssertFalse(store.notices.contains { $0.entity == "phone" })
     }
+
+    func testShowThemAgainBringsBackDismissedNotices() {
+        let store = RoomStore()
+        store.receive(state: MockData.sampleSnapshot)
+        let all = store.notices
+        all.forEach(store.dismiss)
+        XCTAssertTrue(store.notices.isEmpty)
+        XCTAssertEqual(store.dismissedNotices.count, all.count)
+
+        store.restoreNotices()
+        XCTAssertEqual(store.notices, all)
+    }
 }

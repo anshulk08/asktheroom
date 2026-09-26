@@ -32,6 +32,10 @@ struct MainView: View {
         .onChange(of: store.current?.id) { _, id in
             if id != nil, tab != .table { focus = .answer(nil) }
         }
+        // Off unless a helper turns it on; the rig already speaks in the room.
+        .onChange(of: store.current?.answer) { _, answer in
+            if let answer { Speaker.shared.say(answer.text) }
+        }
         .task {
             if store.isMock, let name = UserDefaults.standard.string(forKey: "mockFocus") { focus = .thing(name) }
         }
@@ -142,24 +146,29 @@ private struct DayHeader: View {
 
     var body: some View {
         TimelineView(.everyMinute) { context in
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 2) {
+                // Full width for the words, so the date is never cut short.
+                Group {
                     Text(Dashboard.greeting(at: context.date))
                         .font(.largeTitle.bold())
-                        .minimumScaleFactor(0.6)
                     Text(context.date.formatted(.dateTime.weekday(.wide).month(.wide).day()))
                         .font(.title3)
                         .foregroundStyle(.secondary)
+                }
+                .fixedSize(horizontal: false, vertical: true)
+                HStack(alignment: .center) {
                     Text(context.date.formatted(date: .omitted, time: .shortened))
                         .font(.title.weight(.semibold))
                         .monospacedDigit()
-                        .padding(.top, 2)
-                }
-                .lineLimit(1)
-                .accessibilityElement(children: .combine)
-                Spacer()
-                StatusPill(store: store)
+                        .lineLimit(1)
+                    Spacer()
+                    HStack(spacing: 2) {
+                        StatusPill(store: store)
+                        HelperSettingsButton(store: store)
+                    }
                     .dynamicTypeSize(...DynamicTypeSize.accessibility1)
+                }
+                .padding(.top, 2)
             }
         }
     }
@@ -170,6 +179,7 @@ private struct NoticeCard: View {
     let now: Date
     let onShow: () -> Void
     let onDismiss: () -> Void
+    @Environment(\.dynamicTypeSize) private var typeSize
 
     private var icon: (String, HierarchicalShapeStyle) {
         switch notice.kind {
@@ -195,15 +205,19 @@ private struct NoticeCard: View {
                 }
                 .fixedSize(horizontal: false, vertical: true)
             }
-            HStack(spacing: 10) {
+            // Stacked at the largest text sizes so neither button gets squeezed.
+            let layout = typeSize.isAccessibilitySize ? AnyLayout(VStackLayout(spacing: 10)) : AnyLayout(HStackLayout(spacing: 10))
+            layout {
                 Button(action: onShow) {
                     Label(notice.kind == .unnamed ? "Show me" : "Help me find it", systemImage: "scope")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
-                Button("Got it", action: onDismiss)
-                    .buttonStyle(.bordered)
-                    .tint(.primary)
+                Button(action: onDismiss) {
+                    Text("Got it").frame(maxWidth: typeSize.isAccessibilitySize ? .infinity : nil)
+                }
+                .buttonStyle(.bordered)
+                .tint(.primary)
             }
             .controlSize(.extraLarge)
         }
