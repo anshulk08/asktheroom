@@ -10,7 +10,7 @@ import Foundation
 ///   -mockOffline YES   report the cloud voice as unavailable
 ///   -mockAppDown YES   report the room app as down
 ///   -mockAsk "a|b"     ask these, a second after launch and then every 2.5 s; on Home each opens the answer sheet
-///   -mockSelect name   open this entity's detail sheet
+///   -mockSelect name   open this entity's detail sheet (with -mockTab table: pick it on the map)
 ///   -mockFocus name    open the answer sheet on this entity
 ///   -mockTab table     open on the Table (or `recent`) tab rather than Home
 ///   -mockScroll YES    scroll Home to the bottom

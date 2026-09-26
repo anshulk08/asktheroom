@@ -6,18 +6,18 @@ struct SuggestionChips: View {
     var onPick: (String) -> Void
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(Self.suggestions, id: \.self) { s in
-                    Button(s) { onPick(s) }
-                        .font(.subheadline.weight(.medium))
-                        .buttonStyle(.bordered)
-                        .buttonBorderShape(.capsule)
-                        .tint(.primary)
-                }
+        // Wraps instead of scrolling sideways, so no question is cut off mid-word.
+        FlowLayout(spacing: 8) {
+            ForEach(Self.suggestions, id: \.self) { s in
+                Button(s) { onPick(s) }
+                    .font(.subheadline.weight(.medium))
+                    .buttonStyle(.bordered)
+                    .buttonBorderShape(.capsule)
+                    .tint(.primary)
             }
-            .padding(.horizontal, 16)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 16)
     }
 }
 

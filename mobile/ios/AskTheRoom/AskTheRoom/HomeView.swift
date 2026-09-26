@@ -10,13 +10,16 @@ struct MainView: View {
     @State private var tab = Tab(rawValue: UserDefaults.standard.string(forKey: "mockTab") ?? "") ?? .home
     /// What's open over Home or Recent; nil when nothing is.
     @State private var focus: Focus?
+    /// What's picked on the Table map. `-mockTab table -mockSelect name` picks it at launch.
+    @State private var tablePick: String? = UserDefaults.standard.string(forKey: "mockTab") == "table"
+        ? UserDefaults.standard.string(forKey: "mockSelect") : nil
 
     var body: some View {
         TabView(selection: $tab) {
             HomeView(store: store, ask: store.ask, show: { focus = .thing($0) })
                 .tabItem { Label("Home", systemImage: "house.fill") }
                 .tag(Tab.home)
-            RoomView(store: store)
+            RoomView(store: store, selected: $tablePick)
                 .tabItem { Label("Table", systemImage: "square.grid.3x2.fill") }
                 .tag(Tab.table)
             RecentView(store: store) { entry in
@@ -43,6 +46,7 @@ struct MainView: View {
             FocusSheet(store: store, focus: $focus) { name in
                 focus = nil
                 if let name { store.showOnMap(name) }
+                tablePick = name
                 tab = .table
             }
         }
@@ -115,7 +119,8 @@ struct HomeView: View {
         }
         .task {
             guard store.isMock else { return }
-            if let name = UserDefaults.standard.string(forKey: "mockSelect") { selected = name }
+            if let name = UserDefaults.standard.string(forKey: "mockSelect"),
+               UserDefaults.standard.string(forKey: "mockTab") != "table" { selected = name }
             if UserDefaults.standard.bool(forKey: "mockScroll") {
                 try? await Task.sleep(for: .seconds(1))
                 proxy.scrollTo("end", anchor: .bottom)

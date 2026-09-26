@@ -13,9 +13,18 @@ struct RootView: View {
     }
 }
 
+/// The Table tab: the map, a short key, and one thing at a time underneath it (what was
+/// tapped, or the latest answer), so the screen never shows more than one story.
 struct RoomView: View {
     let store: RoomStore
-    @State private var selected: String?
+    /// The thing tapped on the map; MainView sets it for "Show the whole table".
+    @Binding var selected: String?
+    @State private var details: String?
+    @Environment(\.dynamicTypeSize) private var typeSize
+
+    /// At the largest text sizes the key and suggestions scroll with the card, so the map
+    /// and the card aren't squeezed out.
+    private var compact: Bool { typeSize.isAccessibilitySize }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -34,37 +43,121 @@ struct RoomView: View {
                 .padding(.horizontal, 16)
                 .padding(.top, 8)
 
-            Group {
-                if let snapshot = store.snapshot {
-                    TableMapView(snapshot: snapshot, highlight: store.highlight,
-                                 greyed: store.isRoomAppDown) { selected = $0 }
-                } else {
-                    ContentUnavailableView("Waiting for the room", systemImage: "rectangle.dashed",
-                                           description: Text("The map appears once the rig sends what it sees."))
-                        .frame(maxHeight: 260)
+            if let snapshot = store.snapshot {
+                TableMapView(snapshot: snapshot, highlight: store.highlight,
+                             greyed: store.isRoomAppDown, selected: selected) { name in
+                    selected = selected == name ? nil : name
                 }
+                .padding(.horizontal, 4)
+                // The map keeps its full width; the card area below scrolls instead.
+                .layoutPriority(1)
+                if !compact {
+                    legend(for: snapshot)
+                        .padding(.horizontal, 16)
+                }
+            } else {
+                ContentUnavailableView("Waiting for the room", systemImage: "rectangle.dashed",
+                                       description: Text("The map appears once the rig sends what it sees."))
+                    .frame(maxHeight: 260)
             }
-            .padding(.horizontal, 4)
 
             ScrollView {
                 VStack(spacing: 14) {
+                    if let name = selected, store.snapshot?.entity(named: name) != nil {
+                        SelectedThingCard(name: name, store: store,
+                                          onAsk: { question in selected = nil; store.ask(question) },
+                                          onMore: { details = name },
+                                          onClose: { selected = nil })
+                    } else if let current = store.current {
+                        AnswerCard(exchange: current, onRetry: store.retry)
+                    } else if store.snapshot != nil {
+                        Label("Tap something on the map to see where it is.", systemImage: "hand.tap")
+                            .font(.body)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.top, 4)
+                    }
                     if store.showRoomVoiceAnswers, let heard = store.heardInRoom {
                         HeardInRoomCard(answer: heard)
                     }
-                    if let current = store.current {
-                        AnswerCard(exchange: current, onRetry: store.retry)
+                    if compact, let snapshot = store.snapshot {
+                        legend(for: snapshot)
                     }
-                    HistoryList(exchanges: store.history)
+                    if compact {
+                        SuggestionChips { question in
+                            selected = nil
+                            store.ask(question)
+                        }
+                        .padding(.horizontal, -16)
+                    }
                 }
                 .padding(.horizontal, 16)
-                .padding(.vertical, 8)
+                .padding(.vertical, 12)
+                .animation(.easeOut(duration: 0.2), value: selected)
                 .animation(.easeOut(duration: 0.2), value: store.exchanges)
             }
             .scrollDismissesKeyboard(.interactively)
 
-            AskPanel(onAsk: store.ask)
+            AskPanel(showSuggestions: !compact) { question in
+                selected = nil
+                store.ask(question)
+            }
         }
-        .entityDetail($selected, store: store)
+        .entityDetail($details, store: store)
+    }
+
+    private func legend(for snapshot: Snapshot) -> some View {
+        MapLegend(entries: MapLayout.legend(for: MapLayout.items(for: snapshot)))
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// What was tapped on the map, in words, with what can be done about it.
+private struct SelectedThingCard: View {
+    let name: String
+    let store: RoomStore
+    var onAsk: (String) -> Void
+    var onMore: () -> Void
+    var onClose: () -> Void
+
+    private var askable: Entity? {
+        guard let e = store.snapshot?.entity(named: name), e.kind == .target,
+              !e.isThing || !e.aliases.isEmpty else { return nil }
+        return e
+    }
+
+    var body: some View {
+        VStack(spacing: 10) {
+            ThingSummary(name: name, store: store)
+                .overlay(alignment: .topTrailing) {
+                    Button(action: onClose) {
+                        Image(systemName: "xmark")
+                            .font(.body.weight(.semibold))
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("Close")
+                }
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 10) { buttons }
+                VStack(spacing: 10) { buttons }
+            }
+            .buttonStyle(.bordered)
+            .tint(.primary)
+            .controlSize(.large)
+        }
+    }
+
+    @ViewBuilder private var buttons: some View {
+        if let e = askable {
+            Button { onAsk(Dashboard.question(for: e)) } label: {
+                Label("Ask the room", systemImage: "questionmark.bubble").frame(maxWidth: .infinity)
+            }
+        }
+        Button(action: onMore) {
+            Label("More about it", systemImage: "info.circle").frame(maxWidth: .infinity)
+        }
     }
 }
 

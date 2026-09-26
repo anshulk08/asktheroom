@@ -131,8 +131,8 @@ struct FocusSheet: View {
     }
 }
 
-/// Where one thing is, in words, for the top of the sheet.
-private struct ThingSummary: View {
+/// Where one thing is, in words: the top of the sheet, and the card under the Table map.
+struct ThingSummary: View {
     let name: String
     let store: RoomStore
 

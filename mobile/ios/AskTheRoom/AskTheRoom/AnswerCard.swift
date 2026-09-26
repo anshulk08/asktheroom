@@ -63,32 +63,6 @@ struct HeardInRoomCard: View {
     }
 }
 
-/// Earlier questions and answers, newest first.
-struct HistoryList: View {
-    let exchanges: ArraySlice<Exchange>
-
-    var body: some View {
-        if !exchanges.isEmpty {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Earlier")
-                    .font(.footnote.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                ForEach(exchanges) { e in
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(e.question).font(.footnote).foregroundStyle(.secondary)
-                        Text(e.answer?.text ?? (e.timedOut ? "No answer" : "…"))
-                            .font(.body)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    .accessibilityElement(children: .combine)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 4)
-        }
-    }
-}
-
 #Preview {
     VStack {
         AnswerCard(exchange: Exchange(id: 1, question: "Where are my keys?",
