@@ -232,7 +232,8 @@ def main(argv=None) -> int:
         frames = VideoFileSource(a.video, start=False).frames()
     else:
         from core.capture import FrameBuffer
-        fb = FrameBuffer(int(a.device or 0))
+        dev = str(a.device or 0)
+        fb = FrameBuffer(int(dev) if dev.isdigit() else dev)      # an index, or a /dev/v4l/by-id/ path
         frames = _live(fb, a.seconds)
     seen, n, ms, last = Counter(), 0, [], None
     t0 = time.monotonic()
@@ -261,7 +262,7 @@ def _live(fb, seconds: float):
     end, last = time.monotonic() + seconds, 0
     try:
         while time.monotonic() < end:
-            f = fb.wait_new(last, 1.0)
+            f = fb.wait_new(last, 1.0 if last else 5.0)   # the Brio's first frame takes ~1.1 s after opening
             if f is None:
                 return
             last = f.idx
