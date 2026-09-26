@@ -26,6 +26,7 @@ HISTORY_MAX = 1000
 TRANSIT_S, TRANSIT_CM = 0.5, 4.0   # a hand whose centre moved this far this recently is passing over
 LABEL_ON_THING_IOU = 0.5    # a configured label on a thing's box overlapping this much ...
 ESTABLISHED_S = 2.0         # ... in place this long before the object was last seen elsewhere: the thing
+PARTLY_HIDDEN_INSIDE = 0.8  # a smaller box this much inside the box an object rests in: part of it is hidden
 
 # A rule verdict is (Status, parent, confidence, EventType[, candidates]), or NO_CHANGE: the rule
 # claims the object this update (later rules are skipped) but leaves the belief as it is and emits
@@ -75,6 +76,7 @@ class World(ThingRules):
                              for n in self.cfg.names()}
             self._seen_t: dict[str, float] = {}         # obj -> monotonic t of last detection
             self._rest: dict[str, tuple] = {}           # obj -> where it last sat still (visible)
+            self._rest_box: dict[str, tuple] = {}       # obj -> its box there
             self._carry: dict[str, tuple] = {}          # obj -> (hand, origin) while moved in view
             self._path: dict[str, deque] = {n: deque(maxlen=60) for n in self.entities}  # (t, pos)
             self._bits = {n: deque(maxlen=self.cfg.present_n) for n in self.entities}
@@ -241,7 +243,7 @@ class World(ThingRules):
         ent.status, ent.parent, ent.candidates, ent.confidence, ent.edge = Status.VISIBLE, None, [], 1.0, None
         ent.zone, ent.pre_pickup_pos, ent.held_since = 'table', None, None
         self._confirmed.add(name)
-        self._rest[name] = ent.pos_cm
+        self._rest[name], self._rest_box[name] = ent.pos_cm, ent.box_cm
         self._carry.pop(name, None)
         if prev == Status.HELD:
             moved = origin is not None and geom.dist(ent.pos_cm, origin) >= self.cfg.moved_min_cm
@@ -311,19 +313,22 @@ class World(ThingRules):
     def _track_motion(self, name: str, ent: Entity) -> list[Event]:
         """A carried object often stays detected, so it never goes absent and rule 4 never fires.
         Leaving its resting spot by moved_min_cm with a hand on it is a pick-up; untouched for
-        settle_s and still within settle_cm since the last touch is a set-down (MOVED / PUT_BACK)."""
+        settle_s and still within settle_cm since the last touch is a set-down (MOVED / PUT_BACK).
+        A box that only shrank inside the one the object rests in is the object partly hidden (an arm
+        over it), not moved: its centre shifts, the object does not."""
         pos = ent.pos_cm
         self._path[name].append((self._now, pos))
         rest = self._rest.setdefault(name, pos)
+        self._rest_box.setdefault(name, ent.box_cm)
         touches = self._contacts[name]
         carry = self._carry.get(name)
         if carry is None:
-            if geom.dist(pos, rest) < self.cfg.moved_min_cm:
+            if geom.dist(pos, rest) < self.cfg.moved_min_cm or self._partly_hidden(name, ent):
                 return []
             recent = sorted(((t, h) for h, t in touches.items()
                              if t >= self._now - self.cfg.contact_window_s), reverse=True)
             if not recent:                  # shifted with no hand (e.g. re-detected): new rest spot
-                self._rest[name] = pos
+                self._rest[name], self._rest_box[name] = pos, ent.box_cm
                 return []
             self._carry[name] = (recent[0][1], rest)
             return [self._emit(name, EventType.PICKED_UP, from_cm=rest, parent=recent[0][1])]
@@ -334,9 +339,14 @@ class World(ThingRules):
         if not since or any(geom.dist(p, pos) > self.cfg.settle_cm for p in since):
             return []
         origin = self._carry.pop(name)[1]
-        self._rest[name] = pos
+        self._rest[name], self._rest_box[name] = pos, ent.box_cm
         etype = EventType.MOVED if geom.dist(pos, origin) >= self.cfg.moved_min_cm else EventType.PUT_BACK
         return [self._emit(name, etype, from_cm=origin, to_cm=pos)]
+
+    def _partly_hidden(self, name: str, ent: Entity) -> bool:
+        rest = self._rest_box.get(name)
+        return (rest is not None and ent.box_cm is not None and geom.area(ent.box_cm) < geom.area(rest)
+                and geom.overlap_frac(rest, ent.box_cm) >= PARTLY_HIDDEN_INSIDE)
 
     # ----- rule 4: disappearance ----------------------------------------------------------------
 

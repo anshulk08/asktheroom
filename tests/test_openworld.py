@@ -677,3 +677,27 @@ def test_a_configured_object_moved_to_an_empty_spot_follows_the_detector(scene, 
     scene.run(world, 2.0)
     phone = world.get('phone')
     assert phone.status == Status.VISIBLE and abs(phone.pos_cm[0] - 90) < 3
+
+
+# ----- an arm over part of a big thing ------------------------------------------------------------------
+
+def test_a_big_thing_partly_hidden_by_an_arm_keeps_its_identity_when_it_shows_whole_again(cfg, scene):
+    """hands_1 on the rig: an arm sweeps over a 22 x 13 cm tub and the hand detector finds it in one
+    frame only. The proposer sees just the tub's uncovered part, which shrinks to one corner (its centre
+    5-6 cm from the tub's), then the whole tub again. Nothing was picked up, and the whole tub is still
+    thing:1: not a new thing, although it is over 4x the corner's size."""
+    world = World(cfg)                              # the rig runs without an appearance embedder
+    appear(scene, world, 'tub', (40, 30), seconds=2.0, w=22, h=13)
+    scene.thing('tub', 40, 32, w=22, h=9)           # the arm hides the top of the tub
+    events = scene.run(world, 0.3)
+    scene.hand(1, 40, 34)                           # the arm, seen as a hand once
+    events += world.update(*scene.step())
+    scene.hand_off(1)
+    scene.thing('tub', 35, 27, w=11, h=6)           # only one corner shows
+    events += scene.run(world, 0.3)
+    scene.thing('tub', 40, 30, w=22, h=13)          # the arm has gone: the whole tub again
+    events += scene.run(world, 3.0)
+    assert events == []
+    assert things(world) == ['thing:1']
+    tub = world.get('thing:1')
+    assert tub.status == Status.VISIBLE and tub.pos_cm == pytest.approx((40, 30))
