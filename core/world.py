@@ -24,6 +24,7 @@ from core.types import Detection, Detections, Entity, Event, EventType, Frame, P
 
 HISTORY_MAX = 1000
 TRANSIT_S, TRANSIT_CM = 0.5, 4.0   # a hand whose centre moved this far this recently is passing over
+LABEL_LEFT_IOU = 0.3         # a target's label this clear of its box while its pixels stay: a swap
 LABEL_ON_THING_IOU = 0.5    # a configured label on a thing's box overlapping this much ...
 ESTABLISHED_S = 2.0         # ... in place this long before the object was last seen elsewhere: the thing
 PARTLY_HIDDEN_INSIDE = 0.8  # a smaller box this much inside the box an object rests in: part of it is hidden
@@ -204,11 +205,22 @@ class World(ThingRules):
         best: dict[str, Detection] = {}
         for d in items:
             if d.cls in self.entities and d.conf >= self.cfg.conf_threshold:
-                if self._label_on_a_thing(d, hands):
+                if self._label_on_a_thing(d, hands) or self._label_left_behind(d):
                     continue
                 if d.cls not in best or d.conf > best[d.cls].conf:
                     best[d.cls] = d
         return best
+
+    def _label_left_behind(self, d: Detection) -> bool:
+        """The object's label read moved_min_cm or more from where it lies while its remembered pixels
+        still match there: the detector is calling a neighbour by its name (a label swap), the object
+        itself has not moved. A real move leaves the old spot looking different. Targets only, and only
+        a label clear of the old box: a big, plain cover or container slid part-way can still look
+        alike over its old spot."""
+        ent = self.entities[d.cls]
+        return (ent.kind == 'target' and ent.status == Status.VISIBLE and ent.pos_cm is not None
+                and ent.box_cm is not None and geom.dist(ent.pos_cm, d.center_cm) >= self.cfg.moved_min_cm
+                and geom.iou(ent.box_cm, d.box_cm) < LABEL_LEFT_IOU and self._still_there(d.cls))
 
     def _label_on_a_thing(self, d: Detection, hands) -> bool:
         """A configured label read on a thing that was already in place while that object was seen

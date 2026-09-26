@@ -683,3 +683,26 @@ def test_keys_taken_while_already_unseen_are_lost_when_the_grace_runs_out(scene,
     events += scene.run(world, cfg.lost_grace_s)
     assert types(events) == [EventType.LOST_TRACK]
     assert world.get('keys').status == Status.UNKNOWN
+
+
+# ----- a configured label jumping away while the object's pixels stay put ----------------------------
+
+def test_a_label_jumping_away_from_keys_still_in_place_is_another_object(rscene, world, cfg):
+    """The detector calls a neighbour 'keys' for a few frames (a label swap) while the real keys lie
+    untouched where they were: their pixels still match there, so the keys do not move."""
+    from tests.synth import DEFAULT_SIZE_CM
+    w, h = DEFAULT_SIZE_CM['target']
+    rscene.place('keys', 40, 30)
+    rscene.run(world, 2.0)
+    rscene.hand(1, 36, 30)                          # a hand brushes the keys just before
+    rscene.run(world, 0.2)
+    rscene.hand_off(1)
+    rscene.overlay('keys', 40, 30, w, h)            # the real keys stay drawn at their spot ...
+    rscene.place('keys', 48, 30)                    # ... while the 'keys' detection is 8 cm away
+    events = rscene.run(world, 0.5)
+    assert abs(world.get('keys').pos_cm[0] - 40) < 2
+    rscene.place('keys', 40, 30)
+    events += rscene.run(world, 1.0)
+    assert events == []
+    keys = world.get('keys')
+    assert keys.status == Status.VISIBLE and abs(keys.pos_cm[0] - 40) < 2
