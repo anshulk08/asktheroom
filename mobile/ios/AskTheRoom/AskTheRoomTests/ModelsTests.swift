@@ -1,0 +1,99 @@
+import XCTest
+@testable import AskTheRoom
+
+final class ModelsTests: XCTestCase {
+    func testSampleSnapshotDecodesEveryStatus() throws {
+        let snap = try XCTUnwrap(Wire.decode(Snapshot.self, from: Data(MockData.sampleSnapshotJSON.utf8)))
+        XCTAssertEqual(snap.v, 1)
+        XCTAssertEqual(snap.tableSize, TablePoint(x: 90, y: 60))
+        XCTAssertEqual(snap.laser, LaserState(on: true, target: "keys"))
+        XCTAssertEqual(snap.entities.count, 10)
+        XCTAssertEqual(Set(snap.entities.map(\.status)), [.visible, .held, .under, .inside, .gone, .lost])
+
+        let keys = try XCTUnwrap(snap.entity(named: "keys"))
+        XCTAssertEqual(keys.drawPoint, TablePoint(x: 70.4, y: 38.1))
+        XCTAssertEqual(keys.parent, "box")
+
+        let phone = try XCTUnwrap(snap.entity(named: "phone"))
+        XCTAssertEqual(phone.edge, .left)
+        XCTAssertNil(phone.r)
+        XCTAssertEqual(phone.drawPoint, TablePoint(x: 3, y: 30))
+
+        XCTAssertTrue(try XCTUnwrap(snap.entity(named: "glasses")).isUncertain)
+        XCTAssertTrue(try XCTUnwrap(snap.entity(named: "remote")).isInHand)
+        XCTAssertEqual(try XCTUnwrap(snap.entity(named: "thing:9")).maybeSameAs, [MaybeSame(name: "thing:4", score: 0.62)])
+    }
+
+    func testDisplayNames() {
+        XCTAssertEqual(Entity.displayName(for: "pill_bottle"), "pill bottle")
+        XCTAssertEqual(Entity.displayName(for: "thing:7", aliases: ["my charger"]), "my charger")
+        XCTAssertEqual(Entity.displayName(for: "thing:9"), "unnamed object 9")
+    }
+
+    func testChainFollowsNestingAndStopsAtHands() {
+        let json = """
+        {"e":[
+          {"n":"keys","k":"t","s":"U","p":"notebook"},
+          {"n":"notebook","k":"v","s":"I","p":"box"},
+          {"n":"box","k":"c","s":"H","p":"hand:1"}
+        ]}
+        """
+        let snap = Wire.decode(Snapshot.self, from: Data(json.utf8))!
+        XCTAssertEqual(snap.chain(from: "keys").map(\.name), ["keys", "notebook", "box"])
+        XCTAssertEqual(snap.tableSize, Snapshot.defaultTable)
+    }
+
+    func testChainSurvivesCyclesAndMissingParents() {
+        let json = """
+        {"e":[{"n":"a","k":"t","s":"I","p":"b"},{"n":"b","k":"c","s":"I","p":"a"},{"n":"c","k":"t","s":"I","p":"nowhere"}]}
+        """
+        let snap = Wire.decode(Snapshot.self, from: Data(json.utf8))!
+        XCTAssertEqual(snap.chain(from: "a").map(\.name), ["a", "b"])
+        XCTAssertEqual(snap.chain(from: "c").map(\.name), ["c"])
+    }
+
+    func testUnknownValuesDecodeInsteadOfFailing() throws {
+        let json = #"{"e":[{"n":"keys","k":"z","s":"Q","edge":"left"}]}"#
+        let keys = try XCTUnwrap(Wire.decode(Snapshot.self, from: Data(json.utf8))?.entities.first)
+        XCTAssertEqual(keys.kind, .unrecognized)
+        XCTAssertEqual(keys.status, .unrecognized)
+    }
+
+    func testAnswerActionsAreAnOpenString() throws {
+        let raw = #"{"id":17,"ok":true,"text":"Your keys are inside the box.","point_at":"keys","action":"trace","target":[70.4,38.1],"ms":412}"#
+        let answer = try XCTUnwrap(Wire.decode(Answer.self, from: Data(raw.utf8)))
+        XCTAssertEqual(answer.laserAction, .other("trace"))
+        XCTAssertEqual(answer.target, TablePoint(x: 70.4, y: 38.1))
+        XCTAssertEqual(LaserAction("sweep:right"), .sweep(.right))
+        XCTAssertEqual(LaserAction("sweep:sideways"), .other("sweep:sideways"))
+        XCTAssertEqual(LaserAction("circle"), .circle)
+    }
+
+    func testAnswerWithoutIDOrActionDecodes() throws {
+        let raw = #"{"id":null,"ok":false,"text":"The room isn't running right now."}"#
+        let answer = try XCTUnwrap(Wire.decode(Answer.self, from: Data(raw.utf8)))
+        XCTAssertNil(answer.id)
+        XCTAssertFalse(answer.succeeded)
+        XCTAssertNil(answer.laserAction)
+    }
+
+    func testMalformedJSONReturnsNil() {
+        XCTAssertNil(Wire.decode(Snapshot.self, from: Data("{\"e\":[".utf8)))
+        XCTAssertNil(Wire.decode(Answer.self, from: Data("not json".utf8)))
+    }
+
+    func testStatus() throws {
+        let raw = #"{"app":"down","fps":0}"#
+        let status = try XCTUnwrap(Wire.decode(RigStatus.self, from: Data(raw.utf8)))
+        XCTAssertFalse(status.appIsUp)
+    }
+
+    func testQuestionFitsInOneWrite() throws {
+        let short = try XCTUnwrap(Question(id: 17, q: "where are my keys?").encoded())
+        XCTAssertEqual(String(decoding: short, as: UTF8.self), #"{"id":17,"q":"where are my keys?"}"#)
+
+        let long = try XCTUnwrap(Question(id: 65535, q: String(repeating: "é", count: 300)).encoded())
+        XCTAssertLessThanOrEqual(long.count, Question.maxBytes)
+        XCTAssertNotNil(Wire.decode(Question.self, from: long))
+    }
+}
