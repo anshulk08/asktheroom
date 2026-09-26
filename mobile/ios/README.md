@@ -6,19 +6,25 @@ SwiftUI app (iOS 17+, no third-party packages) that talks to the rig over Blueto
 
 Open `AskTheRoom/AskTheRoom.xcodeproj` in Xcode. Source folders sync automatically: new `.swift` files in `AskTheRoom/` or `AskTheRoomTests/` join their target with no project edits.
 
-- **Simulator:** the Simulator has no Bluetooth, so tap "Use demo mode" (or pass `-mock YES` under Scheme → Run → Arguments). Long-press the status pill to switch demo mode on or off anywhere.
+- **Simulator:** the Simulator has no Bluetooth, so tap "Use demo mode" (or pass `-mock YES` under Scheme → Run → Arguments). Switch demo mode on or off anywhere from the gear (Helper settings) next to the status pill.
 - **iPhone:** target → Signing & Capabilities → your personal team. If the bundle id `com.asktheroom.app` is taken, add a suffix. On the phone, turn on Settings → Privacy & Security → Developer Mode.
 
 ## Screens
 
-After the rig connects (or in demo mode) the app opens on **Home**, an assistant-style dashboard inspired by [Project Memoria](https://github.com/gamefreakoneone/Project-Memoria_Dementia-Assistant):
+After the rig connects (or in demo mode) the app opens on **Home**, an assistant-style dashboard inspired by [Project Memoria](https://github.com/gamefreakoneone/Project-Memoria_Dementia-Assistant). There are three tabs:
 
-- the greeting and today's date, for orientation;
-- **The room noticed**: things that left the table, things the rig lost track of, and new unnamed objects, each with a big "Help me find it" button (asks the rig, so the laser points) and "Got it" to put it away;
-- **Your things**: a tile per tracked object with where it is in plain words; tap to ask the room and jump to the map, long-press for details;
-- **Recently**: what changed since the app connected, worked out on the phone by comparing snapshots (no protocol change). Pill wording stays neutral: "picked up", never "taken".
+- **Home**
+  - the greeting, today's date and the time in large type, for orientation;
+  - **The room noticed**: things moved off the table, things the room can't see right now (with when they were last seen), and new unnamed objects. Each has a big "Help me find it" button (asks the rig, so the laser points) and "Got it" to put it away;
+  - **Your things**: a tile per tracked object with where it is in plain words ("Inside the box", "Someone is holding it"); tap to ask the room.
+- **Table**: the spec's Room screen, with the live map, the answer card, suggestions and history.
+- **Recent**: what changed since the app connected and the questions asked, newest first, with clock times, under "In the last hour" and "Earlier". Changes are worked out on the phone by comparing snapshots (no protocol change). Pill wording stays neutral: "picked up", never "taken".
 
-The **Table** tab is the spec's Room screen: the live map, the answer card, suggestions and history.
+Asking from Home, or tapping a row on Recent, opens an **answer sheet** over that screen rather than jumping to another tab. It shows the answer (or where the thing is), a map with it ringed until the person taps Done, and large buttons: "Ask the room where it is", "More about it" (the detail sheet) and "Show the whole table" (the only thing that switches tabs).
+
+The design follows dementia-friendly guidance: one thing at a time, no surprise screen changes, plain wording that never blames, large text and targets (one column of tiles at the largest text sizes), calm colours (red only where the laser points), and no hidden gestures.
+
+**Helper settings** (the gear next to the status pill) are for a family member or carer: demo mode, "Read answers aloud" (off by default, since the rig already speaks), "Show answers to questions asked in the room" (PROTOCOL_PROPOSALS.md P2), the rig's status, and "Show them again" for notices put away with "Got it".
 
 ## Tests
 
@@ -41,7 +47,10 @@ If `xcode-select` points at the Command Line Tools, prefix the command with `DEV
 | `TableMapView.swift` | The table map, pulse, laser reticle, sweep and circle |
 | `AnswerCard.swift`, `AskBar.swift` | Answer and history; suggestion chips, text field, mic |
 | `Dashboard.swift` | Home's words: where each thing is, what the room noticed, what changed between snapshots |
-| `HomeView.swift` | Home (start screen) and the Home / Table tabs |
+| `HomeView.swift` | Home (start screen) and the Home / Table / Recent tabs |
+| `RecentView.swift` | The Recent tab |
+| `AnswerSheet.swift` | The answer sheet over Home and Recent |
+| `HelperSettings.swift`, `Speaker.swift` | Helper settings; reading answers aloud |
 | `RoomView.swift` | Connect and Table screens, status pill, banners, detail sheet |
 | `RoomLink.swift` | CoreBluetooth: scan, connect to the strongest rig, subscribe, reconnect with backoff |
 | `Dictation.swift` | Hold-to-talk, on-device speech recognition only |
@@ -63,7 +72,8 @@ Set `SIM=<id>` for a different simulator and `WAIT=<seconds>` to wait longer bef
 | `-mockPaused YES` | Hold the sample snapshot; don't play the story |
 | `-mockOffline YES` | Rig reports no internet |
 | `-mockAppDown YES` | Rig's room app is down (banner, greyed map) |
-| `-mockAsk "a\|b"` | Ask these questions, one every 2.5 s |
+| `-mockAsk "a\|b"` | Ask these questions, one every 2.5 s (on Home each opens the answer sheet) |
 | `-mockSelect keys` | Open that entity's detail sheet |
-| `-mockTab table` | Open on the Table tab instead of Home |
+| `-mockFocus phone` | Open the answer sheet on that entity |
+| `-mockTab table` | Open on the Table (or `recent`) tab instead of Home |
 | `-mockScroll YES` | Scroll Home to the bottom |
