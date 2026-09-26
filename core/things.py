@@ -760,7 +760,8 @@ class ThingRules:
                       'edge', 'pre_pickup_pos', 'zone', 'held_since'):
                 setattr(ek, f, getattr(ed, f))
             for d in (self._seen_t, self._rest, self._carry, self._box_px, self._hidden_at,
-                      self._placed_t, self._lifted_at, self._learn_t, self._unsure_until):
+                      self._placed_t, self._lifted_at, self._learn_t, self._unsure_until, self._matched_t,
+                      self._waiting):
                 if drop in d:
                     d[keep] = d.pop(drop)
                 else:

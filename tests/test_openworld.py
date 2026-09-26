@@ -221,7 +221,7 @@ def test_thing_follows_the_cover_rule_and_is_uncovered_in_place(scene, world):
 def test_thing_lost_in_place_and_seen_again_at_the_same_spot_keeps_its_identity(scene, world):
     appear(scene, world, 'mug', (40, 30))
     scene.miss('mug')
-    assert types(scene.run(world, 1.5)) == [EventType.LOST_TRACK]
+    assert types(scene.run(world, world.cfg.lost_grace_s + 0.3)) == [EventType.LOST_TRACK]
     scene.miss('mug', False)
     events = scene.run(world, 1.0)
     assert types(events) == [EventType.CORRECTED]
@@ -593,7 +593,7 @@ def test_a_thing_lost_in_the_edge_band_comes_back_as_itself(scene, table_world):
         scene.thing('mug', x + 0.5, 30)
         table_world.update(*scene.step())
     scene.miss('mug')
-    assert types(scene.run(table_world, 1.5)) == [EventType.LOST_TRACK]
+    assert types(scene.run(table_world, table_world.cfg.lost_grace_s + 0.3)) == [EventType.LOST_TRACK]
     scene.miss('mug', False)
     events = scene.run(table_world, 1.0)
     assert [(e.obj, e.type) for e in events] == [('thing:1', EventType.CORRECTED)]

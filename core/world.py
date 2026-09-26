@@ -94,6 +94,8 @@ class World(ThingRules):
             self._bg = relations.BackgroundModel(self.cfg.bg_frames, self.cfg.bg_change_threshold)
             self._looks = relations.AppearanceMemory()
             self._look_px: dict[str, tuple] = {}        # obj -> box_px its remembered patch came from
+            self._matched_t: dict[str, float] = {}      # obj -> last t its patch matched while undetected
+            self._waiting: dict[str, float] = {}        # obj -> when an absence no rule explained began
             self._bg_t: float | None = None             # last background / appearance refresh
             self._gray_img = None                       # this update's grey frame, made on demand
             self._reset_things()
@@ -243,6 +245,7 @@ class World(ThingRules):
         self._confirmed.add(name)
         self._rest[name] = ent.pos_cm
         self._carry.pop(name, None)
+        self._waiting.pop(name, None)
         if prev == Status.HELD:
             moved = origin is not None and geom.dist(ent.pos_cm, origin) >= self.cfg.moved_min_cm
             etype = EventType.MOVED if moved else EventType.PUT_BACK
@@ -343,19 +346,28 @@ class World(ThingRules):
     def _disappear(self, name: str, ent: Entity) -> list[Event]:
         if self._still_there(name):
             self._present[name] = True      # detector miss: re-checked each update while it lasts
+            self._matched_t[name] = self._now
             return []
         if self._hand_over(ent):            # the hand hides the spot (a wave, or a grab in progress):
             self._present[name] = True      # decided once it moves on, by the rules below
             return []
-        slid_over = self._slid_over_by_hand(name, ent)
-        if slid_over is not None:
-            return self._apply_verdict(name, ent, slid_over)
-        held = self._picked_up(name, ent)
-        if held or ent.status == Status.HELD:
-            return held
+        waiting = self._now - self._waiting.get(name, -1e18) <= self.cfg.lost_grace_s
+        if not waiting:                     # already unexplained: a hand that comes after did not take it
+            slid_over = self._slid_over_by_hand(name, ent)
+            if slid_over is not None:
+                return self._apply_verdict(name, ent, slid_over)
+            held = self._picked_up(name, ent)
+            if held or ent.status == Status.HELD:
+                return held
         hidden = self._hidden_by(name, ent, ent.box_cm, self._now, self._frame)
         if hidden is not None:
             return self._apply_verdict(name, ent, hidden)
+        if self._now - self._last_evidence(name) < self.cfg.lost_grace_s:
+            if not waiting:                 # unexplained: an arm no detector saw, or a detector miss
+                self._waiting[name] = self._now
+            self._present[name] = True      # re-checked each update; seen again meanwhile: nothing logged
+            return []
+        self._waiting.pop(name, None)
         return self._lose(name, ent)
 
     def _still_there(self, name: str) -> bool:
@@ -366,6 +378,16 @@ class World(ThingRules):
         gray, box = self._gray(), self._look_px.get(name)
         return (gray is not None and box is not None
                 and self._looks.still_there(name, gray, box, self.cfg.appearance_match))
+
+    def _last_evidence(self, name: str) -> float:
+        """When the object was last detected or its patch last matched. An absence no rule explains is
+        not a loss until lost_grace_s after this: on the rig the detector drops objects while an arm is
+        near them and a dim-light arm is often not detected as a hand, so the patch check fails whenever
+        the arm overlaps the box as absence is declared, and untouched objects flickered LOST_TRACK ->
+        CORRECTED (shell_1: unseen up to 1.9 s, then found in place). Meanwhile the object stays VISIBLE
+        where it was, the cover and background rules still apply, and hands arriving later are ignored:
+        the absence came first (shell_1: one frame of a hand over the already unseen phone)."""
+        return max(self._seen_t.get(name, -1e18), self._matched_t.get(name, -1e18))
 
     def _lose(self, name: str, ent: Entity) -> list[Event]:
         """UNKNOWN at the last known position; confidence is left as it was."""

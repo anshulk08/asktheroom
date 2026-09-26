@@ -19,6 +19,7 @@ Test suite at time of writing (Sat 26 Sep, after the overnight merge): `.venv/bi
 | — | YOLO11 fine-tune on overhead frames (`scripts/finetune/`) | implemented | `tests/test_finetune.py` covers the tooling. No trained model yet |
 | — | Hand tracking via detector `hand` class (`core/hands.py`) | validated | `tests/test_hands.py` |
 | — | World rules: HELD, UNDER, INSIDE, GONE, UNKNOWN, parent chains, decay (`core/world.py`, `core/relations.py`) | validated | `tests/test_world_rules.py`, `tests/test_world_core.py`, `tests/test_relations.py` (synthetic detections) |
+| — | Briefly unseen is not lost: an absence no rule explains waits `lost_grace_s` (2 s) before `LOST_TRACK`; seen again in place meanwhile logs nothing (`core/world.py` rule 4) | validated (synthetic + replay) | `tests/test_world_rules.py`. shell_1 replay (model 1): wallet and phone `LOST_TRACK`/`CORRECTED` events 13 → 2, identity changes 1 → 0. A removed object is lost ~1.1 s later than before |
 | — | Shell game (keys → notebook → box → box moved) | validated | Synthetic: world-rule tests and `eval.synth`. Real-table trials not yet recorded (F5) |
 | — | Event log + snapshots, 24 h snapshot pruning (`core/events.py`) | validated | `tests/test_events.py` |
 | — | Open-world identity: unnamed `thing:N` entities, causal-first re-identification, UNKNOWN survives (`maybe_same_as`, no silent merges), exemplar bank (`core/things.py`) | validated (synthetic) | `tests/test_openworld.py`. The real-table check (D17: teach, hide, move the box, ask; at least 4/5) is not done yet |
