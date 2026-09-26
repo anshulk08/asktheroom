@@ -115,6 +115,8 @@ struct FocusSheet: View {
             }
         }
         .buttonStyle(.bordered)
+        // Full-contrast labels; only Done carries the accent.
+        .tint(.primary)
         .controlSize(.extraLarge)
     }
 
