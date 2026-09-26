@@ -31,7 +31,7 @@ def test_hidden_on_table_privacy_help_meds(world):
     assert "keys inside the box" in templated("which things are hidden right now", world, CFG).text
     assert templated("how many things are on the table", world, CFG).text == \
         "I can see the wallet, the box and the notebook on the table."
-    assert "don't save anything you say" in templated("are you recording me", world, CFG).text
+    assert "never save a recording" in templated("are you recording me", world, CFG).text
     assert "your pill bottle" in templated("what can you do", world, CFG).text
     a = templated("did I take my meds", world, CFG)
     assert (a.text, a.point_at) == (PILLS_SAFE, "pill_bottle")

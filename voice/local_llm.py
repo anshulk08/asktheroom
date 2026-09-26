@@ -84,8 +84,8 @@ def _list(names: list[str], cfg: dict) -> str:
     return said[0] if len(said) == 1 else ", ".join(said[:-1]) + f" and {said[-1]}"
 
 
-PRIVACY = ("Video and audio stay on this device. I keep where things are and a day of snapshots "
-           "when something moves, and I don't save anything you say.")
+PRIVACY = ("Video and audio stay on this device, and I never save a recording. I only keep the "
+           "questions you ask me, and a day of snapshots when something moves.")
 _MEDS_TAKEN = re.compile(r"\b(take|took|taken|had|swallow\w*)\b.*\b(pills?|meds|medicine|medication)\b")
 _PRIVACY = re.compile(r"\b(record\w*|camera|listening|spy\w*|video|privacy|private|saving|save)\b")
 _HELP = re.compile(r"\b(what can you do|what do you do|how do(es)? (you|this|it) work|what are you|help)\b")

@@ -36,3 +36,6 @@ models/**/*.onnx.json
 models/**/*.gguf
 models/**/*.gguf.part
 models/**/*.bin
+
+# spoken-question recordings (people's voices) stay local
+tests/stt_audio/*.wav

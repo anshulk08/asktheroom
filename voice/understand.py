@@ -152,7 +152,7 @@ def to_intent(raw: str, text: str, cfg: dict, obj_hint: Optional[str] = None) ->
     obj = obj_hint or (obj if obj in _objects(cfg) and sounds_like(obj, text, cfg) else None)
     if kind in ("WHERE", "HISTORY", "HANDLED") and obj is None:
         # nothing to point at or look up: CHANGES covers "did anyone touch anything",
-        # OTHER lets Grok (online) or the fallback handle "where is the charger"
+        # OTHER lets voice/local_llm handle "where is the charger"
         kind = "CHANGES" if kind != "WHERE" else "OTHER"
     if kind in NO_OBJECT:
         obj = None
