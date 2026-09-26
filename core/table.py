@@ -84,8 +84,7 @@ class Table:
         self.size_cm = tuple(t.get("size_cm", (90, 60)))
         self.markers_cm = {int(k): tuple(v) for k, v in (t.get("markers") or {}).items()}
         self.cal_path = cal_path or (cfg.get("paths") or {}).get("table_cal", "table_cal.json")
-        self.H: Optional[np.ndarray] = None       # px -> cm
-        self.Hinv: Optional[np.ndarray] = None    # cm -> px
+        self._cal: tuple = (None, None)           # (H px -> cm, Hinv cm -> px), swapped as one (_set)
         self.found: list[int] = []
         tt = cfg.get("table_tag") or {}
         self.tag_mode = bool(tt.get("enabled"))
@@ -101,6 +100,21 @@ class Table:
     @property
     def ok(self) -> bool:
         return self.H is not None
+
+    @property
+    def H(self) -> Optional[np.ndarray]:          # px -> cm
+        return self._cal[0]
+
+    @H.setter
+    def H(self, H: Optional[np.ndarray]) -> None:
+        if H is None:
+            self._cal = (None, None)
+        else:
+            self._set(H)
+
+    @property
+    def Hinv(self) -> Optional[np.ndarray]:       # cm -> px
+        return self._cal[1]
 
     def calibrate(self, frame_img: np.ndarray) -> bool:
         """Fit from markers 0-3 in this image (or, in one-tag mode, from the tag averaged over several
@@ -159,8 +173,10 @@ class Table:
         return True
 
     def _set(self, H: np.ndarray) -> None:
-        self.H = np.asarray(H, dtype=np.float64)
-        self.Hinv = np.linalg.inv(self.H)
+        """One assignment, so another thread (perception, the laser) never pairs a new H with the old
+        Hinv while a spoken 'recalibrate' refits on its own thread."""
+        H = np.asarray(H, dtype=np.float64)
+        self._cal = (H, np.linalg.inv(H))
 
     def px_to_cm(self, pts) -> np.ndarray:
         return self._apply(self.H, pts)
