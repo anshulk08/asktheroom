@@ -280,9 +280,9 @@ def to_answer(text: str, point_at: Optional[str], names: list[str], cfg: dict,
 # ---------------------------------------------------------------- the call
 
 def _make_client(base_url: str, api_key: str, timeout: float):
-    """Seam for tests."""
-    from openai import OpenAI
-    return OpenAI(base_url=base_url, api_key=api_key, timeout=timeout, max_retries=0)
+    """Seam for tests. core.xai: plain requests on the shared, pre-warmed connection to xAI."""
+    from core.xai import Client
+    return Client(base_url, api_key, timeout=timeout)
 
 
 def _args(tc) -> dict:

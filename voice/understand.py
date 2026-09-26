@@ -213,7 +213,10 @@ class Grok:
         self.reasoning = llm.get("reasoning_effort")
         self.system = system_prompt(cfg)
         self.schema = schema(cfg)
-        self.session = session if session is not None else requests.Session()
+        if session is None:
+            from core.xai import session as shared
+            session = shared()                    # the process-wide connection to xAI (core/xai.py)
+        self.session = session
 
     @staticmethod
     def _key() -> str:

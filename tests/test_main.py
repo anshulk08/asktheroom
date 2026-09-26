@@ -446,3 +446,41 @@ def test_the_same_question_by_voice_after_the_window_is_answered(tmp_path, monke
     now[0] += 3.5
     room._answer("where is my wallet?", now[0], now[0], {"mode": "overheard"})
     assert wait_for(lambda: len(room.tts.said) == 2)
+
+
+class FlipNet:
+    def __init__(self, online=False):
+        self.online, self.cbs = online, []
+
+    def on_change(self, cb):
+        self.cbs.append(cb)
+
+    def flip(self, online):
+        self.online = online
+        for cb in self.cbs:
+            cb(online)
+
+
+def test_grok_is_warmed_when_the_network_comes_up_and_again_after_a_drop():
+    warmed = []
+    net = FlipNet(online=False)
+    main.warm_on_connect(net, lambda: warmed.append(1))
+    time.sleep(0.05)
+    assert warmed == []                                 # offline at start: nothing to warm
+    net.flip(True)
+    assert wait_for(lambda: len(warmed) == 1)
+    net.flip(False)
+    time.sleep(0.05)
+    assert len(warmed) == 1
+    net.flip(True)
+    assert wait_for(lambda: len(warmed) == 2)
+
+
+def test_grok_is_warmed_at_start_when_already_online_and_a_slow_warm_never_blocks_the_monitor():
+    warmed = []
+    net = FlipNet(online=True)
+    t0 = time.monotonic()
+    main.warm_on_connect(net, lambda: (time.sleep(0.5), warmed.append(1)))
+    net.flip(True)
+    assert time.monotonic() - t0 < 0.2                  # the monitor thread is never held up
+    assert wait_for(lambda: len(warmed) >= 1)

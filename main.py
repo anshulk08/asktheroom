@@ -69,6 +69,18 @@ class FlatTable:
         return False
 
 
+def warm_on_connect(netmon, warm: Callable[[], object]) -> None:
+    """Warm the connection to Grok (core.xai.warm) now if online, and every time the network comes back:
+    otherwise the first question after a start or a drop pays for the TLS handshake and can run past its
+    time budget. On its own thread, so the network monitor is never held up."""
+    def go() -> None:
+        threading.Thread(target=warm, name="warm-grok", daemon=True).start()
+
+    netmon.on_change(lambda online: go() if online else None)
+    if netmon.online:
+        go()
+
+
 PHONE_ECHO_S = 3.0      # a voice question matching a phone question this recent is the same question
 
 
@@ -524,6 +536,10 @@ def build(cfg: dict, fake: bool = False, camera: int = 0, with_voice: bool = Tru
     cleanup.append(netmon.stop)
     interpret = voice.understand.Understander(cfg, online=lambda: netmon.online)
     interpret.warm()                                   # logs and falls back to the rules if the model is down
+    import core.xai
+    llm = cfg.get("llm") or {}
+    warm_on_connect(netmon, lambda: core.xai.warm(llm.get("base_url") or core.xai.BASE_URL)
+                    and log.info("Grok connection warm"))
     # Narration and visual memory (both off unless enabled in config): they attach to world.update, so
     # the perception loop and --fake's SimCamera feed them without a call here; stopped before the log closes.
     import core.narration

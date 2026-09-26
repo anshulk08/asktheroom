@@ -9,7 +9,7 @@ COPY wheels/ /tmp/wheels/
 RUN ldconfig \
  && pip freeze | grep -E '^[A-Za-z0-9_.-]+==' > /tmp/pins.txt \
  && pip install --no-index --find-links /tmp/wheels --no-build-isolation -c /tmp/pins.txt \
-      fastapi uvicorn httpx python-multipart websockets openai twilio sounddevice pyserial evdev \
+      fastapi uvicorn httpx python-multipart websockets twilio sounddevice pyserial evdev \
  && pip install --no-index --find-links /tmp/wheels --no-deps piper-tts \
  && rm -rf /tmp/wheels \
  && python3 -c "import fastapi, uvicorn, sounddevice, piper, evdev, serial; print('askroom deps ok')"

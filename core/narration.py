@@ -536,8 +536,8 @@ class OpenAICompatProvider(Provider):
     response_format json_schema (strict) and validated here anyway. reasoning_effort comes from config.
     If the API rejects reasoning_effort or json_schema (HTTP 400), the call is retried once without it
     (json_schema falls back to json_object) and that choice is kept for later calls. The key comes from
-    $XAI_API_KEY (or cfg api_key_env), read per call, never logged. Client construction mirrors
-    voice/llm.py (OpenAI SDK, no SDK retries: the narrator's queue does the retrying)."""
+    $XAI_API_KEY (or cfg api_key_env), read per call, never logged. The client is core.xai's (plain requests
+    on the shared connection, no retries: the narrator's queue does the retrying)."""
     name = "grok"
 
     def __init__(self, c: NarrationConfig):
@@ -569,13 +569,10 @@ class OpenAICompatProvider(Provider):
                 kw["reasoning_effort"] = self.c.reasoning_effort
             try:
                 if self._client is None:
-                    from openai import OpenAI
-                    self._client = OpenAI(base_url=self.c.base_url or "https://api.x.ai/v1", api_key=key,
-                                          timeout=self.c.timeout_s, max_retries=0)
+                    from core.xai import Client
+                    self._client = Client(self.c.base_url or "https://api.x.ai/v1", key, timeout=self.c.timeout_s)
                 r = self._client.chat.completions.create(**kw)
                 break
-            except ImportError as ex:
-                raise ProviderError(f"openai SDK missing: {ex}", retryable=True)
             except Exception as ex:
                 if getattr(ex, "status_code", None) == 400:
                     # Drop the feature the error names; if it names neither, reasoning_effort first.

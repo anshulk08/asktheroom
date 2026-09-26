@@ -196,11 +196,9 @@ def test_timeout_returns_fallback_within_budget(monkeypatch, world, key):
     assert_fallback(a)
 
 
-def test_sdk_timeout_error_returns_fallback(monkeypatch, world, key):
-    import httpx
-    import openai
-    err = openai.APITimeoutError(request=httpx.Request("POST", "https://api.x.ai/v1/chat/completions"))
-    install(monkeypatch, FakeClient([err]))
+def test_http_timeout_returns_fallback(monkeypatch, world, key):
+    import requests
+    install(monkeypatch, FakeClient([requests.Timeout("read timed out")]))
     assert_fallback(ask_grok("anything", world, world.events, CFG))
 
 
