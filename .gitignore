@@ -26,6 +26,7 @@ data/snapshots/
 table_cal.json
 laser_cal.json
 room_map.json
+camera_intrinsics.json
 *.log
 
 # Downloaded/generated model artifacts

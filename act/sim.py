@@ -151,10 +151,12 @@ class SimCamera:
 
     def __init__(self, rig: "SimRig", fps: float = 30.0, history_s: float = 2.0):
         self.rig, self.period, self.history_s = rig, 1.0 / fps, history_s
+        self.w, self.h = getattr(rig, "size_px", (W, H))
         self._cache: "OrderedDict[int, Frame]" = OrderedDict()
         self._base = self._render_base()
         rng = np.random.default_rng(rig.seed + 1)
-        self._noise = [rng.normal(0, rig.noise_sigma, (H, W, 3)).astype(np.float32) for _ in range(4)]
+        self._noise = [rng.normal(0, rig.noise_sigma, (self.h, self.w, 3)).astype(np.float32)
+                       for _ in range(4)]
 
     def _k_now(self) -> int:
         return int(math.floor(self.rig.clock.now() / self.period + 1e-9))
@@ -231,17 +233,18 @@ class SimCamera:
         return np.clip(img, 0, 255).astype(np.uint8)
 
     @staticmethod
-    def _draw_dot(img: np.ndarray, px: float, py: float, amp: float, r: int = 18) -> None:
+    def _draw_dot(img: np.ndarray, px: float, py: float, amp: float, r: int = 18,
+                  scale: float = 1.0) -> None:
         x0, y0 = int(px) - r, int(py) - r
         x1, y1 = x0 + 2 * r + 1, y0 + 2 * r + 1
-        cx0, cy0, cx1, cy1 = max(x0, 0), max(y0, 0), min(x1, W), min(y1, H)
+        cx0, cy0, cx1, cy1 = max(x0, 0), max(y0, 0), min(x1, img.shape[1]), min(y1, img.shape[0])
         if cx0 >= cx1 or cy0 >= cy1:
             return
         yy, xx = np.mgrid[cy0:cy1, cx0:cx1].astype(np.float32)
         d2 = (xx - px) ** 2 + (yy - py) ** 2
-        halo = np.exp(-d2 / (2 * 4.0 ** 2)) * 230 * amp
-        bloom = np.exp(-d2 / (2 * 9.0 ** 2)) * 50 * amp
-        core = np.exp(-d2 / (2 * 1.6 ** 2)) * 255 * amp
+        halo = np.exp(-d2 / (2 * (4.0 * scale) ** 2)) * 230 * amp
+        bloom = np.exp(-d2 / (2 * (9.0 * scale) ** 2)) * 50 * amp
+        core = np.exp(-d2 / (2 * (1.6 * scale) ** 2)) * 255 * amp
         roi = img[cy0:cy1, cx0:cx1]
         roi[..., 2] += halo + bloom + core
         roi[..., 1] += 0.15 * halo + core
@@ -293,3 +296,205 @@ class SimRig:
     def make_laser(self, cal_path: str):
         from act.laser import Laser
         return Laser(self.act, self.frames, self.table, cal_path, cfg=self.cfg, clock=self.clock)
+
+
+# ---------------------------------------------------------------- room scene (room pointing, spec 0006)
+
+class RoomScene:
+    """A small room of axis-aligned boxes (cm, z up) seen by a pinhole camera high on the front wall.
+
+    Every surface is a box, so one slab raycast serves the camera (what is visible at a pixel) and the
+    laser (where the beam lands). Boxes: name -> (lo xyz, hi xyz, BGR colour, reflectance).
+    """
+
+    def __init__(self, size_px=(640, 360), f_px=460.0, cam=(0.0, 0.0, 230.0), pitch_deg=25.0):
+        self.w, self.h = size_px
+        self.f, self.c = f_px, np.array([size_px[0] / 2, size_px[1] / 2])
+        self.cam = np.asarray(cam, dtype=np.float64)
+        p = math.radians(pitch_deg)
+        self.Rc = np.array([[1.0, 0, 0],                               # rows: camera x, y (down), z (forward)
+                            [0, -math.sin(p), -math.cos(p)],
+                            [0, math.cos(p), -math.sin(p)]])
+        self.boxes: dict[str, tuple] = {
+            "floor": ((-250, 0, -2), (250, 720, 0), (58, 62, 70), 0.8),
+            "back_wall": ((-250, 700, 0), (250, 720, 260), (150, 160, 170), 1.0),
+            "left_wall": ((-270, 0, 0), (-250, 720, 260), (140, 150, 160), 1.0),
+            "right_wall": ((250, 0, 0), (270, 720, 260), (140, 150, 160), 1.0),
+            "table": ((-90, 260, 72), (0, 340, 75), (95, 128, 165), 0.9),
+            "shelf": ((70, 430, 137), (150, 470, 140), (120, 140, 150), 0.9),
+            "coffee_table": ((20, 560, 42), (120, 640, 45), (80, 100, 120), 0.9),
+            "bottle": ((100, 442, 140), (110, 452, 168), (60, 150, 70), 0.7),
+            "backpack": ((-170, 480, 0), (-125, 510, 45), (120, 60, 40), 0.5),
+        }
+
+    def project(self, P) -> Optional[tuple[float, float]]:
+        d = self.Rc @ (np.asarray(P, dtype=np.float64) - self.cam)
+        if d[2] <= 1e-6:
+            return None
+        return float(self.f * d[0] / d[2] + self.c[0]), float(self.f * d[1] / d[2] + self.c[1])
+
+    def ray(self, uv) -> np.ndarray:
+        """World direction of the camera ray through pixel uv."""
+        d = np.array([(uv[0] - self.c[0]) / self.f, (uv[1] - self.c[1]) / self.f, 1.0])
+        d = self.Rc.T @ d
+        return d / np.linalg.norm(d)
+
+    def cast(self, o, d) -> tuple[float, Optional[str]]:
+        """Nearest hit of the ray o + s*d (s > 0): (s, box name), or (inf, None)."""
+        o, d = np.asarray(o, dtype=np.float64), np.asarray(d, dtype=np.float64)
+        best, name = math.inf, None
+        with np.errstate(divide="ignore", invalid="ignore"):
+            inv = 1.0 / d
+            for k, (lo, hi, _, _) in self.boxes.items():
+                t1, t2 = (np.asarray(lo) - o) * inv, (np.asarray(hi) - o) * inv
+                tn = np.nanmax(np.minimum(t1, t2))
+                tf = np.nanmin(np.maximum(t1, t2))
+                if tf >= max(tn, 1e-6) and tn < best:
+                    best, name = max(tn, 0.0), k
+        return best, name
+
+    def cast_many(self, o, D) -> tuple[np.ndarray, np.ndarray]:
+        """Vectorised cast for rays D (N,3) from one origin: (distance (N,), box index (N,), -1 = none)."""
+        o = np.asarray(o, dtype=np.float64)
+        best = np.full(len(D), np.inf)
+        idx = np.full(len(D), -1)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            inv = 1.0 / D
+            for i, (lo, hi, _, _) in enumerate(self.boxes.values()):
+                t1, t2 = (np.asarray(lo) - o) * inv, (np.asarray(hi) - o) * inv
+                tn = np.nanmax(np.minimum(t1, t2), axis=1)
+                tf = np.nanmin(np.maximum(t1, t2), axis=1)
+                hit = (tf >= np.maximum(tn, 1e-6)) & (tn < best)
+                best[hit], idx[hit] = np.maximum(tn[hit], 0.0), i
+        return best, idx
+
+    def visible(self, P, eps: float = 0.5) -> bool:
+        """The camera sees point P (nothing nearer on the line of sight)."""
+        v = np.asarray(P, dtype=np.float64) - self.cam
+        dist = float(np.linalg.norm(v))
+        s, _ = self.cast(self.cam, v / dist)
+        return s >= dist - eps
+
+    def render(self) -> tuple[np.ndarray, np.ndarray]:
+        """(BGR float image, box-index image) of the empty-laser room."""
+        yy, xx = np.mgrid[0:self.h, 0:self.w].astype(np.float64)
+        D = np.stack([(xx - self.c[0]) / self.f, (yy - self.c[1]) / self.f, np.ones_like(xx)], -1)
+        D = np.einsum("nj,jk->nk", D.reshape(-1, 3), self.Rc)
+        D /= np.linalg.norm(D, axis=1, keepdims=True)
+        dist, idx = self.cast_many(self.cam, D)
+        cols = np.array([b[2] for b in self.boxes.values()] + [(20, 20, 20)], dtype=np.float32)
+        img = cols[idx].reshape(self.h, self.w, 3)
+        shade = np.clip(1.25 - dist / 900.0, 0.55, 1.1).astype(np.float32).reshape(self.h, self.w, 1)
+        return img * shade, idx.reshape(self.h, self.w)
+
+    def box_px(self, name: str, ids: np.ndarray) -> Optional[tuple[float, float, float, float]]:
+        """Visible image box (x1, y1, x2, y2) of a scene box."""
+        i = list(self.boxes).index(name)
+        ys, xs = np.nonzero(ids == i)
+        if len(xs) == 0:
+            return None
+        return float(xs.min()), float(ys.min()), float(xs.max() + 1), float(ys.max() + 1)
+
+
+class RoomHead:
+    """Pan-tilt head at the camera plus `offset` cm (the pivot baseline b), aimed into the room.
+    Same angle convention as HeadGeometry; hit3d() raycasts the beam into the scene."""
+
+    def __init__(self, scene: RoomScene, offset=(3.0, 0.0, 0.0), aim=(0.0, 450.0, 40.0),
+                 us_per_deg=(9.6, 10.3), offset_deg=(1.5, -2.0), roll_deg=2.0):
+        self.scene = scene
+        self.pos = scene.cam + np.asarray(offset, dtype=np.float64)
+        self.k, self.off = us_per_deg, offset_deg
+        a = np.asarray(aim, dtype=np.float64) - self.pos
+        a /= np.linalg.norm(a)
+        pitch, yaw = math.asin(-a[2]), math.atan2(-a[0], a[1])
+        self.R = _rz(yaw) @ _rx(-pitch) @ _ry(math.radians(roll_deg))
+
+    def direction(self, pan: float, tilt: float) -> np.ndarray:
+        th = math.radians((pan - 1500) / self.k[0] + self.off[0])
+        al = math.radians((tilt - 1500) / self.k[1] + self.off[1])
+        return self.R @ _rz(th) @ _rx(-al) @ np.array([0.0, 1.0, 0.0])
+
+    def hit3d(self, pan: float, tilt: float) -> tuple[Optional[np.ndarray], Optional[str]]:
+        d = self.direction(pan, tilt)
+        s, name = self.scene.cast(self.pos, d)
+        return (None, None) if name is None else (self.pos + s * d, name)
+
+    def dot_px(self, pan: float, tilt: float) -> Optional[tuple[float, float]]:
+        """Where the camera sees the dot, or None (no surface, occluded from the camera, off-frame)."""
+        P, _ = self.hit3d(pan, tilt)
+        if P is None or not self.scene.visible(P):
+            return None
+        uv = self.scene.project(P)
+        if uv is None or not (0 <= uv[0] < self.scene.w and 0 <= uv[1] < self.scene.h):
+            return None
+        return uv
+
+
+class RoomCamera(SimCamera):
+    """SimCamera over a RoomScene: fresh noise per frame (so averaging pairs helps), dot size and
+    brightness falling with distance and scaled by the surface's reflectance."""
+
+    def _render_base(self) -> np.ndarray:
+        img, self.ids = self.rig.scene.render()
+        return img
+
+    def _render(self, t_state: float, k: int) -> np.ndarray:
+        rig = self.rig
+        rng = np.random.default_rng((rig.seed * 1_000_003 + k) & 0x7FFFFFFF)
+        g = 1.0 + 0.02 * math.sin(t_state * 0.7) + rng.normal(0, 0.006)
+        img = self._base * g + self._noise[int(rng.integers(len(self._noise)))]
+        pan, tilt, on = rig.act.state_at(t_state)
+        if on and not rig.blocked:
+            P, name = rig.geom.hit3d(pan, tilt)
+            uv = rig.geom.dot_px(pan, tilt) if P is not None else None
+            if uv is not None:
+                dist = float(np.linalg.norm(P - rig.scene.cam))
+                refl = rig.scene.boxes[name][3]
+                amp = rig.dot_gain * refl * min(1.0, (300.0 / dist) ** 2) * rng.uniform(0.85, 1.0)
+                self._draw_dot(img, uv[0], uv[1], max(amp, 0.0), r=10,
+                               scale=float(np.clip(150.0 / dist, 0.35, 0.6)))
+        return np.clip(img, 0, 255).astype(np.uint8)
+
+
+class RoomRig:
+    """Simulated room: RoomScene + RoomHead (pivot `b_cm` from the lens) + RoomCamera + SimActuator.
+    Plugs into Laser like SimRig (table=None: room aiming is pixel-space only)."""
+
+    def __init__(self, *, b_cm: float = 3.0, seed: int = 0, latency_s: float = 0.05, fps: float = 30.0,
+                 backlash_deg: float = 1.0, pulse_noise_us: float = 1.0, noise_sigma: float = 3.0,
+                 dot_gain: float = 1.0, cfg: Optional[dict] = None):
+        self.seed, self.realtime = seed, False
+        self.rng = np.random.default_rng(seed)
+        self.clock: Clock = SimClock()
+        self.latency_s, self.backlash_deg = latency_s, backlash_deg
+        self.pulse_noise_us, self.noise_sigma, self.dot_gain = pulse_noise_us, noise_sigma, dot_gain
+        self.blocked = False
+        self.scene = RoomScene()
+        self.size_px = (self.scene.w, self.scene.h)
+        self.geom = RoomHead(self.scene, offset=(0.6 * b_cm, 0.0, -0.8 * b_cm))
+        self.cfg = copy.deepcopy(cfg) if cfg else {"laser_timeout_s": 60}
+        self.cfg["servo_limits"] = {"pan": [1130, 1830], "tilt": [1310, 1770]}   # covers the view
+        self.cfg["camera_latency_s"] = latency_s
+        self.cfg["actuator"] = "fake"
+        self.act = SimActuator(self, self.cfg)   # type: ignore[arg-type]
+        self.frames = RoomCamera(self, fps=fps)
+        self.frames._noise = [np.random.default_rng(seed + 7 + i).normal(0, noise_sigma, (self.scene.h,
+                              self.scene.w, 3)).astype(np.float32) for i in range(16)]
+
+    def true_dot_px(self) -> Optional[tuple[float, float]]:
+        """Where the camera would see the (physical) beam now, ignoring latency; None if unseen."""
+        pan, tilt, _ = self.act.state_at(self.clock.now())
+        return self.geom.dot_px(pan, tilt)
+
+    def box_px(self, name: str) -> Optional[tuple[float, float, float, float]]:
+        return self.scene.box_px(name, self.frames.ids)
+
+    def surface_at(self, uv) -> Optional[str]:
+        x, y = int(np.clip(uv[0], 0, self.scene.w - 1)), int(np.clip(uv[1], 0, self.scene.h - 1))
+        i = int(self.frames.ids[y, x])
+        return None if i < 0 else list(self.scene.boxes)[i]
+
+    def make_laser(self, cal_path: str = ""):
+        from act.laser import Laser
+        return Laser(self.act, self.frames, None, cal_path, cfg=self.cfg, clock=self.clock)  # type: ignore[arg-type]

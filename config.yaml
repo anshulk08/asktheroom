@@ -406,3 +406,23 @@ detect_filter:
   hand_iou: 0.6
   max_area_frac: 0.25         # of the frame
   table_margin_cm: 5.0        # null = keep boxes off the table
+
+# Room pointing (spec 0006, roadmap: off for the demo). The laser points at image pixels anywhere the camera
+# can see the dot, with no depth: a dot map (python -m act.room_map --sweep, nobody in view) gives the first
+# guess, and a pixel-space closed loop finishes. Fires only inside zones drawn on the map
+# (python -m act.room_map --zone NAME --poly x,y ...), never with a hand or person box on the beam path,
+# and for at most room_dwell_s. The map path is the `room_map` key above.
+room:
+  enabled: false
+  grid: [20, 15]              # sweep pulse grid (pan x tilt) over servo_limits; ~2-3 min on the rig
+  n_pairs: 3                  # laser on/off pairs averaged per look (a far dot is faint)
+  tol_px: 12                  # stop when the dot is this close to the target (or inside the object's box)
+  deadband_us: 8              # SG90 dead band: smaller steps don't update the Jacobian
+  jump_px: 30                 # dot moved this much more than predicted: it landed on something nearer
+  max_map_gap_px: 60          # refuse targets farther than this from every mapped dot
+  room_dwell_s: 5             # room aims turn off after this (the table keeps laser_timeout_s)
+  require_zone: true          # fire only inside a zone polygon (floor, furniture tops; never eye level)
+  head_px: null               # [u, v] where the pan-tilt head appears in the image, for the beam-path check
+  hand_recent_s: 2            # hand boxes seen this recently block a room aim
+  person_check: true          # also run OpenCV HOG for standing people before each room aim
+  person_clear_s: 5           # the sweep needs nobody seen for this long, and stops when someone appears

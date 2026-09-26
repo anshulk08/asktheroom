@@ -57,14 +57,45 @@ def _largest_blob(mask: np.ndarray, weight: np.ndarray, min_area: int, max_area:
     return float((xs * wt).sum() / s), float((ys * wt).sum() / s)
 
 
+def dot_score(off: np.ndarray, on: np.ndarray) -> np.ndarray:
+    """Red rise minus half the green/blue rise (a saturated white core still scores; a hand or
+    lighting change, which moves all channels, doesn't)."""
+    d = on.astype(np.int16) - off.astype(np.int16)
+    return d[..., 2] - (np.maximum(d[..., 0], d[..., 1]) >> 1)
+
+
 def dot_px_diff(off: np.ndarray, on: np.ndarray, thr: int = 40, min_area: int = 2,
                 max_area: int = 3000) -> Optional[tuple[float, float]]:
-    """Laser dot from an off/on BGR pair: red rise minus half the green/blue rise (a saturated
-    white core still scores; a hand or lighting change, which moves all channels, doesn't)."""
-    d = on.astype(np.int16) - off.astype(np.int16)
-    score = d[..., 2] - (np.maximum(d[..., 0], d[..., 1]) >> 1)
+    """Laser dot from an off/on BGR pair (see dot_score)."""
+    score = dot_score(off, on)
     mask = (score > thr).astype(np.uint8)
     return _largest_blob(mask, score, min_area, max_area)
+
+
+def _dot_blob(mask: np.ndarray, weight: np.ndarray, min_area: int, max_area: int,
+              max_aspect: float = 4.0, min_fill: float = 0.3) -> Optional[tuple[float, float]]:
+    """Brightest dot-shaped blob: area in range, not a streak (aspect), not a ring or edge (fill).
+    Centre of gravity of the score over the blob's bounding box."""
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    best, best_peak = None, -np.inf
+    for i in range(1, n):
+        x, y, w, h, area = (int(stats[i, k]) for k in (cv2.CC_STAT_LEFT, cv2.CC_STAT_TOP,
+                                                       cv2.CC_STAT_WIDTH, cv2.CC_STAT_HEIGHT,
+                                                       cv2.CC_STAT_AREA))
+        if area < min_area or area > max_area or max(w, h) > max_aspect * min(w, h) \
+                or area < min_fill * w * h:
+            continue
+        m = lab[y:y + h, x:x + w] == i
+        peak = float(weight[y:y + h, x:x + w][m].max())
+        if peak > best_peak:
+            best, best_peak = (x, y, w, h, m), peak
+    if best is None:
+        return None
+    x, y, w, h, m = best
+    wt = np.where(m, np.maximum(weight[y:y + h, x:x + w].astype(np.float64), 1.0), 0.0)
+    ys, xs = np.mgrid[y:y + h, x:x + w]
+    s = wt.sum()
+    return float((xs * wt).sum() / s), float((ys * wt).sum() / s)
 
 
 def dot_px_hsv(on: np.ndarray, min_area: int = 2, max_area: int = 1500) -> Optional[tuple[float, float]]:
@@ -164,6 +195,26 @@ def fit_poly(xy_cm, pulses, grid: Optional[int] = None) -> LaserFit:
 EDGES = ("left", "right", "top", "bottom")
 
 
+@dataclass
+class PxAim:
+    """Result of Laser.aim_px. on_target: the dot was last seen inside the (shrunk) box or within
+    tol_px. seen: the dot was detected at least once. reason: in_box | within_tol | max_tries |
+    not_seen | lost | jumped | unmapped."""
+    err_px: float
+    on_target: bool
+    seen: bool
+    tries: int
+    dot_px: Optional[tuple[float, float]]
+    reason: str
+    first_err_px: Optional[float] = None
+
+
+def _in_box(p, box, shrink: float = 0.2) -> bool:
+    x1, y1, x2, y2 = box
+    mx, my = (x2 - x1) * shrink / 2, (y2 - y1) * shrink / 2
+    return x1 + mx <= p[0] <= x2 - mx and y1 + my <= p[1] <= y2 - my
+
+
 class Laser:
     """Points the laser at table positions. Holds act.lock (if any) for each high-level action."""
 
@@ -185,6 +236,13 @@ class Laser:
         self.diff_thr = int(cfg.get("laser_diff_thr", 40))
         self.max_dot_px = int(cfg.get("laser_max_dot_px", 3000))
         self.table_size = tuple((cfg.get("table") or {}).get("size_cm", (90, 60)))
+        room = cfg.get("room") or {}
+        self.room_map = None            # act.room_map.RoomMap, set by the caller (main.py) when enabled
+        self.room_n_pairs = int(room.get("n_pairs", 3))
+        self.tol_px = float(room.get("tol_px", 12))
+        self.deadband_us = float(room.get("deadband_us", 8))
+        self.jump_px = float(room.get("jump_px", 30))
+        self.max_map_gap_px = float(room.get("max_map_gap_px", 60))
         self.fit: Optional[LaserFit] = None
         self.state = {"on": False, "target": None, "err_cm": None}
         self.last_aim: dict = {}
@@ -234,24 +292,42 @@ class Laser:
             self.clock.sleep(0.005)
 
     # -- spec API
-    def find_dot(self) -> Optional[Point]:
-        """Blink the laser and return the dot position in table cm (None if not seen). Laser ends on."""
+    def find_dot_px(self, n_pairs: int = 1, gate: bool = True) -> Optional[tuple[float, float]]:
+        """Blink the laser n_pairs times and return the dot in image px (None if not seen). Laser ends on.
+        The pairs' scores are averaged, which lifts a dim far dot out of sensor noise (SNR ~ sqrt(n));
+        the threshold drops by sqrt(n) to keep the false-alarm rate. gate: pick the brightest
+        dot-shaped blob instead of the largest one."""
         with self._locked():
-            off = self._grab(False)
-            on = self._grab(True)
+            acc, n, off, on = None, 0, None, None
+            for _ in range(max(1, n_pairs)):
+                off = self._grab(False)
+                on = self._grab(True)
+                if on is None:
+                    break
+                if off is not None:
+                    sc = dot_score(off.img, on.img).astype(np.float32)
+                    acc = sc if acc is None else acc + sc
+                    n += 1
             self.last_frames = (off, on)
             if on is None:
                 return None
-            if off is not None:
-                px = dot_px_diff(off.img, on.img, self.diff_thr, max_area=self.max_dot_px)
-            else:
+            if acc is None:
                 # Fallback only without an off frame: when the diff is possible and empty, the dot
                 # really isn't visible, and a single-frame red mask would fire on warm surfaces.
-                px = dot_px_hsv(on.img, max_area=self.max_dot_px // 2)
-            if px is None:
-                return None
-            cm = self.table.px_to_cm(np.array([px], dtype=np.float64)).reshape(-1)
-            return float(cm[0]), float(cm[1])
+                return dot_px_hsv(on.img, max_area=self.max_dot_px // 2)
+            score = acc / n
+            mask = (score > self.diff_thr / math.sqrt(n)).astype(np.uint8)
+            if gate:
+                return _dot_blob(mask, score, 2, self.max_dot_px)
+            return _largest_blob(mask, score, 2, self.max_dot_px)
+
+    def find_dot(self) -> Optional[Point]:
+        """Blink the laser and return the dot position in table cm (None if not seen). Laser ends on."""
+        px = self.find_dot_px(1, gate=False)
+        if px is None:
+            return None
+        cm = self.table.px_to_cm(np.array([px], dtype=np.float64)).reshape(-1)
+        return float(cm[0]), float(cm[1])
 
     def aim(self, target_cm: tuple, mode: str = "point") -> float:
         """Point at target_cm. mode 'point' closes the loop on the seen dot (<= 8 tries, stop < tol_cm);
@@ -295,6 +371,80 @@ class Laser:
         err = self.aim(tuple(tgt))
         self.state["target"] = name
         return err
+
+    def aim_px(self, target_px, box_px=None, *, room_map=None, n_pairs: Optional[int] = None,
+               tol_px: Optional[float] = None) -> PxAim:
+        """Point at image pixel target_px anywhere in the room (spec 0006), with no depth: the dot seen
+        inside the object's box is on the object. Feedforward from the room dot map, then a P step
+        through the local pixel/pulse Jacobian, which a Broyden update corrects after every step
+        (a Jacobian mapped on the floor is ~2x off on a near shelf). Stops when the dot is inside
+        box_px shrunk 20%, or within tol_px. Leaves the laser on; the caller turns it off when
+        on_target is False (dot never seen, lost, or it jumped: something nearer is in the way)."""
+        rm = room_map if room_map is not None else self.room_map
+        if rm is None:
+            raise RuntimeError("no room map; run python -m act.room_map --sweep")
+        target = np.asarray(target_px, dtype=np.float64)
+        tol = self.tol_px if tol_px is None else float(tol_px)
+        pairs = self.room_n_pairs if n_pairs is None else int(n_pairs)
+        g = rm.pulses_for_px(target, max_gap_px=self.max_map_gap_px)
+        if g is None:
+            return PxAim(math.inf, False, False, 0, None, "unmapped")
+        J = np.array(g.J, dtype=np.float64)                          # px per µs
+        cap = 2.0 * np.asarray(rm.step_us, dtype=np.float64)
+        n, misses, first, err = 0, 0, None, math.inf
+        seen, jumped, dot, reason = False, False, None, "max_tries"
+        prev_cmd = prev_dot = None
+        with self._locked():
+            cmd = np.array(self._clamp(*g.pulses))
+            self.move_to(*cmd)
+            for i in range(self.max_tries):
+                self.clock.sleep(self.settle_s)
+                d = self.find_dot_px(pairs)
+                n += 1
+                if d is None:
+                    dot, misses = None, misses + 1
+                    if not seen and misses >= 3:
+                        reason = "not_seen"
+                        break
+                    continue
+                dot, seen = np.asarray(d), True
+                if prev_dot is not None:
+                    du, ds = cmd - prev_cmd, dot - prev_dot
+                    pred = J @ du
+                    if np.linalg.norm(ds - pred) > self.jump_px + 1.5 * np.linalg.norm(pred):
+                        jumped = True                   # discontinuity: landed on something nearer
+                    elif np.linalg.norm(du) > self.deadband_us:
+                        J2 = J + np.outer(ds - pred, du) / float(du @ du)
+                        if np.linalg.det(J2) * np.linalg.det(J) > 0 and np.linalg.cond(J2) < 1e3:
+                            J = J2
+                e = target - dot
+                err = float(np.linalg.norm(e))
+                first = err if first is None else first
+                if box_px is not None and _in_box(dot, box_px):
+                    reason = "in_box"
+                    break
+                if err < tol:
+                    reason = "within_tol"
+                    break
+                if i == self.max_tries - 1:
+                    break
+                step = self.gain * np.linalg.solve(J, e)
+                k = float(np.max(np.abs(step) / cap))
+                prev_cmd, prev_dot = cmd, dot
+                cmd = np.array(self._clamp(*(cmd + (step / k if k > 1 else step))))
+                self.move_to(*cmd, duration_s=0.1)
+            self.act.laser(True)
+        if seen and dot is None and reason == "max_tries":
+            reason = "lost"
+        if jumped and reason in ("in_box", "within_tol", "max_tries"):
+            reason = "jumped"
+        ok = reason in ("in_box", "within_tol")
+        res = PxAim(err, ok, seen, n, None if dot is None else (float(dot[0]), float(dot[1])),
+                    reason, first)
+        self.last_aim = {"tries": n, "first_err_px": first, "err_px": err, "reason": reason}
+        self.state = {"on": True, "target": None, "err_cm": None,
+                      "err_px": None if math.isinf(err) else round(err, 1)}
+        return res
 
     def _trace(self, pts_cm: np.ndarray, seg_s: float) -> None:
         fit = self._need_fit()
