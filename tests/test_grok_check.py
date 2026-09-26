@@ -366,8 +366,9 @@ def test_offline_an_unknown_name_uses_a_sighting_online_grok_picks(log):
     q = qa(log, w, sighted(log, w, "red mug"))
     a = q.route(parse("Where is my red mug?", CFG), "Where is my red mug?", online=False)
     assert a.action == "circle" and "red mug" in a.text
-    seen = []
+    seen = []                                                  # online: a live Grok look, not the sighting
     q.pick = lambda t, said: seen.append(said) or Answer("P")
+    q.look = lambda t, intent: seen.append(intent.name or intent.obj) or Answer("P")
     assert q.route(parse("Where is my red mug?", CFG), "Where is my red mug?", online=True) == Answer("P")
     assert seen == ["red mug"]
 
