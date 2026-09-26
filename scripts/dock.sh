@@ -10,10 +10,19 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 IMAGE="${ASKROOM_IMAGE:-askroom:latest}"   # docker/Dockerfile: the Ultralytics image + app packages
 devs=()
-for d in /dev/video* /dev/i2c-7 /dev/snd /dev/input; do [ -e "$d" ] && devs+=(--device "$d"); done
+# gpiochip: Blinka's board module (adafruit_servokit) imports Jetson.GPIO, which reads the GPIO chips.
+for d in /dev/video* /dev/i2c-7 /dev/gpiochip* /dev/snd /dev/input; do [ -e "$d" ] && devs+=(--device "$d"); done
 tty=(); [ -t 0 ] && tty=(-it)
 envf=(); [ -f .env ] && envf=(--env-file .env)   # API keys (e.g. XAI_API_KEY); .env is gitignored
-v4l=(); [ -d /dev/v4l ] && v4l=(-v /dev/v4l:/dev/v4l:ro)   # stable camera paths: main.py --camera /dev/v4l/by-id/...
-exec docker run --rm "${tty[@]}" --runtime=nvidia --ipc=host --network=host "${devs[@]}" \
+# Cameras: --device only passes the /dev/video* nodes that exist now, so a Brio replugged (or re-enumerated)
+# while the container runs was unreachable. The host's /dev is mounted instead and every V4L2 node (char
+# major 81) is allowed, so /dev/v4l/by-id/... finds the camera again. ASKROOM_DEV_BIND=0 turns this off.
+cams=()
+if [ "${ASKROOM_DEV_BIND:-1}" = 1 ]; then
+  cams=(--device-cgroup-rule='c 81:* rmw' -v /dev:/dev)
+elif [ -d /dev/v4l ]; then
+  cams=(-v /dev/v4l:/dev/v4l:ro)                # stable camera paths only (no replug)
+fi
+exec docker run --rm "${tty[@]}" --runtime=nvidia --ipc=host --network=host "${devs[@]}" "${cams[@]}" \
   -v /etc/localtime:/etc/localtime:ro -v /etc/timezone:/etc/timezone:ro \
-  "${envf[@]}" "${v4l[@]}" -v "$PWD":/askroom -w /askroom -e PYTHONPATH=/askroom "$IMAGE" "$@"
+  "${envf[@]}" -v "$PWD":/askroom -w /askroom -e PYTHONPATH=/askroom "$IMAGE" "$@"
