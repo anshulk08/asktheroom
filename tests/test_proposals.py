@@ -63,7 +63,7 @@ class Table:
 
 
 def proposer(**kw):
-    cfg = dict(ref_frames=5, adopt_frames=3)
+    cfg = dict(ref_frames=5, adopt_frames=3, warmup_frames=0)
     cfg.update(kw)
     return ChangeProposer(cfg)
 
@@ -490,3 +490,42 @@ def test_a_failing_proposer_never_costs_the_known_objects():
     det = Detector(CFG, table=TenPxPerCm(), backend=FakeBackend([('keys', 0.9, (0, 0, 10, 10))]), proposer=Broken())
     d = det.detect(Frame(t=0, wall=0, img=np.zeros((H, W, 3), np.uint8), idx=0))
     assert [x.cls for x in d.items] == ['keys']
+
+
+# ---------------------------------------------------------------- warm-up before the reference
+
+def test_the_reference_waits_out_the_cameras_settling_frames():
+    """A webcam's first frames after the stream opens are darker and unstable. A reference taken from
+    them makes every object already on the table (and the table itself) look changed forever after;
+    measured on the rig: 71 flickering spots with the first frames, 8 with a warm-up."""
+    def settle(p, tab):
+        tab.things = {"keyboard": (500, 100, 900, 330), "tape": (300, 400, 420, 520)}
+        for g in np.linspace(0.45, 1.0, 12):          # exposure settling: 12 dark-to-normal frames
+            tab.gain = float(g)
+            p.propose(tab.frame(), [], [])
+        tab.gain = 1.0
+        for _ in range(p.cfg.ref_frames + 5):
+            p.propose(tab.frame(), [], [])
+        return run(p, tab, n=5)
+
+    assert settle(proposer(warmup_frames=0), Table()) != []           # reference from the settling frames
+    assert settle(proposer(warmup_frames=12), Table()) == []          # waited: objects there all along are background
+
+
+def test_warmup_starts_again_on_reset():
+    p = proposer(warmup_frames=4)
+    tab = Table()
+    for _ in range(4 + p.cfg.ref_frames):
+        p.propose(tab.frame(), [], [])
+    assert p.ready
+    p.reset()
+    for _ in range(4 + p.cfg.ref_frames - 1):             # warm-up again, then one short of a reference
+        p.propose(tab.frame(), [], [])
+    assert not p.ready
+    p.propose(tab.frame(), [], [])
+    assert p.ready
+
+
+def test_the_default_warmup_is_about_three_seconds():
+    from core.proposals import ChangeConfig
+    assert ChangeConfig().warmup_frames == 45

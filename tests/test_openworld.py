@@ -76,23 +76,23 @@ def test_flickering_proposal_never_becomes_a_thing(scene, world):
     assert things(world) == []
 
 
-def test_a_wandering_blob_never_becomes_a_thing(scene, world):
-    """A hand the detector missed, proposed as a blob that drifts ~4 cm per batch (slow enough for
-    the per-frame gate): it never holds still, so it never becomes a thing."""
-    for i in range(40):
-        scene.thing('hand-blob', 20 + 1.5 * i if i < 20 else 50 - 1.5 * (i - 20), 30, 10, 10)
+def test_a_region_sweeping_across_the_table_never_becomes_a_thing(scene, world):
+    """An arm the hand detector missed reaches the proposer as a region that keeps moving. Objects
+    people put down stay put; measured on the rig, every pass of a hand left phantom things behind."""
+    for i in range(40):                            # 4 s at 8 cm/s, no hand box anywhere
+        scene.thing('arm', 10 + 0.8 * i, 30, w=10, h=6)
         world.update(*scene.step())
     assert things(world) == []
 
 
-def test_a_blob_that_stops_becomes_a_thing_once_it_has_held_still(scene, world):
-    for i in range(10):
-        scene.thing('mug', 20 + 4 * i, 30)
+def test_an_object_slid_into_place_becomes_one_thing_once_it_stops(scene, world):
+    for i in range(15):                            # slid 12 cm over 1.5 s ...
+        scene.thing('mug', 20 + 0.8 * i, 30)
         world.update(*scene.step())
     assert things(world) == []
-    events = scene.run(world, 1.0)                 # still at x = 56 from here
-    assert types(events) == [EventType.APPEARED]
-    assert events[0].to_cm == pytest.approx((56, 30))
+    events = scene.run(world, 1.5)                 # ... then left there
+    assert types(events) == [EventType.APPEARED] and things(world) == ['thing:1']
+    assert world.get('thing:1').pos_cm == pytest.approx((31.2, 30), abs=0.5)
 
 
 def test_the_hand_itself_reported_as_a_proposal_is_ignored(scene, world):
