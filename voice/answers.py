@@ -581,7 +581,10 @@ def _maybe_back(obj: str, ans: Answer, world, cfg: dict) -> Answer:
     """A thing that left or was lost, while something that may be it came back: say so, hedged, and
     point at the look-alike. Identity is never asserted (see core/things.py)."""
     try:
-        if world.get(obj).status not in (Status.GONE, Status.UNKNOWN) or not hasattr(world, "similar_to"):
+        e0 = world.get(obj)
+        if e0.status not in (Status.GONE, Status.UNKNOWN) or not hasattr(world, "similar_to"):
+            return ans
+        if getattr(e0, "zone", "table") != "table":    # a room object (spec 0009): its answer is the room one
             return ans
         for other, _ in world.similar_to(obj):
             e = world.get(other)

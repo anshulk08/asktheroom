@@ -203,3 +203,15 @@ def test_room_place_for_never_seen_on_table():
     fw = FakeWorld([Entity("keys", "target", Status.UNKNOWN, confidence=0.0)])
     fw.set_place("keys", room_place("keys"))
     assert ask(fw, "keys").text == "Your keys are on the bookshelf. They appeared there 3 minutes ago."
+
+
+def test_absent_room_object_gets_no_look_alike_sentence(w):
+    """_maybe_back hedges 'something similar came back' for lost table objects; a room object's answer is
+    the room one, even when similar_to would offer a look-alike on the table."""
+    w.set("wallet", status=Status.UNKNOWN, zone="shelf", pos_cm=None)
+    w.set_place("wallet", room_place("wallet", fresh=False, absent=True))
+    w.similar_to = lambda obj: [("remote", 0.9)]
+    a = ask(w, "wallet")
+    spoken_ok(a)
+    assert a.text.endswith("I can't see it there now.") and "similar" not in a.text
+    assert a.point_at is None
