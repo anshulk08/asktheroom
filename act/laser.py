@@ -2,7 +2,8 @@
 
 Model: a 2nd-order polynomial per axis maps table cm (x, y) -> servo pulses (pan, tilt), fitted by
 least squares on calibration points. aim() predicts, moves, looks for the dot and corrects with the
-polynomial's local Jacobian until the dot is within 1 cm.
+polynomial's local Jacobian until the dot is within laser_tol_cm (2 cm: SG90-class servos have
+1.5-1.8 deg of deadband, so a 1 cm stop makes them hunt).
 """
 from __future__ import annotations
 
@@ -178,7 +179,7 @@ class Laser:
         self.frame_timeout_s = float(cfg.get("laser_frame_timeout_s", 1.0))
         self.settle_s = 0.15            # after a move, before looking
         self.gain = 0.7
-        self.tol_cm = 1.0
+        self.tol_cm = float(cfg.get("laser_tol_cm", 2.0))
         self.max_tries = 8
         self.anti_backlash_us = float(cfg.get("laser_anti_backlash_us", 25))
         self.diff_thr = int(cfg.get("laser_diff_thr", 40))
@@ -253,7 +254,7 @@ class Laser:
             return float(cm[0]), float(cm[1])
 
     def aim(self, target_cm: tuple, mode: str = "point") -> float:
-        """Point at target_cm. mode 'point' closes the loop on the seen dot (<= 8 tries, stop < 1 cm);
+        """Point at target_cm. mode 'point' closes the loop on the seen dot (<= 8 tries, stop < tol_cm);
         'open' just moves to the prediction and measures once. Returns the last measured error in cm
         (inf if the dot was never seen). Leaves the laser on; the actuator's auto-off timer restarts."""
         fit = self._need_fit()

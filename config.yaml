@@ -32,6 +32,51 @@ detect:
   half: true
   min_conf: 0.05             # model floor; per-object cut-offs are conf_threshold below
 
+# Open-world proposals (core/proposals.py): class-agnostic 'thing' boxes for core/things.py. The
+# Detector builds the proposer from here; kind switches between change detection and YOLOE.
+proposals:
+  enabled: true
+  kind: change               # change (empty-table reference, no model) | yoloe (prompt-free checkpoint)
+  roi_margin_cm: 2.0         # proposals only inside the calibrated table outline grown by this
+  dedupe:                    # a proposal that is a known object or a hand is dropped (px boxes)
+    known_iou: 0.5
+    known_inside: 0.7        # share of the proposal inside a known box
+    known_contain: 0.8       # share of a known box inside the proposal ...
+    known_grow: 2.0          # ... when the proposal is at most this many times its area
+    hand_iou: 0.3
+    hand_inside: 0.5
+    self_iou: 0.5
+    self_inside: 0.8
+  change:
+    work_px: 480             # working long side: Mac 2.3 ms/frame; Orin Nano ~13 ms (320: ~7.5, 640: ~17)
+    ref_frames: 10           # empty-table reference = median of this many frames (startup, reset)
+    reference: null          # or a saved empty-table image (same camera pose) to start from
+    adopt_frames: 5
+    k_sigma: 4.0
+    noise_cap: 3.0
+    floor_l: 10.0            # LAB 0-255 units
+    floor_c: 7.0
+    shadow_ratio: [0.35, 0.95]
+    shadow_chroma: 10.0
+    min_area_frac: 0.0004    # of the frame (~370 px at 720p)
+    max_area_frac: 0.15
+    refresh_alpha: 0.03
+    drift_alpha: 0.002
+    rebuild_frac: 0.4
+    rebuild_frames: 45
+    ignore_px: []            # extra [x1, y1, x2, y2] boxes never to propose in
+  yoloe:
+    model: models/yoloe-26s-seg-pf.pt   # or a .engine exported from it in the Jetson container
+    conf: 0.15
+    imgsz: 640
+    half: false              # .pt on a GPU only; an .engine has its precision baked in
+    masks: false
+  crops:                     # core/crops.py: best-clean + latest crop per object / proposal
+    enabled: true
+    size_px: 128
+    max_tracks: 48
+    recent_every_s: 0.5
+
 # Spoken names -> object names (used by intents and answers)
 synonyms:
   key: keys
@@ -129,8 +174,28 @@ serial_timeout_s: 0.1
 camera_latency_s: 0.06       # measure on the rig with act.calibrate.measure_latency, then set
 laser_channel: 15
 laser_timeout_s: 10
+laser_tol_cm: 2.0             # closed-loop aim stops within this (1 cm makes SG90-class servos hunt)
 shiny_objects: [phone, keys]  # aim 3 cm to the side
 shiny_offset_cm: 3
+
+# Open world (core/things.py): class-agnostic 'thing' proposals become entities thing:1, thing:2, ...
+# Every key is optional (defaults in ThingsConfig). Identity is causal first; appearance only
+# confirms, and needs an embedder injected as World(cfg, events, embed=...).
+# teach_zone_cm: [0, 45, 20, 60]   # the teach square in table cm (x1, y1, x2, y2); unset: the thing
+                                   # put down most recently (within openworld.teach_recent_s) is named
+openworld:
+  enabled: true
+  proposal_conf: 0.25        # 'thing' proposals below this are ignored
+  area_cm2: [4, 900]         # plausible object size; bigger blobs are table / background
+  gate_cm: 8                 # a visible thing keeps the nearest proposal within this, per frame
+  hand_gate_cm: 4            # a held thing is the proposal at its hand's boxes of the last ...
+  hand_trail_s: 2.0          # ... this many seconds
+  emerge_cm: 12              # 'next to' the box / notebook when a hidden thing comes out
+  resurrect_sim: 0.92        # appearance alone brings a thing back only above this ...
+  resurrect_margin: 0.10     # ... and this far ahead of every other thing (a twin blocks it)
+  maybe_sim: 0.70            # a new thing is linked 'maybe the same as' an old one above this
+  exemplar_max: 8            # appearance views kept per thing
+  teach_recent_s: 30
 
 # Stretch (D15, D16)
 floor_zones: {}               # per zone: table edge, ArUco 4-7 positions in table cm, head preset pan/tilt
@@ -158,6 +223,7 @@ tts:
   elevenlabs_voice_id: ""     # set in .env as ELEVENLABS_VOICE_ID to override
   elevenlabs_model: eleven_flash_v2_5
   piper_voice: en_US-lessac-medium
+  output_device: null         # sounddevice index or part of the name (python -m voice.tts --devices); null = default (HDMI in the container)
 
 net:
   check_host: https://api.x.ai
@@ -174,9 +240,16 @@ sms:
   whitelist: []               # E.164 numbers allowed to text questions, e.g. "+14045550123"
 
 stt:
-  backend: pywhispercpp       # pywhispercpp (laptop) | cli (whisper-cli from a whisper.cpp build, Jetson)
+  # auto: whisper-server (model stays loaded) > whisper-cli > pywhispercpp, whichever this machine has,
+  # so one config works on the Mac (build-mac) and the Jetson (build). scripts/build_whisper.sh builds both.
+  backend: auto               # auto | server | cli | pywhispercpp
   model: base.en              # ggml model name (models/whisper/ggml-base.en.bin) or a path
-  cli_binary: whisper-cli
+  cli_binary: whisper-cli     # name, path, or found in third_party/whisper.cpp/build{,-mac}/bin
+  server_binary: whisper-server
+  server_port: 8178           # 127.0.0.1; a healthy server already on this port is reused
+  audio_ctx: 0                # sized (clip length) | N fixed | 0 = full 30 s window; sized clips garbled here
+  prompt_synonyms: true       # Whisper prompt also lists the synonyms (fixed 'meds' -> 'mids')
+  end_drop_db: 10             # crowd noise: after speech, blocks this far below the asker's level are quiet; null = Silero only
   threads: 4
   max_s: 6
   silence_ms: 700             # this long below the VAD's off threshold after speech ends the question
@@ -210,3 +283,95 @@ listen:
   wake_words: [room]          # also lets overheard speech reset or ask open questions ("room, reset")
   idle_s: 8                   # reopen the mic after this long with nobody talking
   echo_tail_s: 0.4            # keep the mic shut this long after the rig stops speaking
+
+# Re-ID crop embedder (core/embed.py) for open-world identity: World(cfg, events, embed=make_embedder(cfg)).
+# Off: the world has no appearance evidence (as before). DINOv2-S/14 ONNX from
+# experiments/openset/weights (not in git). The first TensorRT build takes ~75 s on the Orin and runs
+# on a background thread (no appearance until it is done); later starts load models/cache/reid.
+reid:
+  enabled: false
+  model: models/reid/dinov2_s14.onnx
+  providers: [tensorrt, cuda, cpu]   # tried in order; drop cpu to stay off if the GPU paths fail
+  input_size: 224
+  margin: 0.08               # of the box, each side
+  fit: letterbox             # letterbox | stretch
+  max_batch: 8               # TensorRT profile 1..max_batch
+  cache_dir: models/cache/reid
+
+# Episode narration (core/narration.py): after each burst of activity at the table, a VLM describes what
+# the person did, grounded in the world model's events, for 'what was I doing before lunch?' and 'what
+# happened while I was away?'. PRIVACY: when enabled, keyframes of the table (hands and objects; the
+# camera sees nothing else) are sent to the provider below; the dashboard state says so. Off by default.
+narration:
+  enabled: false
+  provider: grok             # grok (xAI, OpenAI-compatible) | claude | fake (offline demo / tests)
+  model: grok-4.3
+  base_url: https://api.x.ai/v1
+  api_key_env: XAI_API_KEY   # read from the environment only, never logged
+  reasoning_effort: low      # none | low | medium | high | xhigh (dropped automatically if the API refuses it)
+  quiet_s: 4                 # no hands and no world events this long ends an episode
+  max_episode_s: 120         # longer episodes are split
+  min_episode_s: 2           # shorter ones without a world event are not narrated
+  keyframe_every_s: 1.0      # plus one at every world event
+  keyframes: 24              # kept per episode (thinned evenly beyond this)
+  frame_px: 640              # keyframe long side (JPEG under snapshots/narration, pruned after keep_h)
+  max_images: 8              # per VLM call
+  max_per_hour: 30           # VLM calls per hour (cost cap)
+  max_queued: 20             # episodes kept for later while offline (oldest dropped first)
+  timeout_s: 30
+  keep_h: 24
+
+# Visual memory (core/visual_memory.py, voice/visual.py): questions about what the camera sees now
+# ('what does the note say?') or saw before ('was there a red mug here this morning?'). PRIVACY: when
+# enabled, the current frame and (for past questions) up to recall_frames saved frames are sent to the
+# provider below; the archive itself stays on this device. Off by default.
+visual_memory:
+  enabled: false
+  provider: grok
+  model: grok-4.3
+  base_url: https://api.x.ai/v1
+  api_key_env: XAI_API_KEY
+  reasoning_effort: none     # on the voice path: answer fast
+  timeout_s: 8
+  max_per_hour: 60           # VLM calls per hour; over it, questions fall back to the world model
+  look_px: 1280              # current frame long side sent
+  crop_px: 384               # close-ups of named objects are upscaled to this
+  max_crops: 3
+  abstain_below: 0.5         # VLM confidence under this: "I can't tell from here."
+  recall_frames: 6           # saved frames sent per past-tense question
+  recall_px: 768
+  archive:
+    archive_every_s: 30      # a frame is kept at least this often ...
+    check_every_s: 1.0       # ... and on a settled scene change, checked this often
+    change_thr: 0.3          # % of 128x72 thumbnail pixels changed by > 20 grey levels
+    frame_px: 1280
+    jpeg_quality: 80
+    max_mb: 500              # disk cap for saved frames (oldest go first)
+    keep_h: 24
+  embed:
+    embed: onnx              # onnx (MobileCLIP2-S0: python scripts/export_mobileclip.py) | fake | none
+    image_model: models/mobileclip2_s0_image.onnx
+    text_model: models/mobileclip2_s0_text.onnx
+    vocab: models/bpe_simple_vocab_16e6.txt.gz
+    providers: [tensorrt, cuda, cpu]
+    cache_dir: models/cache/clip
+    tiles: [3, 2]            # tile grid embedded besides the whole frame (small objects)
+    min_sim: 0.21            # best text match below this: "I don't remember seeing that"
+
+# Care layer (voice/care.py): reminders, morning report + caregiver summary, follow-up questions, profile
+# facts. Proactive speech is capped; notices past the cap or in quiet hours are recorded, not spoken.
+care:
+  enabled: true
+  tick_s: 10                  # scheduler: reminders checked against the event log this often
+  quiet_hours: ["22:00", "07:00"]   # local; nothing is spoken proactively in between
+  max_notices_per_hour: 4
+  notice_expiry_min: 30       # unacknowledged notices leave /state after this
+  ack_window_s: 60            # 'okay' / 'thanks' / 'done' this soon after a notice acknowledges it
+  late_grace_min: 30          # a reminder found this late (app was off) is skipped, not fired
+  morning_report: true
+  morning_after: "06:00"      # the first question or table activity after this (and before noon) gets it
+  morning_until: "12:00"
+  morning_on_activity: true
+  conversation_ttl_s: 120     # follow-ups ('and my glasses?') use the last turns until this much silence
+  conversation_turns: 5
+  profile_llm: true           # online: free-form 'about me' statements go to Grok (llm: section) as strict JSON

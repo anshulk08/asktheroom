@@ -14,6 +14,8 @@ from typing import Optional
 import cv2
 import numpy as np
 
+from core.labels import spoken, thing_labels
+
 OUT_WIDTH = 960
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 
@@ -32,11 +34,13 @@ INK_BGR = (232, 238, 230)
 DIM_BGR = (170, 181, 157)
 
 
-def _label(e: dict) -> str:
+def _label(e: dict, labels: Optional[dict] = None) -> str:
+    """'keys: inside box'; things by their taught name or 'unnamed object 7' (core/labels.py)."""
+    labels = labels or {}
     st = e.get("status", "UNKNOWN")
     parent = e.get("parent")
     if st in ("INSIDE", "UNDER") and parent:
-        where = f"{st.lower()} {parent}"
+        where = f"{st.lower()} {spoken(parent, labels)}"
     elif st == "HELD":
         where = "held"
     elif st == "GONE":
@@ -45,7 +49,7 @@ def _label(e: dict) -> str:
         where = "on table"
     else:
         where = "unknown"
-    return f"{e['name'].replace('_', ' ')}: {where}"
+    return f"{spoken(e['name'], labels)}: {where}"
 
 
 def _text(img, s, org, scale=0.5, color=INK_BGR, thick=1):
@@ -96,6 +100,7 @@ def draw(frame_img: np.ndarray, state: Optional[dict], table=None, dets=None,
     state = state or {}
     ents = state.get("entities") or []
     by_name = {e.get("name"): e for e in ents}
+    labels = thing_labels(state)
     H, W = img.shape[:2]
 
     # detection boxes (px in source-frame coordinates)
@@ -155,11 +160,11 @@ def draw(frame_img: np.ndarray, state: Optional[dict], table=None, dets=None,
             k = slots.get(key, 0)
             slots[key] = k + 1
             color = STATUS_BGR.get(e.get("status"), DIM_BGR)
-            _text(img, _label(e), (x + 12, y + 5 + 17 * k), 0.45, color)
+            _text(img, _label(e, labels), (x + 12, y + 5 + 17 * k), 0.45, color)
 
     # legend panel: every entity's state (always; it is the only state display without a table)
     if ents:
-        rows = [(e, _label(e), e.get("confidence")) for e in ents]
+        rows = [(e, _label(e, labels), e.get("confidence")) for e in ents]
         pw = 12 + max(cv2.getTextSize(r[1], FONT, 0.45, 1)[0][0] for r in rows) + 76
         ph = 10 + 19 * len(rows)
         _panel(img, 10, 10, pw, ph)
@@ -173,7 +178,7 @@ def draw(frame_img: np.ndarray, state: Optional[dict], table=None, dets=None,
 
     # laser badge
     if laser.get("on"):
-        msg = f"laser: {str(target).replace('_', ' ')}" if target else "laser on"
+        msg = f"laser: {spoken(str(target), labels)}" if target else "laser on"
         if laser.get("err_cm") is not None:
             msg += f"  ({laser['err_cm']:.1f} cm)"
         tw = cv2.getTextSize(msg, FONT, 0.5, 1)[0][0]

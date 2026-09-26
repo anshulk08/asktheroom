@@ -14,7 +14,25 @@
     VISIBLE: C.visible, HELD: C.held, INSIDE: C.hidden, UNDER: C.hidden, GONE: C.gone, UNKNOWN: C.gone,
   };
 
-  const nice = (n) => (n || "").replace(/^hand:(\d+)$/, "hand $1").replace(/_/g, " ");
+  // Open-world things go by their taught name, or "unnamed object 7", never "thing:7" (core/labels.py).
+  let thingNames = new Map(); // thing:N (merged ids too) -> name, from the latest state
+  const nice = (n) => thingNames.get(n) ||
+    (n || "").replace(/^thing:(\d+)$/, "unnamed object $1").replace(/^hand:(\d+)$/, "hand $1").replace(/_/g, " ");
+  function learnNames(state) {
+    const m = new Map();
+    for (const e of state.entities || []) {
+      if (String(e.name).indexOf("thing:") === 0) m.set(e.name, e.label || String(e.name).replace(/^thing:/, "unnamed object "));
+    }
+    const merged = state.merged || {};
+    for (const old of Object.keys(merged)) {
+      let into = merged[old];
+      for (let i = 0; i < 8 && merged[into]; i++) into = merged[into];
+      if (m.has(into)) m.set(old, m.get(into));
+    }
+    const changed = m.size !== thingNames.size || [...m].some(([k, v]) => thingNames.get(k) !== v);
+    thingNames = m;
+    return changed;
+  }
   const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 
   // server clock may differ from the laptop's (the Jetson may have no NTP on a hotspot)
@@ -70,7 +88,8 @@
     return {
       id: e.name,
       label: "<b>" + nice(e.name) + "</b>\n" + whereText(e),
-      title: nice(e.name) + ": " + whereText(e) + " (" + Math.round(conf * 100) + "% sure)",
+      title: nice(e.name) + ": " + whereText(e) + " (" + Math.round(conf * 100) + "% sure)" +
+        (e.maybe_same_as && e.maybe_same_as.length ? ". Maybe the same as " + e.maybe_same_as.map((m) => nice(m[0])).join(" or ") : ""),
       shape: "box",
       borderWidth: e.kind === "target" ? 2 : 3,
       shapeProperties: { borderRadius: e.kind === "target" ? 4 : 1, borderDashes: dashed ? [5, 4] : false },
@@ -461,6 +480,15 @@
     const lz = $("st-laser");
     lz.dataset.on = L.on ? "true" : "false";
     setText(lz, L.on ? (L.target ? "Laser on " + nice(L.target) : "Laser on") : "Laser off");
+    // Narration / visual memory (off by default): shown only when on; the tooltip is the privacy disclosure.
+    const N = state.narration, V = state.visual_memory, mem = $("st-memory");
+    mem.hidden = !(N || V);
+    if (N || V) {
+      setText(mem, [N && ("narration" + (N.queued ? " (" + N.queued + " queued)" : "")), V && "visual"]
+        .filter(Boolean).join(" + ") + " \u2192 " + ((N || V).provider || "cloud"));
+      mem.title = [N && N.disclosure, V && V.disclosure, N && N.last_summary && ("Last: " + N.last_summary)]
+        .filter(Boolean).join("\n");
+    }
   }
 
   function setLink(state) {
@@ -597,6 +625,7 @@
       setLink("live");
       if (msg.server_t) clockOffset = msg.server_t - Date.now() / 1000;
       if (msg.state) {
+        if (learnNames(msg.state) && haveRenderedOnce) renderEvents(); // a name was taught: relabel the timeline
         try { updateGraph(msg.state); } catch (e) { console.error(e); }
         updateStatus(msg.state, msg);
       }

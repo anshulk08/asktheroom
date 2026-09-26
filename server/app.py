@@ -1,6 +1,6 @@
 """Dashboard + phone server (spec V7, V8, V11).
 
-create_app(cfg, world, events, frames=None, ask_fn=None, table=None) -> FastAPI
+create_app(cfg, world, events, frames=None, ask_fn=None, table=None, care=None) -> FastAPI
 
   GET  /                 dashboard (server/web/index.html; everything served locally, works offline)
   GET  /video            MJPEG of the latest frame with the world drawn on it (server/overlay.py)
@@ -9,6 +9,11 @@ create_app(cfg, world, events, frames=None, ask_fn=None, table=None) -> FastAPI
   GET  /snapshots/{name} one event snapshot jpg (snapshot dir only)
   POST /ask              {"text"} -> {"text", "point_at", "action", "latency_ms"}
   POST /sms              Twilio webhook (signature checked, whitelist only)
+
+With care=voice.care.Care (reminders, reports; see voice/care.py), additively:
+  /state and /ws         also carry "notices": [{id, t, kind, text, point_at, acknowledged, ...}]
+  POST /notices/{id}/ack acknowledge a notice (the phone app's button)
+  GET  /report?date=YYYY-MM-DD&format=markdown|text|json   the caregiver summary for a day
 
 Run the dev version with fake data:  python -m server.app --fake
 """
@@ -145,7 +150,7 @@ def canned_ask(cfg: dict, world) -> AskFn:
 # ---------------------------------------------------------------- app
 
 def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = None,
-               table=None) -> FastAPI:
+               table=None, care=None) -> FastAPI:
     scfg = cfg.get("server") or {}
     push_period = 1.0 / float(scfg.get("push_hz", 5) or 5)
     mjpeg_period = 1.0 / float(scfg.get("mjpeg_fps", 10) or 10)
@@ -180,7 +185,13 @@ def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = 
         return d
 
     def meta() -> dict:
-        return {"last_answer": app.state.last_answer, "server_t": time.time()}
+        out = {"last_answer": app.state.last_answer, "server_t": time.time()}
+        if care is not None:                                   # care layer: additive key
+            try:
+                out["notices"] = care.notices_json()
+            except Exception:
+                log.exception("care notices failed")
+        return out
 
     # -- pages
     @app.get("/", response_class=HTMLResponse)
@@ -364,6 +375,26 @@ def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = 
             return twiml("Text me a question, like: where are my keys?")
         ans, _ = await run_ask(text[:500], "sms", SMS_TIMEOUT_S)
         return twiml(ans.text)
+
+    # -- care layer (voice/care.py): acknowledge a notice, the caregiver summary
+    if care is not None:
+        @app.post("/notices/{notice_id}/ack")
+        async def ack_notice(notice_id: int):
+            if not await asyncio.to_thread(care.ack, notice_id):
+                raise HTTPException(404, "no such notice")
+            return {"ok": True}
+
+        @app.get("/report")
+        async def report(date: Optional[str] = None, format: str = "markdown"):
+            fmt = format if format in ("markdown", "text", "json") else "markdown"
+            try:
+                out = await asyncio.to_thread(care.report, date, fmt)
+            except ValueError:
+                raise HTTPException(400, "date must be YYYY-MM-DD, today or yesterday")
+            if fmt == "json":
+                return JSONResponse(out)
+            return Response(out, media_type="text/markdown; charset=utf-8" if fmt == "markdown"
+                            else "text/plain; charset=utf-8")
 
     app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
     return app

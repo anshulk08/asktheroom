@@ -139,7 +139,7 @@ class Room:
     def aim(self, ans: Answer) -> Optional[float]:
         """Move the laser for an Answer. Returns the aim error in cm for a point, else None.
         Never raises: the spoken answer must play even when the laser can't."""
-        action = ans.action or ("point" if ans.point_at else None)
+        action = ans.action or ("point" if ans.point_at or ans.target_cm else None)
         if action is None:
             return None
         err = None
@@ -148,7 +148,10 @@ class Room:
                 if action.startswith("sweep:"):
                     self.laser.sweep_edge(action.split(":", 1)[1])
                 else:
-                    pos, chain = self.world.resolve(ans.point_at)
+                    if ans.point_at is None and ans.target_cm is not None:   # visual Q&A: a raw table spot
+                        pos, chain = tuple(ans.target_cm), ["table"]
+                    else:
+                        pos, chain = self.world.resolve(ans.point_at)
                     if pos is None:
                         log.info("no position for %s; not aiming", ans.point_at)
                         return None
@@ -360,7 +363,7 @@ class Room:
 
         from server.app import create_app
         app = create_app(self.cfg, self.world, self.events, frames=self.frames,
-                         ask_fn=self.ask_and_act, table=self.table)
+                         ask_fn=self.ask_and_act, table=self.table, care=getattr(self, "care", None))
         self.server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level="warning",
                                                     timeout_graceful_shutdown=2))
         self.server.install_signal_handlers = lambda: None     # the main thread handles Ctrl-C
@@ -379,6 +382,8 @@ class Room:
             log.info("%s", {"click": f"{how} to ask a question",
                             "wake": f"listening for \"room, ...\"; or {how}",
                             }.get(self.listen_mode, f"listening; ask out loud, or {how}"))
+        if getattr(self, "care", None) is not None:
+            self.care.start()                                  # care scheduler: reminders, morning report
         self.start_server(host, port)
 
     def shutdown(self) -> None:
@@ -405,6 +410,7 @@ class Room:
 def build(cfg: dict, fake: bool = False, camera: int = 0, with_voice: bool = True,
           video: Optional[str] = None, keyboard: Optional[bool] = None) -> tuple[Room, bool]:
     """Construct everything. Returns (room, needs_perception_thread)."""
+    import core.embed
     import core.events
     import core.world
     import net
@@ -419,7 +425,7 @@ def build(cfg: dict, fake: bool = False, camera: int = 0, with_voice: bool = Tru
     else:
         events = core.events.EventLog(cfg["paths"]["events_db"], cfg["paths"]["snapshots"])
     cleanup.append(events.close)
-    world = core.world.World(cfg, events)
+    world = core.world.World(cfg, events, embed=core.embed.make_embedder(cfg))   # None unless reid.enabled
 
     detector = hands = None
     perception = True
@@ -470,8 +476,15 @@ def build(cfg: dict, fake: bool = False, camera: int = 0, with_voice: bool = Tru
     netmon = net.NetMonitor(cfg).start()
     cleanup.append(netmon.stop)
     interpret = voice.understand.Understander(cfg)
-    interpret.warm()                                   # logs and falls back to the rules if Qwen is down
-    ask = voice.pipeline.make_ask(cfg, world, events, net=netmon, interpret=interpret)
+    interpret.warm()                                   # logs and falls back to the rules if the model is down
+    # Narration and visual memory (both off unless enabled in config): they attach to world.update, so
+    # the perception loop and --fake's SimCamera feed them without a call here; stopped before the log closes.
+    import core.narration
+    import voice.visual
+    narrator = core.narration.from_config(cfg, events, world, online=lambda: netmon.online)
+    visual = voice.visual.from_config(cfg, world, events, frames, table, online=lambda: netmon.online)
+    cleanup += [x.stop for x in (narrator, visual) if x is not None]
+    ask = voice.pipeline.make_ask(cfg, world, events, net=netmon, interpret=interpret, visual=visual)
     tts = voice.tts.TTS(cfg, net=netmon)
     tts.warm()
     cleanup.append(tts.stop)
@@ -488,6 +501,9 @@ def build(cfg: dict, fake: bool = False, camera: int = 0, with_voice: bool = Tru
     room = Room(cfg, world, events, table, frames, laser, ask, netmon=netmon, tts=tts, stt=stt,
                 clicker=clicker, detector=detector, hands=hands, interpret=interpret)
     room.cleanup = cleanup
+    if (cfg.get("care") or {}).get("enabled", True):     # reminders, reports, follow-ups, profile (voice/care.py)
+        from voice.care import attach_care
+        cleanup.append(attach_care(room, cfg).stop)
     return room, perception
 
 
