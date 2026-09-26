@@ -339,7 +339,7 @@ def test_where_falls_back_to_a_sighting_for_a_never_placed_object(log):
     w = world(log)
     q = qa(log, w, sighted(log, w, "black wallet"))
     a = q.route(parse("Where is my wallet?", CFG), "Where is my wallet?", online=True)
-    assert a.action == "circle" and a.point_at is None and a.target_cm == pytest.approx((45, 30), abs=0.5)
+    assert a.action is None and a.point_at is None and a.target_cm is None   # an old VLM sighting: spoken only
     assert "10:00 AM" in a.text and "wallet" in a.text
     a2 = q.route(parse("Where is my wallet?", CFG), "Where is my wallet?", online=False)
     assert a2 == a                                              # stored rows: the same offline
@@ -365,7 +365,7 @@ def test_offline_an_unknown_name_uses_a_sighting_online_grok_picks(log):
     w = world(log)
     q = qa(log, w, sighted(log, w, "red mug"))
     a = q.route(parse("Where is my red mug?", CFG), "Where is my red mug?", online=False)
-    assert a.action == "circle" and "red mug" in a.text
+    assert a.action is None and a.target_cm is None and "red mug" in a.text
     seen = []                                                  # online: a live Grok look, not the sighting
     q.pick = lambda t, said: seen.append(said) or Answer("P")
     q.look = lambda t, intent: seen.append(intent.name or intent.obj) or Answer("P")

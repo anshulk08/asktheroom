@@ -556,7 +556,11 @@ class VisualQA:
         mk = ob.marks[m - 1]
         ent = mk.name
         label = _label(d.get("label"))
-        if ent.startswith("thing:") and not names.get(ent) and conf >= BIND_CONF and hasattr(self.world, "bind_alias"):
+        holds = self._still_holds(mk)       # checked before any naming: a thing that moved keeps no name
+        if holds and ent.startswith("thing:"):
+            names[ent] = self._names().get(ent) or names.get(ent)      # a name taught during the call wins
+        if (holds and ent.startswith("thing:") and not names.get(ent) and conf >= BIND_CONF
+                and hasattr(self.world, "bind_alias")):
             try:
                 if self.world.bind_alias(ent, said):
                     log.info("visual pick: %s is now '%s' (Grok saw %s, %.2f)", ent, said, label, conf)
@@ -619,19 +623,24 @@ class VisualQA:
         """Point at mk's entity only if it still holds now that the answer is back: it still exists and
         wasn't merged, and if still visible it hasn't moved more than JUMP_CM (hidden: the laser follows
         it through world.resolve as usual). Otherwise the answer, a short note and no pointing."""
+        if not self._still_holds(mk):
+            return Answer(_with_note(text, MOVED, where))
+        return Answer(text, point_at=mk.name, action="point")
+
+    def _still_holds(self, mk: Mark) -> bool:
+        """mk's entity still exists unmerged, and is hidden (followed by the world) or still visible
+        within JUMP_CM of where the mark had it."""
         try:
             ent = self.world.get(mk.name)
             status, pos, merged = str(ent.status), ent.pos_cm, getattr(ent, "merged_into", None)
         except Exception:
-            ent = None
-        if ent is None or merged:
-            return Answer(_with_note(text, MOVED, where))
+            return False
+        if merged:
+            return False
         if status == "VISIBLE":
-            if mk.pos_cm is None or pos is None or np.hypot(pos[0] - mk.pos_cm[0], pos[1] - mk.pos_cm[1]) > JUMP_CM:
-                return Answer(_with_note(text, MOVED, where))
-        elif status not in HIDDEN:
-            return Answer(_with_note(text, MOVED, where))
-        return Answer(text, point_at=mk.name, action="point")
+            return not (mk.pos_cm is None or pos is None
+                        or np.hypot(pos[0] - mk.pos_cm[0], pos[1] - mk.pos_cm[1]) > JUMP_CM)
+        return status in HIDDEN
 
     def _crops(self, focus: list[str]) -> list[tuple[str, Crop]]:
         """(entity, crop) close-ups of focus entities: only crops the store knows were of that entity
@@ -820,7 +829,8 @@ class VisualQA:
     def _sighting(self, ent: Optional[str] = None, said: Optional[str] = None) -> Optional[Answer]:
         """WHERE for something the world has never had a position for (a tracked object still UNKNOWN,
         or offline, a name it doesn't know), from the Grok settle check's newest sighting of it. Stored
-        rows, so it works offline. The laser circles the spot, since the sighting may be minutes old.
+        rows, so it works offline. Spoken only: the spot is a VLM estimate that may be minutes old, and the
+        laser only ever aims at tracked entities.
         None: the templates answer as before."""
         if self.grok_check is None:
             return None
@@ -841,9 +851,10 @@ class VisualQA:
             return None
         if hit is None:
             return None
+        from voice.answers import area
         text = _spoken(f"I haven't tracked your {said}, but at {_clock(hit['wall'])} I saw what looked like "
-                       f"your {said} about here.")
-        return Answer(text, action="circle", target_cm=(hit["x_cm"], hit["y_cm"]))
+                       f"your {said} {area((hit['x_cm'], hit['y_cm']), self.cfg)}.")
+        return Answer(text)                 # an old, ungrounded VLM sighting: spoken only, never aimed at
 
     def _about_table(self, intent: Intent, t: str) -> bool:
         """Whether an OTHER question (t normalized) is about the table or what the camera sees: it says

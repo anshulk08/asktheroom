@@ -1,6 +1,6 @@
 # 0008: Thing identity: one object, one thing:N
 
-Status: implemented Sat 26 Sep, before the 6 PM freeze. Rebirth is on in `config.yaml`; one-per-kind merging is on with the settle check (spec 0007, itself off by default); Grok label belief is off by default. Unit-tested; tried live on the Jetson for about 6 minutes (results and handoff at the end).
+Status: implemented Sat 26 Sep, before the 6 PM freeze. Rebirth is off in `config.yaml` after review (below); one-per-kind merging is on with the settle check (spec 0007, itself off by default); Grok label belief is off by default. Unit-tested; tried live on the Jetson for about 6 minutes (results and handoff at the end).
 
 ## Problem
 
@@ -71,6 +71,21 @@ The bridge (`mobile/bridge/`) sends per thing:
 | `as: "grok"` | the name was bound by Grok, not taught |
 
 It drops unnamed things lost more than 10 minutes ago. The iOS app shows guesses hedged ("phone charger?") and never says "your X" for a Grok-bound name.
+
+## Review before enabling (Sat 26 Sep, afternoon, on branch `integration`)
+
+An outside review reproduced four faults; until each is fixed and measured, the demo config keeps these off
+(`rebirth_s: 0`, `merge_same: false`, `belief_enabled: false`, `grok_check.enabled: false`):
+
+| Fault | Reproduced | Needed before enabling |
+|---|---|---|
+| Rebirth hands a HELD thing's identity to a different object of its size set down at its spot | yes | never reborn from HELD while its hand is elsewhere; treat a match as "possibly the same", not the same |
+| One-per-kind merge folds a visitor's second mug into yours (seen apart is not one object) | by construction | a suggested match only, or only for props marked unique |
+| Belief normalises over the supplied guesses only: three checks at 1% "mug" name it; 1% "not an object" retires it | yes | keep the unguessed mass; require absolute evidence to name or retire |
+| A Grok reply that lands after a name was taught becomes the primary label (`named_by: grok`) | yes | re-check eligibility atomically when applying the reply |
+
+Replays (`eval/score_clip.py`) cannot catch these: they run with `visual=None` and no settle checker, and
+rebirth only runs with it in the replay config. Identical replay scores show merge compatibility only.
 
 ## Not built (proposals)
 

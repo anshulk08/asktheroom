@@ -453,8 +453,8 @@ grok_check:                   # Grok checks the tracker each time the table sett
   bind_names: true            # an unnamed thing:N takes Grok's label (never over a taught name) ...
   bind_conf: 0.9              # ... at or above this confidence (on the rig, 0.7-0.8 named one thing
                               # 'phone' and 'phone charger' on two checks; at 0.9 names held up)
-  merge_same: true            # one per kind: a new thing Grok names what a lost thing answers to is that
-                              # thing (never two seen at once, never one holding another)
+  merge_same: false           # one per kind: a new thing Grok names what a lost thing answers to is that
+                              # thing. Off: a visitor's second mug would be folded into yours (review, spec 0008)
   belief_enabled: false       # an unnamed thing's top-3 guesses, summed over checks, name it or retire it
   min_obs: 3                  # checks before the belief acts
   name_p: 0.6                 # top label's share to name it, name_margin ahead of the next
@@ -471,7 +471,8 @@ grok_check:                   # Grok checks the tracker each time the table sett
 # births in 13 min on the rig were within 5 cm of an earlier thing). Now a thing lost this recently and
 # seen again, of its size, where it was last seen or picked up from is that thing again.
 thing_identity:
-  rebirth_s: 60               # 0 = off
+  rebirth_s: 0                # 0 = off. Off for the demo: a held thing's identity went to a different object
+                              # put at its spot (review, Sat 26 Sep), and replays showed no gain; spec 0008
   rebirth_cm: 5.0
 
 # Known-object boxes dropped before the world sees them (core/detect.py). Zero-shot YOLO-World labels a

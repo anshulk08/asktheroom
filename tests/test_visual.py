@@ -880,3 +880,40 @@ def test_pick_says_what_grok_saw_when_it_differs_from_the_name_asked(log):
     q, _ = pick_qa(log, mark=1)
     a = q.pick("Where is my red mug?", "red mug")
     assert a.point_at == "keys" and a.text.startswith("I think your red mug is what I call your keys.")
+
+
+class BindingWorld(ThingWorld):
+    """bind_alias like the real World's: it binds even over an existing name (the name moves)."""
+    def bind_alias(self, entity, name):
+        if entity not in self.entities:
+            return False
+        self.labels[entity] = name
+        return True
+
+
+def during_call(q, reply, change):
+    """q._vlm returns reply after change() ran, as if the world moved on while Grok answered."""
+    def vlm(*_a, **_k):
+        change()
+        return json.loads(reply)
+    q._vlm = vlm
+
+
+def test_pick_names_nothing_when_the_thing_moved_during_the_call(log):
+    q, _ = pick_qa(log, mark=2)
+    q.world = BindingWorld(list(q.world.entities.values()), log)
+    def move():
+        q.world.entities["thing:3"].pos_cm = (20.0, 40.0)          # carried 50 cm away meanwhile
+    during_call(q, json.dumps({"mark": 2, "label": "red mug", "confidence": 0.9}), move)
+    a = q.pick("Where is my red mug?", "red mug")
+    assert a.point_at is None and q.world.labels == {}
+
+
+def test_pick_never_names_over_a_name_taught_during_the_call(log):
+    q, _ = pick_qa(log, mark=2)
+    q.world = BindingWorld(list(q.world.entities.values()), log)
+    def teach():
+        q.world.labels["thing:3"] = "souvenir"
+    during_call(q, json.dumps({"mark": 2, "label": "red mug", "confidence": 0.9}), teach)
+    q.pick("Where is my red mug?", "red mug")
+    assert q.world.labels == {"thing:3": "souvenir"}
