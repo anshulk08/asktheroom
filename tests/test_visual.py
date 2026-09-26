@@ -505,7 +505,8 @@ def test_onnx_mobileclip_matches_text_to_the_right_frame():
     from core.visual_memory import OnnxClipEmbedder
     e = OnnxClipEmbedder(os.path.join(MODELS, "mobileclip2_s0_image.onnx"),
                          os.path.join(MODELS, "mobileclip2_s0_text.onnx"),
-                         os.path.join(MODELS, "bpe_simple_vocab_16e6.txt.gz"), providers=("cpu",))
+                         os.path.join(os.path.dirname(MODELS), "assets", "bpe_simple_vocab_16e6.txt.gz"),
+                         providers=("cpu",))
     red, blue = img(block=(0, 0, 230), size=400), img(block=(230, 0, 0), size=400)
     E = e.image([red, blue])
     T = e.text(["a photo of a red square", "a photo of a blue square"])

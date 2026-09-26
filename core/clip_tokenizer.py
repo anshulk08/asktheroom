@@ -3,8 +3,8 @@
 The visual archive (core/visual_memory.py) embeds spoken queries ('a red mug') on the device, where
 neither torch nor open_clip is installed. This implements the standard CLIP tokenization (byte-to-unicode
 map, 49,152-merge BPE vocabulary, <start_of_text>/<end_of_text>, 77-token context, zero padding) from
-the vocabulary file open_clip ships (bpe_simple_vocab_16e6.txt.gz, copied to models/ by
-scripts/export_mobileclip.py). Text cleaning is html-unescape + whitespace collapse + lowercase (open_clip
+the vocabulary file open_clip ships (bpe_simple_vocab_16e6.txt.gz, MIT, committed in assets/;
+scripts/export_mobileclip.py refreshes it). Text cleaning is html-unescape + whitespace collapse + lowercase (open_clip
 also runs ftfy, which only matters for mojibake). tests/test_visual_memory.py checks the ids against
 open_clip when it is importable.
 """

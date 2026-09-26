@@ -3,8 +3,8 @@
     python scripts/export_mobileclip.py [--out models]      # needs torch, open_clip_torch, timm, onnxruntime
 
 Writes models/mobileclip2_s0_image.onnx (images [b,3,256,256] RGB 0-1 -> unit embedding),
-models/mobileclip2_s0_text.onnx (tokens [b,77] int64 -> unit embedding) and the BPE vocabulary
-(models/bpe_simple_vocab_16e6.txt.gz) for core/clip_tokenizer.py, then checks ONNX against torch and our
+models/mobileclip2_s0_text.onnx (tokens [b,77] int64 -> unit embedding) and refreshes the BPE vocabulary
+(assets/bpe_simple_vocab_16e6.txt.gz, committed: models/ is never committed) for core/clip_tokenizer.py, then checks ONNX against torch and our
 tokenizer against open_clip's. MobileCLIP2 is reparameterized (timm) before export: its train-time
 multi-branch blocks fold into single convolutions, which is what makes the ONNX / TensorRT graph small.
 Batch is dynamic; opset 17. On the Jetson, build engines from these with trtexec as for the other models.
@@ -62,7 +62,9 @@ def main(argv=None) -> int:
     torch.onnx.export(Text(m).eval(), t, txt_path, input_names=["tokens"], output_names=["emb"],
                       opset_version=17, dynamic_axes={"tokens": {0: "b"}, "emb": {0: "b"}}, dynamo=False)
     vocab = os.path.join(os.path.dirname(open_clip.__file__), "bpe_simple_vocab_16e6.txt.gz")
-    shutil.copy(vocab, os.path.join(a.out, "bpe_simple_vocab_16e6.txt.gz"))
+    ours_vocab = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets",
+                              "bpe_simple_vocab_16e6.txt.gz")
+    shutil.copy(vocab, ours_vocab)
 
     for path, inp, name, ref in ((img_path, x, "images", Image(m)(x)), (txt_path, t, "tokens", Text(m)(t))):
         s = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
@@ -73,7 +75,7 @@ def main(argv=None) -> int:
               f"{ms:.0f} ms for a batch of {len(o)} on CPU, {os.path.getsize(path) / 1e6:.1f} MB")
 
     from core.clip_tokenizer import ClipTokenizer
-    ours = ClipTokenizer(os.path.join(a.out, "bpe_simple_vocab_16e6.txt.gz"))
+    ours = ClipTokenizer(ours_vocab)
     probe = ["a photo of a red mug", "Grandma's ring & keys!", "what does the note say? 3:30 pm", "pill bottle"]
     same = (ours(probe) == tok(probe).numpy()).all()
     print("tokenizer matches open_clip:", bool(same))

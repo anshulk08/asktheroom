@@ -352,7 +352,7 @@ visual_memory:
     embed: onnx              # onnx (MobileCLIP2-S0: python scripts/export_mobileclip.py) | fake | none
     image_model: models/mobileclip2_s0_image.onnx
     text_model: models/mobileclip2_s0_text.onnx
-    vocab: models/bpe_simple_vocab_16e6.txt.gz
+    vocab: assets/bpe_simple_vocab_16e6.txt.gz
     providers: [tensorrt, cuda, cpu]
     cache_dir: models/cache/clip
     tiles: [3, 2]            # tile grid embedded besides the whole frame (small objects)

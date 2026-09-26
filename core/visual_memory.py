@@ -77,7 +77,7 @@ class VisualConfig:
     embed: str = "onnx"            # onnx | none | fake
     image_model: str = "models/mobileclip2_s0_image.onnx"
     text_model: str = "models/mobileclip2_s0_text.onnx"
-    vocab: str = "models/bpe_simple_vocab_16e6.txt.gz"
+    vocab: str = "assets/bpe_simple_vocab_16e6.txt.gz"
     providers: tuple = ("tensorrt", "cuda", "cpu")   # onnxruntime execution providers, tried in order
     cache_dir: str = "models/cache/clip"   # TensorRT engine cache (first build is slow; later starts load it)
     tiles: tuple = (3, 2)          # grid (cols, rows) of tiles embedded besides the whole frame
