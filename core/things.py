@@ -52,6 +52,7 @@ ARCHIVED = (Status.GONE, Status.UNKNOWN)
 # Events after which a thing sits on the table where it was just put: what 'this is my X' refers to.
 PLACED = {EventType.APPEARED, EventType.MOVED, EventType.PUT_BACK, EventType.TAKEN_OUT,
           EventType.UNCOVERED, EventType.CORRECTED}
+OPEN_INSIDE = 0.8   # this much of a visible object's box within an open container's box: lying in it
 STARTUP_S = 3.0     # configured objects first seen this soon after the first batch were not put down
 ARTICLES = {'my', 'the', 'a', 'an', 'your', 'our', 'this', 'that', 'his', 'her', 'their'}
 NEG = float('-inf')
@@ -261,6 +262,21 @@ class ThingRules:
                 if hit:
                     return self._survivor(hit)
             return None
+
+    def open_container_of(self, name: str) -> str | None:
+        """The container a VISIBLE object is seen lying in: a visible configured container, or a thing
+        that may hold others (thing_containers), whose box holds at least OPEN_INSIDE of the object's
+        box. From overhead an open box shows its contents, so they never go INSIDE; answers say 'in'."""
+        with self.lock:
+            ent = self.entities.get(name)
+            if ent is None or ent.status != Status.VISIBLE or ent.box_cm is None:
+                return None
+            boxes = {n: self.entities[n].box_cm for n in self.cfg.names('container')
+                     if n != name and self.entities[n].status == Status.VISIBLE and self.entities[n].box_cm}
+            boxes.update({n: b for n, b in self._thing_containers().items() if n != name})
+            inside = [(geom.area(b), n) for n, b in boxes.items()
+                      if geom.area(b) > geom.area(ent.box_cm) and geom.overlap_frac(b, ent.box_cm) >= OPEN_INSIDE]
+            return min(inside)[1] if inside else None
 
     def teach_target(self) -> str | None:
         """What 'this is my X' would name now (see teach), without binding anything."""

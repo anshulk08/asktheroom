@@ -210,6 +210,12 @@ def _where(obj: str, world, events, cfg: dict, now: float) -> Answer:
     prob = " probably" if e.confidence < plain or e.candidates else ""
 
     if e.status == Status.VISIBLE:
+        try:
+            holder = world.open_container_of(obj) if hasattr(world, "open_container_of") else None
+        except Exception:
+            holder = None
+        if holder:                          # seen lying in an open box: 'in the box', not 'on the table'
+            return Answer(f"{Y} {n} {be}{prob} in {_pn(cfg, holder)}.", point_at=obj, action="point")
         near = _nearest(obj, e, world, cfg)
         tail = f", near the {near}" if near else ""
         return Answer(f"{Y} {n} {be}{prob} on the table{tail}.", point_at=obj, action="point")

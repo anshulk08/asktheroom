@@ -322,3 +322,32 @@ def test_with_thing_containers_disabled_only_configured_containers_hold(cfg, tmp
     events = pods_in_tub(scene, world, cfg)
     assert of(events, 'thing:2') == [EventType.PICKED_UP]
     assert world.get('thing:2').status == Status.HELD
+
+
+# ----- seen lying in an open container ------------------------------------------------------------------
+
+def test_keys_seen_lying_in_the_open_box_are_in_the_box(scene, world):
+    """From overhead an open box shows what is in it: the keys stay VISIBLE, and the answer says where."""
+    scene.place('box', 80, 40)                      # 20 x 15 cm
+    scene.place('keys', 82, 41)
+    scene.run(world, 1.5)
+    assert world.open_container_of('keys') == 'box'
+    a = ask(world, "where are my keys?")
+    assert a.text == "Your keys are in the box." and a.point_at == 'keys', a.text
+
+
+def test_an_object_lying_in_an_open_thing_container_is_in_it(scene, world):
+    scene.thing('tub', *TUB_AT, *TUB)
+    scene.run(world, 1.5)
+    scene.place('keys', 78, 40)
+    scene.run(world, 1.5)
+    assert world.open_container_of('keys') == 'thing:1'
+    assert ask(world, "where are my keys?").text == "Your keys are in a container."
+
+
+def test_keys_beside_the_box_are_not_in_it(scene, world):
+    scene.place('box', 80, 40)
+    scene.place('keys', 95, 40)                     # half over the box's edge
+    scene.run(world, 1.5)
+    assert world.open_container_of('keys') is None
+    assert "in the box" not in ask(world, "where are my keys?").text
