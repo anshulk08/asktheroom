@@ -189,3 +189,7 @@ main:
   perception_max_fps: 15
   net_copy_s: 5
 
+demo_check:
+  camera: 0
+  home_cm: {}                 # object: [x, y] table cm of the demo layout; empty = check 7 only needs VISIBLE
+  home_tol_cm: 5
