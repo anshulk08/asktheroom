@@ -419,3 +419,14 @@ auto_name:
 # window: nothing is logged. Only LOST_TRACK waits: hand, cover, container and 'unknown' cover rules
 # still decide at once. A removed object is lost this long after it was last seen.
 lost_grace_s: 2.0
+
+# Things as containers (core/things.py, world rules 7-8). Besides the configured box, a large unnamed
+# thing:N (a tub, a bag, a hat, a mug) holds what a hand leaves in it, by the same evidence: the hand that
+# holds an object dwells inside the thing's box (container_dwell_s), leaves, and the object is not seen
+# again within reappear_wait_s -> PUT_INSIDE that thing; its contents then follow it (resolve()). Only a
+# thing lying on the table with at least this footprint qualifies; the configured box wins when the hand
+# was in both, and a hand that crossed the thing (in one side, out the other) was carrying something past
+# it (a placemat, a sheet of paper), not into it. Code defaults match these values.
+thing_containers:
+  enabled: true
+  min_area_cm2: 100           # footprint in table cm2: a mug or larger; keys, a coin, an AirPods case are not

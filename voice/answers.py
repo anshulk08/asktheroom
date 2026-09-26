@@ -122,7 +122,18 @@ def _rel(world, cfg: dict, parent: Optional[str], status: Optional[Status] = Non
         return "in someone's hand"
     k = _kind(world, cfg, parent)
     under = status == Status.UNDER if status in (Status.UNDER, Status.INSIDE) else k == "cover"
-    return f"{'under' if under else 'inside'} the {_dn(cfg, parent)}"
+    return f"{'under' if under else 'inside'} {_pn(cfg, parent)}"
+
+
+def _pn(cfg: dict, parent: str) -> str:
+    """A parent as spoken after 'inside' / 'put inside': 'the box'; a thing that holds others by its
+    taught name ('the toy bin') or automatic guess ('the plastic tub'), else 'a container'."""
+    if not parent.startswith("thing:"):
+        return f"the {_dn(cfg, parent)}"
+    name = (cfg.get("display_names") or {}).get(parent)
+    if not name or name == UNNAMED:
+        name = (cfg.get("thing_guesses") or {}).get(parent)
+    return f"the {name}" if name else "a container"
 
 
 def _clause(e: Entity, world, cfg: dict) -> Optional[str]:
@@ -146,8 +157,8 @@ def _event_phrase(ev: Event, cfg: dict) -> str:
         "MOVED": "moved",
         "COVERED": f"covered by the {p}" if p else "covered up",
         "UNCOVERED": "uncovered",
-        "PUT_INSIDE": f"put inside the {p}" if p else "put inside something",
-        "TAKEN_OUT": f"lifted out of the {p}" if p else "lifted out of something",
+        "PUT_INSIDE": f"put inside {_pn(cfg, ev.parent)}" if p else "put inside something",
+        "TAKEN_OUT": f"lifted out of {_pn(cfg, ev.parent)}" if p else "lifted out of something",
         "EXITED_VIEW": f"carried off the {ev.edge} side of the table" if ev.edge else "carried off the table",
         "LOST_TRACK": "lost from view",
         "CORRECTED": "given a corrected location",
@@ -446,7 +457,21 @@ def _with_things(cfg: dict, world) -> dict:
     objects = dict(cfg.get("objects") or {})
     for n, label in labels.items():
         names[n], objects[n] = label or UNNAMED, "target"
-    return {**cfg, "display_names": names, "objects": objects}
+    return {**cfg, "display_names": names, "objects": objects, "thing_guesses": _thing_guesses(world)}
+
+
+def _thing_guesses(world) -> dict:
+    """Thing -> its automatic name guess (core/auto_name.py adds 'guess' to state_json), for naming a
+    thing that holds others: 'inside the plastic tub'."""
+    try:
+        out = {}
+        for e in world.state_json().get("entities") or []:
+            g = e.get("guess") if isinstance(e, dict) else None
+            if isinstance(g, dict) and g.get("name") and str(e.get("name", "")).startswith("thing:"):
+                out[e["name"]] = str(g["name"])
+        return out
+    except Exception:
+        return {}
 
 
 def _hedge(text: str, n: str) -> str:

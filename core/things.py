@@ -56,6 +56,8 @@ STARTUP_S = 3.0     # configured objects first seen this soon after the first ba
 ARTICLES = {'my', 'the', 'a', 'an', 'your', 'our', 'this', 'that', 'his', 'her', 'their'}
 NEG = float('-inf')
 REST_IOU = 0.5      # a proposal this much over the box a partly hidden thing rests in: the whole of it
+CROSS_UV = 1.0      # a hand in and out of a thing container on opposite sides of its middle, this far
+                    # apart (in half-widths): it crossed the thing carrying something past, not into it
 
 
 @dataclass
@@ -100,6 +102,18 @@ class ThingsConfig:
         if 'area_cm2' in kw:
             kw['area_cm2'] = tuple(kw['area_cm2'])
         return cls(**kw)
+
+
+@dataclass
+class ContainerConfig:
+    """The thing_containers: section of config.yaml (every key optional): which things may hold others."""
+    enabled: bool = True
+    min_area_cm2: float = 100.0        # footprint of a mug or larger: a tub, a bag, a hat; not keys, a coin
+
+    @classmethod
+    def from_config(cls, cfg) -> 'ContainerConfig':
+        raw = dict(getattr(cfg, 'thing_containers', None) or {})
+        return cls(**{k: v for k, v in raw.items() if k in {f.name for f in fields(cls)}})
 
 
 @dataclass
@@ -222,6 +236,9 @@ class ThingRules:
         self._clean: dict[str, Detection] = {}          # this batch's unambiguous associations
         self._trail: dict[str, deque] = {}              # hand -> recent (t, box_cm)
         self._batch_boxes: list[tuple] = []             # this batch's object / proposal / hand boxes
+        self._ccfg = ContainerConfig.from_config(self.cfg)
+        self._in_thing: dict[tuple, list] = {}          # (hand, thing container) -> [entry t, entry uv, last uv]
+        self._thing_visits: dict[tuple, tuple] = {}     # (hand, thing, exit t) -> (entry t, crossed it)
         self._known_names: dict[str, str] = {}
         for n in self.cfg.names():
             self._known_names[norm_name(n)] = n
@@ -347,6 +364,7 @@ class ThingRules:
         known += [self.entities[n].box_cm for n in self.cfg.names()
                   if self.entities[n].box_cm is not None and (self._present[n] or any(self._bits[n]))]
         hand_boxes = [h.box_cm for h in hands]
+        holders = list(self._thing_containers().values()) if hand_boxes else []
         kept: list[Detection] = []
         for d in sorted((d for d in items if d.cls == THING and d.conf >= tc.proposal_conf),
                         key=lambda d: -d.conf):
@@ -354,8 +372,10 @@ class ThingRules:
                 continue
             if any(geom.iou(d.box_cm, k) >= tc.dup_iou for k in known + [p.box_cm for p in kept]):
                 continue
-            if any(geom.iou(d.box_cm, h) >= tc.dup_iou or geom.overlap_frac(d.box_cm, h) >= tc.hand_contain
-                   for h in hand_boxes):
+            # a hand resting inside a tub lies wholly within the tub's box: that box is still the tub
+            is_holder = any(geom.iou(d.box_cm, b) >= tc.member_iou for b in holders)
+            if not is_holder and any(geom.iou(d.box_cm, h) >= tc.dup_iou
+                                     or geom.overlap_frac(d.box_cm, h) >= tc.hand_contain for h in hand_boxes):
                 continue
             kept.append(d)
         return kept
@@ -593,6 +613,8 @@ class ThingRules:
             return True
         since = self._hidden_at.get(name, NEG)
         _, chain = relations.resolve_chain(name, self.entities, self.cfg.max_nesting)
+        if not self._size_ok(d.box_cm, ent.box_cm):
+            return False            # e.g. the tub it lies in, seen again after being carried: not it
         for p in chain[1:]:
             box = self.entities[p].box_cm
             if box is not None and geom.contains_point(_grow(box, tc.emerge_cm), d.center_cm) \
@@ -817,3 +839,82 @@ class ThingRules:
             out.update(label=ent.aliases[0] if ent.aliases else None, aliases=list(ent.aliases),
                        maybe_same_as=[[n, s] for n, s in ent.maybe_same_as])
         return out
+
+    # ----- things as containers ---------------------------------------------------------------------
+    # A large thing (a tub, a bag, a hat, a cup) holds what a hand leaves in it, by the world's container
+    # rule (rules 7-8): the hand holding the object dwells inside the thing's box, leaves, and the object
+    # is not seen again. The configured box keeps priority, and a hand that crossed the thing was
+    # carrying something past it (over a placemat, a sheet of paper), not into it.
+
+    def _thing_containers(self) -> dict[str, tuple]:
+        """Things that may hold others -> box: visible on the table (so inside or under nothing), with a
+        footprint of at least min_area_cm2. While an arm hides part of one, the box it rests in."""
+        if not self._ccfg.enabled:
+            return {}
+        out = {}
+        for n in self._visible_things():
+            ent = self.entities[n]
+            box = self._rest_box[n] if self._partly_hidden(n, ent) else ent.box_cm
+            if geom.area(box) >= self._ccfg.min_area_cm2:
+                out[n] = box
+        return out
+
+    def _track_crossings(self, hands, containers: dict[str, tuple]) -> None:
+        """Where each hand's centre went into a thing container and where it last was inside, in the
+        thing's own coordinates. Called with the same hands and boxes as the dwell tracker, so a visit
+        that ends here ends there in the same update (same exit time)."""
+        inside = set()
+        for h in hands:
+            c = geom.center(h.box_cm)
+            for n, box in containers.items():
+                if geom.contains_point(box, c):
+                    inside.add((h.cls, n))
+                    self._in_thing.setdefault((h.cls, n), [self._now, _uv(c, box), None])[2] = _uv(c, box)
+        for key in [k for k in self._in_thing if k not in inside]:
+            entry_t, a, b = self._in_thing.pop(key)
+            crossed = any(p * q < 0 and abs(p - q) >= CROSS_UV for p, q in zip(a, b))
+            self._thing_visits[(key[0], key[1], self._now)] = (entry_t, crossed)
+        for v in [v for v in self._thing_visits if self._now - v[2] > relations.DwellTracker.HISTORY_S]:
+            del self._thing_visits[v]
+
+    def _holding_visits(self, name: str, hid: str, since: float) -> list[tuple[str, float]]:
+        """The hand's completed container visits since `since` that could have left `name` inside,
+        oldest first; the last one is the container to use. A thing is skipped when the hand crossed it
+        or when holding name would nest deeper than max_nesting. A configured container the hand left
+        while it was inside the last thing wins over that thing: a box standing on a tray."""
+        out = []
+        for c, t in self._dwell.visits_since(hid, since):
+            if c == name or c not in self.entities:
+                continue
+            if is_thing(c) and (self._thing_visits.get((hid, c, t), (t, False))[1] or not self._may_hold(c, name)):
+                continue
+            out.append((c, t))
+        if out and is_thing(out[-1][0]):
+            entered = self._thing_visits.get((hid, *out[-1]), (out[-1][1],))[0]
+            known = [v for v in out if not is_thing(v[0]) and v[1] >= entered]
+            if known:
+                out.remove(known[-1])
+                out.append(known[-1])
+        return out
+
+    def _may_hold(self, container: str, name: str) -> bool:
+        _, chain = relations.resolve_chain(container, self.entities, self.cfg.max_nesting + 1)
+        if name in chain:
+            return False            # a thing inside the object cannot hold it
+        return len(chain) + self._depth_below(name) <= self.cfg.max_nesting
+
+    def _depth_below(self, name: str) -> int:
+        """Levels of entities hidden in name (keys in the box in hand: the box has 1)."""
+        depth, frontier, seen = 0, {name}, {name}
+        while True:
+            nxt = {n for n, e in self.entities.items() if e.parent in frontier and n not in seen}
+            if not nxt:
+                return depth
+            depth, frontier = depth + 1, nxt
+            seen |= nxt
+
+
+def _uv(p, box) -> tuple[float, float]:
+    """p in box's own coordinates: -1 at its left / top edge, 0 in the middle, 1 at its right / bottom."""
+    hw, hh = (box[2] - box[0]) / 2 or 1.0, (box[3] - box[1]) / 2 or 1.0
+    return ((p[0] - box[0]) / hw - 1.0, (p[1] - box[1]) / hh - 1.0)

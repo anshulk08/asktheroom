@@ -278,7 +278,9 @@ class World(ThingRules):
     def _track_dwell(self, hands: list[Detection]) -> None:
         containers = {c: self.entities[c].box_cm for c in self.cfg.names('container')
                       if self.entities[c].status == Status.VISIBLE and self.entities[c].box_cm is not None}
-        self._dwell.update(self._now, hands, containers)
+        things = self._thing_containers()          # large things hold too (core/things.py)
+        self._track_crossings(hands, things)
+        self._dwell.update(self._now, hands, {**containers, **things})
 
     def _gray(self):
         """This update's frame in grayscale, converted at most once per update; None without an image."""
@@ -489,8 +491,8 @@ class World(ThingRules):
         cover also qualifies. (A touch within contact_window_s of last_seen is a pick-up instead.)"""
         out: list[str] = []
         for hid, touched in self._contacts[name].items():
-            for container, _ in self._dwell.visits_since(hid, touched):
-                if container != name and container not in out:
+            for container, _ in self._holding_visits(name, hid, touched):
+                if container not in out:
                     out.append(container)
         return out
 
@@ -531,7 +533,7 @@ class World(ThingRules):
         through to them."""
         # Anchored at last_seen, not held_since: debounce declares HELD 0.6-0.9 s late, and a quick
         # drop into the box can be over by then.
-        visits = [v for v in self._dwell.visits_since(ent.parent, self._seen_t[name]) if v[0] != name]
+        visits = self._holding_visits(name, ent.parent, self._seen_t[name])
         if not visits:
             return None
         container, exit_t = visits[-1]
