@@ -31,6 +31,8 @@ struct TableMapView: View {
     var steady = false
     /// Where the real laser dot is. Off in the answer sheet, so only one thing is lit up there.
     var showsLaser = true
+    /// The thing tapped on the Table tab, ringed in the accent colour.
+    var selected: String? = nil
     var onSelect: (String) -> Void = { _ in }
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -39,8 +41,7 @@ struct TableMapView: View {
         let items = MapLayout.items(for: snapshot)
         GeometryReader { proxy in
             let geo = MapGeometry(table: snapshot.tableSize, size: proxy.size)
-            let placement = MapLayout.placements(for: items, in: geo)
-            let places = placement.points
+            let places = MapLayout.placements(for: items, in: geo)
 
             ZStack {
                 TableSurface(geo: geo)
@@ -48,12 +49,12 @@ struct TableMapView: View {
                 ForEach(items.filter { $0.exitEdge != nil }) { item in
                     let from = places[item.id] ?? .zero
                     ExitArrow(from: from, to: geo.exitPoint(from: from, through: item.exitEdge!))
-                        .stroke(.primary.opacity(0.7), style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+                        .stroke(.primary.opacity(0.6), style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
                         .opacity(item.opacity)
                 }
 
                 ForEach(items) { item in
-                    MapItemView(item: item, scale: geo.scale, showsCaption: !placement.hiddenCaptions.contains(item.id))
+                    MapItemView(item: item, scale: geo.scale, isSelected: item.id == selected)
                         .position(places[item.id] ?? .zero)
                         .zIndex(Double(item.layer))
                         .onTapGesture { onSelect(item.id) }
@@ -108,17 +109,8 @@ private struct TableSurface: View {
             let table = Path(roundedRect: rect, cornerRadius: 14)
             context.fill(table, with: .color(Theme.surface(scheme)))
 
-            // 10 cm grid.
-            var grid = Path()
-            let step = geo.length(10)
-            if step > 4 {
-                var x = rect.minX + step
-                while x < rect.maxX - 1 { grid.move(to: CGPoint(x: x, y: rect.minY)); grid.addLine(to: CGPoint(x: x, y: rect.maxY)); x += step }
-                var y = rect.minY + step
-                while y < rect.maxY - 1 { grid.move(to: CGPoint(x: rect.minX, y: y)); grid.addLine(to: CGPoint(x: rect.maxX, y: y)); y += step }
-            }
-            context.stroke(grid, with: .color(.primary.opacity(0.07)), lineWidth: 1)
-            context.stroke(table, with: .color(.primary.opacity(0.35)), lineWidth: 1.5)
+            // No grid: the table's edge is the only line that isn't a thing.
+            context.stroke(table, with: .color(.primary.opacity(0.2)), lineWidth: 1)
         }
         .accessibilityHidden(true)
     }
@@ -127,7 +119,7 @@ private struct TableSurface: View {
 private struct MapItemView: View {
     let item: MapItem
     let scale: CGFloat
-    var showsCaption = true
+    var isSelected = false
     @Environment(\.colorScheme) private var scheme
 
     var body: some View {
@@ -139,22 +131,31 @@ private struct MapItemView: View {
         }
     }
 
-    private var outline: StrokeStyle {
-        StrokeStyle(lineWidth: 1.5, dash: item.dashed ? [5, 3] : [])
+    /// Plain things get a faint edge; only hidden and held things get a strong dashed one,
+    /// so the lines that are there mean something.
+    private var edge: (Color, StrokeStyle) {
+        item.dashed
+            ? (.primary.opacity(0.6), StrokeStyle(lineWidth: 1.5, dash: [5, 3]))
+            : (.primary.opacity(0.18), StrokeStyle(lineWidth: 1))
     }
 
     private func block(width: CGFloat, height: CGFloat) -> some View {
         RoundedRectangle(cornerRadius: 6)
             .fill(Theme.block(scheme))
-            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.primary.opacity(0.45), style: outline))
+            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(edge.0, style: edge.1))
+            .overlay {
+                if isSelected {
+                    RoundedRectangle(cornerRadius: 8).strokeBorder(Theme.accent, lineWidth: 3).padding(-3)
+                }
+            }
             .frame(width: width, height: height)
             .overlay(alignment: .top) {
-                Text(item.title)
-                    .font(.footnote.weight(.semibold))
+                // The name sits inside the block, so nothing floats above it.
+                Text(item.label)
+                    .font(.caption.weight(.semibold))
                     .fixedSize()
-                    .offset(y: -19)
+                    .frame(height: MapLayout.blockTitleHeight)
             }
-            .overlay(alignment: .bottom) { caption.offset(y: 19) }
             .opacity(item.opacity)
             .contentShape(Rectangle())
     }
@@ -164,37 +165,66 @@ private struct MapItemView: View {
             if let glyph = item.glyph {
                 Image(systemName: glyph).font(.footnote.weight(.bold))
             }
-            Text(item.title).font(.subheadline.weight(.semibold))
+            Text(item.label).font(.subheadline.weight(.semibold))
             if item.linkBadge {
-                Text("? link")
+                Image(systemName: "link")
                     .font(.caption2.weight(.bold))
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 1)
-                    .background(Capsule().fill(.primary.opacity(0.15)))
+                    .foregroundStyle(.secondary)
             }
         }
         .lineLimit(1)
         .fixedSize()
         .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(Capsule().fill(Theme.chip(scheme)))
-        .overlay(Capsule().strokeBorder(.primary.opacity(0.55), style: outline))
-        .overlay(alignment: .top) { caption.offset(y: MapLayout.chipHeight - 1) }
+        .frame(height: MapLayout.chipHeight)
+        .background(Capsule().fill(Theme.chip(scheme)).shadow(color: .black.opacity(0.08), radius: 1, y: 1))
+        .overlay(Capsule().strokeBorder(edge.0, style: edge.1))
+        .overlay {
+            if isSelected {
+                Capsule().strokeBorder(Theme.accent, lineWidth: 3).padding(-4)
+            }
+        }
         .opacity(item.opacity)
         .contentShape(Capsule())
     }
+}
 
-    @ViewBuilder private var caption: some View {
-        if showsCaption, let caption = item.caption {
-            Text(caption)
-                .font(.footnote)
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 4)
-                .background(RoundedRectangle(cornerRadius: 4).fill(Theme.surface(scheme).opacity(0.85)))
-                // Wrap long captions at a fixed width instead of the chip's.
-                .frame(width: MapLayout.captionMaxWidth)
-                .fixedSize()
+/// The key under the map: only the marks in use, each with its words.
+struct MapLegend: View {
+    let entries: [MapLayout.LegendEntry]
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        if !entries.isEmpty {
+            FlowLayout(spacing: 14, lineSpacing: 6) {
+                ForEach(entries, id: \.self) { entry in
+                    HStack(spacing: 6) {
+                        mark(entry)
+                        Text(entry.words)
+                    }
+                }
+            }
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Key: " + entries.map(\.words).joined(separator: ", "))
+        }
+    }
+
+    @ViewBuilder private func mark(_ entry: MapLayout.LegendEntry) -> some View {
+        switch entry {
+        case .held:
+            Image(systemName: "hand.raised.fill").foregroundStyle(.primary)
+        case .hidden:
+            Capsule().strokeBorder(.primary.opacity(0.6), style: StrokeStyle(lineWidth: 1.5, dash: [4, 2]))
+                .frame(width: 22, height: 13)
+        case .left:
+            Image(systemName: "arrow.left").foregroundStyle(.primary)
+        case .lost:
+            Image(systemName: "questionmark").foregroundStyle(.primary)
+        case .unsure:
+            Capsule().fill(Theme.chip(scheme)).overlay(Capsule().strokeBorder(.primary.opacity(0.18)))
+                .frame(width: 22, height: 13)
+                .opacity(MapLayout.uncertainOpacity)
         }
     }
 }

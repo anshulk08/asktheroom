@@ -65,7 +65,7 @@ final class MapLayoutTests: XCTestCase {
         let items = MapLayout.items(for: s)
         XCTAssertEqual(item("keys", in: items).siblingCount, 2)
         let geo = MapGeometry(table: s.tableSize, size: CGSize(width: 390, height: 280))
-        let points = MapLayout.placements(for: items, in: geo).points
+        let points = MapLayout.placements(for: items, in: geo)
         XCTAssertNotEqual(points["keys"]!.y, points["wallet"]!.y)
     }
 
@@ -81,17 +81,17 @@ final class MapLayoutTests: XCTestCase {
         XCTAssertLessThan(geo.exitPoint(from: CGPoint(x: 50, y: 99), through: .left).x, rect.minX)
     }
 
-    /// On an iPhone-width map the sample's chips and labels don't cover one another.
+    private func iPhoneGeometry(width: CGFloat = 394) -> MapGeometry {
+        let size = CGSize(width: width, height: width / MapGeometry.aspectRatio(for: sample.tableSize, width: width))
+        return MapGeometry(table: sample.tableSize, size: size)
+    }
+
+    /// On an iPhone-width map the sample's chips don't cover one another.
     func testSampleChipsDontOverlapOnAnIPhone() {
         let items = MapLayout.items(for: sample)
-        let width: CGFloat = 394
-        let size = CGSize(width: width, height: width / MapGeometry.aspectRatio(for: sample.tableSize, width: width))
-        let placement = MapLayout.placements(for: items, in: MapGeometry(table: sample.tableSize, size: size))
+        let points = MapLayout.placements(for: items, in: iPhoneGeometry())
         let chips = items.filter { $0.shape == .chip }
-        let rects = chips.map { chip in
-            MapLayout.rect(at: placement.points[chip.id]!,
-                           size: MapLayout.footprint(of: chip, withCaption: !placement.hiddenCaptions.contains(chip.id)))
-        }
+        let rects = chips.map { MapLayout.rect(at: points[$0.id]!, size: MapLayout.footprint(of: $0)) }
         for i in rects.indices {
             for j in rects.indices where j > i {
                 // Footprints are estimates, so edges touching by a few points is fine.
@@ -100,6 +100,36 @@ final class MapLayoutTests: XCTestCase {
                               "\(chips[i].id) overlaps \(chips[j].id) by \(overlap.size)")
             }
         }
-        XCTAssertFalse(placement.hiddenCaptions.contains("keys"), "the headline caption stays")
+    }
+
+    /// The box's name sits inside its top edge; the keys go below it, still inside the box.
+    func testInsideChipSitsUnderItsParentsName() {
+        let items = MapLayout.items(for: sample)
+        let geo = iPhoneGeometry()
+        let keys = MapLayout.placements(for: items, in: geo)["keys"]!
+        let box = item("box", in: items)
+        guard case .block(let w, let h) = box.shape else { return XCTFail("box is a block") }
+        let c = geo.point(box.center)
+        let body = CGRect(x: c.x - geo.length(w) / 2, y: c.y - geo.length(h) / 2, width: geo.length(w), height: geo.length(h))
+        let chip = MapLayout.rect(at: keys, size: MapLayout.footprint(of: item("keys", in: items)))
+        XCTAssertGreaterThanOrEqual(chip.minY, body.minY + MapLayout.blockTitleHeight - 1, "clear of the name")
+        XCTAssertTrue(body.contains(CGPoint(x: keys.x, y: keys.y)), "still inside the box")
+    }
+
+    /// Unnamed things print a short label; the full name stays for VoiceOver and the card.
+    func testUnnamedThingsGetAShortLabel() {
+        let items = MapLayout.items(for: sample)
+        XCTAssertEqual(item("thing:9", in: items).label, "unnamed")
+        XCTAssertEqual(item("thing:9", in: items).title, "unnamed object 9")
+        XCTAssertEqual(item("thing:7", in: items).label, "my charger", "named things keep their name")
+        XCTAssertTrue(item("thing:9", in: items).accessibilityLabel.hasPrefix("unnamed object 9"))
+    }
+
+    /// The key only lists the marks the map is using.
+    func testLegendListsOnlyMarksInUse() {
+        XCTAssertEqual(MapLayout.legend(for: MapLayout.items(for: sample)), [.held, .hidden, .left, .lost, .unsure])
+        var calm = sample
+        calm.e = calm.e.filter { ["wallet", "box", "notebook"].contains($0.n) }
+        XCTAssertEqual(MapLayout.legend(for: MapLayout.items(for: calm)), [])
     }
 }
