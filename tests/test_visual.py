@@ -17,7 +17,7 @@ from core.narration_store import NarrationStore
 from core.types import Answer, Detection, Detections, Entity, Event, Frame, Status
 from core.visual_memory import FakeEmbedder, VisualArchive, VisualConfig, digest, letterbox, tiles
 from voice.intents import parse
-from voice.visual import ABSTAIN, OFFLINE, PILLS_SAFE, VisualQA, box_to_px, px_to_cm, query_phrase
+from voice.visual import ABSTAIN, OFFLINE, PILLS_SAFE, VisualQA, point_to_px, px_to_cm, query_phrase
 
 CFG = load_config()
 T0 = datetime(2026, 9, 25, 9, 0, 0).timestamp()        # local 9:00 AM
@@ -211,15 +211,12 @@ def test_query_phrases():
 
 # ---------------------------------------------------------------- geometry
 
-def test_box_to_px_normalized_and_downscaled():
-    # normalized 0-1000 of the image sent: the downscale cancels out
-    assert box_to_px([100, 200, 300, 400], (640, 360), (1280, 720)) == (256.0, 72.0, 512.0, 216.0)
-    # pixels of the downscaled image (values > 1000 only make sense as pixels): scaled back up
-    x1, y1, x2, y2 = box_to_px([200, 900, 300, 1100], (1280, 720), (2560, 1440))
-    assert (x1, y1, x2, y2) == (1800.0, 400.0, 2200.0, 600.0)
-    assert box_to_px([0, 0, 0, 0], (640, 360), (1280, 720)) is None
-    assert box_to_px(["a"], (640, 360), (1280, 720)) is None
-    assert box_to_px([-50, -50, 2000, 500], (1280, 720), (1280, 720))[0] == 0.0     # clamped
+def test_point_to_px_fractions_and_0_1000():
+    assert point_to_px({"x": 0.25, "y": 0.5}, (1280, 720)) == (320.0, 360.0)
+    assert point_to_px({"x": 250, "y": 500}, (1280, 720)) == (320.0, 360.0)      # 0-1000 tolerated
+    assert point_to_px({"x": -0.2, "y": 1.4}, (1280, 720)) == (0.0, 720.0)        # clamped
+    for bad in (None, {"x": "a", "y": 1}, {"x": 0.5}, "nope", {"x": 5000, "y": 1}):
+        assert point_to_px(bad, (1280, 720)) is None
 
 
 def test_px_to_cm_with_a_homography_and_with_cm_to_px_only():
@@ -242,8 +239,8 @@ class Frames:
         return None if self.im is None else Frame(t=0.0, wall=T0, img=self.im, idx=1)
 
 
-def look_reply(answer="Your mug is on the right.", conf=0.9, point=None):
-    return json.dumps({"answer": answer, "confidence": conf, "point": point})
+def look_reply(answer="Your mug is on the right.", conf=0.9, mark=None, point=None):
+    return json.dumps({"answer": answer, "confidence": conf, "mark": mark, "point": point})
 
 
 def qa(log, reply, world=None, im="default", online=True, **kw):
@@ -258,31 +255,50 @@ def qa(log, reply, world=None, im="default", online=True, **kw):
     return q, prov
 
 
-def test_look_points_at_the_tracked_entity_the_box_lands_on(log):
-    # keys at (20, 15) cm = (284, 180) px in the 1280x720 sim frame = (250, 222) in 0-1000
-    q, prov = qa(log, look_reply("Your keys are near the top left.", point={"box_2d": [230, 200, 270, 245],
-                                                                            "label": "keys"}))
+def test_look_marks_visible_entities_and_points_at_the_chosen_mark(log):
+    q, prov = qa(log, look_reply("Your keys are near the top left.", mark=1))
     a = q.look("where are the shiny things?")
     assert a == Answer("Your keys are near the top left.", point_at="keys", action="point")
     [call] = prov.calls
     images = [p for p in call.parts if p[0] == "image"]
-    assert len(images) == 1                                  # no close-ups asked for
+    assert len(images) == 1                                  # the marked frame; no close-ups asked for
+    texts = " ".join(p[1] for p in call.parts if p[0] == "text")
+    assert "1 = keys" in texts and "2 = box" in texts
     s = call.system.lower()
-    assert "box_2d" in s and "0-1000" in s and "medication" in s and "beyond the table" in s
+    assert "numbered" in s and "mark" in s and "medication" in s and "beyond the table" in s
+    assert "box_2d" not in s
+    assert "never mention the marks" in s                   # the listener can't see them
 
 
-def test_look_points_at_a_raw_spot_when_no_entity_is_there(log):
-    q, _ = qa(log, look_reply("There is a note on the left.", point={"box_2d": [450, 50, 550, 150], "label": "note"}))
+def test_marks_skip_hidden_and_unboxed_entities(log):
+    world = FakeWorld([Entity("keys", "target", Status.INSIDE, parent="box", pos_cm=(70.0, 40.0)),
+                       Entity("box", "container", Status.VISIBLE, pos_cm=(70.0, 40.0), box_cm=(62.0, 34.0, 78.0, 46.0)),
+                       Entity("wallet", "target", Status.VISIBLE, pos_cm=(30.0, 30.0))], log)
+    q, prov = qa(log, look_reply(mark=1), world=world)
+    q.look("what's on the table?")
+    texts = " ".join(p[1] for p in prov.calls[0].parts if p[0] == "text")
+    assert "1 = box" in texts and "keys" not in texts.split("Marks:")[1].split("\n")[0] and "2 =" not in texts
+
+
+def test_look_points_at_a_raw_spot_when_no_mark_fits(log):
+    # (0.1, 0.5) of the 1280x720 sim frame = (128, 360) px = (9, 30) cm
+    q, _ = qa(log, look_reply("There is a note on the left.", point={"x": 0.1, "y": 0.5}))
     a = q.look("what does the note say?")
     assert a.point_at is None and a.action == "point"
     assert a.target_cm == pytest.approx((9.0, 30.0), abs=0.2)
 
 
-def test_look_ignores_points_off_the_table_and_bad_boxes(log):
-    for point in ({"box_2d": [0, 0, 0, 0], "label": "x"}, {"box_2d": "nope", "label": "x"}, None):
-        q, _ = qa(log, look_reply(point=point))
+def test_look_point_on_a_tracked_entity_follows_it(log):
+    # keys at (20, 15) cm = (284, 180) px = (0.222, 0.25): a point there resolves to the entity
+    q, _ = qa(log, look_reply("Your keys are there.", point={"x": 0.222, "y": 0.25}))
+    assert q.look("where are the shiny things?").point_at == "keys"
+
+
+def test_look_ignores_bad_marks_and_points(log):
+    for kw in ({"mark": 99}, {"mark": "one"}, {"mark": 0}, {"point": {"x": 5000, "y": 1}}, {"point": "nope"}, {}):
+        q, _ = qa(log, look_reply(**kw))
         a = q.look("what's on the table?")
-        assert a.point_at is None and a.target_cm is None and a.action is None
+        assert a.point_at is None and a.target_cm is None and a.action is None, kw
 
 
 def test_look_abstains_when_unsure(log):
@@ -506,3 +522,15 @@ def test_clip_tokenizer_matches_open_clip():
     ours = ClipTokenizer(vocab)
     probe = ["a photo of a red mug", "Grandma's ring & keys!", "3:30 pm pill bottle"]
     assert (ours(probe) == oc.get_tokenizer("MobileCLIP2-S0")(probe).numpy()).all()
+
+
+@pytest.mark.parametrize("said,spoken", [
+    ("next to the camera, under mark 10.", "Next to the camera."),
+    ("The keys are in the small yellow box at mark 9.", "The keys are in the small yellow box."),
+    ("The calculator (mark 3) is on the left.", "The calculator is on the left."),
+    ("Mark 2 is your mug, on the right.", "Your mug, on the right."),
+    ("It's on the left, marked 4, by the cup.", "It's on the left, by the cup."),
+])
+def test_look_never_speaks_the_marks(log, said, spoken):
+    q, _ = qa(log, look_reply(said, mark=1))
+    assert q.look("where is it?").text == spoken

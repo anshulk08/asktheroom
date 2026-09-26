@@ -10,14 +10,19 @@ Routing (VisualQA.route, called by voice/pipeline.py before the offline template
 Offline, a question only the VLM could answer gets a spoken 'I need the connection' (the world model
 still answers everything else). Over the hourly cap, route() returns None and the old path answers.
 
-look(): the current frame (<= look_px), upscaled close-ups of entities the question names (from
-core.crops.active()), the compact world state and the question go to the VLM, which replies with strict
-JSON {answer, confidence, point: null | {box_2d: [ymin, xmin, ymax, xmax] 0-1000 in image 1, label}}. A
-point is mapped to table cm (frame px -> table homography) and attached to the nearest tracked entity it
-falls on (the laser then follows that entity through world.resolve); otherwise the Answer carries the
-raw table position in target_cm. Low confidence abstains: "I can't tell from here." (The box_2d
-convention, [y1, x1, y2, x2] normalized to 0-1000, is the one Project Memoria's gemini_spatial.py uses
-for Gemini grounding, MIT licensed; this is a separate implementation.)
+look(): set-of-marks grounding. Every VISIBLE tracked entity with a box (known objects and thing:N) is
+drawn on the current frame (<= look_px) as a numbered yellow box; that marked frame, upscaled close-ups of
+entities the question names (from core.crops.active()), the compact world state and the question go to
+the VLM, which replies with strict JSON {answer, confidence, mark: null | number, point: null | {x, y}
+fractions of image 1}. A mark points at its entity (the laser then follows it through world.resolve); a
+point (for something no mark covers) is mapped to table cm (frame px -> table homography), attached to a
+tracked entity it lands on, else carried as the raw table position in target_cm. Low confidence abstains:
+"I can't tell from here."
+
+Why marks: measured with grok-4.3 on a 5-object desk photo, asking for boxes (Project Memoria's Gemini
+box_2d convention, [ymin, xmin, ymax, xmax] 0-1000) scored 0/5 (mean IoU 0.14; pixel and fraction boxes
+2/5), a bare point landed on 4/5, and picking among numbered candidate boxes got 5/5 in ~0.75 s. The
+tracker already has the boxes; the VLM only has to choose.
 
 recall(): archived frames (core/visual_memory.py) picked by text similarity and/or the question's time
 window, each with its time and the world model's digest, plus the narrations and world events of that
@@ -63,18 +68,21 @@ Rules:
 - Say only what you can see or what the tracker states. If you can't tell, say so and set confidence below 0.5.
 - Never state or imply that medication was taken, swallowed, skipped or missed.
 - Never describe anything beyond the table; the camera cannot see it.
-- If the answer is about one visible thing on the table, set point.box_2d to its box in image 1 as [ymin, xmin, ymax, xmax], each 0-1000 relative to image 1's height and width, and point.label to a short name. Otherwise point is null.
+- Image 1 has numbered yellow boxes (marks) around objects the tracker follows; the text lists them. If the answer is about one visible thing and a mark is on it, set mark to that number and point to null.
+- If the thing has no mark, set mark to null and point to its centre in image 1 as {"x": fraction of the width, "y": fraction of the height}, each 0 to 1.
+- If the answer is not about one visible thing, mark and point are both null.
+- Never mention the marks, their numbers or the yellow boxes in the answer: the listener can't see them. Describe places the way a person would ("on the left, next to the cup").
 - confidence: 0 to 1.
 Reply with the JSON object only."""
 
 LOOK_SCHEMA = {
-    "type": "object", "additionalProperties": False, "required": ["answer", "confidence", "point"],
+    "type": "object", "additionalProperties": False, "required": ["answer", "confidence", "mark", "point"],
     "properties": {
         "answer": {"type": "string"}, "confidence": {"type": "number"},
+        "mark": {"anyOf": [{"type": "null"}, {"type": "integer"}]},
         "point": {"anyOf": [{"type": "null"}, {
-            "type": "object", "additionalProperties": False, "required": ["box_2d", "label"],
-            "properties": {"box_2d": {"type": "array", "items": {"type": "number"}},
-                           "label": {"type": "string"}}}]}},
+            "type": "object", "additionalProperties": False, "required": ["x", "y"],
+            "properties": {"x": {"type": "number"}, "y": {"type": "number"}}}]}},
 }
 
 RECALL_SYSTEM = """You answer spoken questions about what was on a tabletop earlier. You get frames an overhead camera saved at the listed times (it looks straight down: table, objects, sometimes hands; nothing beyond the table, no faces), what an object tracker believed at each frame, and the tracker's events and activity notes for that time.
@@ -97,22 +105,22 @@ RECALL_SCHEMA = {
 
 # ---------------------------------------------------------------- geometry
 
-def box_to_px(box_2d, sent_wh: tuple, orig_wh: tuple) -> Optional[tuple]:
-    """[ymin, xmin, ymax, xmax] from the VLM -> (x1, y1, x2, y2) pixels of the ORIGINAL frame. Values
-    are 0-1000 of the image sent (so the downscale cancels out); a reply in pixels of the sent image
-    (any value > 1000) is scaled back by orig / sent instead."""
+def point_to_px(point, orig_wh: tuple) -> Optional[tuple]:
+    """{x, y} from the VLM -> (x, y) pixels of the ORIGINAL frame. Fractions 0-1 (what the prompt asks;
+    slightly out of range is clamped); values up to 1000 are read as the 0-1000 convention some models
+    fall back to; anything else is None."""
     try:
-        y1, x1, y2, x2 = (float(v) for v in box_2d)
-    except (TypeError, ValueError):
+        x, y = float(point["x"]), float(point["y"])
+    except (TypeError, ValueError, KeyError):
         return None
-    (sw, sh), (ow, oh) = sent_wh, orig_wh
-    if max(y1, x1, y2, x2) <= 1000.0:
-        fx, fy = ow / 1000.0, oh / 1000.0
-    else:
-        fx, fy = ow / sw, oh / sh
-    x1, x2 = sorted((min(max(x1 * fx, 0.0), ow), min(max(x2 * fx, 0.0), ow)))
-    y1, y2 = sorted((min(max(y1 * fy, 0.0), oh), min(max(y2 * fy, 0.0), oh)))
-    return (x1, y1, x2, y2) if x2 > x1 and y2 > y1 else None
+    if not (x == x and y == y):
+        return None
+    m = max(abs(x), abs(y))
+    if m > 1000:
+        return None
+    scale = 1.0 if m <= 1.5 else 1000.0
+    ow, oh = orig_wh
+    return (min(max(x / scale, 0.0), 1.0) * ow, min(max(y / scale, 0.0), 1.0) * oh)
 
 
 def px_to_cm(table, pts) -> Optional[np.ndarray]:
@@ -131,6 +139,40 @@ def px_to_cm(table, pts) -> Optional[np.ndarray]:
         H = cv2.getPerspectiveTransform(px, cm)
         return cv2.perspectiveTransform(pts.reshape(-1, 1, 2), H).reshape(-1, 2)
     return None
+
+
+def cm_box_to_px(table, box_cm) -> Optional[tuple]:
+    """A table-cm box -> the (x1, y1, x2, y2) frame-px box around its projected corners."""
+    if table is None or not hasattr(table, "cm_to_px"):
+        return None
+    x1, y1, x2, y2 = (float(v) for v in box_cm)
+    try:
+        px = np.asarray(table.cm_to_px([[x1, y1], [x2, y1], [x2, y2], [x1, y2]]), dtype=np.float64).reshape(-1, 2)
+    except Exception:
+        return None
+    (a, b), (c, d) = px.min(axis=0), px.max(axis=0)
+    return (float(a), float(b), float(c), float(d)) if c > a and d > b else None
+
+
+def draw_marks(img: np.ndarray, boxes: list) -> np.ndarray:
+    """A copy of img with each px box drawn in yellow and numbered from 1 (black-outlined white digits in
+    a corner tag), sized for the frame so they survive the downscale to look_px."""
+    import cv2
+    out = img.copy()
+    h, w = out.shape[:2]
+    th = max(2, round(max(h, w) / 400))
+    fs = max(0.6, max(h, w) / 1100)
+    for i, (x1, y1, x2, y2) in enumerate(boxes, 1):
+        p1 = (int(max(0, x1)), int(max(0, y1)))
+        p2 = (int(min(w - 1, x2)), int(min(h - 1, y2)))
+        cv2.rectangle(out, p1, p2, (0, 255, 255), th)
+        label = str(i)
+        (tw, tht), base = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, fs, th)
+        tx = min(max(p1[0], 0), w - tw - 6)
+        ty = p1[1] - 4 if p1[1] - tht - 8 >= 0 else min(p1[1] + tht + 6, h - 4)
+        cv2.rectangle(out, (tx, ty - tht - 4), (tx + tw + 6, ty + base), (0, 255, 255), -1)
+        cv2.putText(out, label, (tx + 3, ty), cv2.FONT_HERSHEY_SIMPLEX, fs, (0, 0, 0), th + 1, cv2.LINE_AA)
+    return out
 
 
 def _jpeg(img: np.ndarray, long_side: Optional[int] = None, upscale: bool = False) -> tuple[bytes, tuple]:
@@ -163,6 +205,22 @@ def _spoken(text: str) -> str:
     if not t and n:
         return PILLS_SAFE
     return t if not t or t.endswith((".", "!", "?")) else t + "."
+
+
+_MARK_REFS = [re.compile(p, re.I) for p in (
+    r"\s*\(\s*(?:mark(?:ed)?|#)\s*#?\d+\s*\)",                                    # "(mark 3)"
+    r"\bmark\s*#?\d+\s+is\s+",                                                  # "Mark 2 is your mug"
+    r",?\s*(?:(?:under|at|in|by|near|beside|with)\s+)?(?:the\s+)?mark(?:ed)?\s*(?:number\s*)?#?\d+\b",
+)]
+
+
+def _unmark(text: str) -> str:
+    """Drop references to the numbered marks: the listener never sees image 1."""
+    for rx in _MARK_REFS:
+        text = rx.sub("", text)
+    text = re.sub(r"\s+([,.!?])", r"\1", text)
+    text = re.sub(r",\s*([,.!?])", r"\1", text).strip(" ,")
+    return text[:1].upper() + text[1:]
 
 
 def _conf(d: dict) -> float:
@@ -285,24 +343,52 @@ class VisualQA:
         if f is None or getattr(f, "img", None) is None:
             return Answer(CANT_SEE)
         oh, ow = f.img.shape[:2]
-        full, sent = _jpeg(f.img, self.c.look_px)
+        names = self._names()
+        marks = self._marks()
+        full, _ = _jpeg(draw_marks(f.img, [b for _, b in marks]) if marks else f.img, self.c.look_px)
         parts: list = [("text", "Image 1: the whole table now, from above."), ("image", full)]
         focus = self._focus(intent, question)
-        names = self._names()
         crops = self._crops(focus)
         for i, (n, img) in enumerate(crops, 2):
             parts += [("text", f"Image {i}: close-up of the {names.get(n) or 'unnamed object'}."),
                       ("image", _jpeg(img, self.c.crop_px, upscale=True)[0])]
-        parts.append(("text", f"Tracker: {self._state_text()}.\nQuestion: {question}"))
+        listed = ", ".join(f"{i} = {names.get(n) or 'unnamed object'}" for i, (n, _) in enumerate(marks, 1))
+        parts.append(("text", f"Marks: {listed or 'none'}.\nTracker: {self._state_text()}.\n"
+                              f"Question: {question}"))
         try:
             d = self._vlm(LOOK_SYSTEM, parts, LOOK_SCHEMA)
         except (ProviderError, NarrationError) as ex:
             log.warning("look failed: %s", ex)
             return Answer("Sorry, I couldn't look at the table just now.")
-        text = _spoken(str(d.get("answer") or ""))
+        text = _spoken(_unmark(str(d.get("answer") or "")))
         if not text or _conf(d) < self.c.abstain_below:
             return Answer(ABSTAIN)
-        return self._pointed(text, d.get("point"), sent, (ow, oh))
+        m = d.get("mark")
+        if isinstance(m, int) and not isinstance(m, bool) and 1 <= m <= len(marks):
+            return Answer(text, point_at=marks[m - 1][0], action="point")
+        return self._pointed(text, d.get("point"), (ow, oh))
+
+    def _marks(self) -> list[tuple[str, tuple]]:
+        """(entity, frame px box) for every VISIBLE tracked entity with a box, in world order: the
+        candidates the VLM picks from."""
+        if self.table is None or getattr(self.table, "ok", True) is False:
+            return []
+        try:
+            ents = self.world.state_json().get("entities", [])
+        except Exception:
+            return []
+        out = []
+        for d in ents:
+            if d.get("status") != "VISIBLE":
+                continue
+            try:
+                box = self.world.get(d["name"]).box_cm
+            except Exception:
+                box = None
+            px = cm_box_to_px(self.table, box) if box is not None else None
+            if px is not None:
+                out.append((d["name"], px))
+        return out
 
     def _crops(self, focus: list[str]) -> list[tuple[str, np.ndarray]]:
         try:
@@ -321,14 +407,14 @@ class VisualQA:
                 out.append((n, crop.img))
         return out
 
-    def _pointed(self, text: str, point, sent_wh: tuple, orig_wh: tuple) -> Answer:
-        """The answer, pointing at what the VLM boxed: a tracked entity it lands on, else the spot."""
+    def _pointed(self, text: str, point, orig_wh: tuple) -> Answer:
+        """The answer, pointing where the VLM pointed: a tracked entity it lands on, else the spot."""
         if not isinstance(point, dict) or getattr(self.table, "ok", True) is False:
             return Answer(text)
-        box = box_to_px(point.get("box_2d"), sent_wh, orig_wh)
-        if box is None:
+        px = point_to_px(point, orig_wh)
+        if px is None:
             return Answer(text)
-        c = px_to_cm(self.table, [((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)])
+        c = px_to_cm(self.table, [px])
         if c is None:
             return Answer(text)
         x, y = float(c[0][0]), float(c[0][1])
