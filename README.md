@@ -53,7 +53,7 @@ Walk through the key files in the order data flows:
 5. `core/world.py` and `core/relations.py` hold the deterministic world model: debounce, hand contact, covers, container dwell, background change, parent chains and decay. See [`TECHNICAL_DESIGN.md`](TECHNICAL_DESIGN.md).
 6. `core/events.py` stores events, question logs and snapshots in SQLite. On startup it prunes snapshot JPEGs and state snapshots older than 24 h.
 7. `voice/stt.py` detects speech with Silero VAD and transcribes it with whisper.cpp, using a prompt that lists the object names.
-8. `voice/understand.py` decides whether overheard speech was meant for the rig, then runs the rule parser (`voice/intents.py`) and falls back to Qwen when the rules can't read it.
+8. `voice/understand.py` decides whether overheard speech was meant for the rig, then runs the rule parser (`voice/intents.py`) and falls back to Grok when the rules can't read it (offline, the rules alone answer).
 9. `voice/pipeline.py` routes the intent. `voice/answers.py` fills templates for the core intents. `voice/local_llm.py` answers open questions.
 10. `voice/tts.py` speaks. `act/laser.py` aims, circles or sweeps. `main.py` wires the threads together and reports each answered question to n8n.
 
@@ -88,7 +88,7 @@ A judge runs it, and it resets in under a minute:
 
 - Python 3.10 (the Jetson's JetPack 6 version). The laptop setup uses [uv](https://github.com/astral-sh/uv).
 - For the rig: a Jetson Orin Nano with JetPack 6.2 and Docker (the Ultralytics JetPack 6 image), a USB camera, a pan-tilt head with a laser, a USB mic and speaker, and a presentation clicker.
-- `llama-server` from llama.cpp: `brew install llama.cpp` on a Mac. On the Jetson, build it with CUDA (the command is in `scripts/qwen_server.sh`). Ask the team before building on the Jetson.
+- `XAI_API_KEY` in `.env` for Grok, which reads questions the rules can't and answers open and visual questions. Local Qwen (`understand.backend: qwen`, needs `llama-server` from llama.cpp, see `scripts/qwen_server.sh`) is optional and not installed on the rig.
 - Optional: `ELEVENLABS_API_KEY` (plus `ELEVENLABS_VOICE_ID`) for the online voice, and `TWILIO_AUTH_TOKEN` for SMS.
 
 Nothing in the test suite needs hardware.

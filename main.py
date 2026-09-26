@@ -2,7 +2,7 @@
 
   capture     30 fps     core.capture.FrameBuffer runs its own thread
   perception  10-15 fps  wait_new -> detector.detect -> hands.update -> world.update (world logs events)
-  voice       always     mic -> VAD -> whisper -> "was that for me?" -> Qwen reads it -> ask -> speak + aim
+  voice       always     mic -> VAD -> whisper -> "was that for me?" -> Grok reads it -> ask -> speak + aim
                          (listen.mode: always | wake | click; the clicker means "listen now" in all three)
   net         every 5 s  NetMonitor probes; world.online follows it
   server      5 Hz       server.app.create_app(...) under uvicorn
@@ -14,10 +14,10 @@
 
 Questions are spoken. The mic is always on: Whisper transcribes what people near the table say,
 voice/understand.py drops what isn't meant for the rig (never logged, the audio is only ever in
-memory), and Qwen (llama-server on the Jetson, scripts/qwen_server.sh) works out what the rest
-meant; without it the rule parser does. The mic waits while the rig speaks, or it would answer itself. The
-dashboard's /ask (for testing) and texts (/sms) go through the same ask(); dashboard questions also
-speak and move the laser, texts only answer by text. Aiming never blocks speech: an uncalibrated laser
+memory), and Grok (voice/understand.py, understand.backend: grok) works out what the rest meant;
+offline the rule parser does (local Qwen is optional and not installed on the rig). The mic waits while the rig speaks, or it would answer itself. The
+dashboard's /ask, the phone (over the BLE bridge) and texts (/sms) go through the same ask(); dashboard
+and phone questions also speak and move the laser, texts only answer by text. Aiming never blocks speech: an uncalibrated laser
 raises RuntimeError, which is logged, and the answer still plays.
 
 --fake wiring (mirrors server/sim.py): server.sim.SimCamera plays the scripted tabletop story and

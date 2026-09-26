@@ -8,9 +8,8 @@ next to the app's HTTP API on localhost:8000.
                         the phone subscribes
     status           -> read (unframed JSON) + notify on change (app up/down, fps, online, calibration)
 
-Source "dashboard" is the /ask source that is spoken AND aimed (main.Room.ask_and_act answers every
-source except "sms"/"n8n" out loud and moves the laser; server/app.py accepts only
-{"dashboard", "n8n"}).
+Source "phone" is spoken AND aimed like "dashboard" (main.Room.ask_and_act answers every source
+except "sms" out loud and moves the laser; server/app.py's /ask accepts only {"dashboard", "phone"}).
 
 Needs only what JetPack 6 ships: python3 (3.10), python3-dbus, python3-gi, BlueZ 5.64.
 

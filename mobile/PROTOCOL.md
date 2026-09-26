@@ -97,7 +97,7 @@ A 414-byte state snapshot at MTU 185 is 3 chunks: `03 00 00 …179 B`, `03 01 00
     (one question is answered at a time, and one more can wait in the queue)
 - The bridge sends the question to `POST http://127.0.0.1:8000/ask` with `{"text": q, "source": "phone"}`.
   `phone` and `dashboard` are the sources a client may name, and both speak and move the laser
-  (`main.Room.ask_and_act` treats only `sms` and `n8n` as text-only). Asking from the phone has the same
+  (`main.Room.ask_and_act` treats only `sms` as text-only; n8n only receives a report of each answer). Asking from the phone has the same
   effect as asking from the dashboard: the answer is spoken on the rig and the laser points.
 - **Dictating next to the rig (P1).** The always-on mic also hears a question the judge dictates into the
   phone. The rig drops a voice question that nearly matches (same words after normalizing) a phone question
