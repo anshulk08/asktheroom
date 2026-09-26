@@ -396,3 +396,13 @@ table_tag:
   size_cm: 16.0               # black square side as printed
   frames: 15                  # corner positions averaged over this many consecutive frames
   max_cm: 250                 # cap on the tracked area (a steep camera sees far across the plane)
+
+# Known-object boxes dropped before the world sees them (core/detect.py). Zero-shot YOLO-World labels a
+# hand as 'phone' / 'wallet' next to its 'hand' box (per-class NMS keeps both): a known box this close to
+# a hand box is the hand. Also dropped: boxes too big for any prop, and boxes whose centre is off the
+# table (a phone in someone's pocket). The change proposer and thing candidates also reject motion
+# (proposals.change still_frames / moving_frac, openworld still_cm / still_s; defaults in the code).
+detect_filter:
+  hand_iou: 0.6
+  max_area_frac: 0.25         # of the frame
+  table_margin_cm: 5.0        # null = keep boxes off the table
