@@ -133,7 +133,7 @@ class RoomTracker:
                     continue
                 ov = geom.iou(tr.box_px, o.box_px)
                 d = geom.dist(geom.center(tr.box_px), geom.center(o.box_px))
-                if ov >= MATCH_IOU or d <= MATCH_DIAG * diag:
+                if ov >= MATCH_IOU or (d <= MATCH_DIAG * diag and _near_ok(tr, o)):
                     pairs.append((-ov, d, i, j))
         pairs.sort()
         out: dict[str, RoomObservation] = {}
@@ -267,6 +267,20 @@ class RoomNamer:
         self._wake.set()
         if self._thread is not None:
             self._thread.join(timeout=2.0)
+
+
+def _near_ok(tr: RoomTrack, o: RoomObservation) -> bool:
+    """A match by centre distance alone. A prop's class keeps different objects apart; unnamed objects all
+    share cls 'thing', so a small one next to a big one (the remote beside a bag of chips on the couch, rig
+    run Sat 26 Sep) must not match the big one's track: the centre must be within half the *smaller*
+    diagonal and the sizes within 3x."""
+    if tr.cls != "thing":
+        return True
+    da = math.hypot(tr.box_px[2] - tr.box_px[0], tr.box_px[3] - tr.box_px[1])
+    db = math.hypot(o.box_px[2] - o.box_px[0], o.box_px[3] - o.box_px[1])
+    aa, ab = max(geom.area(tr.box_px), 1), max(geom.area(o.box_px), 1)
+    return (geom.dist(geom.center(tr.box_px), geom.center(o.box_px)) <= MATCH_DIAG * min(da, db)
+            and max(aa, ab) / min(aa, ab) <= 3.0)
 
 
 # ---------------------------------------------------------------------------------------------

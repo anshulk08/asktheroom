@@ -249,3 +249,25 @@ def test_confirmed_track_is_kept_until_absent_min_s_even_after_absent_visits():
     for _ in range(2):                                     # past 3 s since the last match
         v = go()
     assert v.dropped == [k] and tr.tracks() == []
+
+
+def test_a_small_thing_beside_a_big_one_keeps_its_own_track():
+    """Rig run: the remote (crop px 49,185-141,228) lay beside a bag of chips (32,237-243,287) on the couch.
+    Both are cls 'thing'; the remote must not match the bag's track by centre distance."""
+    remote, bag = (729, 975, 821, 1018), (712, 1027, 923, 1077)
+    r = Run()
+    r.visit(("thing", bag))
+    r.visit(("thing", bag))
+    [bag_track] = r.tr.tracks()
+    r.visit(("thing", remote))                            # YOLOE misses the bag this visit
+    assert bag_track.box_px == bag                        # the remote did not take the bag's track
+    v = r.visit(("thing", bag), ("thing", remote))
+    assert sorted(t.box_px for t in v.confirmed) == sorted([bag, remote])
+    assert bag_track.box_px == bag and len(r.tr.tracks()) == 2
+
+
+def test_a_thing_still_matches_itself_when_it_shifts_a_little():
+    r = Run()
+    r.visit(("thing", (100, 100, 160, 130)))
+    v = r.visit(("thing", (112, 104, 172, 134)))          # IoU ~0.5
+    assert len(v.confirmed) == 1 and len(r.tr.tracks()) == 1
