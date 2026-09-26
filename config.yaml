@@ -26,6 +26,8 @@ prompts:
 # --export). Path B swaps in the fine-tuned model; its class names must be the object names + hand.
 detect:
   model: models/yolov8s-worldv2-askroom.engine   # built on the Jetson from the .pt below (scripts/dock.sh)
+  # The rig overrides this in its gitignored config.local.yaml: models/askroom-yolo26s-brio.engine (YOLO26s
+  # fine-tuned on Brio captures, Sat 26 Sep), with proposals.kind yoloe and wallet/phone conf_threshold 0.6.
   world_pt_baked: models/yolov8s-worldv2-askroom.pt   # prompts baked in on the Mac, CLIP removed
   world_pt: models/yolov8s-worldv2.pt
   imgsz: 640
