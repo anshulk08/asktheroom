@@ -1,3 +1,4 @@
+import AVFoundation
 import SwiftUI
 
 /// For a family member or carer: demo mode, speech and the rig's details, kept off the main
@@ -5,9 +6,16 @@ import SwiftUI
 struct HelperSettings: View {
     let store: RoomStore
     @AppStorage(Speaker.enabledKey) private var readAloud = false
+    @AppStorage(Speaker.engineKey) private var engine = Speaker.Engine.grok
+    @AppStorage(Speaker.grokVoiceKey) private var grokVoice = Grok.defaultVoice
+    @AppStorage(Speaker.speedKey) private var speed = 1.0
     @AppStorage(Speaker.voiceIDKey) private var voiceID = ""
+    @State private var grokKeyDraft = ""
+    @State private var hasGrokKey = Speaker.grokKey != nil
     @State private var keyDraft = ""
     @State private var hasKey = Speaker.apiKey != nil
+    @State private var voices = Grok.knownVoices
+    @State private var route = VoiceRoute.current
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -30,29 +38,7 @@ struct HelperSettings: View {
                     Text("The rig already says its answers out loud. Read aloud is for using the phone away from the table.")
                 }
 
-                Section {
-                    TextField("Voice ID", text: $voiceID)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    SecureField(hasKey ? "API key (saved)" : "API key", text: $keyDraft)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .onSubmit(saveKey)
-                    if hasKey {
-                        Button("Forget the key", role: .destructive) {
-                            Speaker.apiKey = nil
-                            hasKey = false
-                        }
-                    }
-                    Button("Try the voice") {
-                        saveKey()
-                        Speaker.shared.speak("Your keys are inside the box.")
-                    }
-                } header: {
-                    Text("The rig's voice")
-                } footer: {
-                    Text("Use the same ElevenLabs voice ID as the rig (ELEVENLABS_VOICE_ID) so the phone sounds like the room. The key stays in this phone's Keychain. When read aloud is on, answer text goes to ElevenLabs; without a key or internet the iPhone's own voice reads it.")
-                }
+                voiceSection
 
                 Section("The room") {
                     LabeledContent("Connection", value: connection)
@@ -84,7 +70,10 @@ struct HelperSettings: View {
                          : "\(store.dismissedNotices.count) put away with “Got it”.")
                 }
             }
-            .onDisappear(perform: saveKey)
+            .onDisappear(perform: saveKeys)
+            .task(id: hasGrokKey) { voices = await Grok.fetchVoices(key: Speaker.grokKey) }
+            .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.routeChangeNotification)
+                .receive(on: RunLoop.main)) { _ in route = VoiceRoute.current }
             .navigationTitle("Helper settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -95,12 +84,100 @@ struct HelperSettings: View {
         }
     }
 
-    private func saveKey() {
-        let key = keyDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !key.isEmpty else { return }
-        Speaker.apiKey = key
-        keyDraft = ""
-        hasKey = true
+    private func saveKeys() {
+        if let key = trimmed(grokKeyDraft) {
+            Speaker.grokKey = key
+            grokKeyDraft = ""
+            hasGrokKey = true
+        }
+        if let key = trimmed(keyDraft) {
+            Speaker.apiKey = key
+            keyDraft = ""
+            hasKey = true
+        }
+    }
+
+    private func trimmed(_ draft: String) -> String? {
+        let key = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        return key.isEmpty ? nil : key
+    }
+
+    @ViewBuilder
+    private var voiceSection: some View {
+        Section {
+            Picker("Voice", selection: $engine) {
+                ForEach(Speaker.Engine.allCases) { Text($0.title).tag($0) }
+            }
+            switch engine {
+            case .grok:
+                Picker("Grok voice", selection: $grokVoice) {
+                    ForEach(voiceChoices) { Text($0.name).tag($0.id) }
+                }
+                keyField(hasGrokKey ? "xAI API key (saved)" : "xAI API key", draft: $grokKeyDraft)
+                if hasGrokKey {
+                    Button("Forget the xAI key", role: .destructive) {
+                        Speaker.grokKey = nil
+                        hasGrokKey = false
+                    }
+                }
+            case .rigVoice:
+                TextField("ElevenLabs voice ID", text: $voiceID)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                keyField(hasKey ? "ElevenLabs API key (saved)" : "ElevenLabs API key", draft: $keyDraft)
+                if hasKey {
+                    Button("Forget the ElevenLabs key", role: .destructive) {
+                        Speaker.apiKey = nil
+                        hasKey = false
+                    }
+                }
+            case .builtIn:
+                EmptyView()
+            }
+            VStack(alignment: .leading) {
+                LabeledContent("Speed", value: speed.formatted(.number.precision(.fractionLength(1))) + "×")
+                Slider(value: $speed, in: Grok.speeds, step: 0.1) {
+                    Text("Speed")
+                } minimumValueLabel: {
+                    Image(systemName: "tortoise").accessibilityLabel("Slower")
+                } maximumValueLabel: {
+                    Image(systemName: "hare").accessibilityLabel("Faster")
+                }
+            }
+            LabeledContent("Playing through", value: route.summary)
+            Button("Try the voice") {
+                saveKeys()
+                Speaker.shared.speak("Your keys are inside the box.")
+            }
+        } header: {
+            Text("Voice")
+        } footer: {
+            Text(voiceFooter)
+        }
+    }
+
+    private var voiceChoices: [Grok.Voice] {
+        voices.contains { $0.id.caseInsensitiveCompare(grokVoice) == .orderedSame }
+            ? voices : voices + [Grok.Voice(id: grokVoice, name: grokVoice.capitalized)]
+    }
+
+    private func keyField(_ title: String, draft: Binding<String>) -> some View {
+        SecureField(title, text: draft)
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+            .onSubmit(saveKeys)
+    }
+
+    private var voiceFooter: String {
+        let adapts = "The voice is matched to where it plays: a little slower on the phone's speaker or across a room, full quality in headphones, and it stops if headphones are unplugged."
+        switch engine {
+        case .grok:
+            return "Grok's voice from xAI. The key stays in this phone's Keychain. When read aloud is on, answer text goes to xAI; without a key or internet the iPhone's own voice reads it. " + adapts
+        case .rigVoice:
+            return "Use the same ElevenLabs voice ID as the rig (ELEVENLABS_VOICE_ID) so the phone sounds like the room. The key stays in this phone's Keychain. When read aloud is on, answer text goes to ElevenLabs; without a key or internet the iPhone's own voice reads it. " + adapts
+        case .builtIn:
+            return "The iPhone's own voice. Nothing leaves the phone. " + adapts
+        }
     }
 
     private var connection: String {
@@ -123,6 +200,12 @@ struct HelperSettingsButton: View {
     @State private var open = false
 
     var body: some View {
+        button.onAppear {
+            if store.isMock, UserDefaults.standard.bool(forKey: "mockSettings") { open = true }
+        }
+    }
+
+    private var button: some View {
         Button { open = true } label: {
             Image(systemName: "gearshape")
                 .font(.title3)

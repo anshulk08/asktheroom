@@ -14,6 +14,7 @@ import Foundation
 ///   -mockFocus name    open the answer sheet on this entity
 ///   -mockTab table     open on the Table (or `recent`) tab rather than Home
 ///   -mockScroll YES    scroll Home to the bottom
+///   -mockSettings YES  open helper settings
 @MainActor
 final class MockRoom: RoomTransport {
     static let stepInterval: Duration = .seconds(5)
