@@ -16,7 +16,8 @@ order. Priority (first match wins), chosen so overlaps resolve sensibly:
   OTHER                             open-ended; routed to the LLM when online
 
 TEACH ('this is my X', 'remember this as X', 'call this my X') is checked first, on the words as
-spoken: obj and name are the new name ('phone charger'), even when it is a configured object's name,
+spoken, and only as the whole sentence ('lets call it a day', 'what do you call that', 'it is a mess'
+don't teach): obj and name are the new name ('phone charger'), even when it is a configured object's name,
 so the answer can refuse it politely. Open world: when a WHERE / HISTORY / HANDLED question names no
 configured object, Intent.name keeps the spoken noun phrase after my/the ('where is my charger' ->
 name 'charger', obj None); answers resolve it through world.find. parse(..., aliases=[...]) matches
@@ -69,13 +70,20 @@ GENERAL = re.compile(r"\b(?:anything|something|everything|stuff|things|what happ
 ARTICLES = {"my", "the", "a", "your", "our"}
 
 _ART = r"(?:my|the|our|a|an|his|her|their)"
+_OWN = r"(?:my|our|his|her|their)"
+# Whole sentence, said as a statement: 'what do you call that thing', 'lets call it a day', 'it is a
+# mess' and 'thats the problem' are not teaching. 'a/an' only after 'called'.
+_START = r"^(?:and\s+|now\s+)?"
 TEACH = [re.compile(p) for p in (
-    rf"^(?:and\s+|now\s+)?(?:this|that|it)(?:\s+one|\s+thing)?\s+is\s+(?:called\s+)?{_ART}\s+(?P<n>.+)$",
-    rf"^(?:and\s+|now\s+)?thats\s+{_ART}\s+(?P<n>.+)$",
-    rf"\bremember\s+(?:this|it|that)(?:\s+one|\s+thing)?\s+as\s+(?:{_ART}\s+)?(?P<n>.+)$",
-    rf"\bcall\s+(?:this|it|that)(?:\s+one|\s+thing)?\s+(?:{_ART}\s+)?(?P<n>.+)$",
+    rf"{_START}(?:this|that)(?:\s+one|\s+thing)?\s+is\s+(?:called\s+(?:{_ART}\s+)?|(?:{_OWN}|the)\s+)(?P<n>.+)$",
+    rf"{_START}thats\s+{_OWN}\s+(?P<n>.+)$",
+    rf"{_START}(?:(?:can|could|will|would)\s+you\s+)?remember\s+(?:this|it|that)(?:\s+one|\s+thing)?\s+as\s+"
+    rf"(?:{_ART}\s+)?(?P<n>.+)$",
+    rf"{_START}call\s+(?:(?:this|that)(?:\s+one|\s+thing)?\s+(?:{_ART}\s+)?|it\s+{_OWN}\s+)(?P<n>.+)$",
 )]
 TEACH_TAIL = {"here", "now", "right", "please", "thanks", "thank", "you", "ok", "okay"}
+NOT_A_NAME = {"day", "mess", "point", "bad", "fault", "problem", "idea", "thing", "deal", "plan", "turn", "job",
+              "life", "way", "one", "question", "guess", "best", "worst", "last", "first", "end", "even", "quits"}
 # Words that end a spoken name ('where is my charger in the box' -> 'charger'), or are not one.
 NAME_STOP = {
     "is", "are", "was", "were", "be", "been", "go", "gone", "went", "to", "at", "in", "on", "under",
@@ -136,7 +144,8 @@ def _teach_name(t: str) -> Optional[str]:
                 words.pop()
             while words and words[0] in ARTICLES:
                 words.pop(0)
-            return " ".join(words[:4]) or None
+            name = " ".join(words[:4])
+            return name if name and name not in NOT_A_NAME else None   # 'thats my point'
     return None
 
 

@@ -117,6 +117,7 @@ TEACH_CASES = [
     ("Remember this as my headphones", "headphones"),
     ("remember this as Grandma's ring", "grandmas ring"),
     ("Call this my lucky coin", "lucky coin"),
+    ("Call it my lucky coin", "lucky coin"),
     ("This one is my charger, please", "charger"),
     ("That's my water bottle", "water bottle"),
     ("This is called my stapler", "stapler"),
@@ -128,6 +129,16 @@ TEACH_CASES = [
 def test_teach_intent(text, name):
     it = parse(text, CFG)
     assert (it.kind, it.obj, it.name) == ("TEACH", name, name), text
+
+
+@pytest.mark.parametrize("text", [
+    "Let's call it a day.", "What do you call that thing on the table?", "It is a mess.", "This is a mess.",
+    "That's my point.", "That's the problem.", "That's the thing.", "This is the best!",
+    "Do you remember it as bigger?", "Call it even.", "That's a lot of stuff.", "It is my keys.",
+    "I can't remember what to call this.", "Is this my charger?",
+])
+def test_everyday_phrases_do_not_teach(text):
+    assert parse(text, CFG).kind != "TEACH", text
 
 
 @pytest.mark.parametrize("text,kind,name", [

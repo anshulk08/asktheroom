@@ -16,6 +16,8 @@ Asked: rules first, then Qwen.
     the phrasings they know and on synonyms ("clicker" is the remote), where a small model slips.
     RESET and RECAL act on the room, so only the explicit words count: a misheard "reset"
     mid-demo would wipe the world model.
+  - So do TEACH, WHAT_DOING and questions about a name outside the config ("where is my charger",
+    kept as Intent.name for world.find); Qwen knows neither those kinds nor taught names.
   - Otherwise (rules say OTHER, or found no object) Qwen decides the kind. An object the rules
     recognised still wins over Qwen's.
   - Qwen's object must sound like something that was said (sounds_like), so "my coffee mug"
@@ -57,9 +59,10 @@ from voice.intents import _vocab, normalize, parse
 log = logging.getLogger(__name__)
 
 ACTS = ("RESET", "RECAL")               # act on the room: the rules alone decide these
+RULES_ONLY = ACTS + ("TEACH", "WHAT_DOING")   # TEACH binds a name; Qwen's schema has neither
 NO_OBJECT = ("RESET", "RECAL", "CHANGES")
 SOUNDS_LIKE = 0.6                       # difflib ratio: "wall it" ~ wallet, "note book" ~ notebook, "mug" !~ glasses
-QWEN_KINDS = [k for k in INTENT_KINDS if k not in ACTS]
+QWEN_KINDS = [k for k in INTENT_KINDS if k not in RULES_ONLY]
 IGNORE = "IGNORE"                       # overheard speech not meant for the rig; say and do nothing
 COMMAND_WORDS = {"where", "whered", "wheres", "find", "found", "seen", "lost", "show", "point", "light",
                  "miss", "missed", "change", "changed", "different", "happened", "happen", "touch",
@@ -136,7 +139,9 @@ def sounds_like(obj: str, text: str, cfg: dict) -> bool:
 
 
 def rules_sure(i: Intent) -> bool:
-    return i.kind in NO_OBJECT or (i.kind != "OTHER" and i.obj is not None)
+    """A kind only the rules produce, or a question with its object or spoken name ('where is my
+    charger': world.find resolves taught names Qwen has never heard of)."""
+    return i.kind in NO_OBJECT or i.kind in RULES_ONLY or (i.kind != "OTHER" and (i.obj or i.name) is not None)
 
 
 def to_intent(raw: str, text: str, cfg: dict, obj_hint: Optional[str] = None) -> Optional[Intent]:
@@ -152,7 +157,7 @@ def to_intent(raw: str, text: str, cfg: dict, obj_hint: Optional[str] = None) ->
     obj = obj_hint or (obj if obj in _objects(cfg) and sounds_like(obj, text, cfg) else None)
     if kind in ("WHERE", "HISTORY", "HANDLED") and obj is None:
         # nothing to point at or look up: CHANGES covers "did anyone touch anything",
-        # OTHER lets voice/local_llm handle "where is the charger"
+        # OTHER lets voice/local_llm handle "where did it go"
         kind = "CHANGES" if kind != "WHERE" else "OTHER"
     if kind in NO_OBJECT:
         obj = None
