@@ -115,6 +115,10 @@ class Room:
         self.listen_mode = str(li.get("mode", "always"))       # always | wake | click
         self.idle_s = float(li.get("idle_s", 8))
         self.echo_tail_s = float(li.get("echo_tail_s", 0.4))
+        demo = cfg.get("demo") or {}
+        self.cue_after_s = float(demo.get("thinking_cue_s", 1.0))       # 0 = off
+        self.cue_phrases = list(demo.get("thinking_phrases") or ["Let me look.", "One moment.", "Hmm, let me check."])
+        self._cues = 0
         self.stop_ev = threading.Event()
         self._acted = threading.local()            # .kind: RESET / RECAL if the router answered one
         self._clear_ev = threading.Event()         # RESET: the perception thread resets proposals + crops
@@ -357,7 +361,7 @@ class Room:
         if self._heard_from_phone(text):
             log.info("heard %r: the phone just asked it; answered once", text)
             return
-        ans = self.ask(text, "voice")
+        ans, cued = self._ask_with_cue(text)
         if self.record_answer is not None:
             try:
                 self.record_answer(text, ans, "voice")
@@ -379,7 +383,7 @@ class Room:
                      "qwen_ms": round(getattr(self.interpret, "last_ms", 0.0)),
                      "answer": ans.text, "point_at": ans.point_at, "action": ans.action,
                      "laser_err_cm": (self.world.laser or {}).get("err_cm"),
-                     "online": bool(self.world.online), **extra, **self.last_timing})
+                     "online": bool(self.world.online), "thinking_cue": cued, **extra, **self.last_timing})
         if self.listen_mode == "click":
             return
         while say.is_alive() and not self.stop_ev.is_set():
@@ -390,6 +394,34 @@ class Room:
             elif self.clicker is None:
                 say.join(0.05)
         self.stop_ev.wait(self.echo_tail_s)
+
+    def _ask_with_cue(self, text: str) -> tuple[Answer, bool]:
+        """ask(text, "voice"); if no answer within demo.thinking_cue_s (a model is reading it, or Grok
+        is answering), say a short "let me look" so the rig doesn't sit silent. Returns (answer, cued).
+        The TTS lock queues the answer behind the cue."""
+        if self.cue_after_s <= 0 or self.tts is None or not self.cue_phrases:
+            return self.ask(text, "voice"), False
+        box: dict = {}
+        done = threading.Event()
+
+        def work() -> None:
+            try:
+                box["ans"] = self.ask(text, "voice")
+            except BaseException as ex:          # re-raised on the caller's thread
+                box["err"] = ex
+            finally:
+                done.set()
+
+        threading.Thread(target=work, name="ask", daemon=True).start()
+        cued = not done.wait(self.cue_after_s)
+        if cued:
+            phrase = self.cue_phrases[self._cues % len(self.cue_phrases)]
+            self._cues += 1
+            threading.Thread(target=self._speak, args=(phrase,), name="cue", daemon=True).start()
+            done.wait()
+        if "err" in box:
+            raise box["err"]
+        return box["ans"], cued
 
     def report(self, question: dict) -> None:
         """Send one spoken question to the n8n workflow (n8n.webhook_url), in the background so it

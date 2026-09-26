@@ -131,10 +131,11 @@ Everything lives in `config.yaml`. All thresholds are starting values: tune them
 | `understand` | Model on/off, `backend: auto \| grok \| qwen` (auto: Grok online, Qwen offline), llama-server URL and model (qwen), intent timeout 1.5 s |
 | `listen` | `mode: always \| wake \| click` (default `always`), `wake_words: [room]`, `idle_s`, `echo_tail_s` |
 | `n8n` | `webhook_url` for the question log (empty turns it off), shared `token` |
+| `demo` | `thinking_cue_s` (a short "Let me look." when an answer takes longer than this, default 1 s; 0 = off), `thinking_phrases`, `hold_notices` (true: reminders and the morning report never speak unasked) |
 | `sms` | `whitelist` of E.164 numbers allowed to text questions |
 | `paths` | Event DB, snapshot folder, calibration files |
 
-The `llm` section configures Grok (`grok-4.3`): it reads questions the rules can't (`understand.backend: grok`) and answers open questions (4 s budget, `llm.timeout_s`). `narration` and `visual_memory` configure Grok with images.
+The `llm` section configures Grok (`grok-4.3`): it reads questions the rules can't (`understand.backend: auto` or `grok`) and answers open questions (4 s budget, `llm.timeout_s`). `narration` and `visual_memory` configure Grok with images.
 
 Secrets come from environment variables (`.env`, passed into the container by `scripts/dock.sh`): `XAI_API_KEY` (Grok), `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID`, `TWILIO_AUTH_TOKEN`, `ASKROOM_PUBLIC_URL` (for the Twilio signature check behind a tunnel).
 

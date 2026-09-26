@@ -44,6 +44,8 @@ Test suite at time of writing (Sat 26 Sep, after the overnight merge): `.venv/bi
 | — | Conversation memory: follow-ups like "and my wallet?" (`voice/conversation.py`) | validated (unit) | `tests/test_conversation.py` |
 | — | Reminders from events ("remind me if I haven't picked up my pill bottle by 9"), neutral pill wording (`core/reminders.py`, `voice/care.py`) | validated (unit) | `tests/test_reminders.py`, `tests/test_care.py` |
 | — | Morning report and caregiver summary (`core/reports.py`) | validated (unit) | `tests/test_reports.py` |
+| — | Thinking cue: a short "Let me look." when a spoken answer takes over `demo.thinking_cue_s` (`main.py`) | validated (unit) | `tests/test_main.py` (`test_slow_answer_gets_a_thinking_cue_first`); not yet timed with real Grok |
+| — | Demo hold: `demo.hold_notices` keeps reminders and the morning report silent unless asked (`voice/care.py`) | validated (unit) | `tests/test_care.py` (`test_demo_hold_notices_keeps_the_rig_quiet_unless_asked`) |
 | — | Profile facts ("my daughter is Sarah") (`core/profile.py`) | validated (unit) | `tests/test_profile.py` |
 | — | TTS output device selection (`tts.output_device`) | validated (unit) | `tests/test_tts_device.py` |
 

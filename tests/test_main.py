@@ -202,6 +202,32 @@ def test_voice_loop_click_to_answer_and_laser(tmp_path, cal_path):
     t.join(2)
 
 
+def test_slow_answer_gets_a_thinking_cue_first(tmp_path, cal_path, monkeypatch):
+    posted = []
+    monkeypatch.setattr(main.requests, "post", lambda url, json, timeout, headers=None: posted.append(json))
+    room, rig = make_room(tmp_path, cal_path)
+    room.webhook_url, room.cue_after_s = "http://laptop/webhook", 0.05
+    fast = room.base_ask
+
+    def slow(text, source):
+        time.sleep(0.3)
+        return fast(text, source)
+
+    room.base_ask = slow
+    room._answer("where's my wallet", time.monotonic(), time.monotonic(), {"mode": "asked"})
+    assert wait_for(lambda: len(room.tts.said) == 2)
+    assert room.tts.said[0] == "Let me look." and "wallet" in room.tts.said[1].lower()
+    assert wait_for(lambda: posted) and posted[0]["thinking_cue"] is True
+
+
+def test_quick_answer_gets_no_cue(tmp_path, cal_path):
+    room, rig = make_room(tmp_path, cal_path)
+    room._answer("where's my wallet", time.monotonic(), time.monotonic(), {"mode": "asked"})
+    assert wait_for(lambda: room.tts.said) and len(room.tts.said) == 1 and "wallet" in room.tts.said[0].lower()
+    room.cue_after_s = 0                        # off
+    assert room._ask_with_cue("where's my wallet")[1] is False
+
+
 def test_voice_loop_nothing_heard(tmp_path, cal_path):
     clicker = FakeClicker()
     room, rig = make_room(tmp_path, cal_path, stt=FakeSTT(""), clicker=clicker)

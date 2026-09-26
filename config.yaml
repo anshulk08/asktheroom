@@ -376,3 +376,11 @@ care:
   conversation_ttl_s: 120     # follow-ups ('and my glasses?') use the last turns until this much silence
   conversation_turns: 5
   profile_llm: true           # online: free-form 'about me' statements go to Grok (llm: section) as strict JSON
+
+# Demo behaviour (main.py, voice/care.py).
+demo:
+  thinking_cue_s: 1.0         # no answer this long after a spoken question (Grok reading or answering it):
+                              # say a short phrase so the rig isn't silent; 0 = off
+  thinking_phrases: ["Let me look.", "One moment.", "Hmm, let me check."]   # used in turn
+  hold_notices: false         # true: nothing speaks unasked (reminders, morning report); notices still
+                              # show on /state and the phone. Turn on if reminders would talk over a judge.

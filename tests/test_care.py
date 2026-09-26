@@ -313,3 +313,21 @@ def test_greeting_loses_the_race_to_the_scheduler(tmp_path):
     care.morning.deliver = scheduler_wins
     assert care.ask("good morning", "voice").text == "Good morning."
     events.close()
+
+
+def test_demo_hold_notices_keeps_the_rig_quiet_unless_asked(tmp_path):
+    events = EventLog(":memory:", str(tmp_path / "s"))
+    world = real_world(events)
+    now = [at(8, 30)]
+    spoken = []
+    cfg = dict(CFG, demo={"hold_notices": True})
+    care = Care(cfg, world, events, make_ask(cfg, world, events, other=no_grok), clock=lambda: now[0])
+    care.on_notice = spoken.append
+    base = make_ask(cfg, world, events, other=no_grok)
+    assert care.ask("where are my pills?", "voice").text == base("where are my pills?", "voice").text  # no morning report
+    care.ask("remind me if I haven't picked up my pills by 9", "voice")
+    now[0] = at(9, 0, 5)
+    notices = care.tick()
+    assert notices and spoken == []                                        # recorded, not spoken
+    assert care.notices_json() and care.ask("morning report", "voice").text.startswith("Good morning")
+    events.close()

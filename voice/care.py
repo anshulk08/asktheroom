@@ -64,6 +64,9 @@ class Care:
         self.online = online or (lambda: bool(getattr(world, "online", False)))
         self.on_notice: Optional[Callable[[Answer], object]] = None
         self.tick_s = float(self.c.get("tick_s", 10))
+        # demo.hold_notices: during judging nothing speaks unasked. Reminders are still recorded and shown
+        # (/state notices, the phone); the morning report is only said when asked for.
+        self.hold = bool((cfg.get("demo") or {}).get("hold_notices", False))
         self._pending: dict[str, tuple[float, str, list, str]] = {}   # source -> (t, obj, times, said)
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -116,7 +119,7 @@ class Care:
                 return self._suggest(reply.answer, reply.suggest, source, text, now), "CARE_PROFILE"
             m = GREETING.match(t)
             if m:
-                report = self.morning.deliver(now)          # None if not due or already said
+                report = None if self.hold else self.morning.deliver(now)   # None if not due or already said
                 if report:
                     return Answer(report), "CARE_GREETING"
                 g = m.group("g")
@@ -127,7 +130,7 @@ class Care:
         return None
 
     def _with_morning(self, ans: Answer, source: str, now: float) -> Answer:
-        if source in TEXT_ONLY:
+        if source in TEXT_ONLY or self.hold:
             return ans
         try:
             text = self.morning.deliver(now)
@@ -212,7 +215,7 @@ class Care:
             out.append(n)
             if ans is not None:
                 self._say(ans)
-        if self.c.get("morning_on_activity", True) and self.morning.due(now) and self.reminders.may_speak(now) \
+        if not self.hold and self.c.get("morning_on_activity", True) and self.morning.due(now) and self.reminders.may_speak(now) \
                 and self.morning.activity_since_morning(now):
             text = self.morning.deliver(now)          # None if a question delivered it since due()
             n = self.reminders.store.add_notice(now, "morning", text, None, None, True) if text else None
@@ -222,6 +225,9 @@ class Care:
         return out
 
     def _say(self, ans: Answer) -> None:
+        if self.hold:
+            log.info("notice held (demo.hold_notices): %s", ans.text)
+            return
         if self.on_notice is None:
             log.info("notice (no speaker): %s", ans.text)
             return
