@@ -481,14 +481,20 @@
     const lz = $("st-laser");
     lz.dataset.on = L.on ? "true" : "false";
     setText(lz, L.on ? (L.target ? "Laser on " + nice(L.target) : "Laser on") : "Laser off");
-    // Narration / visual memory (off by default): shown only when on; the tooltip is the privacy disclosure.
-    const N = state.narration, V = state.visual_memory, A = state.auto_name, mem = $("st-memory");
-    mem.hidden = !(N || V || A);
-    if (N || V || A) {
-      setText(mem, [N && ("narration" + (N.queued ? " (" + N.queued + " queued)" : "")), V && "visual", A && "naming"]
-        .filter(Boolean).join(" + ") + " \u2192 " + ((N || V || A).provider || "cloud"));
-      mem.title = [N && N.disclosure, V && V.disclosure, A && A.disclosure,
-        N && N.last_summary && ("Last: " + N.last_summary)].filter(Boolean).join("\n");
+    // Narration / visual memory / Grok check (off by default): shown only when on; the tooltip is the
+    // privacy disclosure and the last results.
+    const N = state.narration, V = state.visual_memory, A = state.auto_name, G = state.grok_check, mem = $("st-memory");
+    mem.hidden = !(N || V || A || G);
+    if (N || V || A || G) {
+      const GL = G && G.last, gOff = GL && !GL.error ? (GL.phantom || []).length + (GL.relabel || []).length +
+        (GL.unmarked || []).length : 0;
+      setText(mem, [N && ("narration" + (N.queued ? " (" + N.queued + " queued)" : "")), V && "visual", A && "naming",
+        G && ("check" + (gOff ? " (" + gOff + " to review)" : ""))]
+        .filter(Boolean).join(" + ") + " \u2192 " + ((N || V || A || G).provider || "cloud"));
+      mem.title = [N && N.disclosure, V && V.disclosure, A && A.disclosure, G && G.disclosure,
+        N && N.last_summary && ("Last: " + N.last_summary),
+        GL && ("Last check: " + (GL.error ? "failed, " + GL.error : GL.text))]
+        .filter(Boolean).join("\n");
     }
   }
 

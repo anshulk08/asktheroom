@@ -430,3 +430,19 @@ lost_grace_s: 2.0
 thing_containers:
   enabled: true
   min_area_cm2: 100           # footprint in table cm2: a mug or larger; keys, a coin, an AirPods case are not
+
+grok_check:                   # Grok checks the tracker each time the table settles (core/grok_check.py, spec 0007)
+  enabled: false              # true: one still frame of the table goes to Grok per settle (privacy: README)
+  provider: grok              # grok | fake (canned agreement, for --fake runs)
+  model: grok-4.3
+  reasoning_effort: none
+  quiet_s: 1.5                # no hands and no world events this long = settled
+  min_gap_s: 5                # between calls; a newer settle replaces a waiting one
+  max_per_hour: 120           # cost cap (~$0.003 per call)
+  look_px: 1280
+  timeout_s: 8
+  min_conf: 0.6               # below: stored as 'unsure', no effect
+  bind_names: true            # an unnamed thing:N takes Grok's label (never over a taught name) ...
+  bind_conf: 0.7              # ... at or above this confidence
+  sighting_max_age_s: 900     # WHERE falls back to a sighting no older than this
+  keep_h: 24                  # rows older than this are deleted on start
