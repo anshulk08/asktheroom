@@ -89,13 +89,14 @@ struct StatusPill: View {
     let store: RoomStore
 
     private var label: (String, Color) {
-        if store.isMock { return ("Demo mode", .orange) }
+        // Words carry the meaning; the dot is only green when all is well.
+        if store.isMock { return ("Demo mode", .gray) }
         switch store.link {
         case .connected: return ("Connected", .green)
-        case .connecting: return ("Connecting…", .yellow)
-        case .reconnecting: return ("Reconnecting…", .yellow)
-        case .searching: return ("Looking…", .yellow)
-        case .bluetoothOff, .unauthorized, .unsupported: return ("No Bluetooth", .red)
+        case .connecting: return ("Connecting…", .gray)
+        case .reconnecting: return ("Reconnecting…", .gray)
+        case .searching: return ("Looking…", .gray)
+        case .bluetoothOff, .unauthorized, .unsupported: return ("No Bluetooth", .gray)
         }
     }
 
@@ -128,7 +129,7 @@ struct Banners: View {
                 EmptyView()
             }
             if store.isRoomAppDown {
-                Banner(icon: "exclamationmark.triangle.fill", tint: .orange,
+                Banner(icon: "exclamationmark.triangle", tint: .secondary,
                        text: "The room app isn't running. The map may be out of date.")
             } else if store.isOffline {
                 Banner(icon: "icloud.slash", tint: .secondary, text: "Offline: using the on-device voice.")

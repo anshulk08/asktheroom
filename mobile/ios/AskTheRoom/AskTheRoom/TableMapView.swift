@@ -1,8 +1,13 @@
 import SwiftUI
 
 enum Theme {
-    /// Same red as the laser dot (spec section 6).
+    /// Same red as the laser dot (spec section 6). Only for "the laser points here":
+    /// map highlights, the reticle and the connect pulse. Buttons use `accent`.
     static let laser = Color(red: 1, green: 0.231, blue: 0.188)
+    /// Calm slate blue (AccentColor in the asset catalog) for buttons and selection.
+    static let accent = Color.accentColor
+    /// Behind icons on cards.
+    static let iconWell = Color(.tertiarySystemFill)
 
     static func surface(_ scheme: ColorScheme) -> Color {
         scheme == .dark ? Color(red: 0.17, green: 0.20, blue: 0.24) : Color(red: 0.95, green: 0.91, blue: 0.84)

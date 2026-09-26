@@ -146,11 +146,11 @@ private struct NoticeCard: View {
     let onShow: () -> Void
     let onDismiss: () -> Void
 
-    private var icon: (String, Color) {
+    private var icon: (String, HierarchicalShapeStyle) {
         switch notice.kind {
-        case .leftTable: return ("arrow.left.square.fill", .orange)
-        case .lostTrack: return ("questionmark.circle.fill", .orange)
-        case .unnamed: return ("sparkles", .blue)
+        case .leftTable: return ("arrow.left.square", .secondary)
+        case .lostTrack: return ("questionmark.circle", .secondary)
+        case .unnamed: return ("sparkles", .secondary)
         }
     }
 
@@ -171,7 +171,6 @@ private struct NoticeCard: View {
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(Theme.laser)
                 Button("Got it", action: onDismiss)
                     .buttonStyle(.bordered)
             }
@@ -200,11 +199,11 @@ private struct ThingTile: View {
                     Image(systemName: Dashboard.symbol(for: thing.name))
                         .font(.title2)
                         .frame(width: 44, height: 44)
-                        .background(Circle().fill(isAway ? Color.orange.opacity(0.18) : Theme.laser.opacity(0.12)))
-                        .foregroundStyle(isAway ? Color.orange : Theme.laser)
+                        .background(Circle().fill(Theme.iconWell))
+                        .foregroundStyle(.primary)
                     Spacer()
                     if isHidden || isAway {
-                        Image(systemName: isAway ? "exclamationmark.circle.fill" : "eye.slash")
+                        Image(systemName: isAway ? "questionmark.circle" : "eye.slash")
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -214,7 +213,7 @@ private struct ThingTile: View {
                     .lineLimit(2)
                 Text(Dashboard.whereabouts(thing, in: snapshot))
                     .font(.subheadline)
-                    .foregroundStyle(isAway ? Color.orange : .secondary)
+                    .foregroundStyle(.primary)
                     .fixedSize(horizontal: false, vertical: true)
                 if isAway, let seen = thing.lastSeen {
                     Text("Seen \(Dashboard.ago(seen, now: snapshot.time ?? Date()).lowercased())")

@@ -11,7 +11,7 @@ struct AnswerCard: View {
                 .font(.body)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 7)
-                .background(Theme.laser.opacity(0.12), in: RoundedRectangle(cornerRadius: 14))
+                .background(Theme.accent.opacity(0.14), in: RoundedRectangle(cornerRadius: 14))
                 .frame(maxWidth: .infinity, alignment: .trailing)
                 .accessibilityLabel("You asked: \(exchange.question)")
 

@@ -76,7 +76,7 @@ struct AskBar: View {
                     Image(systemName: "arrow.up")
                         .font(.title2.weight(.bold))
                         .frame(width: 56, height: 56)
-                        .background(Circle().fill(Theme.laser))
+                        .background(Circle().fill(Theme.accent))
                         .foregroundStyle(.white)
                 }
                 .accessibilityLabel("Ask")
@@ -108,7 +108,7 @@ private struct MicButton: View {
         Image(systemName: isListening ? "waveform" : "mic.fill")
             .font(.title2.weight(.bold))
             .frame(width: 56, height: 56)
-            .background(Circle().fill(isListening ? Theme.laser : Color.primary.opacity(0.85)))
+            .background(Circle().fill(isListening ? Theme.accent : Color.primary.opacity(0.85)))
             .foregroundStyle(isListening ? Color.white : Color(.systemBackground))
             .scaleEffect(pressed ? 1.12 : 1)
             .animation(.easeOut(duration: 0.15), value: pressed)
