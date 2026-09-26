@@ -7,8 +7,8 @@ Routing (VisualQA.route, called by voice/pipeline.py before the offline template
   - OTHER questions about the scene now go to look(); in the past tense, to recall(). An OTHER question
     that isn't about the table or what the camera sees ('what time is it', 'tell me a joke') returns None
     so the pipeline's `other` answerer takes it, online or offline;
-  - WHERE for a name the world model doesn't know ('where is my red mug?') goes to look(), which can
-    point at it; HISTORY / HANDLED for such a name goes to recall() when no narration mentions it.
+  - WHERE for a name the world model doesn't know ('where is my red mug?') goes to pick(); HISTORY /
+    HANDLED for such a name goes to recall() when no narration mentions it.
 Offline, a question only the VLM could answer gets a spoken 'I need the connection' (the world model
 still answers everything else). Over the hourly cap, route() returns None and the old path answers.
 
@@ -25,6 +25,12 @@ Why marks: measured with grok-4.3 on a 5-object desk photo, asking for boxes (Pr
 box_2d convention, [ymin, xmin, ymax, xmax] 0-1000) scored 0/5 (mean IoU 0.14; pixel and fraction boxes
 2/5), a bare point landed on 4/5, and picking among numbered candidate boxes got 5/5 in ~0.75 s. The
 tracker already has the boxes; the VLM only has to choose.
+
+pick(): the narrow form of look() for 'where is my X' when X is a name the world doesn't know. Grok gets
+only the marked frame and replies {mark, label, confidence}: which box shows X and what the object is
+(1-4 words). Where it is comes from the world model (the WHERE template), so Grok writes no sentence. An
+unnamed thing picked at >= BIND_CONF takes the asked-for name (world.bind_alias; a taught name is never
+replaced), so the next question is answered offline with no Grok call. No marks: falls back to look().
 
 recall(): archived frames (core/visual_memory.py) picked by text similarity and/or the question's time
 window, each with its time and the world model's digest, plus the narrations and world events of that
@@ -46,7 +52,7 @@ import numpy as np
 
 from core.config import display_name
 from core.narration import NarrationConfig, NarrationError, ProviderError, _parse_json, event_line, make_provider
-from core.narration_store import parse_window, redact_meds
+from core.narration_store import med_claim, parse_window, redact_meds
 from core.types import Answer, Intent
 from core.visual_memory import VisualArchive, VisualConfig, digest_text, make_embedder
 
@@ -59,6 +65,7 @@ ABSTAIN = "I can't tell from here."
 PILLS_SAFE = ("I can't tell whether medication was taken; I can only tell you where the pill bottle is "
               "and when it was moved.")
 POINT_NEAR_CM = 6.0
+BIND_CONF = 0.7                  # a picked unnamed thing takes the asked-for name at or above this confidence
 
 PAST = re.compile(r"\b(?:was|were|did|had|earlier|before|ago|yesterday|used to|show(?:ed|n)? up|appeared"
                   r"|last time|when i left|before i left|while i was)\b")
@@ -93,6 +100,21 @@ LOOK_SCHEMA = {
             "properties": {"x": {"type": "number"}, "y": {"type": "number"}}}]}},
 }
 
+PICK_SYSTEM = """You find one object on a tabletop seen by an overhead camera that looks straight down. The image has numbered yellow boxes (marks) around the objects a tracker follows. Your only job is to say which mark shows the object the person asks about and what that object is.
+
+Rules:
+- mark: the number of the box around the object asked about; null if no box shows it.
+- label: what the object in that box is, the way a person would say it: 1 to 4 plain words, colour first if it helps ("red mug", "phone charger"). Null if mark is null. For any medicine container say only "pill bottle".
+- confidence: 0 to 1; below 0.5 if you aren't sure.
+Reply with the JSON object only."""
+
+PICK_SCHEMA = {
+    "type": "object", "additionalProperties": False, "required": ["mark", "label", "confidence"],
+    "properties": {"mark": {"anyOf": [{"type": "null"}, {"type": "integer"}]},
+                   "label": {"anyOf": [{"type": "null"}, {"type": "string"}]},
+                   "confidence": {"type": "number"}},
+}
+
 RECALL_SYSTEM = """You answer spoken questions about what was on a tabletop earlier. You get frames an overhead camera saved at the listed times (it looks straight down: table, objects, sometimes hands; nothing beyond the table, no faces), what an object tracker believed at each frame, and the tracker's events and activity notes for that time.
 
 Rules:
@@ -100,14 +122,12 @@ Rules:
 - Say only what the frames or notes show. If none of the frames show what was asked, say you didn't see it in the saved pictures. If you can't tell, set confidence below 0.5.
 - Never state or imply that medication was taken, swallowed, skipped or missed.
 - Never describe anything beyond the table.
-- frames: the numbers of the frames your answer relies on.
 - confidence: 0 to 1.
 Reply with the JSON object only."""
 
 RECALL_SCHEMA = {
-    "type": "object", "additionalProperties": False, "required": ["answer", "confidence", "frames"],
-    "properties": {"answer": {"type": "string"}, "confidence": {"type": "number"},
-                   "frames": {"type": "array", "items": {"type": "integer"}}},
+    "type": "object", "additionalProperties": False, "required": ["answer", "confidence"],
+    "properties": {"answer": {"type": "string"}, "confidence": {"type": "number"}},
 }
 
 
@@ -237,6 +257,16 @@ def _conf(d: dict) -> float:
     except (TypeError, ValueError):
         return 0.0
     return min(1.0, max(0.0, c)) if c == c else 0.0
+
+
+def _label(v) -> Optional[str]:
+    """Grok's name for what it picked, as something safe to say: 1-4 plain lower-case words, never a
+    medication claim, or None."""
+    t = re.sub(r"[^a-z' -]", "", str(v or "").lower()).strip()
+    t = re.sub(r"^(?:a|an|the|my|your)\s+", "", t)
+    if not t or len(t.split()) > 4 or len(t) > 30 or med_claim(t) or t in ("object", "thing", "item", "unknown"):
+        return None
+    return t
 
 
 _QUERY = [re.compile(p) for p in (
@@ -375,6 +405,55 @@ class VisualQA:
         if isinstance(m, int) and not isinstance(m, bool) and 1 <= m <= len(marks):
             return Answer(text, point_at=marks[m - 1][0], action="point")
         return self._pointed(text, d.get("point"), (ow, oh))
+
+    def pick(self, question: str, said: str) -> Answer:
+        """'Where is my red mug?' for a name the world doesn't know: Grok only says which mark shows it and
+        what it is; the world model says where (the WHERE template). A picked unnamed thing keeps the
+        name, so the next question needs no Grok call. No marks to pick from: the full look."""
+        f = self.frames.latest() if self.frames is not None else None
+        if f is None or getattr(f, "img", None) is None:
+            return Answer(CANT_SEE)
+        marks = self._marks()
+        if not marks:
+            return self.look(question)
+        names = self._names()
+        full, _ = _jpeg(draw_marks(f.img, [b for _, b in marks]), self.c.look_px)
+        listed = ", ".join(f"{i} = {names.get(n) or 'unnamed object'}" for i, (n, _) in enumerate(marks, 1))
+        parts: list = [("image", full), ("text", f"Marks: {listed}.\nFind: {said}\nQuestion: {question}")]
+        try:
+            d = self._vlm(PICK_SYSTEM, parts, PICK_SCHEMA)
+        except (ProviderError, NarrationError) as ex:
+            log.warning("pick failed: %s", ex)
+            return Answer("Sorry, I couldn't look at the table just now.")
+        m, conf = d.get("mark"), _conf(d)
+        if not (isinstance(m, int) and not isinstance(m, bool) and 1 <= m <= len(marks)):
+            return Answer(f"I can't see your {said} on the table right now." if conf >= self.c.abstain_below
+                          else ABSTAIN)
+        if conf < self.c.abstain_below:
+            return Answer(ABSTAIN)
+        ent = marks[m - 1][0]
+        label = _label(d.get("label"))
+        if ent.startswith("thing:") and not names.get(ent) and conf >= BIND_CONF and hasattr(self.world, "bind_alias"):
+            try:
+                if self.world.bind_alias(ent, said):
+                    log.info("visual pick: %s is now '%s' (Grok saw %s, %.2f)", ent, said, label, conf)
+                    names[ent] = said
+            except Exception:
+                log.exception("bind_alias failed")
+        if ent.startswith("thing:") and not names.get(ent):
+            if label and label != said.lower():
+                return Answer(f"I think your {said} is this {label}.", point_at=ent, action="point")
+            return Answer(f"I think this is your {said}.", point_at=ent, action="point")
+        from voice.answers import answer
+        try:
+            text = answer(Intent("WHERE", None, "", name=ent), self.world, self.events, self.cfg).text
+        except Exception:
+            log.exception("pick: WHERE template failed")
+            text = ""
+        known = names.get(ent) or ""
+        if known.lower() != said.lower():               # Grok picked something the rig knows by another name
+            text = f"I think your {said} is what I call your {known}. {text}".strip()
+        return Answer(text or f"I think this is your {said}.", point_at=ent, action="point")
 
     def _marks(self) -> list[tuple[str, tuple]]:
         """(entity, frame px box) for every VISIBLE tracked entity with a box, in world order: the
@@ -552,7 +631,7 @@ class VisualQA:
                 return None
             said = [w for w in (intent.name or intent.obj, query_phrase(text)) if w]
             if k == "WHERE":
-                how = "look"
+                how = "pick"
             elif self.archive is not None and _narrated_about(said, self.events, self.clock()) is None:
                 how = "recall"
             else:
@@ -565,6 +644,8 @@ class VisualQA:
         if self._capped():
             log.info("visual questions: hourly cap reached; answering without the camera")
             return None
+        if how == "pick":
+            return self.pick(text, said[0])
         return self.look(text, intent) if how == "look" else self.recall(text)
 
     def _about_table(self, intent: Intent, t: str) -> bool:

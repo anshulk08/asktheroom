@@ -26,7 +26,9 @@ confirms, and when the rig isn't sure it says so (UNKNOWN, `maybe_same_as`) inst
 Questions the world model can't answer from its state go to Grok with the camera frame: "what colour
 is my mug?", "what does the note say?", "was there a red mug here this morning?" (saved keyframes).
 For "where", Grok picks one of the tracked objects drawn as numbered boxes (set-of-marks), so the laser
-still points at a tracked entity.
+still points at a tracked entity. "Where is my red mug?" for a name the rig doesn't know asks Grok only
+which box it is and what it is (`VisualQA.pick`); the world model says where, and an unnamed thing keeps
+the name, so the next ask needs no Grok call.
 
 ## Hardware
 
