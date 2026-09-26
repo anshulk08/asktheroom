@@ -81,3 +81,22 @@ def test_class_list_is_every_prompt_plus_hand_with_a_label_map():
     assert "key ring" in classes and "hand" in classes and len(classes) == len(set(classes))
     assert to_obj["key ring"] == "keys" and to_obj["tv remote"] == "remote" and to_obj["hand"] == "hand"
     assert to_obj["keys"] == "keys"          # a fine-tuned model's class names are the object names
+
+
+def test_reset_proposals_recaptures_the_reference_and_forgets_crops():
+    from core.crops import CropStore
+    from core.types import Detection
+
+    class Prop:
+        resets = 0
+
+        def reset(self):
+            self.resets += 1
+
+    store, prop = CropStore(), Prop()
+    img = np.random.default_rng(0).integers(0, 255, (120, 160, 3), dtype=np.uint8)
+    store.update(img, [Detection('thing', 0.9, (20, 20, 60, 60), (3.0, 3.0), (2, 2, 4, 4))], [], 1.0)
+    det = Detector({}, table=None, backend=object(), proposer=prop, crops=store)
+    assert len(store) == 1
+    det.reset_proposals()
+    assert prop.resets == 1 and len(store) == 0

@@ -74,7 +74,8 @@ class Room:
                  netmon=None, tts=None, stt=None, clicker=None, detector=None, hands=None,
                  interpret: Optional[Callable[[str], Intent]] = None):
         self.cfg, self.world, self.events, self.table = cfg, world, events, table
-        self.frames, self.laser, self.base_ask = frames, laser, ask
+        self.frames, self.laser = frames, laser
+        self.base_ask = self._router(ask)          # the care layer (attach_care) goes in front of this
         self.netmon, self.tts, self.stt, self.clicker = netmon, tts, stt, clicker
         self.detector, self.hands = detector, hands
         if interpret is None:
@@ -93,6 +94,8 @@ class Room:
         self.idle_s = float(li.get("idle_s", 8))
         self.echo_tail_s = float(li.get("echo_tail_s", 0.4))
         self.stop_ev = threading.Event()
+        self._acted = threading.local()            # .kind: RESET / RECAL if the router answered one
+        self._clear_ev = threading.Event()         # RESET: the perception thread resets proposals + crops
         self._aim_lock = threading.Lock()
         self._aim_gen = 0
         self._off_timer: Optional[threading.Timer] = None
@@ -103,14 +106,25 @@ class Room:
 
     # -- asking and answering
 
+    def _router(self, ask: Callable[[str, str], Answer]) -> Callable[[str, str], Answer]:
+        """ask, noting the intent the router answered, so Room.ask acts only on a real RESET / RECAL:
+        never on text the care layer handled ('remind me to reset the router') or rewrote."""
+        def routed(text: str, source: str) -> Answer:
+            ans = ask(text, source)
+            self._acted.kind = self.interpret(text).kind     # the same Intent the router used (cached)
+            return ans
+        return routed
+
     def ask(self, text: str, source: str) -> Answer:
         """The router, plus the two intents that act on the room (reset, recalibrate)."""
+        self._acted.kind = None
         ans = self.base_ask(text, source)
-        kind = self.interpret(text).kind           # the same Intent the router used (cached)
+        kind, self._acted.kind = self._acted.kind, None
         if kind == "RESET":
             self.world.reset()
             if self.hands is not None:
                 self.hands.reset()
+            self._clear_ev.set()
         elif kind == "RECAL":
             threading.Thread(target=self.recalibrate, name="recal", daemon=True).start()
         return ans
@@ -221,6 +235,9 @@ class Room:
                 self.table.calibrate(frame.img)
                 continue
             try:
+                if self._clear_ev.is_set():        # here, not in ask: the proposer isn't thread-safe
+                    self._clear_ev.clear()
+                    self.detector.reset_proposals()
                 dets = self.detector.detect(frame)
                 dets.hands = self.hands.update(dets.hands, dets.t)
                 self.world.update(dets, frame)
