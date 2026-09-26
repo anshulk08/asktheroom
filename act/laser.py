@@ -1,0 +1,334 @@
+"""Closed-loop laser pointing (spec H4/H5). Owner: A.
+
+Model: a 2nd-order polynomial per axis maps table cm (x, y) -> servo pulses (pan, tilt), fitted by
+least squares on calibration points. aim() predicts, moves, looks for the dot and corrects with the
+polynomial's local Jacobian until the dot is within 1 cm.
+"""
+from __future__ import annotations
+
+import contextlib
+import json
+import logging
+import math
+import os
+import time
+from dataclasses import dataclass, field
+from typing import Optional, Protocol
+
+import cv2
+import numpy as np
+
+from act.actuator import Actuator, Clock
+from core.types import Frame, Point
+
+log = logging.getLogger(__name__)
+
+DEFAULT_LATENCY_S = 0.06
+
+
+class FrameSource(Protocol):
+    def latest(self) -> Optional[Frame]: ...
+    def at(self, t: float) -> Optional[Frame]: ...
+
+
+class TableMap(Protocol):
+    def px_to_cm(self, pts: np.ndarray) -> np.ndarray: ...
+    def cm_to_px(self, pts: np.ndarray) -> np.ndarray: ...
+
+
+# ---------------------------------------------------------------- dot detection
+
+def _largest_blob(mask: np.ndarray, weight: np.ndarray, min_area: int, max_area: int
+                  ) -> Optional[tuple[float, float]]:
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    if n <= 1:
+        return None
+    i = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    area = int(stats[i, cv2.CC_STAT_AREA])
+    if area < min_area or area > max_area:
+        return None
+    x, y, w, h = (int(stats[i, k]) for k in (cv2.CC_STAT_LEFT, cv2.CC_STAT_TOP,
+                                              cv2.CC_STAT_WIDTH, cv2.CC_STAT_HEIGHT))
+    m = (lab[y:y + h, x:x + w] == i)
+    wt = np.where(m, np.maximum(weight[y:y + h, x:x + w].astype(np.float64), 1.0), 0.0)
+    ys, xs = np.mgrid[y:y + h, x:x + w]
+    s = wt.sum()
+    return float((xs * wt).sum() / s), float((ys * wt).sum() / s)
+
+
+def dot_px_diff(off: np.ndarray, on: np.ndarray, thr: int = 40, min_area: int = 2,
+                max_area: int = 3000) -> Optional[tuple[float, float]]:
+    """Laser dot from an off/on BGR pair: red rise minus half the green/blue rise (a saturated
+    white core still scores; a hand or lighting change, which moves all channels, doesn't)."""
+    d = on.astype(np.int16) - off.astype(np.int16)
+    score = d[..., 2] - (np.maximum(d[..., 0], d[..., 1]) >> 1)
+    mask = (score > thr).astype(np.uint8)
+    return _largest_blob(mask, score, min_area, max_area)
+
+
+def dot_px_hsv(on: np.ndarray, min_area: int = 2, max_area: int = 1500) -> Optional[tuple[float, float]]:
+    """Fallback on a single frame: bright saturated red (hue wraps at 0/180). Can false-fire on
+    warm, brightly lit surfaces, so find_dot uses it only when no off frame arrived."""
+    hsv = cv2.cvtColor(on, cv2.COLOR_BGR2HSV)
+    lo = cv2.inRange(hsv, (0, 120, 230), (8, 255, 255))
+    hi = cv2.inRange(hsv, (172, 120, 230), (180, 255, 255))
+    mask = ((lo | hi) > 0).astype(np.uint8)
+    return _largest_blob(mask, hsv[..., 2], min_area, max_area)
+
+
+# ---------------------------------------------------------------- calibration model
+
+def _features(u: np.ndarray, v: np.ndarray) -> np.ndarray:
+    return np.stack([np.ones_like(u), u, v, u * u, u * v, v * v], axis=-1)
+
+
+@dataclass
+class LaserFit:
+    """pulses = F(u, v) @ coef, with u = (x - cx)/s, v = (y - cy)/s (normalised for conditioning)."""
+    coef: np.ndarray                       # 6x2: columns pan, tilt
+    norm: tuple[float, float, float]       # cx, cy, s
+    fit_error_cm: dict = field(default_factory=dict)   # {'median':, 'max':}
+    n_points: int = 0
+    grid: Optional[int] = None
+    timestamp: float = 0.0
+
+    def _uv(self, xy: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        cx, cy, s = self.norm
+        return (xy[..., 0] - cx) / s, (xy[..., 1] - cy) / s
+
+    def predict(self, xy) -> np.ndarray:
+        """cm (2,) or (N,2) -> pulses (pan, tilt) of the same shape."""
+        xy = np.asarray(xy, dtype=np.float64)
+        u, v = self._uv(xy)
+        return _features(u, v) @ self.coef
+
+    def jacobian(self, xy) -> np.ndarray:
+        """2x2 d(pan, tilt)/d(x, y) at one point, in µs per cm."""
+        u, v = self._uv(np.asarray(xy, dtype=np.float64))
+        s = self.norm[2]
+        du = np.array([0.0, 1.0, 0.0, 2 * u, v, 0.0]) / s
+        dv = np.array([0.0, 0.0, 1.0, 0.0, u, 2 * v]) / s
+        return np.stack([du @ self.coef, dv @ self.coef], axis=1)   # rows: pan, tilt
+
+    def residuals_cm(self, xy: np.ndarray, pulses: np.ndarray) -> np.ndarray:
+        """Per-point fit error, pulse residual converted to cm through the local Jacobian."""
+        r = self.predict(xy) - pulses
+        return np.array([np.linalg.norm(np.linalg.solve(self.jacobian(p), ri))
+                         for p, ri in zip(xy, r)])
+
+    def to_dict(self) -> dict:
+        return {"model": "poly2", "coef": self.coef.tolist(), "norm": list(self.norm),
+                "fit_error_cm": self.fit_error_cm, "n_points": self.n_points, "grid": self.grid,
+                "timestamp": self.timestamp}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "LaserFit":
+        return cls(np.asarray(d["coef"], dtype=np.float64), tuple(d["norm"]),  # type: ignore[arg-type]
+                   d.get("fit_error_cm", {}), int(d.get("n_points", 0)), d.get("grid"),
+                   float(d.get("timestamp", 0.0)))
+
+    def save(self, path: str) -> None:
+        d = os.path.dirname(os.path.abspath(path))
+        os.makedirs(d, exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(self.to_dict(), f, indent=1)
+        os.replace(tmp, path)
+
+    @classmethod
+    def load(cls, path: str) -> "LaserFit":
+        with open(path) as f:
+            return cls.from_dict(json.load(f))
+
+
+def fit_poly(xy_cm, pulses, grid: Optional[int] = None) -> LaserFit:
+    """Least-squares fit of pulses = poly2(cm). Needs >= 6 points (use >= 9)."""
+    xy = np.asarray(xy_cm, dtype=np.float64).reshape(-1, 2)
+    p = np.asarray(pulses, dtype=np.float64).reshape(-1, 2)
+    if len(xy) < 6:
+        raise ValueError(f"need >= 6 calibration points, got {len(xy)}")
+    c = xy.mean(axis=0)
+    s = float(max(np.ptp(xy[:, 0]), np.ptp(xy[:, 1]), 1e-6) / 2)
+    tmp = LaserFit(np.zeros((6, 2)), (float(c[0]), float(c[1]), s))
+    u, v = tmp._uv(xy)
+    coef, *_ = np.linalg.lstsq(_features(u, v), p, rcond=None)
+    fit = LaserFit(coef, tmp.norm, n_points=len(xy), grid=grid, timestamp=time.time())
+    e = fit.residuals_cm(xy, p)
+    fit.fit_error_cm = {"median": float(np.median(e)), "max": float(e.max())}
+    return fit
+
+
+# ---------------------------------------------------------------- laser
+
+EDGES = ("left", "right", "top", "bottom")
+
+
+class Laser:
+    """Points the laser at table positions. Holds act.lock (if any) for each high-level action."""
+
+    def __init__(self, act: Actuator, frames: FrameSource, table: TableMap, cal_path: str, *,
+                 cfg: Optional[dict] = None, clock: Optional[Clock] = None,
+                 latency_s: Optional[float] = None):
+        cfg = cfg or {}
+        self.act, self.frames, self.table, self.cal_path = act, frames, table, cal_path
+        self.cfg = cfg
+        self.clock: Clock = clock or getattr(act, "clock", None) or Clock()
+        self.latency_s = float(latency_s if latency_s is not None
+                               else cfg.get("camera_latency_s", DEFAULT_LATENCY_S))
+        self.frame_timeout_s = float(cfg.get("laser_frame_timeout_s", 1.0))
+        self.settle_s = 0.15            # after a move, before looking
+        self.gain = 0.7
+        self.tol_cm = 1.0
+        self.max_tries = 8
+        self.anti_backlash_us = float(cfg.get("laser_anti_backlash_us", 25))
+        self.diff_thr = int(cfg.get("laser_diff_thr", 40))
+        self.max_dot_px = int(cfg.get("laser_max_dot_px", 3000))
+        self.table_size = tuple((cfg.get("table") or {}).get("size_cm", (90, 60)))
+        self.fit: Optional[LaserFit] = None
+        self.state = {"on": False, "target": None, "err_cm": None}
+        self.last_aim: dict = {}
+        self.last_frames: tuple[Optional[Frame], Optional[Frame]] = (None, None)
+        if cal_path and os.path.exists(cal_path):
+            self.fit = LaserFit.load(cal_path)
+
+    # -- helpers
+    def _locked(self):
+        lk = getattr(self.act, "lock", None)
+        return lk if lk is not None else contextlib.nullcontext()
+
+    def _need_fit(self) -> LaserFit:
+        if self.fit is None:
+            raise RuntimeError(f"laser not calibrated (no {self.cal_path}); run python -m act.calibrate")
+        return self.fit
+
+    def _clamp(self, pan: float, tilt: float) -> tuple[float, float]:
+        (plo, phi), (tlo, thi) = self.act.limits()
+        return min(phi, max(plo, float(pan))), min(thi, max(tlo, float(tilt)))
+
+    def move_to(self, pan: float, tilt: float, duration_s: float = 0.3) -> None:
+        """Move, always finishing from below on both axes so servo backlash is repeatable
+        (calibration and aiming then see the same offset, which the fit absorbs)."""
+        pan, tilt = self._clamp(pan, tilt)
+        a = self.anti_backlash_us
+        if a > 0:
+            self.act.move(*self._clamp(pan - a, tilt - a), duration_s=duration_s)
+            self.act.move(pan, tilt, duration_s=0.06)
+        else:
+            self.act.move(pan, tilt, duration_s=duration_s)
+
+    def _grab(self, on: bool) -> Optional[Frame]:
+        """Switch the laser, then return the first frame captured after the switch + camera latency.
+        Frame.t is stamped when the frame leaves the pipeline, which lags the scene by ~2-3 frames,
+        so a fixed short sleep would return a frame that still shows the old laser state."""
+        self.act.laser(on)
+        t_cmd = self.clock.now()
+        deadline = t_cmd + self.latency_s + self.frame_timeout_s
+        while True:
+            f = self.frames.latest()
+            if f is not None and f.t > t_cmd + self.latency_s:
+                return f
+            if self.clock.now() > deadline:
+                log.warning("no fresh frame %.2f s after laser %s", self.frame_timeout_s, on)
+                return None
+            self.clock.sleep(0.005)
+
+    # -- spec API
+    def find_dot(self) -> Optional[Point]:
+        """Blink the laser and return the dot position in table cm (None if not seen). Laser ends on."""
+        with self._locked():
+            off = self._grab(False)
+            on = self._grab(True)
+            self.last_frames = (off, on)
+            if on is None:
+                return None
+            if off is not None:
+                px = dot_px_diff(off.img, on.img, self.diff_thr, max_area=self.max_dot_px)
+            else:
+                # Fallback only without an off frame: when the diff is possible and empty, the dot
+                # really isn't visible, and a single-frame red mask would fire on warm surfaces.
+                px = dot_px_hsv(on.img, max_area=self.max_dot_px // 2)
+            if px is None:
+                return None
+            cm = self.table.px_to_cm(np.array([px], dtype=np.float64)).reshape(-1)
+            return float(cm[0]), float(cm[1])
+
+    def aim(self, target_cm: tuple, mode: str = "point") -> float:
+        """Point at target_cm. mode 'point' closes the loop on the seen dot (<= 8 tries, stop < 1 cm);
+        'open' just moves to the prediction and measures once. Returns the last measured error in cm
+        (inf if the dot was never seen). Leaves the laser on; the actuator's auto-off timer restarts."""
+        fit = self._need_fit()
+        target = np.asarray(target_cm, dtype=np.float64)
+        tries = 1 if mode == "open" else self.max_tries
+        err, first, n = math.inf, None, 0
+        with self._locked():
+            cmd = np.array(self._clamp(*fit.predict(target)))
+            self.move_to(*cmd)
+            for i in range(tries):
+                self.clock.sleep(self.settle_s)
+                dot = self.find_dot()
+                n += 1
+                if dot is None:
+                    continue            # occluded or missed: look again (counts as a try)
+                e = target - np.asarray(dot)
+                err = float(np.linalg.norm(e))
+                first = err if first is None else first
+                if err < self.tol_cm or i == tries - 1:
+                    break
+                cmd = np.array(self._clamp(*(cmd + self.gain * fit.jacobian(target) @ e)))
+                self.move_to(*cmd, duration_s=0.1)
+            self.act.laser(True)
+        self.last_aim = {"tries": n, "first_err_cm": first, "err_cm": err}
+        self.state = {"on": True, "target": None,
+                      "err_cm": None if math.isinf(err) else round(err, 2)}
+        return err
+
+    def aim_object(self, name: str, target_cm: tuple) -> float:
+        """aim(), but for shiny objects (cfg shiny_objects) aim shiny_offset_cm toward the table
+        centre so the dot lands on the table next to the object instead of glinting off it."""
+        tgt = np.asarray(target_cm, dtype=np.float64)
+        if name in (self.cfg.get("shiny_objects") or []):
+            off = float(self.cfg.get("shiny_offset_cm", 3))
+            d = np.asarray(self.table_size, dtype=np.float64) / 2 - tgt
+            n = float(np.linalg.norm(d))
+            tgt = tgt + (d / n if n > 1e-6 else np.array([1.0, 0.0])) * off
+        err = self.aim(tuple(tgt))
+        self.state["target"] = name
+        return err
+
+    def _trace(self, pts_cm: np.ndarray, seg_s: float) -> None:
+        fit = self._need_fit()
+        with self._locked():
+            pul = fit.predict(pts_cm)
+            self.act.laser(True)
+            self.act.move(*self._clamp(*pul[0]), duration_s=0.3)
+            for p in pul[1:]:
+                self.act.move(*self._clamp(*p), duration_s=seg_s)
+            self.act.laser(True)       # restart the auto-off timer at the end
+        self.state["on"] = True
+
+    def sweep_edge(self, edge: str, inset_cm: float = 4.0, passes: int = 2) -> None:
+        """Run the dot back and forth along one table edge ('carried off the left side')."""
+        if edge not in EDGES:
+            raise ValueError(f"edge must be one of {EDGES}, got {edge!r}")
+        w, h = self.table_size
+        m = 5.0
+        a, b = {"left": ((inset_cm, m), (inset_cm, h - m)),
+                "right": ((w - inset_cm, m), (w - inset_cm, h - m)),
+                "top": ((m, inset_cm), (w - m, inset_cm)),
+                "bottom": ((m, h - inset_cm), (w - m, h - inset_cm))}[edge]
+        s = np.linspace(0, 1, 12)[:, None]
+        line = np.asarray(a) + s * (np.asarray(b) - np.asarray(a))
+        pts = [line if k % 2 == 0 else line[::-1] for k in range(passes)]
+        self._trace(np.concatenate(pts), seg_s=0.06)
+        self.state["target"] = f"edge:{edge}"
+
+    def circle(self, center_cm: tuple, r_cm: float = 5, laps: int = 2) -> None:
+        """Trace a circle around a last-seen position ('I lost track, last seen here')."""
+        n = 24
+        a = np.linspace(0, 2 * np.pi * laps, n * laps + 1)
+        c = np.asarray(center_cm, dtype=np.float64)
+        self._trace(c + r_cm * np.stack([np.cos(a), np.sin(a)], axis=1), seg_s=0.04)
+
+    def off(self) -> None:
+        self.act.laser(False)
+        self.state = {"on": False, "target": None, "err_cm": None}
