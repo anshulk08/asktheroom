@@ -9,17 +9,22 @@ enum RigGATT {
     static let answer = CBUUID(string: "8A1E0003-6B7F-4C2B-9E3A-2F5D7C1A0003")
     static let state = CBUUID(string: "8A1E0004-6B7F-4C2B-9E3A-2F5D7C1A0004")
     static let status = CBUUID(string: "8A1E0005-6B7F-4C2B-9E3A-2F5D7C1A0005")
-    static let incoming = [answer, state, status]
+    /// In the order to subscribe: state last, because subscribing to it sends a snapshot at once.
+    static let incoming = [answer, status, state]
 }
 
 /// The Bluetooth link to the rig (spec section 5, "Connect"): scan for the service,
-/// connect to the strongest rig, remember it, and reconnect forever with backoff up to 5 s.
+/// connect to the strongest rig, remember it, and reconnect forever: at once after a drop,
+/// then with backoff up to 5 s.
 @MainActor
 final class RoomLink: NSObject, RoomTransport {
     static let rememberedKey = "rigPeripheralID"
     /// How long to keep listening after the first rig is heard, to pick the strongest.
     static let chooseWindow: Duration = .milliseconds(800)
     static let maxBackoff = 5.0
+    /// The bridge sends state at least every 5 s. Nothing for three heartbeats means the link is up but
+    /// the bridge hung or lost our subscription, so reconnect.
+    static let staleAfter: Duration = .seconds(15)
 
     private let log = Logger(subsystem: "com.asktheroom.app", category: "RoomLink")
     private weak var store: RoomStore?
@@ -30,6 +35,8 @@ final class RoomLink: NSObject, RoomTransport {
     private var heard: [UUID: (peripheral: CBPeripheral, rssi: Int)] = [:]
     private var chooseTask: Task<Void, Never>?
     private var retryTask: Task<Void, Never>?
+    private var watchTask: Task<Void, Never>?
+    private var lastHeard = ContinuousClock.now
     private var backoff = 0.5
     private var stopped = false
     /// A question asked while the link was down; sent as soon as it's back.
@@ -58,6 +65,7 @@ final class RoomLink: NSObject, RoomTransport {
         stopped = true
         chooseTask?.cancel()
         retryTask?.cancel()
+        watchTask?.cancel()
         if central.state == .poweredOn { central.stopScan() }
         if let peripheral { central.cancelPeripheralConnection(peripheral) }
         peripheral = nil
@@ -129,11 +137,20 @@ final class RoomLink: NSObject, RoomTransport {
     private func lost(_ p: CBPeripheral, error: Error?) {
         guard p.identifier == peripheral?.identifier else { return }
         log.info("disconnected: \(error?.localizedDescription ?? "no error")")
+        let wasWorking = questionCharacteristic != nil
         peripheral = nil
         questionCharacteristic = nil
         reassemblers = [:]
+        watchTask?.cancel()
         store?.linkChanged(.searching)
-        retryLater()
+        // A working link that dropped: try again straight away. The pending connect to the remembered
+        // rig completes as soon as it advertises again. Only failed attempts back off.
+        if wasWorking {
+            backoff = 0.5
+            findRig()
+        } else {
+            retryLater()
+        }
     }
 
     private func retryLater() {
@@ -159,32 +176,53 @@ final class RoomLink: NSObject, RoomTransport {
     }
 
     private func foundCharacteristics(_ p: CBPeripheral, service: CBService) {
-        for c in service.characteristics ?? [] {
-            switch c.uuid {
-            case RigGATT.question:
-                questionCharacteristic = c
-            case RigGATT.answer, RigGATT.state:
-                p.setNotifyValue(true, for: c)
-            case RigGATT.status:
-                p.setNotifyValue(true, for: c)
-                p.readValue(for: c)
-            default:
-                break
-            }
+        var found: [CBUUID: CBCharacteristic] = [:]
+        for c in service.characteristics ?? [] { found[c.uuid] = c }
+        questionCharacteristic = found[RigGATT.question]
+        // PROTOCOL.md section 3: read status first, which tells the bridge this link's MTU, so the
+        // first snapshot comes in as few chunks as the link allows. CoreBluetooth runs these in order.
+        if let status = found[RigGATT.status] { p.readValue(for: status) }
+        for uuid in RigGATT.incoming {
+            if let c = found[uuid] { p.setNotifyValue(true, for: c) }
         }
         store?.linkChanged(.connected)
         if let waiting { send(waiting) }
+        watch(p)
+    }
+
+    /// Reconnects when nothing has arrived for `staleAfter` on a link that still looks connected.
+    private func watch(_ p: CBPeripheral) {
+        let id = p.identifier
+        lastHeard = .now
+        watchTask?.cancel()
+        watchTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(5))
+                guard let self, !Task.isCancelled, let current = self.peripheral, current.identifier == id else { return }
+                if ContinuousClock.now - self.lastHeard > Self.staleAfter {
+                    self.log.info("nothing from the rig for \(Self.staleAfter.components.seconds) s; reconnecting")
+                    self.central.cancelPeripheralConnection(current)
+                    return
+                }
+            }
+        }
     }
 
     // MARK: Incoming
 
     private func received(_ value: Data, on uuid: CBUUID) {
+        lastHeard = .now
         // A status read may come back as plain JSON rather than a framed chunk.
         if uuid == RigGATT.status, value.first == UInt8(ascii: "{"), let status = Wire.decode(RigStatus.self, from: value) {
             store?.receive(status: status)
             return
         }
-        guard let message = reassemblers[uuid, default: Reassembler()].add(value) else { return }
+        let droppedBefore = reassemblers[uuid]?.dropped ?? 0
+        let message = reassemblers[uuid, default: Reassembler()].add(value)
+        if let dropped = reassemblers[uuid]?.dropped, dropped > droppedBefore {
+            log.notice("dropped an incomplete message on \(uuid.uuidString, privacy: .public) (\(dropped) so far)")
+        }
+        guard let message else { return }
         switch uuid {
         case RigGATT.answer:
             guard let answer = Wire.decode(Answer.self, from: message) else { return dropped(message, uuid) }
@@ -260,6 +298,13 @@ extension RoomLink: CBPeripheralDelegate {
         guard error == nil, let value = characteristic.value else { return }
         let uuid = characteristic.uuid
         MainActor.assumeIsolated { received(value, on: uuid) }
+    }
+
+    nonisolated func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
+        guard let error else { return }
+        let uuid = characteristic.uuid.uuidString
+        let message = error.localizedDescription
+        MainActor.assumeIsolated { log.error("subscribing to \(uuid, privacy: .public) failed: \(message, privacy: .public)") }
     }
 
     nonisolated func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
