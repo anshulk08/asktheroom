@@ -113,3 +113,62 @@ def test_video_source_in_realtime_takes_the_clip_length(clip):
     assert src.done.wait(3.0)
     assert time.monotonic() - t0 >= 0.9                       # 20 frames at 0.05 s
     src.stop()
+
+
+# ----- a camera that drops off USB is reopened and gets its settings back ---------------------------------
+
+class DyingCam(FakeCam):
+    """Works for `good` reads, then fails forever (unplugged)."""
+    def __init__(self, good=20, **kw):
+        super().__init__(**kw)
+        self.good = good
+
+    def read(self):
+        time.sleep(self.dt)
+        self.n += 1
+        return (True, np.zeros((4, 4, 3), np.uint8)) if self.n <= self.good else (False, None)
+
+
+class Controls:
+    def __init__(self):
+        self.snaps, self.restored = [], []
+
+    def snapshot(self, path):
+        self.snaps.append(path)
+        return ["exposure=333", "focus=40"]
+
+    def restore(self, path, snap):
+        self.restored.append((path, list(snap)))
+        return len(snap)
+
+
+def test_a_camera_that_drops_off_usb_is_reopened_with_its_settings_restored():
+    first, second = DyingCam(good=20), FakeCam()
+    opened = []
+
+    def opener(src):
+        opened.append(src)
+        if len(opened) == 1:
+            return first
+        if len(opened) == 2:
+            raise RuntimeError("can't open camera")          # still re-enumerating
+        return second
+
+    ctl = Controls()
+    fb = FrameBuffer("/dev/v4l/by-id/cam", opener=opener, controls=ctl, reopen_after_s=0.05, retry_s=0.02)
+    try:
+        assert wait_for(lambda: fb.reconnects == 1 and fb.latest() is not None and fb.latest().idx > 40)
+        assert opened == ["/dev/v4l/by-id/cam"] * 3 and first.released.is_set()
+        assert ctl.snaps == ["/dev/v4l/by-id/cam"]               # snapshot once, when first opened
+        assert ctl.restored == [("/dev/v4l/by-id/cam", ["exposure=333", "focus=40"])]
+    finally:
+        fb.stop()
+
+
+def test_a_test_source_without_a_device_is_never_reopened():
+    fb = FrameBuffer(DyingCam(good=5), reopen_after_s=0.02, retry_s=0.01)
+    try:
+        time.sleep(0.2)
+        assert fb.reconnects == 0 and fb.failures > 0
+    finally:
+        fb.stop()

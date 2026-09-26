@@ -15,6 +15,7 @@ from __future__ import annotations
 import bisect
 import json
 import logging
+import os
 import sys
 import threading
 import time
@@ -55,10 +56,26 @@ class FrameBuffer:
 
     `source` is a camera index or device path (opened with open_camera), or anything with read() -> (ok, img)
     and release(), which is how tests feed it.
+
+    A camera (index or path) that stops giving frames for reopen_after_s, e.g. dropped off USB, is released
+    and reopened every retry_s; once it is back, the controls it had when first opened (after
+    scripts/camera_setup.sh) are written back, since a replugged UVC camera comes back with auto exposure
+    and autofocus on. Open it by its /dev/v4l/by-id/ path: an index can change when it re-enumerates. In
+    the app's container only the /dev/video* nodes present at start exist: if the camera returns as a new
+    node, the log says so and the app must be restarted.
     """
 
-    def __init__(self, source: Union[int, str, object] = 0, ring_s: float = 10.0, name: str = "capture"):
-        self.cap = open_camera(source) if isinstance(source, (int, str)) else source
+    def __init__(self, source: Union[int, str, object] = 0, ring_s: float = 10.0, name: str = "capture",
+                 opener=None, controls=None, reopen_after_s: float = 1.0, retry_s: float = 1.0):
+        self._device = source if isinstance(source, (int, str)) else None
+        self._opener = opener or open_camera
+        if controls is None:
+            from core import v4l2ctl as controls
+        self._controls = controls
+        self.reopen_after_s, self.retry_s = reopen_after_s, retry_s
+        self.reconnects = 0
+        self.cap = self._opener(source) if self._device is not None else source
+        self._snapshot = self._controls.snapshot(self._ctl_path()) if self._device is not None else []
         self.ring_s = ring_s
         self._ring: deque[Frame] = deque()
         self._lock = threading.Lock()
@@ -70,7 +87,41 @@ class FrameBuffer:
         self._thread = threading.Thread(target=self._run, name=name, daemon=True)
         self._thread.start()
 
+    def _ctl_path(self) -> Optional[str]:
+        from core.v4l2ctl import device_path
+        return device_path(self._device)
+
+    def _reopen(self) -> None:
+        """Release the dead camera and open it again every retry_s until it is back (or stop()), then
+        restore its controls."""
+        log.warning("camera %r gave no frames for %.1f s (unplugged?): reopening", self._device, self.reopen_after_s)
+        try:
+            self.cap.release()
+        except Exception:
+            log.debug("release of the dead camera failed", exc_info=True)
+        tries = 0
+        while not self._stop.is_set():
+            tries += 1
+            try:
+                self.cap = self._opener(self._device)
+                break
+            except Exception as ex:
+                if tries % 10 == 1:
+                    path = self._ctl_path()
+                    target = os.path.realpath(path) if path else None
+                    hint = (f"; it now points at {target}, which this container may not have: restart the app"
+                            if target and path and os.path.exists(path) and not os.path.exists(target) else "")
+                    log.error("camera %r not back yet (%s)%s", self._device, ex, hint)
+                self._stop.wait(self.retry_s)
+        else:
+            return
+        n = self._controls.restore(self._ctl_path(), self._snapshot)
+        self.reconnects += 1
+        log.warning("camera %r is back (reconnect %d); %d of %d controls restored",
+                    self._device, self.reconnects, n, len(self._snapshot))
+
     def _run(self) -> None:
+        dead_since = None
         while not self._stop.is_set():
             ok, img = self.cap.read()
             now, wall = time.monotonic(), time.time()
@@ -78,8 +129,14 @@ class FrameBuffer:
                 self.failures += 1
                 if self.failures % 30 == 1:
                     log.warning("camera read failed (%d so far)", self.failures)
+                dead_since = dead_since or now
+                if self._device is not None and now - dead_since >= self.reopen_after_s:
+                    self._reopen()
+                    dead_since = None
+                    continue
                 self._stop.wait(0.01)
                 continue
+            dead_since = None
             with self._lock:
                 self._idx += 1
                 self._ring.append(Frame(t=now, wall=wall, img=img, idx=self._idx))
