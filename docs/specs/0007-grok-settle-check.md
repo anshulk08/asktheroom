@@ -23,7 +23,7 @@ YOLO is finicky on the rig: hands come out as objects, there are phantom objects
 
 - **Trigger.** The narration `Segmenter` (`core/narration.py`): hands or events open an episode, `quiet_s` of quiet closes it. The close is "the table settled". There is also one check at start-up, after `quiet_s`. `feed()` runs on the perception thread, is O(1), never raises, and puts the settled frame in a one-slot box (newest wins).
 - **Worker** (thread `grok-check`). It calls only when online, under `max_per_hour` and at least `min_gap_s` after the last call. It drops the frame (counted in `dropped`) if an episode has reopened since the frame was taken.
-- **Call.** The frame with numbered marks for the world's VISIBLE entities (`voice/visual.tracked_marks`, the same set-of-marks as look/pick), one Grok call (`grok-4.3`, `reasoning_effort: none`, JSON schema): `{marks: [{mark, real, label, confidence}], unmarked: [{label, point {x, y}, confidence}]}`.
+- **Call.** The frame with numbered marks for the world's VISIBLE entities (`voice/visual.tracked_marks`, the same set-of-marks as look/pick), one Grok call (`grok-4.3`, `reasoning_effort: none`, JSON schema): `{marks: [{mark, real, label, confidence}], unmarked: [{label, point {x, y}, confidence}]}`. Each mark also carries up to 3 `guesses` with probabilities, `not_object` and `held` (spec 0008).
 - **Verdicts,** one row per mark or unmarked find:
 
 | Verdict | Meaning |
@@ -35,17 +35,18 @@ YOLO is finicky on the rig: hands come out as objects, there are phantom objects
 | `unsure` | below `min_conf` |
 | `unmarked` | something on the table no mark covers (up to 8, points inside a mark or off the table skipped) |
 
-- **Store.** Table `grok_checks` in `data/events.db` (own table, same connection pattern as `core/narration_store.py`; `core/events.py` unchanged): `id, t, wall, episode, mark, entity, world_label, grok_label, verdict, x_cm, y_cm, confidence, latency_ms, model`. Rows older than `keep_h` are pruned at start. No frame is kept.
+- **Store.** Table `grok_checks` in `data/events.db` (own table, same connection pattern as `core/narration_store.py`; `core/events.py` unchanged): `id, t, wall, episode, mark, entity, world_label, grok_label, verdict, x_cm, y_cm, confidence, latency_ms, model`, plus `guesses` (JSON), `not_object` and `held` (spec 0008; added by `ALTER TABLE` on start for older databases). Rows older than `keep_h` are pruned at start. No frame is kept.
 - **Effects.**
-  1. An unnamed `thing:N` named at `bind_conf` or more takes the name through `world.bind_alias`, only if it has no alias and no entity already has that name. Taught names are never replaced.
-  2. Phantoms are recorded, never acted on. The world is unchanged. (Letting a phantom veto an entity would need a `core/world.py` change: a proposal for the owner, after judging.)
-  3. `state_json()["grok_check"]` carries the status. The dashboard memory pill shows "check (N to review)" (phantom + relabel + unmarked) and the disclosure in its tooltip.
-  4. "Where is my X?" when the world has no position (UNKNOWN, never seen) or the name is unknown: `VisualQA` answers from the newest sighting (`agree`, `relabel`, `named`, `unmarked`) within `sighting_max_age_s`: "I haven't tracked your X, but at 10:42 I saw what looked like your X about here." It circles the laser at that cm. This reads stored rows, so it also works offline. The answer passes the pill filter.
+  1. An unnamed `thing:N` named at `bind_conf` (0.9) or more takes the name through `world.bind_alias`, only if it has no alias and no entity already has that name. Taught names are never replaced. `bind_conf` was 0.7: on the rig, 0.7–0.8 named one thing "phone" and "phone charger" on two checks.
+  2. One object per kind (`merge_same`, spec 0008): a new unnamed thing Grok names with a label a lost thing already answers to is folded into that lost thing (`world.merge_same_kind`, a `CORRECTED` event). Never when two marks in the frame have similar labels, when the lost thing is among the marks, when the two were ever seen together, or when anything is inside or under either.
+  3. Phantoms alone are recorded, never acted on. With `belief_enabled` (spec 0008, off by default), a phantom verdict adds to a thing's `not_object` tally, and a thing whose tally reaches 0.7 over at least 3 checks is retired as clutter (only a VISIBLE thing with no taught name, nothing inside or under it and no hand contact). One verdict never retires anything.
+  4. `state_json()["grok_check"]` carries the status. The dashboard memory pill shows "check (N to review)" (phantom + relabel + unmarked) and the disclosure in its tooltip.
+  5. "Where is my X?" when the world has no position (UNKNOWN, never seen) or the name is unknown: `VisualQA` answers from the newest sighting (`agree`, `relabel`, `named`, `unmarked`) within `sighting_max_age_s`: "I haven't tracked your X, but at 10:42 I saw what looked like your X about here." It circles the laser at that cm. This reads stored rows, so it also works offline. The answer passes the pill filter.
 - **Eval.** `python -m core.grok_check --eval DIR [--n 20]` sends up to 20 saved frames (optional sidecar `<frame>.json`: `[{"name", "box_px"}]`, frame equals the table) and prints latency p50/p90, prompt tokens and verdict counts. It needs `XAI_API_KEY` and a team OK for spend (about $0.05).
 
 ## Config (`grok_check:`, last section of `config.yaml`)
 
-`enabled` (false), `provider` (grok; `fake` for tests and `--fake`), `model` (grok-4.3), `reasoning_effort` (none), `quiet_s` (1.5), `min_gap_s` (5), `max_per_hour` (120), `look_px` (1280), `timeout_s` (8), `min_conf` (0.6), `bind_names` (true), `bind_conf` (0.7), `sighting_max_age_s` (900), `keep_h` (24).
+`enabled` (false), `provider` (grok; `fake` for tests and `--fake`), `model` (grok-4.3), `reasoning_effort` (none), `quiet_s` (1.5), `min_gap_s` (5), `max_per_hour` (120), `look_px` (1280), `timeout_s` (8), `min_conf` (0.6), `bind_names` (true), `bind_conf` (0.9; was 0.7), `merge_same` (true), `sighting_max_age_s` (900), `keep_h` (24), `belief_enabled` (false) and its thresholds (spec 0008).
 
 ## Privacy
 

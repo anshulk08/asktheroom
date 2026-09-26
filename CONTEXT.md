@@ -86,10 +86,10 @@ rules can't read and of open questions (with a compact world state).
 | `core/world.py`, `core/relations.py`, `core/geom.py` | Deterministic, rule-based world model (covers, containers, holds, edges, parent chains). About 200 tests. |
 | `core/events.py` | EventLog: SQLite event history, questions table and snapshots. |
 | `core/fakeworld.py` | Stand-in world with the same read API, for tests and `--fake` runs. |
-| `core/things.py`, `core/proposals.py`, `core/embed.py`, `core/crops.py` | Open world: unnamed `thing:N` identity, object proposals (change detection, YOLOE prompt-free), DINOv2 re-id embedder (off by default), close-up crops. |
+| `core/things.py`, `core/proposals.py`, `core/embed.py`, `core/crops.py` | Open world: unnamed `thing:N` identity (spec 0008: a thing lost within 60 s and seen again at its spot is itself, `thing_identity:`), object proposals (change detection, YOLOE prompt-free), DINOv2 re-id embedder (off by default), close-up crops. |
 | `core/auto_name.py` | Automatic names: one Grok look at each new `thing:N`'s close-up, kept as a soft guess (not an alias) that questions fall back to, hedged. |
 | `core/narration*.py`, `core/visual_memory.py`, `core/clip_tokenizer.py` | Grok clip narration and the keyframe archive with MobileCLIP2 text search. |
-| `core/grok_check.py` | Grok settle check (spec 0007, off by default): Grok checks the tracked marks when the table settles; verdict rows in `grok_checks`; sightings answer "where is my X" when the world has no position. YOLO stays Stage 1. |
+| `core/grok_check.py` | Grok settle check (spec 0007, off by default): Grok checks the tracked marks when the table settles; verdict rows in `grok_checks`; sightings answer "where is my X" when the world has no position; one object per kind and the label belief (spec 0008). YOLO stays Stage 1. |
 | `core/xai.py` | The one client for every Grok call (xAI's API over plain requests, one shared warm connection; no openai package). `main.py` warms it at start and whenever the network comes back. |
 | `core/reminders.py`, `core/reports.py`, `core/profile.py` | Care layer: event-triggered reminders, morning report, profile facts (ideas from Project Memoria, MIT). |
 | `mobile/` | BLE bridge (`bridge/`), wire protocol (`PROTOCOL.md`), iPhone app (`ios/`). |
@@ -147,6 +147,12 @@ recall over saved frames), Grok narration, reminders, morning report, profile fa
 follow-ups, and the BLE bridge + iPhone app. Not yet on the real table: the D17 open-world check (teach,
 hide, move the box, ask; at least 4/5 or the eight-object demo is the headline), real eval trials, and
 laser calibration. Stretch goals (floor search camera, room map) are deprioritized.
+
+Sat afternoon, unit-tested, not yet measured on the rig: one object, one `thing:N` (spec 0008). On the
+rig, 39 things were born in 13 min, 31 of them within 5 cm of an earlier thing. Now a thing lost
+recently and seen again at its spot is itself (on by default). When Grok names a new thing like a lost
+one, the two are folded into one (`merge_same`, needs the settle check). A summed Grok label belief
+names things and retires clutter (off by default).
 
 ## Decisions worth knowing
 
