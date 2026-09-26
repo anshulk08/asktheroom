@@ -684,11 +684,16 @@ def build(cfg: dict, fake: bool = False, camera: int = 0, with_voice: bool = Tru
                     and log.info("Grok connection warm"))
     # Narration and visual memory (both off unless enabled in config): they attach to world.update, so
     # the perception loop and --fake's SimCamera feed them without a call here; stopped before the log closes.
+    # The Grok settle check (off unless enabled) attaches the same way; visual Q&A reads its sightings.
+    import core.grok_check
     import core.narration
     import voice.visual
     narrator = core.narration.from_config(cfg, events, world, online=lambda: netmon.online)
     visual = voice.visual.from_config(cfg, world, events, frames, table, online=lambda: netmon.online)
-    cleanup += [x.stop for x in (narrator, visual) if x is not None]
+    checker = core.grok_check.from_config(cfg, events, world, table, online=lambda: netmon.online)
+    if visual is not None:
+        visual.grok_check = checker
+    cleanup += [x.stop for x in (narrator, visual, checker) if x is not None]
     ask = voice.pipeline.make_ask(cfg, world, events, net=netmon, interpret=interpret, visual=visual)
     tts = voice.tts.TTS(cfg, net=netmon)
     tts.warm()

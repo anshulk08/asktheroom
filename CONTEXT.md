@@ -69,8 +69,9 @@ start); overheard speech that isn't a question for the rig is dropped without be
 leaves the device: answer text to ElevenLabs for the voice when online, texts via Twilio for /sms,
 and the question log to the team's own n8n on the laptop. Grok (xAI) does all LLM/VLM work when
 online: visual questions send the current frame (and for "earlier" questions a few saved frames),
-narration sends short clips' keyframes. Visual questions are on in `config.yaml` (Sat), narration is
-off; the dashboard shows a disclosure for whatever is on. Grok also gets the text of questions the
+narration sends short clips' keyframes, and the Grok settle check (spec 0007) sends one still frame
+each time the table settles. Visual questions are on in `config.yaml` (Sat), narration and the settle
+check are off; the dashboard shows a disclosure for whatever is on. Grok also gets the text of questions the
 rules can't read and of open questions (with a compact world state).
 
 ## Repo map
@@ -88,6 +89,7 @@ rules can't read and of open questions (with a compact world state).
 | `core/fakeworld.py` | Stand-in world with the same read API, for tests and `--fake` runs. |
 | `core/things.py`, `core/proposals.py`, `core/embed.py`, `core/crops.py` | Open world: unnamed `thing:N` identity, object proposals (change detection, YOLOE prompt-free), DINOv2 re-id embedder (off by default), close-up crops. |
 | `core/narration*.py`, `core/visual_memory.py`, `core/clip_tokenizer.py` | Grok clip narration and the keyframe archive with MobileCLIP2 text search. |
+| `core/grok_check.py` | Grok settle check (spec 0007, off by default): Grok checks the tracked marks when the table settles; verdict rows in `grok_checks`; sightings answer "where is my X" when the world has no position. YOLO stays Stage 1. |
 | `core/xai.py` | The one client for every Grok call (xAI's API over plain requests, one shared warm connection; no openai package). `main.py` warms it at start and whenever the network comes back. |
 | `core/reminders.py`, `core/reports.py`, `core/profile.py` | Care layer: event-triggered reminders, morning report, profile facts (ideas from Project Memoria, MIT). |
 | `mobile/` | BLE bridge (`bridge/`), wire protocol (`PROTOCOL.md`), iPhone app (`ios/`). |

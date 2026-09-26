@@ -6,7 +6,7 @@ Status meanings:
 - **implemented**: the code exists and runs, but hasn't been tested or measured on the real rig.
 - **planned**: a spec or roadmap item with no code yet.
 
-Test suite at time of writing (Sat 26 Sep, after the overnight merge): `.venv/bin/python -m pytest -q` gives 1370 passed, 21 skipped on the laptop (the skips need optional models or hardware). Jetson measurements are labelled "Jetson". See PLANS.md checkpoints F1–F6.
+Test suite at time of writing (Sat 26 Sep, after the overnight merge): `.venv/bin/python -m pytest -q` gives 1432 passed, 25 skipped on the laptop (branch `grok-settle-check`) (the skips need optional models or hardware). Jetson measurements are labelled "Jetson". See PLANS.md checkpoints F1–F6.
 
 ## Perception and world model
 
@@ -100,6 +100,7 @@ All LLM/VLM work goes through Grok (grok-4.3 via the xAI API, `XAI_API_KEY`). Ev
 | — | Pick: "where is my X" for a name the rig doesn't know. Grok only says which mark shows X and what it is (`{mark, label, confidence}`); the world model says where. An unnamed thing picked at confidence 0.7 or more takes the name (`world.bind_alias`), so the next ask needs no Grok call; a taught name is never replaced (`VisualQA.pick`) | validated (unit) | `tests/test_visual.py` (`test_pick_*`). Not yet run against real Grok |
 | — | Recall: saved keyframes found by MobileCLIP2 text search, then Grok answers with times (`voice/visual.py`, `core/visual_memory.py`, `core/clip_tokenizer.py`) | validated (unit) | `tests/test_visual.py`; one real Grok recall on desk photos, 1.0 s, abstained correctly. On in `config.yaml` since Sat (`visual_memory.enabled`) |
 | — | Episode narration: Grok describes what happened in a short clip; "what was I doing this morning?" (`core/narration.py`, `core/narration_store.py`) | validated (unit) | `tests/test_narration.py`, `tests/test_narration_answers.py`; real Grok self-test 15.6 s with reasoning "low" for 4 frames (laptop). Off by default |
+| 0007 | Grok settle check: when the table settles, Grok checks the tracked marks (agree, relabel, phantom, named, unmarked) and rows go to `grok_checks` in `events.db`; unnamed things can take Grok's name; "where is my X" with no world position answers from the last sighting, also offline (`core/grok_check.py`). YOLO stays Stage 1 (research verdict in spec 0007) | implemented, off by default | `tests/test_grok_check.py` (22); `main.py --fake` with the fake provider: one check per sim settle, none while the hand moves (laptop). Not run against real Grok or rig frames; `--eval` needs team spend OK |
 | — | Qwen interpreter and answerer replaced by Grok | validated (laptop) | `tests/test_understand.py`, `tests/test_pipeline.py`; eval numbers above. Rules and templates stay first; offline, rules and the fallback sentence |
 
 ## Phone app

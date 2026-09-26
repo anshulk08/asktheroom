@@ -8,7 +8,9 @@ Routing (VisualQA.route, called by voice/pipeline.py before the offline template
     that isn't about the table or what the camera sees ('what time is it', 'tell me a joke') returns None
     so the pipeline's `other` answerer takes it, online or offline;
   - WHERE for a name the world model doesn't know ('where is my red mug?') goes to pick(); HISTORY /
-    HANDLED for such a name goes to recall() when no narration mentions it.
+    HANDLED for such a name goes to recall() when no narration mentions it;
+  - WHERE for a tracked object the world has never placed (or, offline, for a name it doesn't know) uses
+    the Grok settle check's newest sighting of it (core/grok_check.py, when on and it has one).
 Offline, a question only the VLM could answer gets a spoken 'I need the connection' (the world model
 still answers everything else). Over the hourly cap, route() returns None and the old path answers.
 
@@ -219,6 +221,42 @@ def _jpeg(img: np.ndarray, long_side: Optional[int] = None, upscale: bool = Fals
     return buf.tobytes(), (img.shape[1], img.shape[0])
 
 
+def tracked_marks(world, table) -> list[tuple[str, tuple]]:
+    """(entity, frame px box) for every VISIBLE tracked entity with a box, in world order: the numbered
+    candidates a VLM picks from. Empty without a calibrated table."""
+    if table is None or getattr(table, "ok", True) is False:
+        return []
+    try:
+        ents = world.state_json().get("entities", [])
+    except Exception:
+        return []
+    out = []
+    for d in ents:
+        if d.get("status") != "VISIBLE":
+            continue
+        try:
+            box = world.get(d["name"]).box_cm
+        except Exception:
+            box = None
+        px = cm_box_to_px(table, box) if box is not None else None
+        if px is not None:
+            out.append((d["name"], px))
+    return out
+
+
+def spoken_names(world, cfg: dict) -> dict:
+    """entity -> spoken name, for everything the world tracks (unnamed things: None)."""
+    try:
+        ents = [e["name"] for e in world.state_json().get("entities", [])]
+    except Exception:
+        ents = list((cfg.get("objects") or {}))
+    try:
+        labels = world.thing_labels() if hasattr(world, "thing_labels") else {}
+    except Exception:
+        labels = {}
+    return {n: (labels.get(n) if n.startswith("thing:") else display_name(cfg, n)) for n in ents}
+
+
 def _clock(wall: float) -> str:
     lt = time.localtime(wall)
     return f"{lt.tm_hour % 12 or 12}:{lt.tm_min:02d} {'AM' if lt.tm_hour < 12 else 'PM'}"
@@ -309,6 +347,7 @@ class VisualQA:
         self.clock = clock
         self._calls: deque = deque()
         self.last: Optional[dict] = None
+        self.grok_check = None          # core.grok_check.GrokCheck when on (main.build sets it)
 
     # -- the VLM call
 
@@ -328,16 +367,7 @@ class VisualQA:
     # -- names
 
     def _names(self) -> dict:
-        """entity -> spoken name, for everything the world tracks (unnamed things: None)."""
-        try:
-            ents = [e["name"] for e in self.world.state_json().get("entities", [])]
-        except Exception:
-            ents = list((self.cfg.get("objects") or {}))
-        try:
-            labels = self.world.thing_labels() if hasattr(self.world, "thing_labels") else {}
-        except Exception:
-            labels = {}
-        return {n: (labels.get(n) if n.startswith("thing:") else display_name(self.cfg, n)) for n in ents}
+        return spoken_names(self.world, self.cfg)
 
     def _focus(self, intent: Optional[Intent], text: str) -> list[str]:
         """Entities the question names, for close-ups: the intent's target, then any spoken name or alias
@@ -456,26 +486,7 @@ class VisualQA:
         return Answer(text or f"I think this is your {said}.", point_at=ent, action="point")
 
     def _marks(self) -> list[tuple[str, tuple]]:
-        """(entity, frame px box) for every VISIBLE tracked entity with a box, in world order: the
-        candidates the VLM picks from."""
-        if self.table is None or getattr(self.table, "ok", True) is False:
-            return []
-        try:
-            ents = self.world.state_json().get("entities", [])
-        except Exception:
-            return []
-        out = []
-        for d in ents:
-            if d.get("status") != "VISIBLE":
-                continue
-            try:
-                box = self.world.get(d["name"]).box_cm
-            except Exception:
-                box = None
-            px = cm_box_to_px(self.table, box) if box is not None else None
-            if px is not None:
-                out.append((d["name"], px))
-        return out
+        return tracked_marks(self.world, self.table)
 
     def _crops(self, focus: list[str]) -> list[tuple[str, np.ndarray]]:
         try:
@@ -624,11 +635,12 @@ class VisualQA:
             how = "recall" if past else "look"
         elif k in ("WHERE", "HISTORY", "HANDLED") and (intent.name or intent.obj):
             try:
-                known = _target(intent, self.world, self.cfg) is not None
+                target = _target(intent, self.world, self.cfg)
+                known = target is not None
             except Exception:
-                known = True
+                target, known = None, True
             if known:
-                return None
+                return self._sighting(ent=target) if k == "WHERE" and target else None
             said = [w for w in (intent.name or intent.obj, query_phrase(text)) if w]
             if k == "WHERE":
                 how = "pick"
@@ -640,13 +652,43 @@ class VisualQA:
             return None
         online = self.online() if online is None else online
         if not online:
-            return Answer(OFFLINE) if k == "OTHER" else None
+            if k == "OTHER":
+                return Answer(OFFLINE)
+            return self._sighting(said=said[0]) if how == "pick" else None
         if self._capped():
             log.info("visual questions: hourly cap reached; answering without the camera")
             return None
         if how == "pick":
             return self.pick(text, said[0])
         return self.look(text, intent) if how == "look" else self.recall(text)
+
+    def _sighting(self, ent: Optional[str] = None, said: Optional[str] = None) -> Optional[Answer]:
+        """WHERE for something the world has never had a position for (a tracked object still UNKNOWN,
+        or offline, a name it doesn't know), from the Grok settle check's newest sighting of it. Stored
+        rows, so it works offline. The laser circles the spot, since the sighting may be minutes old.
+        None: the templates answer as before."""
+        if self.grok_check is None:
+            return None
+        if ent is not None:
+            try:
+                e = self.world.get(ent)
+            except Exception:
+                return None
+            if e.status != "UNKNOWN" or e.pos_cm is not None or e.last_seen is not None:
+                return None
+            said = self._names().get(ent) or said
+        if not said:
+            return None
+        try:
+            hit = self.grok_check.lookup(said)
+        except Exception:
+            log.exception("grok check lookup failed")
+            return None
+        if hit is None:
+            return None
+        text = _spoken(f"I haven't tracked your {said}, but at {_clock(hit['wall'])} I saw what looked like "
+                       f"your {said} about here.")
+        return Answer(text, action="circle", target_cm=(hit["x_cm"], hit["y_cm"]))
 
     def _about_table(self, intent: Intent, t: str) -> bool:
         """Whether an OTHER question (t normalized) is about the table or what the camera sees: it says
