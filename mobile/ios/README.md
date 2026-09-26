@@ -24,3 +24,19 @@ If `xcode-select` points at the Command Line Tools, prefix the command with `DEV
 | `Framing.swift` | Chunk reassembly per characteristic (spec section 3) |
 | `Models.swift` | Wire types; optional keys, open-string `action` |
 | `MockData.swift` | The spec's sample snapshot |
+| `MockRoom.swift` | Mock mode: the sample snapshot, a looping story, faked answers |
+| `RoomStore.swift` | App state: snapshot, status, questions and answers, highlight, timeouts |
+| `MapLayout.swift` | What to draw per entity (section 5 table) and where, without overlaps |
+| `TableMapView.swift` | The table map, pulse, laser reticle, sweep and circle |
+| `AnswerCard.swift`, `AskBar.swift` | Answer and history; suggestion chips, text field, mic |
+| `RoomView.swift` | Connect and Room screens, status pill, banners, detail sheet |
+
+## See it without opening Xcode
+
+`./run.sh <name> [launch args]` builds, installs and launches on the simulator, then saves a screenshot to `build/shots/<name>.png`:
+
+```sh
+./run.sh keys -mock YES -mockPaused YES -mockAsk "Where are my keys?"
+```
+
+Set `SIM=<id>` for a different simulator.

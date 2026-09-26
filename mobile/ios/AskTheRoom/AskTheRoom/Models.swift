@@ -182,8 +182,13 @@ struct Answer: Codable, Equatable {
     var action: String?
     var target: TablePoint?
     var ms: Int?
+    /// Proposed (PROTOCOL_PROPOSALS.md P2): "voice" for answers to questions spoken to the room.
+    var src: String?
+    /// Proposed (P2): the transcript the room heard.
+    var q: String?
 
     var succeeded: Bool { ok ?? true }
+    var isRoomVoice: Bool { id == nil && src == "voice" }
     var pointAt: String? { point_at }
     var laserAction: LaserAction? { action.map(LaserAction.init) }
 }
