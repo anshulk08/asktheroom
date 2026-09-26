@@ -190,7 +190,10 @@ class ThingRules:
 
     def _reset_things(self) -> None:
         self._tcfg = ThingsConfig.from_config(self.cfg)
-        self._thing_n = 0
+        # Never reuse an id: the event log outlives RESET and the process, and a new thing:N would
+        # inherit an old thing:N's history. Duck-typed sinks without max_number start at 0.
+        logged = getattr(self.events, 'max_number', None)
+        self._thing_n = max(getattr(self, '_thing_n', 0), logged(PREFIX) if logged else 0)
         self._things: list[str] = []                   # every thing ever confirmed, oldest first
         self._cands: list[Candidate] = []
         self._banks: dict[str, ExemplarBank] = {}

@@ -411,3 +411,10 @@ def test_connections_of_finished_threads_are_not_accumulated(log):
         _in_thread(lambda: log.last('keys'))
     _in_thread(lambda: log.last('keys'))
     assert len(log._conns) <= 2   # this thread's + at most the latest reader's
+
+
+def test_max_number_is_the_highest_numbered_obj_with_the_prefix(log):
+    assert log.max_number('thing:') == 0
+    for obj in ('thing:2', 'thing:10', 'thing:9', 'keys', 'things'):
+        log.add(ev(obj=obj))
+    assert log.max_number('thing:') == 10

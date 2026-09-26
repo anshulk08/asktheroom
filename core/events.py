@@ -168,6 +168,12 @@ class EventLog:
                           (obj, n))
         return [_row_to_event(r) for r in rows]
 
+    def max_number(self, prefix: str) -> int:
+        """Highest N among logged objs named prefix + N ('thing:' -> 12 for thing:12), else 0."""
+        rows = self._rows('SELECT MAX(CAST(substr(obj, ?) AS INTEGER)) FROM events WHERE obj LIKE ?',
+                          (len(prefix) + 1, prefix + '%'))
+        return int(rows[0][0] or 0)
+
     def since(self, wall: float) -> list[Event]:
         """Events with wall time >= wall, oldest first. Wall, not monotonic t: callers pass clock times."""
         rows = self._rows(f'SELECT {_COLS} FROM events WHERE wall >= ? ORDER BY wall, id', (wall,))
