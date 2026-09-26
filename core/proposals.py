@@ -27,7 +27,8 @@ ChangeProposer, per frame, at a working resolution of work_px on the long side:
      like the table around it but did not in the reference is a revealed table (something that was
      in the reference moved away): the reference is healed there and nothing is proposed.
 The reference is the median of ref_frames frames at startup, reset() (RESET / recalibration) or a
-saved image, with hand and known-object boxes left out (those pixels are learned the first time they
+saved image, taken after skipping warmup_frames frames (a webcam settles for a few seconds after the stream
+opens), with hand and known-object boxes left out (those pixels are learned the first time they
 are seen empty for adopt_frames frames). It is refreshed slowly where the frame matches it and there
 is no known object, hand or proposal, so lighting drift is followed while a stationary new object is
 never absorbed. If most of the table changes for rebuild_frames frames (camera bumped, lights
@@ -122,6 +123,9 @@ class ChangeConfig:
     """proposals.change. Pixel sizes are at the working resolution unless named _frac (of the frame)."""
     work_px: int = 640                  # long side of the working image (1280x720 -> 640x360)
     ref_frames: int = 10                # median of this many frames makes the reference
+    warmup_frames: int = 45             # ... taken after skipping this many (a webcam's first frames after the
+                                        # stream opens are dark and unstable; a reference from them made
+                                        # every object on the table look changed: 71 flickering spots vs 8)
     adopt_frames: int = 5               # a never-seen pixel seen empty this many frames in a row is learned
     k_sigma: float = 4.0                # threshold = k_sigma x noise + floor
     noise_cap: float = 3.0              # frame noise is capped at this x the noise right after capture
@@ -184,6 +188,7 @@ class ChangeProposer:
         self._changed_run = 0
         self._valid_mask, self._adopting = None, True
         self._noise_ref: Optional[tuple[float, float]] = None
+        self._warm = max(0, int(self.cfg.warmup_frames))   # frames still to skip before collecting
 
     @property
     def ready(self) -> bool:
@@ -299,6 +304,10 @@ class ChangeProposer:
         self._setup(img.shape[:2])
         if self._loaded is not None:
             self._apply_loaded(img)
+        if self._ref is None and self._warm > 0:
+            self._warm -= 1
+            self.last_ms = 1000 * (time.perf_counter() - t0)
+            return []
         lab = self._lab(img)
         if self._ref is None:
             self._collect(img, lab, known, hands)
