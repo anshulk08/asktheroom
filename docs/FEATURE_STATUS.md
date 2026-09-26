@@ -6,13 +6,13 @@ Status meanings:
 - **implemented**: the code exists and runs, but hasn't been tested or measured on the real rig.
 - **planned**: a spec or roadmap item with no code yet.
 
-Test suite at time of writing: `.venv/bin/python -m pytest -q` gives 608 passed, 20 skipped (the skips need optional models or hardware). Nothing has been measured on the Jetson yet. See PLANS.md checkpoints F1–F6.
+Test suite at time of writing (Sat 26 Sep, after the overnight merge): `.venv/bin/python -m pytest -q` gives 1287 passed, 21 skipped on the laptop (the skips need optional models or hardware). Jetson measurements are labelled "Jetson". See PLANS.md checkpoints F1–F6.
 
 ## Perception and world model
 
 | Spec | Feature | Status | Evidence |
 |---|---|---|---|
-| — | Camera capture, newest frame + ring (`core/capture.py`) | validated | `tests/test_capture.py` |
+| — | Camera capture, newest frame + ring (`core/capture.py`) | validated | `tests/test_capture.py`; 29.9 fps live on the Jetson (MJPG 1280x720, manual exposure) |
 | — | ArUco table frame, px→cm homography (`core/table.py`) | validated | `tests/test_table.py` (synthetic frames) |
 | — | YOLO-World detector, TensorRT on the Jetson (`core/detect.py`) | implemented | `tests/test_detect.py` covers the post-processing only. There is no accuracy measurement on our objects yet |
 | — | YOLO11 fine-tune on overhead frames (`scripts/finetune/`) | implemented | `tests/test_finetune.py` covers the tooling. No trained model yet |
@@ -20,6 +20,12 @@ Test suite at time of writing: `.venv/bin/python -m pytest -q` gives 608 passed,
 | — | World rules: HELD, UNDER, INSIDE, GONE, UNKNOWN, parent chains, decay (`core/world.py`, `core/relations.py`) | validated | `tests/test_world_rules.py`, `tests/test_world_core.py`, `tests/test_relations.py` (synthetic detections) |
 | — | Shell game (keys → notebook → box → box moved) | validated | Synthetic: world-rule tests and `eval.synth`. Real-table trials not yet recorded (F5) |
 | — | Event log + snapshots, 24 h snapshot pruning (`core/events.py`) | validated | `tests/test_events.py` |
+| — | Open-world identity: unnamed `thing:N` entities, causal-first re-identification, UNKNOWN survives (`maybe_same_as`, no silent merges), exemplar bank (`core/things.py`) | validated (synthetic) | `tests/test_openworld.py`. The real-table check (D17: teach, hide, move the box, ask; at least 4/5) is not done yet |
+| — | Teaching by voice: "this is my charger" names the thing just put down (`voice/teach.py`) | validated (unit) | `tests/test_teach.py` |
+| — | Object proposals: change-detection proposer and YOLOE-26s prompt-free adapter, reduced-head fast path (`core/proposals.py`, `core/yoloe_fast.py`) | implemented | `tests/test_proposals.py`, `tests/test_yoloe_fast.py`. Measured on desk photos only, not on the rig |
+| — | Re-identification embedder, DINOv2-S/14 in TensorRT (`core/embed.py`) | implemented, off by default | `tests/test_embed.py`; 3.7–4.7 ms per crop on the Jetson. Same-object cosine mean 0.72 vs different 0.21 on proxy crops; the `openworld` thresholds must be retuned for it before `reid.enabled` goes on |
+| — | Close-up crop store for visual questions (`core/crops.py`) | validated (unit) | `tests/test_crops.py` |
+| — | Model-free fine-tune labelling: background difference + copy-paste synthesis (`scripts/finetune/bglabel.py`, `synthesize.py`) | validated (unit) | `tests/test_bglabel.py`, `tests/test_synthesize.py`. No real capture session yet |
 
 ## Voice
 
@@ -34,7 +40,12 @@ Test suite at time of writing: `.venv/bin/python -m pytest -q` gives 608 passed,
 | 0002 | Always listening, overheard filter, wake and click modes (`main.py`, `voice/understand.py`) | validated (unit) | `tests/test_main.py` (answers questions and drops chatter, waits while speaking, clicker is listen-now); overheard set 16/16 on the laptop. The 10-minute hall-noise run hasn't been done yet (F3) |
 | 0002 | Echo guard: mic shut while speaking + `echo_tail_s` | validated (unit) | `tests/test_main.py::test_always_listening_waits_while_the_rig_speaks`. Not tested with a real speaker and mic |
 | — | ElevenLabs streaming TTS with Piper fallback (`voice/tts.py`) | validated (unit) | `tests/test_tts.py` (fallback on no network and slow first byte) |
-| — | whisper-cli backend on the Jetson (`stt.backend: cli`) | implemented | Not run on the Jetson yet (F4) |
+| — | whisper.cpp on the Jetson GPU (`stt.backend: server`, `whisper-server` base.en, `audio_ctx 0`) | validated (Jetson) | 22/22 test questions right, median 139 ms on the Jetson (`scripts/build_whisper.sh`, `third_party/stt_bench.py`) |
+| — | Conversation memory: follow-ups like "and my wallet?" (`voice/conversation.py`) | validated (unit) | `tests/test_conversation.py` |
+| — | Reminders from events ("remind me if I haven't picked up my pill bottle by 9"), neutral pill wording (`core/reminders.py`, `voice/care.py`) | validated (unit) | `tests/test_reminders.py`, `tests/test_care.py` |
+| — | Morning report and caregiver summary (`core/reports.py`) | validated (unit) | `tests/test_reports.py` |
+| — | Profile facts ("my daughter is Sarah") (`core/profile.py`) | validated (unit) | `tests/test_profile.py` |
+| — | TTS output device selection (`tts.output_device`) | validated (unit) | `tests/test_tts_device.py` |
 
 ## Laser
 
@@ -70,6 +81,24 @@ Test suite at time of writing: `.venv/bin/python -m pytest -q` gives 608 passed,
 
 | Spec | Feature | Status | Evidence |
 |---|---|---|---|
-| 0003 | Measure Grok box error vs ArUco on 20 frames | planned | Spec 0003. Needs team OK for xAI spend |
+| 0003 | Measure Grok box error vs ArUco on 20 frames | partly measured (laptop, desk photos) | grok-4.3 asked for boxes: Gemini `box_2d` 0/5 (mean IoU 0.14), pixel or fraction boxes 2/5, a bare point 4/5. Choosing among numbered candidate boxes (set-of-marks): 5/5. Grok boxes are too loose to auto-label a fine-tune; picking a mark works |
 | 0003 | (a) Grok auto-labelling for the YOLO11 fine-tune | planned | Depends on the measurement |
 | 0003 | (b) Second opinion on low-confidence frames, (c) `find_new` | planned | Depends on the measurement; lower priority |
+
+## Grok (visual questions and memory)
+
+All LLM/VLM work goes through Grok (grok-4.3 via the xAI API, `XAI_API_KEY`). Every answer passes the pill filter. Offline, rules and templates answer and visual questions say they need the connection.
+
+| Spec | Feature | Status | Evidence |
+|---|---|---|---|
+| — | Look now, set-of-marks: tracked objects drawn as numbered boxes, Grok picks a mark (the laser follows that entity) or gives a point (`voice/visual.py`) | validated (laptop, desk photos) | `tests/test_visual.py`; real Grok with 23 unnamed marks on two desk photos: 20/23 right (misses: two sugar packets it declined to name, a notepad under a calculator), about 1.0 s median. Not yet on rig frames |
+| — | Recall: saved keyframes found by MobileCLIP2 text search, then Grok answers with times (`voice/visual.py`, `core/visual_memory.py`, `core/clip_tokenizer.py`) | validated (unit) | `tests/test_visual.py`; one real Grok recall on desk photos, 1.0 s, abstained correctly. Off by default (`visual_memory.enabled`) |
+| — | Episode narration: Grok describes what happened in a short clip; "what was I doing this morning?" (`core/narration.py`, `core/narration_store.py`) | validated (unit) | `tests/test_narration.py`, `tests/test_narration_answers.py`; real Grok self-test 15.6 s with reasoning "low" for 4 frames (laptop). Off by default |
+| — | Qwen interpreter and answerer replaced by Grok | planned | Teammate task; rules and templates stay first |
+
+## Phone app
+
+| Spec | Feature | Status | Evidence |
+|---|---|---|---|
+| — | Bluetooth LE bridge on the Jetson, chunked JSON protocol (`mobile/bridge/`, `mobile/PROTOCOL.md`) | implemented | `tests/test_mobile_protocol.py`. Needs `sudo hcitool` advertising fix on the Jetson; not yet tested with an iPhone |
+| — | Native iPhone app (SwiftUI + CoreBluetooth) (`mobile/ios/`) | implemented | Xcode project from the mobile teammate; framing and wire models reviewed against `mobile/PROTOCOL.md`. Not yet tested against the Jetson |

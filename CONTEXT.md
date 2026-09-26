@@ -9,15 +9,24 @@ Contributor and agent rules are in `AGENTS.md`, the plan in `PLANS.md`, per-feat
 ## What it is
 
 A HackGT 13 project (36 h, live demo judging). An overhead camera watches a tabletop and keeps track
-of eight objects (keys, pill bottle, wallet, glasses, phone, remote, a box and a notebook), including
-ones it can't currently see. You just ask "where are my keys?" (the mic is always on; a clicker
+of the objects on it, including ones it can't currently see: eight known props (keys, pill bottle,
+wallet, glasses, phone, remote, a box and a notebook) plus anything else put down, tracked as an
+unnamed `thing:N` until someone names it ("this is my charger"). The eight props are the reliability
+fallback for the demo. You just ask "where are my keys?" (the mic is always on; a clicker
 works too). It answers out loud
 ("under the notebook, you slid it over them 2 minutes ago") and a pan-tilt laser points at the spot.
 
 The hard part is object permanence. A detector only says what is visible right now, so the world model
 keeps a belief for every object: VISIBLE, HELD by a hand, UNDER a cover, INSIDE a container, or GONE off
 an edge of the table. Hidden objects inherit their parent's position through a chain
-(keys → notebook → table), so moving the notebook moves where the laser points.
+(keys → notebook → table), so moving the notebook moves where the laser points. For unnamed things,
+identity is causal first (it went under the box, so what comes out is probably it); appearance only
+confirms, and when the rig isn't sure it says so (UNKNOWN, `maybe_same_as`) instead of merging.
+
+Questions the world model can't answer from its state go to Grok with the camera frame: "what colour
+is my mug?", "what does the note say?", "was there a red mug here this morning?" (saved keyframes).
+For "where", Grok picks one of the tracked objects drawn as numbered boxes (set-of-marks), so the laser
+still points at a tracked entity.
 
 ## Hardware
 
@@ -39,7 +48,8 @@ always-on mic ─▶ voice/stt (Silero VAD + whisper.cpp; audio only in memory; 
           ─▶ voice/understand: meant for the rig? (keyword gate, then wake word "room" or a question
              opening; chatter is dropped, never logged) ─▶ voice/intents.parse, then Qwen3 1.7B
              (llama.cpp on the Jetson, scripts/qwen_server.sh) for what the rules can't read
-          ─▶ voice/pipeline.make_ask
+          ─▶ voice/care (reminders, profile facts, morning report, follow-ups) ─▶ voice/pipeline.make_ask
+                     ├─ visual questions ─▶ voice/visual: Grok look (set-of-marks) / recall (saved frames)
                      ├─ WHERE / HANDLED / CHANGES / ... ─▶ voice/answers (templates)
                      └─ OTHER ─▶ voice/local_llm (templates for the common ones, else one Qwen call
                                  with the world state; same pill-wording filter)
@@ -47,6 +57,7 @@ always-on mic ─▶ voice/stt (Silero VAD + whisper.cpp; audio only in memory; 
                      ├─ voice/tts: ElevenLabs when online, Piper offline
                      └─ act/laser.Laser.aim_object: closed-loop aim, corrects on the camera's view of the dot
 server/app.py (FastAPI): dashboard, MJPEG overlay, WebSocket state, POST /ask, /sms (Twilio)
+mobile/bridge (BLE GATT on the Jetson) ◀─▶ iPhone app (mobile/ios): ask, state, answers, notices; no cloud
 main.py ─▶ n8n webhook (laptop): a log of every spoken question, plus a 5-minute health check
 ```
 
@@ -54,8 +65,10 @@ Every answer is worked out on the Jetson, online or not. Privacy, honestly: vide
 the device and audio is never written to disk; event snapshots (JPEGs) are kept 24 h (pruned at
 start); overheard speech that isn't a question for the rig is dropped without being logged. What
 leaves the device: answer text to ElevenLabs for the voice when online, texts via Twilio for /sms,
-and the question log to the team's own n8n on the laptop. Grok is not on the voice path (team
-decision); it is planned only as a detector helper (`docs/specs/0003-grok-detection-assist.md`).
+and the question log to the team's own n8n on the laptop. Grok (xAI) does all LLM/VLM work when
+online: visual questions send the current frame (and for "earlier" questions a few saved frames),
+narration sends short clips' keyframes; both are off by default in `config.yaml` and the dashboard
+shows a disclosure when on. The local Qwen interpreter is being replaced by Grok.
 
 ## Repo map
 
@@ -70,13 +83,18 @@ decision); it is planned only as a detector helper (`docs/specs/0003-grok-detect
 | `core/world.py`, `core/relations.py`, `core/geom.py` | Deterministic, rule-based world model (covers, containers, holds, edges, parent chains). About 200 tests. |
 | `core/events.py` | EventLog: SQLite event history, questions table and snapshots. |
 | `core/fakeworld.py` | Stand-in world with the same read API, for tests and `--fake` runs. |
-| `voice/` | `intents` (rule parser), `answers` (spoken templates), `understand` (overheard filter + Qwen reads what the rules can't), `local_llm` (open questions, local), `pipeline` (router), `tts`, `stt` (Silero VAD + whisper.cpp), `trigger` (clicker), `llm` (world-state helpers and pill filter; its Grok call is off the voice path). |
+| `core/things.py`, `core/proposals.py`, `core/embed.py`, `core/crops.py` | Open world: unnamed `thing:N` identity, object proposals (change detection, YOLOE prompt-free), DINOv2 re-id embedder (off by default), close-up crops. |
+| `core/narration*.py`, `core/visual_memory.py`, `core/clip_tokenizer.py` | Grok clip narration and the keyframe archive with MobileCLIP2 text search. |
+| `core/reminders.py`, `core/reports.py`, `core/profile.py` | Care layer: event-triggered reminders, morning report, profile facts (ideas from Project Memoria, MIT). |
+| `mobile/` | BLE bridge (`bridge/`), wire protocol (`PROTOCOL.md`), iPhone app (`ios/`). |
+| `assets/` | Small licensed data files the code needs (CLIP BPE vocabulary). `models/` is never committed. |
+| `voice/` | `visual` (Grok look/recall, routing), `teach` ("this is my X"), `care` + `conversation` (reminders, profile, follow-ups), `intents` (rule parser), `answers` (spoken templates), `understand` (overheard filter + Qwen reads what the rules can't), `local_llm` (open questions, local), `pipeline` (router), `tts`, `stt` (Silero VAD + whisper.cpp), `trigger` (clicker), `llm` (world-state helpers and pill filter; its Grok call is off the voice path). |
 | `act/` | `actuator` (servo drivers + fake), `laser` (poly2 fit + closed-loop aim), `calibrate`, `sim` (simulated rig). |
 | `server/` | FastAPI dashboard (`app.py`), frame overlay, `sim.py` (full demo on a synthetic camera). |
 | `eval/` | Trial recording, synthetic trials, replay against baselines (last-seen, nearest-object, current-frame) and the report. |
 | `net.py` | Online/offline monitor. Readers check `.online`, which never blocks. |
 | `scripts/` | `dock.sh` (run inside the Jetson Ultralytics container), camera setup, markers PDF, servo sweep, `qwen_server.sh`, `eval_understand.py` (interpreter accuracy per model), `overheard_test.py` (false triggers on a hall recording), `gen_n8n_workflow.py`. |
-| `tests/` | About 610 tests. None need hardware. `understand_eval.json`: 64 spoken-style commands for the interpreter. |
+| `tests/` | About 1,300 tests. None need hardware. `understand_eval.json`: 64 spoken-style commands for the interpreter. |
 | `n8n/` | `ask-the-room.json`: a live log of every spoken question plus a 5-minute health check. `ask-the-repo.json`: a chat bot about this repo. See `n8n/README.md`. |
 
 ## Conventions
@@ -91,7 +109,7 @@ decision); it is planned only as a detector helper (`docs/specs/0003-grok-detect
 ## Running it
 
 ```bash
-python -m pytest -q                 # all tests, ~10 s, no hardware
+python -m pytest -q                 # all tests, ~90 s, no hardware
 python -m server.sim                # dashboard at http://localhost:8000 on a scripted synthetic camera
 python -m server.sim --check        # headless: print each step's events and final beliefs
 python -m act.calibrate --sim       # laser calibration against the simulated rig
@@ -110,13 +128,18 @@ intents, answers, TTS, laser math and calibration against the sim, dashboard, an
 harness. The synthetic eval scores 255/300. That number is synthetic and says nothing about how well the
 real detector works.
 
-Also built, tested on the laptop, not yet on the Jetson: speech input (Silero VAD + whisper.cpp) and the
-clicker, `main.py` wiring all threads together, the fine-tuning scripts (zero-shot YOLO-World mistook the
-Jetson case for a phone), `demo_check.py`, Qwen question understanding and local open answers, and the always-on mic.
-Interpreter eval on the laptop (`scripts/eval_understand.py`): rules alone 48/64, rules + Qwen3 1.7B
-58/64 (overheard 16/16), median 114 ms. Still to do on the Jetson: build llama.cpp, time Qwen next to
-YOLO and whisper (`tegrastats`), and the 10-minute hall-noise test (`scripts/overheard_test.py`). Stretch goals (floor search camera, room map) wait until checkpoints D8/D9
-pass.
+Also built, tested on the laptop, not yet on the Jetson: the clicker, `main.py` wiring all threads
+together, the fine-tuning scripts (zero-shot YOLO-World mistook the Jetson case for a phone; the plan is
+model-free background-difference labels plus copy-paste synthesis), `demo_check.py`, Qwen question
+understanding (being replaced by Grok), and the always-on mic. On the Jetson: whisper.cpp base.en on the
+GPU, 22/22 test questions, median 139 ms; DINOv2 re-id at 3.7–4.7 ms per crop.
+
+Built overnight (Fri → Sat), unit-tested: open-world `thing:N` identity and teaching by voice, object
+proposals, Grok visual questions (set-of-marks look: 20/23 on desk photos with real Grok, about 1 s;
+recall over saved frames), Grok narration, reminders, morning report, profile facts, conversation
+follow-ups, and the BLE bridge + iPhone app. Not yet on the real table: the D17 open-world check (teach,
+hide, move the box, ask; at least 4/5 or the eight-object demo is the headline), real eval trials, and
+laser calibration. Stretch goals (floor search camera, room map) are deprioritized.
 
 ## Decisions worth knowing
 
@@ -124,7 +147,8 @@ pass.
 - **Fine-tune YOLO11** on our own overhead frames. YOLO-World is only the baseline and the auto-labeller.
 - **Hands come from the detector's `hand` class.** MediaPipe was dropped: it runs CPU-only on the Jetson and misses hands that hold objects.
 - **The laser corrects in a closed loop** from the camera's view of the dot. Frame-diff dot finding has to allow for camera latency.
-- **Local Qwen, not Grok, for speech.** Qwen3 1.7B beat Qwen2.5 1.5B on speed and open answers at the same intent accuracy. The model never writes coordinates, only picks an object from an enum.
+- **Grok for all LLM/VLM work** (Fri night, xAI track), replacing the earlier local-Qwen decision. Rules and templates still answer first and are the offline fallback. The model never writes coordinates: for "where" it picks a numbered mark (set-of-marks beat asking Grok for boxes, 5/5 vs 0/5 on a desk photo).
+- **Open world is core**, with the eight known props as the fallback. Unnamed things keep UNKNOWN rather than guessing an identity.
 - **Templates stay for the core questions**; the model only covers what they can't. They're exact, tested and instant.
 - **"Was that for me?" is decided by rules, not the model**: Qwen got 8/16 overheard lines right, the gate + wake word + question-opening checks 16/16.
 - **The eval compares against a "nearest object to the last-seen spot" baseline**, so any win is measured against something reasonable.
