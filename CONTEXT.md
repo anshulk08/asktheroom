@@ -86,6 +86,7 @@ rules can't read and of open questions (with a compact world state).
 | `core/fakeworld.py` | Stand-in world with the same read API, for tests and `--fake` runs. |
 | `core/things.py`, `core/proposals.py`, `core/embed.py`, `core/crops.py` | Open world: unnamed `thing:N` identity, object proposals (change detection, YOLOE prompt-free), DINOv2 re-id embedder (off by default), close-up crops. |
 | `core/narration*.py`, `core/visual_memory.py`, `core/clip_tokenizer.py` | Grok clip narration and the keyframe archive with MobileCLIP2 text search. |
+| `core/xai.py` | The one client for every Grok call (xAI's API over plain requests, one shared warm connection; no openai package). `main.py` warms it at start and whenever the network comes back. |
 | `core/reminders.py`, `core/reports.py`, `core/profile.py` | Care layer: event-triggered reminders, morning report, profile facts (ideas from Project Memoria, MIT). |
 | `mobile/` | BLE bridge (`bridge/`), wire protocol (`PROTOCOL.md`), iPhone app (`ios/`). |
 | `assets/` | Small licensed data files the code needs (CLIP BPE vocabulary). `models/` is never committed. |
