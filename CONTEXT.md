@@ -65,7 +65,7 @@ text plus a compact world-state JSON leave the device.
 | `net.py` | Online/offline monitor. Readers check `.online`, which never blocks. |
 | `scripts/` | `dock.sh` (run inside the Jetson Ultralytics container), camera setup, markers PDF, servo sweep, Grok smoke test. |
 | `tests/` | About 475 tests. None need hardware. |
-| `n8n/` | A chat workflow that answers questions about this repo (see `n8n/README.md`). |
+| `n8n/` | `ask-the-room.json`: text chat to the rig plus a 5-minute health check. `ask-the-repo.json`: a chat bot about this repo. See `n8n/README.md`. |
 
 ## Conventions
 
