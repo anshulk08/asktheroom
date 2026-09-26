@@ -8,9 +8,8 @@ next to the app's HTTP API on localhost:8000.
                         the phone subscribes
     status           -> read (unframed JSON) + notify on change (app up/down, fps, online, calibration)
 
-Source "dashboard" is the /ask source that is spoken AND aimed (main.Room.ask_and_act answers every
-source except "sms"/"n8n" out loud and moves the laser; server/app.py accepts only
-{"dashboard", "n8n"}).
+Source "phone" is spoken AND aimed like "dashboard" (main.Room.ask_and_act answers every source
+except "sms" out loud and moves the laser; server/app.py's /ask accepts only {"dashboard", "phone"}).
 
 Needs only what JetPack 6 ships: python3 (3.10), python3-dbus, python3-gi, BlueZ 5.64.
 
@@ -78,13 +77,20 @@ class RoomHTTP:
 
 
 def read_config(repo: str) -> tuple[tuple[float, float], str, str]:
-    """(table size cm, table_cal path, laser_cal path) from the repo's config.yaml."""
+    """(table size cm, table_cal path, laser_cal path) from the repo's config.yaml, with the device's
+    config.local.yaml over it (core/config.py)."""
     size, tcal, lcal = (90.0, 60.0), "table_cal.json", "laser_cal.json"
     path = os.path.join(repo, "config.yaml")
     try:
         import yaml  # present on JetPack; the regex below covers its absence
         with open(path) as f:
             cfg = yaml.safe_load(f) or {}
+        local = os.path.join(repo, "config.local.yaml")
+        if os.path.isfile(local):
+            with open(local) as f:
+                over = yaml.safe_load(f) or {}
+            for k in ("table", "paths"):
+                cfg[k] = dict(cfg.get(k) or {}, **(over.get(k) or {}))
         s = (cfg.get("table") or {}).get("size_cm") or size
         size = (float(s[0]), float(s[1]))
         paths = cfg.get("paths") or {}
@@ -167,6 +173,7 @@ class BridgeCore:
         self.http, self.emit = http, emit
         self.table_cm = (float(table_cm[0]), float(table_cm[1]))
         self.table_cal, self.laser_cal = table_cal, laser_cal
+        self._cal_mtime: Optional[float] = None      # table_cal.json we last took the size from
         self.source = source
         self.seen = {"answers": None, "notices": None}   # newest seq / notice id already handled (None: first poll)
         self.clock, self.mono = clock, mono
@@ -300,7 +307,25 @@ class BridgeCore:
 
     def compact_now(self) -> dict:
         with self.lock:
-            return P.compact_state(self.latest_state, self.table_cm, self.clock())
+            return P.compact_state(self.latest_state, self.current_table_cm(), self.clock())
+
+    def current_table_cm(self) -> tuple[float, float]:
+        """The table size, re-read when table_cal.json changes: a one-tag recalibration measures a new
+        tracked area, and the phone's map should follow it without restarting the bridge."""
+        try:
+            m = os.path.getmtime(self.table_cal) if self.table_cal else None
+        except OSError:
+            m = None
+        if m is not None and m != self._cal_mtime:
+            self._cal_mtime = m
+            try:
+                with open(self.table_cal) as f:
+                    s = json.load(f).get("size_cm")
+                if s:
+                    self.table_cm = (float(s[0]), float(s[1]))
+            except (OSError, ValueError, TypeError, IndexError, AttributeError):
+                pass
+        return self.table_cm
 
     def push_updates(self) -> None:
         now = self.mono()

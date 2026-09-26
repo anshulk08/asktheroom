@@ -269,7 +269,7 @@ demo_check:
 
 understand:
   enabled: true               # false = rule parser only
-  url: http://127.0.0.1:8081/v1   # backend: qwen only (default grok, the llm: section): llama-server (scripts/qwen_server.sh)
+  url: http://127.0.0.1:8081/v1   # local Qwen (llama-server, scripts/qwen_server.sh): only for backend qwen or auto (default grok; not installed on the Jetson)
   model: Qwen3-1.7B-Q4_K_M.gguf   # in models/qwen/ (scripts/qwen_server.sh; scripts/eval_understand.py scores it)
   timeout_s: 1.5              # slower than this, the rule parser answers instead
   answer_timeout_s: 4         # open questions (voice/local_llm.py); slower = the fallback sentence
@@ -377,6 +377,14 @@ care:
   conversation_turns: 5
   profile_llm: true           # online: free-form 'about me' statements go to Grok (llm: section) as strict JSON
 
+# Demo behaviour (main.py, voice/care.py).
+demo:
+  thinking_cue_s: 1.0         # no answer this long after a spoken question (Grok reading or answering it):
+                              # say a short phrase so the rig isn't silent; 0 = off
+  thinking_phrases: ["Let me look.", "One moment.", "Hmm, let me check."]   # used in turn
+  hold_notices: false         # true: nothing speaks unasked (reminders, morning report); notices still
+                              # show on /state and the phone. Turn on if reminders would talk over a judge.
+
 # One-tag table calibration (core/table.py): ONE printed AprilTag 36h11 lying anywhere on the table replaces
 # markers 0-3, so nothing is measured. Print: python scripts/make_markers.py --tag (160 mm), then set size_cm
 # to the black square's side as printed (check with a ruler). The tracked area becomes what the camera sees
@@ -465,3 +473,13 @@ grok_check:                   # Grok checks the tracker each time the table sett
 thing_identity:
   rebirth_s: 60               # 0 = off
   rebirth_cm: 5.0
+
+# Known-object boxes dropped before the world sees them (core/detect.py). Zero-shot YOLO-World labels a
+# hand as 'phone' / 'wallet' next to its 'hand' box (per-class NMS keeps both): a known box this close to
+# a hand box is the hand. Also dropped: boxes too big for any prop, and boxes whose centre is off the
+# table (a phone in someone's pocket). The change proposer and thing candidates also reject motion
+# (proposals.change still_frames / moving_frac, openworld still_cm / still_s; defaults in the code).
+detect_filter:
+  hand_iou: 0.6
+  max_area_frac: 0.25         # of the frame
+  table_margin_cm: 5.0        # null = keep boxes off the table

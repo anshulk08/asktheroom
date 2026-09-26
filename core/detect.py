@@ -3,6 +3,10 @@
 Path A: YOLO-World v2 with the config prompts (zero-shot baseline and auto-labeller).
 Path B (the plan): a YOLO11 model fine-tuned on overhead frames, classes = the 8 objects + hand.
 Either way: keep the highest-confidence box per object, keep every hand box, convert to table cm.
+Before that, known-object boxes that are really a hand or not a tabletop object are dropped
+(detect_filter: in config.yaml): a box that is a hand box (zero-shot YOLO-World calls a hand 'phone'
+or 'wallet'; per-class NMS keeps both labels), a box too big for any prop, and a box whose centre is
+off the table (a phone in someone's pocket).
 Open world (core/proposals.py): an optional class-agnostic proposer adds cls 'thing' items that are not
 a known object or a hand (proposals: in config.yaml), and core/crops.py keeps crops of what was seen.
 
@@ -23,6 +27,7 @@ from typing import Optional, Protocol
 
 import numpy as np
 
+from core import geom
 from core.crops import CropStore, set_active
 from core.proposals import THING, DedupeConfig, dedupe, make_proposer, table_roi
 from core.types import Detection, Detections, Frame
@@ -91,6 +96,10 @@ class Detector:
         _, self.to_obj = class_list(cfg)
         ct = cfg.get("conf_threshold", 0.35)
         self.thresholds = ct if isinstance(ct, dict) else {"default": ct}
+        df = cfg.get("detect_filter") or {}
+        self.hand_iou = float(df.get("hand_iou", 0.6))
+        self.max_area_frac = float(df.get("max_area_frac", 0.25))
+        self.table_margin_cm = df.get("table_margin_cm", 5.0)     # None: keep boxes off the table
         self.last_ms = 0.0
         self.last_proposal_ms = 0.0
         pc = cfg.get("proposals") or {}
@@ -121,17 +130,24 @@ class Detector:
         t0 = time.perf_counter()
         raw = self.backend.infer(frame.img)
         self.last_ms = 1000 * (time.perf_counter() - t0)
-        best: dict[str, Raw] = {}
+        known: list[Raw] = []
         hands: list[Raw] = []
         for label, conf, box in raw:
             obj = self.to_obj.get(label)
             if obj is None or conf < self.threshold(obj):
                 continue
-            if obj == "hand":
-                hands.append((obj, conf, box))
-            elif obj not in best or conf > best[obj][1]:
-                best[obj] = (obj, conf, box)
-        items = [self._to_det(*r) for r in best.values()]
+            (hands if obj == "hand" else known).append((obj, conf, box))
+        max_area = self.max_area_frac * frame.img.shape[0] * frame.img.shape[1] if frame.img is not None else None
+        best: dict[str, Detection] = {}
+        for obj, conf, box in sorted(known, key=lambda r: -r[1]):
+            if obj in best or any(geom.iou(box, h[2]) >= self.hand_iou for h in hands):
+                continue
+            if max_area is not None and geom.area(box) > max_area:
+                continue
+            d = self._to_det(obj, conf, box)
+            if self._on_table(d):
+                best[obj] = d
+        items = list(best.values())
         hand_dets = [self._to_det(*r) for r in hands]
         if frame.img is not None and (self.proposer is not None or self.crops is not None):
             try:
@@ -162,6 +178,12 @@ class Detector:
         return [self._to_det(THING, p.conf, p.box_px, p.occluded) for p in props]
 
     __call__ = detect
+
+    def _on_table(self, d: Detection) -> bool:
+        in_bounds = getattr(self.table, "in_bounds", None)
+        if self.table_margin_cm is None or in_bounds is None:
+            return True
+        return bool(in_bounds(d.center_cm, float(self.table_margin_cm)))
 
     def _to_det(self, obj: str, conf: float, box, occluded: bool = False) -> Detection:
         x1, y1, x2, y2 = box

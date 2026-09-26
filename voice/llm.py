@@ -29,6 +29,7 @@ from typing import Any, Optional
 
 from core.config import display_name, load_config
 from core.labels import thing_labels
+from core.narration_store import med_claim
 from core.types import Answer, Status
 
 log = logging.getLogger(__name__)
@@ -244,10 +245,15 @@ def _labels(world) -> dict[str, str]:
 # ---------------------------------------------------------------- answer post-processing
 
 _MD = re.compile(r"[*_#`>\[\]]+")
-_MEDS = r"\b(pills?(?!\s*bottle)|medication|medicine|meds|doses?)\b"
-_PILLS_TAKEN = re.compile(
-    r"\b(took|taken|takes|swallow\w*)\b[^.?!]*" + _MEDS
-    + r"|" + _MEDS + r"[^.?!]*\b(taken|took|swallowed)\b", re.I)
+_BOTTLE = re.compile(r"\bpill[ _]bottles?\b", re.I)   # the object, not medication
+
+
+def _med_claim(text: str) -> bool:
+    """Any sentence saying medication was taken, missed or skipped (narration_store.med_claim, the
+    wider rule the visual answers use); 'pill bottle' is the object and doesn't count as medication."""
+    return any(med_claim(_BOTTLE.sub("bottle", s)) for s in re.split(r"(?<=[.!?])\s+", text))
+
+
 PILLS_SAFE = ("I can't tell whether medication was taken; I can only tell you where the pill "
               "bottle is and when it was moved.")
 
@@ -271,8 +277,7 @@ def to_answer(text: str, point_at: Optional[str], names: list[str], cfg: dict,
     ids = {v.lower(): k for k, v in (labels or {}).items() if k in names}
     p = ids.get(p) or (cfg.get("synonyms") or {}).get(p, p).replace(" ", "_")
     target = p if p in names else None
-    if _PILLS_TAKEN.search(text) and not re.search(r"\b(can't|cannot|can not|don't know)\b",
-                                                   text, re.I):
+    if _med_claim(text):
         text, target = PILLS_SAFE, ("pill_bottle" if "pill_bottle" in names else None)
     return Answer(text, target, "point" if target else None)
 
@@ -344,13 +349,18 @@ def _run(question: str, world, events, cfg: dict, api_key: str, deadline: float)
 
 def ask_other(question: str, world, events, cfg: dict | None = None, online: bool = True) -> Answer:
     """The pipeline's answerer for OTHER: fixed templates for the common open questions, then Grok
-    when online, else the fallback sentence. Never raises."""
+    when online, else the fallback sentence. understand.backend qwen (or auto, offline) uses the local
+    Qwen (voice.local_llm) instead. Never raises."""
     try:
         cfg = cfg if cfg is not None else load_config()
-        from voice.local_llm import templated
+        from voice.local_llm import ask_local, templated
         fixed = templated(question, world, cfg)
         if fixed is not None:
             return fixed
+        backend = str((cfg.get("understand") or {}).get("backend", "grok"))
+        has_key = bool(os.environ.get("XAI_API_KEY", "").strip())
+        if backend == "qwen" or (backend == "auto" and not (online and has_key)):
+            return ask_local(question, world, events, cfg)
     except Exception:
         log.exception("templated answer failed")
     return ask_grok(question, world, events, cfg, online=online)

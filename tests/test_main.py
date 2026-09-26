@@ -202,6 +202,32 @@ def test_voice_loop_click_to_answer_and_laser(tmp_path, cal_path):
     t.join(2)
 
 
+def test_slow_answer_gets_a_thinking_cue_first(tmp_path, cal_path, monkeypatch):
+    posted = []
+    monkeypatch.setattr(main.requests, "post", lambda url, json, timeout, headers=None: posted.append(json))
+    room, rig = make_room(tmp_path, cal_path)
+    room.webhook_url, room.cue_after_s = "http://laptop/webhook", 0.05
+    fast = room.base_ask
+
+    def slow(text, source):
+        time.sleep(0.3)
+        return fast(text, source)
+
+    room.base_ask = slow
+    room._answer("where's my wallet", time.monotonic(), time.monotonic(), {"mode": "asked"})
+    assert wait_for(lambda: len(room.tts.said) == 2)
+    assert room.tts.said[0] == "Let me look." and "wallet" in room.tts.said[1].lower()
+    assert wait_for(lambda: posted) and posted[0]["thinking_cue"] is True
+
+
+def test_quick_answer_gets_no_cue(tmp_path, cal_path):
+    room, rig = make_room(tmp_path, cal_path)
+    room._answer("where's my wallet", time.monotonic(), time.monotonic(), {"mode": "asked"})
+    assert wait_for(lambda: room.tts.said) and len(room.tts.said) == 1 and "wallet" in room.tts.said[0].lower()
+    room.cue_after_s = 0                        # off
+    assert room._ask_with_cue("where's my wallet")[1] is False
+
+
 def test_voice_loop_nothing_heard(tmp_path, cal_path):
     clicker = FakeClicker()
     room, rig = make_room(tmp_path, cal_path, stt=FakeSTT(""), clicker=clicker)
@@ -525,3 +551,107 @@ def test_camera_is_an_index_or_a_stable_device_path():
     assert main.camera_source("2") == 2 and main.camera_source(" 0 ") == 0
     by_id = "/dev/v4l/by-id/usb-046d_0809_A1C0DC94-video-index0"
     assert main.camera_source(by_id) == by_id and main.camera_source("/dev/video2") == "/dev/video2"
+
+
+class _TagTable:
+    """One-tag table stand-in: fits after `need` calibrate() calls, then shifts the frame by `shift` cm."""
+    tag_mode, tag_id, tag_frames = True, 0, 5
+
+    def __init__(self, need=5, shift=0.0):
+        self.need, self.shift, self.calls, self.ok = need, shift, 0, True
+
+    def calibrate(self, img):
+        self.calls += 1
+        return self.calls >= self.need
+
+    def px_to_cm(self, pts):
+        import numpy as np
+        return np.asarray(pts, dtype=float) / 10 + (self.shift if self.calls >= self.need else 0.0)
+
+
+class _NewFrames:
+    def __init__(self):
+        import numpy as np
+        from core.types import Frame
+        self.Frame, self.img, self.i = Frame, np.zeros((4, 4, 3), np.uint8), 0
+
+    def latest(self):
+        return self.Frame(0.0, 0.0, self.img, self.i)
+
+    def wait_new(self, after_idx, timeout=1.0):
+        time.sleep(0.005)
+        self.i = after_idx + 1
+        return self.Frame(0.0, 0.0, self.img, self.i)
+
+
+def test_recalibrate_feeds_fresh_frames_until_the_tag_fits(tmp_path, caplog):
+    room, _ = make_room(tmp_path)
+    room.frames, room.table = _NewFrames(), _TagTable(need=5, shift=3.0)
+    room.laser.fit = object()
+    with caplog.at_level("WARNING"):
+        assert room.recalibrate(timeout_s=2.0) is True
+    assert room.table.calls == 5
+    assert "recalibrate the laser" in caplog.text           # the frame moved 3 cm under a fitted laser
+
+
+def test_recalibrate_gives_up_when_the_tag_stays_hidden(tmp_path, caplog):
+    room, _ = make_room(tmp_path)
+    room.frames, room.table = _NewFrames(), _TagTable(need=10 ** 6)
+    with caplog.at_level("WARNING"):
+        assert room.recalibrate(timeout_s=0.1) is False
+    assert "tag 0 not held in view" in caplog.text
+
+
+def test_laser_fitted_before_the_table_calibration_is_flagged(tmp_path):
+    import json
+    from types import SimpleNamespace
+    p = tmp_path / "table_cal.json"
+    p.write_text(json.dumps({"H": [[1, 0, 0], [0, 1, 0], [0, 0, 1]], "t": 2000.0}))
+    assert main.laser_older_than_table(SimpleNamespace(timestamp=1000.0), str(p))
+    assert not main.laser_older_than_table(SimpleNamespace(timestamp=3000.0), str(p))
+    assert not main.laser_older_than_table(SimpleNamespace(timestamp=1000.0), str(tmp_path / "none.json"))
+
+
+def test_the_ask_timeout_matches_the_server():
+    import main
+    from server.app import ASK_TIMEOUT_S
+    assert main.ANSWER_LATE_S == ASK_TIMEOUT_S
+
+
+def test_an_answer_past_the_server_timeout_is_not_spoken_or_aimed(tmp_path, cal_path, monkeypatch):
+    import main
+    room, rig = make_room(tmp_path, cal_path)
+    monkeypatch.setattr(main, "ANSWER_LATE_S", -1.0)      # every answer is "late"
+    ans = room.ask_and_act("where is my wallet?", "phone")
+    time.sleep(0.2)
+    assert ans.point_at == "wallet" and room.tts.said == [] and not rig.act.writes
+
+
+def test_a_spoken_recalibrate_that_fails_says_so(tmp_path):
+    room, _ = make_room(tmp_path)
+    room.frames, room.table = _NewFrames(), _TagTable(need=10 ** 6)
+    room.table.size_cm = (80.0, 50.0)
+    room.recalibrate = lambda timeout_s=None: False
+    assert "couldn't recalibrate" in room._recalibrate_and_tell(speak=True)
+    assert room.tts.said and "table tag" in room.tts.said[-1]
+
+
+def test_a_recalibrate_that_changes_the_tracked_area_asks_for_a_restart(tmp_path):
+    room, _ = make_room(tmp_path)
+    room.frames, room.table = _NewFrames(), _TagTable(need=1)
+    room.table.size_cm = (80.0, 50.0)
+
+    def refit(timeout_s=None):
+        room.table.size_cm = (95.0, 55.0)
+        return True
+    room.recalibrate = refit
+    assert "Restart me" in room._recalibrate_and_tell(speak=False)
+    assert room.tts.said == []                               # a text question is not answered aloud
+
+
+def test_a_recalibrate_that_keeps_the_size_says_nothing_more(tmp_path):
+    room, _ = make_room(tmp_path)
+    room.frames, room.table = _NewFrames(), _TagTable(need=1)
+    room.table.size_cm = (80.0, 50.0)
+    room.recalibrate = lambda timeout_s=None: True
+    assert room._recalibrate_and_tell(speak=True) is None and room.tts.said == []

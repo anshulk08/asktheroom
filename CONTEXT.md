@@ -27,7 +27,9 @@ confirms, and when the rig isn't sure it says so (UNKNOWN, `maybe_same_as`) inst
 Questions the world model can't answer from its state go to Grok with the camera frame: "what colour
 is my mug?", "what does the note say?", "was there a red mug here this morning?" (saved keyframes).
 For "where", Grok picks one of the tracked objects drawn as numbered boxes (set-of-marks), so the laser
-still points at a tracked entity.
+still points at a tracked entity. "Where is my red mug?" for a name the rig doesn't know asks Grok only
+which box it is and what it is (`VisualQA.pick`); the world model says where, and an unnamed thing keeps
+the name, so the next ask needs no Grok call.
 
 ## Hardware
 
@@ -58,7 +60,7 @@ always-on mic ─▶ voice/stt (Silero VAD + whisper.cpp; audio only in memory; 
                      ├─ voice/tts: ElevenLabs when online, Piper offline
                      └─ act/laser.Laser.aim_object: closed-loop aim, corrects on the camera's view of the dot
 server/app.py (FastAPI): dashboard, MJPEG overlay, WebSocket state, POST /ask, /sms (Twilio)
-mobile/bridge (BLE GATT on the Jetson) ◀─▶ iPhone app (mobile/ios): ask, state, answers, notices; no cloud
+mobile/bridge (BLE GATT on the Jetson) ◀─▶ iPhone app (mobile/ios): ask, state, answers, notices over BLE, no internet needed; optional read-aloud on the phone sends answer text to xAI or ElevenLabs
 main.py ─▶ n8n webhook (laptop): a log of every spoken question, plus a 5-minute health check
 ```
 
@@ -78,7 +80,7 @@ rules can't read and of open questions (with a compact world state).
 | Path | What it holds |
 |---|---|
 | `core/types.py` | Shared data contracts: Frame, Detection(s), Entity, Event, Intent, Answer. **Change only as a team.** |
-| `core/config.py`, `config.yaml` | Config loaded as a plain dict (`load_config()`); the world also reads a typed `Config` view. All thresholds are here. |
+| `core/config.py`, `config.yaml` | Config loaded as a plain dict (`load_config()`); the world also reads a typed `Config` view. All thresholds are here. A gitignored `config.local.yaml` (per device, e.g. the rig's `actuator: pca9685`) is merged over it; tests skip it (`ASKROOM_NO_LOCAL_CONFIG`). |
 | `core/capture.py` | Camera `FrameBuffer`, plus `VideoFileSource` with the same API for replays. |
 | `core/table.py`, `core/table_area.py` | ArUco / one-tag homography mapping pixels to table cm (`table_cal.json`); the operator's tabletop outline, where objects may appear (`table_area.json`, `python -m core.table --outline`). |
 | `core/detect.py` | YOLO-World (zero-shot, path A) or fine-tuned YOLO11 (path B, the plan), exported to TensorRT. |
@@ -94,7 +96,7 @@ rules can't read and of open questions (with a compact world state).
 | `core/reminders.py`, `core/reports.py`, `core/profile.py` | Care layer: event-triggered reminders, morning report, profile facts (ideas from Project Memoria, MIT). |
 | `mobile/` | BLE bridge (`bridge/`), wire protocol (`PROTOCOL.md`), iPhone app (`ios/`). |
 | `assets/` | Small licensed data files the code needs (CLIP BPE vocabulary). `models/` is never committed. |
-| `voice/` | `visual` (Grok look/recall, routing), `teach` ("this is my X"), `care` + `conversation` (reminders, profile, follow-ups), `intents` (rule parser), `answers` (spoken templates), `understand` (overheard filter + Qwen reads what the rules can't), `local_llm` (open questions, local), `pipeline` (router), `tts`, `stt` (Silero VAD + whisper.cpp), `trigger` (clicker), `llm` (world-state helpers and pill filter; its Grok call is off the voice path). |
+| `voice/` | `visual` (Grok look/recall, routing), `teach` ("this is my X"), `care` + `conversation` (reminders, profile, follow-ups), `intents` (rule parser), `answers` (spoken templates), `understand` (overheard filter + Grok reads what the rules can't), `local_llm` (optional local Qwen answers, not deployed), `pipeline` (router), `tts`, `stt` (Silero VAD + whisper.cpp), `trigger` (clicker), `llm` (Grok open answers, world-state helpers, pill filter). |
 | `act/` | `actuator` (servo drivers + fake), `laser` (poly2 fit + closed-loop aim), `calibrate`, `sim` (simulated rig). |
 | `server/` | FastAPI dashboard (`app.py`), frame overlay, `sim.py` (full demo on a synthetic camera). |
 | `eval/` | Trial recording, synthetic trials, replay against baselines (last-seen, nearest-object, current-frame) and the report. `score_clip`: replay a guided clip (`data/clips/<id>`) through the production pipeline and score it (false births, identity changes, checkpoints, questions); on the Jetson `scripts/dock.sh python3 -m eval.score_clip data/clips/<id>`. |
@@ -138,7 +140,7 @@ Also built, tested on the laptop, not yet on the Jetson: the clicker, `main.py` 
 together, the fine-tuning scripts (zero-shot YOLO-World mistook the Jetson case for a phone; the plan is
 model-free background-difference labels plus copy-paste synthesis), `demo_check.py`, and the always-on mic.
 Grok now reads what the rules can't (58/64 on the interpreter eval, the same as Qwen, median 853 ms) and
-answers open questions (1.3–3.2 s); local Qwen is an offline option. On the Jetson: whisper.cpp base.en on the
+answers open questions (1.3–3.2 s); the rig is Grok-only (offline: rules and templates; the plan is a phone hotspot). Local Qwen is optional (`understand.backend: qwen` / `auto`) and not installed on the Jetson. On the Jetson: whisper.cpp base.en on the
 GPU, 22/22 test questions, median 139 ms; DINOv2 re-id at 3.7–4.7 ms per crop.
 
 Built overnight (Fri → Sat), unit-tested: open-world `thing:N` identity and teaching by voice, object

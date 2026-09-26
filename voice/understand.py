@@ -1,11 +1,13 @@
-"""Qwen interprets spoken questions, on the Jetson: transcript -> Intent (same as voice.intents.parse).
+"""Grok (default) or a local Qwen interprets spoken questions: transcript -> Intent (same as
+voice.intents.parse).
 
 The rule parser knows the phrasings it was written for. People at a demo talk however they like
 ("has anybody messed with my meds", "can you point at the pill bottle") and Whisper mishears, and
-every "I can tell you where things are..." breaks the illusion. A small Qwen, served by llama.cpp's
-llama-server on the Jetson (scripts/qwen_server.sh), reads what the rules can't and returns
-{kind, object}. A JSON schema limits it to a valid kind and one of the known objects. Nothing
-leaves the device. Scores per model: scripts/eval_understand.py on tests/understand_eval.json.
+every "I can tell you where things are..." breaks the illusion. A model reads what the rules can't
+and returns {kind, object}; a JSON schema limits it to a valid kind and one of the known objects.
+understand.backend: grok (the default) sends only the transcript to Grok; qwen / auto use a local Qwen
+served by llama.cpp (scripts/qwen_server.sh, not installed on the rig), where nothing leaves the device.
+Scores per model: scripts/eval_understand.py on tests/understand_eval.json.
 
 Two ways speech arrives (listen.mode in config.yaml):
   asked      the visitor pressed the clicker, so the speech is meant for the rig.
@@ -23,6 +25,10 @@ Asked: rules first, then Qwen.
   - Qwen's object must sound like something that was said (sounds_like), so "my coffee mug"
     doesn't become the glasses.
   - Qwen down, slower than understand.timeout_s, or bad output: the rules' answer stands.
+
+Which model (understand.backend): grok (the default; offline, the rules answer: use a phone hotspot
+if the venue Wi-Fi drops), qwen (the local llama-server, asked online or not), or auto (Grok online,
+Qwen offline). Qwen isn't installed on the Jetson; qwen and auto need scripts/qwen_server.sh running.
 
 Overheard: decide "was that for me?" without the model, then read it like an asked question.
   - A whole teaching sentence ("this is my vaseline") is for the rig, whatever else is true below.
@@ -171,6 +177,7 @@ class Qwen:
     Offline option (understand.backend: qwen); the default is Grok."""
 
     name = "qwen"
+    local = True                                  # on the Jetson: asked online or offline
 
     def __init__(self, cfg: dict):
         u = cfg.get("understand") or {}
@@ -206,6 +213,7 @@ class Grok:
     model and reasoning_effort; key in $XAI_API_KEY). Only the transcript leaves the device."""
 
     name = "grok"
+    local = False
 
     def __init__(self, cfg: dict, session=None):
         llm = cfg.get("llm") or {}
@@ -243,22 +251,26 @@ class Grok:
 
 
 class Understander:
-    """interpret(text) -> Intent. The model (Grok by default, understand.backend) when the rules aren't
-    sure and it is up, online and quick; the rule parser otherwise.
+    """interpret(text) -> Intent. The model (understand.backend: Grok by default) when
+    the rules aren't sure and it is up and quick; the rule parser otherwise.
 
     Remembers the last transcript, so main.Room (RESET/RECAL) and the ask pipeline share one call."""
 
-    def __init__(self, cfg: dict, model=None, qwen=None, online: Optional[Callable[[], bool]] = None):
+    def __init__(self, cfg: dict, model=None, qwen=None, online: Optional[Callable[[], bool]] = None,
+                 local=None):
         u = cfg.get("understand") or {}
         self.cfg = cfg
         self.enabled = bool(u.get("enabled", True))
         self.timeout_s = float(u.get("timeout_s", 1.5))
-        backend = str(u.get("backend", "grok"))
+        self.backend = str(u.get("backend", "grok"))   # grok | qwen | auto
         if model is None:
             model = qwen
         if model is None and self.enabled:
-            model = Qwen(cfg) if backend == "qwen" else Grok(cfg)
+            model = Qwen(cfg) if self.backend == "qwen" else Grok(cfg)
+            if local is None and self.backend == "auto":
+                local = Qwen(cfg)                  # offline stand-in for Grok
         self.model = model
+        self.local = local if self.enabled else None
         self.online = online or (lambda: True)
         self._lock = threading.Lock()
         self._last: tuple[tuple[str, bool], Intent] | None = None
@@ -271,26 +283,44 @@ class Understander:
         """The model, by its old name (tests and scripts written when it was always Qwen)."""
         return self.model
 
-    def _name(self) -> str:
-        return getattr(self.model, "name", "qwen")
+    @staticmethod
+    def _name(model) -> str:
+        return getattr(model, "name", "qwen")
+
+    def _pick(self):
+        """The model for this question: the main one if it is local, or online (and, for Grok, has a
+        key); else the local stand-in (backend auto); else None, and the rules answer."""
+        m = self.model
+        if m is not None and (getattr(m, "local", False) or (
+                self.online() and (not isinstance(m, Grok) or m.health()))):
+            return m
+        return self.local
 
     def warm(self) -> bool:
-        """Check the model and run one question (Qwen: caches the prompt; Grok: opens the connection)."""
-        if self.model is None:
-            return False
-        if not self.model.health():
-            log.warning("%s not reachable at %s; questions use the rule parser", self._name(), self.model.url)
-            return False
-        if not self.online():
-            log.info("offline: questions use the rule parser until the connection is back")
-            return False
-        try:
-            self.model.ask("where are my keys", timeout=30 if self._name() == "qwen" else 5)
-        except Exception as ex:
-            log.warning("%s warm-up failed: %s", self._name(), ex)
-            return False
-        log.info("%s interpreting questions at %s", self._name(), self.model.url)
-        return True
+        """Check each model and run one question (Qwen: caches the prompt; Grok: opens the connection).
+        True if any model is ready."""
+        ready = False
+        for m in (self.model, self.local):
+            if m is None:
+                continue
+            name, local = self._name(m), getattr(m, "local", False)
+            if not m.health():
+                log.warning("%s not reachable at %s", name, m.url)
+                continue
+            if not local and not self.online():
+                log.info("offline: %s is used once the connection is back", name)
+                continue
+            try:
+                m.ask("where are my keys", timeout=30 if local else 5)
+            except Exception as ex:
+                log.warning("%s warm-up failed: %s", name, ex)
+                continue
+            log.info("%s interpreting questions at %s%s", name, m.url,
+                     " (offline stand-in)" if m is self.local else "")
+            ready = True
+        if not ready and (self.model is not None or self.local is not None):
+            log.warning("no model ready; questions use the rule parser")
+        return ready
 
     def __call__(self, text: str, overheard: bool = False) -> Intent:
         """overheard: always-on mic speech, which may be IGNORE. Asked (clicker) speech never is."""
@@ -323,22 +353,24 @@ class Understander:
 
     def _interpret(self, text: str) -> Intent:
         rules = parse(text, self.cfg)
-        if rules_sure(rules) or self.model is None or not text.strip() or not self.online():
+        model = None if rules_sure(rules) or not text.strip() else self._pick()
+        if model is None:
             self.last_by, self.last_ms = "rules", 0.0
             return rules
+        name = self._name(model)
         t0 = time.monotonic()
         try:
-            got = to_intent(self.model.ask(text, self.timeout_s), text, self.cfg, rules.obj)
+            got = to_intent(model.ask(text, self.timeout_s), text, self.cfg, rules.obj)
         except Exception as ex:
-            log.warning("%s failed (%s: %s); using the rule parser", self._name(), type(ex).__name__, ex)
+            log.warning("%s failed (%s: %s); using the rule parser", name, type(ex).__name__, ex)
             got = None
         self.last_ms = 1000 * (time.monotonic() - t0)
         if got is None:
             self.last_by = "rules"
             return rules
-        self.last_by = self._name()
+        self.last_by = name
         if (got.kind, got.obj) != (rules.kind, rules.obj):
-            log.info("%s read %r as %s %s (rules: %s %s) in %.0f ms", self._name(), text, got.kind, got.obj,
+            log.info("%s read %r as %s %s (rules: %s %s) in %.0f ms", name, text, got.kind, got.obj,
                      rules.kind, rules.obj, self.last_ms)
         return got
 

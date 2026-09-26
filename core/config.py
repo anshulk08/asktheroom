@@ -1,7 +1,12 @@
 """Load config.yaml into a plain dict. Every module takes this dict as `cfg`; the world model
-reads the same file through the typed Config view at the bottom."""
+reads the same file through the typed Config view at the bottom.
+
+A gitignored config.local.yaml next to it (per device: the rig's `actuator: pca9685`, the laptop's
+n8n webhook) is merged over it: nested sections merge key by key, anything else replaces.
+ASKROOM_NO_LOCAL_CONFIG=1 skips it (the tests set it, so they read the committed file only)."""
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field, fields
 from pathlib import Path
@@ -11,10 +16,30 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 
 
+LOCAL_NAME = "config.local.yaml"
+
+
 def load_config(path: str | os.PathLike | None = None) -> dict:
     p = Path(path) if path else ROOT / "config.yaml"
     with open(p) as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f)
+    local = p.with_name(LOCAL_NAME)
+    if local != p and local.is_file() and not os.environ.get("ASKROOM_NO_LOCAL_CONFIG"):
+        with open(local) as f:
+            over = yaml.safe_load(f) or {}
+        merge_into(cfg, over)
+        logging.getLogger("askroom.config").info("%s overrides: %s", local.name, ", ".join(sorted(over)))
+    return cfg
+
+
+def merge_into(base: dict, over: dict) -> dict:
+    """Deep-merge `over` into `base` in place: dicts merge recursively, other values replace."""
+    for k, v in over.items():
+        if isinstance(v, dict) and isinstance(base.get(k), dict):
+            merge_into(base[k], v)
+        else:
+            base[k] = v
+    return base
 
 
 def display_name(cfg: dict, obj: str) -> str:

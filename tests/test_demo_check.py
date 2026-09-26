@@ -30,7 +30,7 @@ def fake_rig():
 def test_fake_run_passes_everything(capsys):
     assert dc.main(["--fake", "--skip-manual"]) == 0
     out = capsys.readouterr().out
-    assert out.count("[PASS]") == 7 and "[SKIP] 8" in out and "all checks passed" in out
+    assert out.count("[PASS]") == 8 and "[SKIP] 8" in out and "all checks passed" in out
 
 
 def test_missing_camera_fails_every_check_that_needs_it(monkeypatch, capsys):
@@ -202,3 +202,12 @@ def test_one_tag_markers_check_passes_with_the_tag_removed_and_catches_drift(tmp
     moved = tt.render_tag(h @ np.array([[1, 0, 6.0], [0, 1, 0], [0, 0, 1]]))     # camera knocked 6 cm
     ok, msg = dc.check_markers(tag_rig(tmp_path / "c", moved, cal))
     assert not ok and "recalibrate" in msg
+
+
+def test_clock_check_passes_on_a_set_clock_and_is_last():
+    rig = dc.Rig(load_config(), fake=True)
+    try:
+        ok, msg = dc.check_clock(rig)
+    finally:
+        rig.close()
+    assert ok is True and dc.CHECKS[-1][0] == "clock" and len(dc.CHECKS) == 9

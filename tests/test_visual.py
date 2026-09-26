@@ -613,7 +613,7 @@ def test_recall_low_confidence_and_meds(log):
 
 @pytest.mark.parametrize("text,how", [
     ("What's on the table?", "look"), ("What does the note say?", "look"), ("Is the charger plugged in?", "look"),
-    ("Where is my red mug?", "look"),
+    ("Where is my red mug?", "pick"),
     ("Was there a red mug here this morning?", "recall"), ("When did the papers show up?", "recall"),
     ("What was on the table before I left?", "recall"),
     ("Where are my keys?", None), ("What happened to my keys?", None), ("What was I doing before lunch?", None),
@@ -625,6 +625,7 @@ def test_routing(log, text, how):
     seen = []
     q.look = lambda t, i=None: seen.append("look") or Answer("L")
     q.recall = lambda t: seen.append("recall") or Answer("R")
+    q.pick = lambda t, said: seen.append("pick") or Answer("P")
     a = q.route(parse(text, CFG), text, online=True)
     assert (seen[0] if seen else None) == how, (text, seen)
     assert (a is None) == (how is None)
@@ -656,6 +657,7 @@ def test_questions_not_about_the_table_are_left_to_the_other_answerer(log, text,
     seen = []
     q.look = lambda t, i=None: seen.append("look") or Answer("L")
     q.recall = lambda t: seen.append("recall") or Answer("R")
+    q.pick = lambda t, said: seen.append("pick") or Answer("P")
     assert q.route(parse(text, CFG), text, online=online) is None and seen == []
 
 
@@ -794,3 +796,87 @@ def test_clip_tokenizer_matches_open_clip():
 def test_look_never_speaks_the_marks(log, said, spoken):
     q, _ = qa(log, look_reply(said, mark=1))
     assert q.look("where is it?").text == spoken
+
+
+# ---------------------------------------------------------------- pick: an unknown name, Grok only picks
+
+class ThingWorld(FakeWorld):
+    """FakeWorld plus the open-world calls pick() uses (thing_labels, find, bind_alias)."""
+    def __init__(self, entities, events, labels=None):
+        super().__init__(entities, events)
+        self.labels = dict(labels or {})
+
+    def thing_labels(self):
+        return {n: self.labels.get(n) for n in self.entities if n.startswith("thing:")}
+
+    def find(self, name):
+        return name if name in self.entities else next((n for n, v in self.labels.items() if v == name), None)
+
+    def bind_alias(self, entity, name):
+        if entity not in self.entities or entity in self.labels:
+            return False
+        self.labels[entity] = name
+        return True
+
+
+def pick_qa(log, mark, label="red mug", conf=0.9, labels=None):
+    # seen at the frame's time (T0): marks are only drawn for boxes fresh for the frame (MARK_FRESH_S)
+    world = ThingWorld([Entity("keys", "target", Status.VISIBLE, pos_cm=(20.0, 15.0), box_cm=(17.0, 13.0, 23.0, 17.0),
+                               last_seen=T0),
+                        Entity("thing:3", "target", Status.VISIBLE, pos_cm=(70.0, 40.0),
+                               box_cm=(62.0, 34.0, 78.0, 46.0), last_seen=T0)], log, labels)
+    return qa(log, json.dumps({"mark": mark, "label": label, "confidence": conf}), world=world)
+
+
+def test_pick_asks_grok_only_which_mark_and_what_it_is(log):
+    q, prov = pick_qa(log, mark=2)
+    a = q.route(parse("Where is my red mug?", CFG), "Where is my red mug?", online=True)
+    [call] = prov.calls
+    from voice.visual import PICK_SCHEMA, PICK_SYSTEM
+    assert call.system == PICK_SYSTEM and "answer" not in PICK_SCHEMA["properties"]
+    assert [p[0] for p in call.parts].count("image") == 1                 # the marked frame only, no close-ups
+    assert "Find: red mug" in call.parts[-1][1] and "2 = unnamed object" in call.parts[-1][1]
+    assert a.point_at == "thing:3" and a.action == "point"
+    assert "red mug" in a.text.lower() and "mark" not in a.text.lower()   # the WHERE template, by the new name
+
+
+def test_a_picked_unnamed_thing_keeps_the_name(log):
+    q, prov = pick_qa(log, mark=2)
+    q.pick("Where is my red mug?", "red mug")
+    assert q.world.labels == {"thing:3": "red mug"} and q.world.find("red mug") == "thing:3"
+
+
+def test_pick_never_renames_a_taught_thing_or_binds_when_unsure(log):
+    q, _ = pick_qa(log, mark=2, labels={"thing:3": "charger"})
+    a = q.pick("Where is my red mug?", "red mug")
+    assert q.world.labels == {"thing:3": "charger"} and a.point_at == "thing:3"
+    q, _ = pick_qa(log, mark=2, conf=0.6)                                  # sure enough to point, not to name
+    a = q.pick("Where is my red mug?", "red mug")
+    assert q.world.labels == {} and a.point_at == "thing:3"
+    assert a.text == "I think this is your red mug."                       # Grok's label matches: not repeated
+
+
+def test_pick_says_when_it_cant_see_it_and_abstains_when_unsure(log):
+    q, _ = pick_qa(log, mark=None, label=None)
+    assert q.pick("Where is my red mug?", "red mug") == Answer("I can't see your red mug on the table right now.")
+    q, _ = pick_qa(log, mark=2, conf=0.3)
+    assert q.pick("Where is my red mug?", "red mug").text == ABSTAIN
+    for bad in (99, 0, "two", True):
+        q, _ = pick_qa(log, mark=bad, conf=0.3)
+        assert q.pick("Where is my red mug?", "red mug").point_at is None
+
+
+def test_pick_labels_are_short_plain_and_never_about_medication():
+    from voice.visual import _label
+    assert _label("A Red Mug!") == "red mug"
+    assert _label("pill bottle") == "pill bottle"
+    for bad in (None, "", "object", "a very long description of a mug", "taken pills", "dose cup"):
+        assert _label(bad) is None
+
+
+def test_pick_says_what_grok_saw_when_it_differs_from_the_name_asked(log):
+    q, _ = pick_qa(log, mark=2, conf=0.6, label="blue cup")
+    assert q.pick("Where is my red mug?", "red mug").text == "I think your red mug is this blue cup."
+    q, _ = pick_qa(log, mark=1)
+    a = q.pick("Where is my red mug?", "red mug")
+    assert a.point_at == "keys" and a.text.startswith("I think your red mug is what I call your keys.")

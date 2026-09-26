@@ -821,3 +821,25 @@ def test_clutter_belief_is_never_a_guess():
     out = P.compact_entity(e)
     assert out["g"] == "cable" and out["gc"] == 0.3
     assert "g" not in P.compact_entity({**e, "belief": [["not an object", 0.9]]})
+
+
+def test_read_config_applies_the_local_file(tmp_path):
+    (tmp_path / "config.yaml").write_text("table:\n  size_cm: [90, 60]\npaths:\n  table_cal: table_cal.json\n")
+    (tmp_path / "config.local.yaml").write_text("paths:\n  laser_cal: rig_laser.json\n")
+    size, tcal, lcal = B.read_config(str(tmp_path))
+    assert size == (90.0, 60.0) and tcal.endswith("table_cal.json") and lcal.endswith("rig_laser.json")
+
+
+def test_the_bridge_follows_a_recalibrated_table_size(tmp_path):
+    import os
+    tcal = tmp_path / "table_cal.json"
+    core = B.BridgeCore(None, lambda c, ch: None, table_cm=(90, 60), table_cal=str(tcal))
+    assert core.current_table_cm() == (90.0, 60.0)                  # no calibration file yet
+    tcal.write_text('{"H": [[1,0,0],[0,1,0],[0,0,1]], "size_cm": [70.5, 48.0]}')
+    assert core.current_table_cm() == (70.5, 48.0)
+    tcal.write_text('{"H": [[1,0,0],[0,1,0],[0,0,1]], "size_cm": [95, 55]}')
+    os.utime(tcal, (1e9, 1e9))                                       # a new mtime, as a refit writes
+    assert core.current_table_cm() == (95.0, 55.0)
+    tcal.write_text('{"H": [[1,0,0],[0,1,0],[0,0,1]]}')               # four-marker file: keeps the size
+    os.utime(tcal, (2e9, 2e9))
+    assert core.current_table_cm() == (95.0, 55.0)

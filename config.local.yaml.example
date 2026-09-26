@@ -1,0 +1,9 @@
+# Copy to config.local.yaml on a device (gitignored). Merged over config.yaml at startup:
+# nested sections merge key by key, anything else replaces. Only put what differs on this device.
+
+# The rig (Jetson):
+actuator: pca9685            # the committed default is fake, which never moves the servos
+
+# The laptop running n8n, or the rig if it reports to it:
+# n8n:
+#   webhook_url: http://192.168.55.100:5678/webhook/ask-the-room

@@ -2,7 +2,7 @@
 
   capture     30 fps     core.capture.FrameBuffer runs its own thread
   perception  10-15 fps  wait_new -> detector.detect -> hands.update -> world.update (world logs events)
-  voice       always     mic -> VAD -> whisper -> "was that for me?" -> Qwen reads it -> ask -> speak + aim
+  voice       always     mic -> VAD -> whisper -> "was that for me?" -> Grok reads it -> ask -> speak + aim
                          (listen.mode: always | wake | click; the clicker means "listen now" in all three)
   net         every 5 s  NetMonitor probes; world.online follows it
   server      5 Hz       server.app.create_app(...) under uvicorn
@@ -14,10 +14,10 @@
 
 Questions are spoken. The mic is always on: Whisper transcribes what people near the table say,
 voice/understand.py drops what isn't meant for the rig (never logged, the audio is only ever in
-memory), and Qwen (llama-server on the Jetson, scripts/qwen_server.sh) works out what the rest
-meant; without it the rule parser does. The mic waits while the rig speaks, or it would answer itself. The
-dashboard's /ask (for testing) and texts (/sms) go through the same ask(); dashboard questions also
-speak and move the laser, texts only answer by text. Aiming never blocks speech: an uncalibrated laser
+memory), and Grok (voice/understand.py, understand.backend: grok) works out what the rest meant;
+offline the rule parser does (local Qwen is optional and not installed on the rig). The mic waits while the rig speaks, or it would answer itself. The
+dashboard's /ask, the phone (over the BLE bridge) and texts (/sms) go through the same ask(); dashboard
+and phone questions also speak and move the laser, texts only answer by text. Aiming never blocks speech: an uncalibrated laser
 raises RuntimeError, which is logged, and the answer still plays.
 
 --fake wiring (mirrors server/sim.py): server.sim.SimCamera plays the scripted tabletop story and
@@ -69,6 +69,19 @@ class FlatTable:
         return False
 
 
+def laser_older_than_table(fit, table_cal_path: str) -> bool:
+    """True if the table was calibrated after the laser was fitted (laser fits map table cm to pulses, so
+    a new table frame shifts where they point)."""
+    import json
+    try:
+        with open(table_cal_path) as f:
+            t = float(json.load(f).get("t") or 0.0)
+    except (OSError, ValueError):
+        return False
+    ts = float(getattr(fit, "timestamp", 0.0) or 0.0)
+    return bool(t and ts and t > ts + 1.0)
+
+
 def camera_source(s: str):
     """--camera: an index ('2') or a device path. Indices move when cameras are replugged; the
     /dev/v4l/by-id/ path names one camera for good (scripts/dock.sh passes /dev/v4l into the container)."""
@@ -89,6 +102,7 @@ def warm_on_connect(netmon, warm: Callable[[], object]) -> None:
 
 
 PHONE_ECHO_S = 3.0      # a voice question matching a phone question this recent is the same question
+ANSWER_LATE_S = 10.0    # server.app.ASK_TIMEOUT_S: past it the asker was told "took too long", so stay quiet
 
 
 def _norm(text: str) -> str:
@@ -122,6 +136,10 @@ class Room:
         self.listen_mode = str(li.get("mode", "always"))       # always | wake | click
         self.idle_s = float(li.get("idle_s", 8))
         self.echo_tail_s = float(li.get("echo_tail_s", 0.4))
+        demo = cfg.get("demo") or {}
+        self.cue_after_s = float(demo.get("thinking_cue_s", 1.0))       # 0 = off
+        self.cue_phrases = list(demo.get("thinking_phrases") or ["Let me look.", "One moment.", "Hmm, let me check."])
+        self._cues = 0
         self.stop_ev = threading.Event()
         self._acted = threading.local()            # .kind: RESET / RECAL if the router answered one
         self._clear_ev = threading.Event()         # RESET: the perception thread resets proposals + crops
@@ -158,15 +176,23 @@ class Room:
                 self.hands.reset()
             self._clear_ev.set()
         elif kind == "RECAL":
-            threading.Thread(target=self.recalibrate, name="recal", daemon=True).start()
+            threading.Thread(target=self._recalibrate_and_tell, args=(source != "sms",), name="recal",
+                             daemon=True).start()
         return ans
 
     def ask_and_act(self, text: str, source: str) -> Answer:
-        """ask_fn for the server: dashboard questions are spoken and aimed, texts only answered."""
+        """ask_fn for the server: dashboard questions are spoken and aimed, texts only answered. An
+        answer that arrives after the server gave up (ANSWER_LATE_S) is dropped, not spoken: the asker
+        already heard "that took too long", and a late laser would contradict it."""
         if source == "phone":
             self._phone_qs.append((time.monotonic(), _norm(text)))
+        t0 = time.monotonic()
         ans = self.ask(text, source)
-        if source != "sms":
+        late = time.monotonic() - t0
+        if late > ANSWER_LATE_S:
+            log.warning("answer to %r took %.1f s, past the server's %.0f s timeout; not speaking or aiming it",
+                        text, late, ANSWER_LATE_S)
+        elif source != "sms":
             self.respond(ans)
         return ans
 
@@ -249,13 +275,63 @@ class Room:
         self._off_timer.daemon = True
         self._off_timer.start()
 
-    def recalibrate(self) -> None:
+    def recalibrate(self, timeout_s: Optional[float] = None) -> bool:
+        """Refit the table frame from fresh frames. One-tag mode averages the tag over table_tag.frames
+        consecutive frames, so this feeds new frames until it fits or timeout_s runs out."""
         f = self.frames.latest() if self.frames is not None else None
         if f is None or f.img is None:
             log.warning("recalibrate: no camera frame")
-            return
+            return False
+        tag = bool(getattr(self.table, "tag_mode", False))
+        if timeout_s is None:
+            timeout_s = max(2.0, getattr(self.table, "tag_frames", 1) / 10.0) if tag else 0.0
+        before = self._frame_probe()
+        deadline = time.monotonic() + timeout_s
         ok = self.table.calibrate(f.img)
-        log.info("table recalibration %s", "ok" if ok else "failed (markers 0-3 not all visible)")
+        while not ok and time.monotonic() < deadline:
+            f = self.frames.wait_new(f.idx, timeout=max(0.05, deadline - time.monotonic())) or f
+            if f.img is not None:
+                ok = self.table.calibrate(f.img)
+        if not ok:
+            log.warning("table recalibration failed (%s)", f"tag {self.table.tag_id} not held in view"
+                        if tag else "markers 0-3 not all visible")
+            return False
+        after = self._frame_probe()
+        moved = float(np.abs(after - before).max()) if before is not None and after is not None else 0.0
+        log.info("table recalibration ok%s", f" (the table frame moved {moved:.1f} cm)" if moved >= 0.1 else "")
+        if moved > 2.0 and self.laser is not None and getattr(self.laser, "fit", None) is not None:
+            log.warning("the table frame moved %.1f cm: recalibrate the laser (python -m act.calibrate) "
+                        "or it will point off", moved)
+        return True
+
+    def _recalibrate_and_tell(self, speak: bool) -> Optional[str]:
+        """A spoken 'recalibrate': refit, then say what the person has to do about it, if anything. A
+        one-tag refit that measures a new tracked area saves it to table_cal.json, but the world, laser,
+        detector and answers read the size once at startup, so it only takes effect after a restart."""
+        before = tuple(getattr(self.table, "size_cm", ()) or ())
+        tag = bool(getattr(self.table, "tag_mode", False))
+        msg = None
+        if not self.recalibrate():
+            msg = ("I couldn't recalibrate. Hold the table tag in view and ask again." if tag else
+                   "I couldn't recalibrate. Make sure all four corner markers are in view and ask again.")
+        elif tag and before and max(abs(a - b) for a, b in zip(self.table.size_cm, before)) >= 1.0:
+            log.warning("tracked area changed from %.0f x %.0f to %.0f x %.0f cm; restart the app so every "
+                        "part uses it", *before, *self.table.size_cm)
+            msg = "Recalibrated, but the table area changed size. Restart me so I use the new size."
+        if msg and speak:
+            self._speak(msg)
+        return msg
+
+    def _frame_probe(self) -> Optional[np.ndarray]:
+        """Where three fixed image points land on the table (cm), to tell how far a refit moved the frame."""
+        if not getattr(self.table, "ok", True):
+            return None
+        try:
+            w, h = self.cfg.get("frame_size_px", (1280, 720))
+            return np.asarray(self.table.px_to_cm([[w / 4, h / 4], [3 * w / 4, h / 4], [w / 2, 3 * h / 4]]),
+                              dtype=float)
+        except Exception:
+            return None
 
     # -- threads
 
@@ -374,7 +450,7 @@ class Room:
         if self._heard_from_phone(text):
             log.info("heard %r: the phone just asked it; answered once", text)
             return
-        ans = self.ask(text, "voice")
+        ans, cued = self._ask_with_cue(text)
         if self.record_answer is not None:
             try:
                 self.record_answer(text, ans, "voice")
@@ -396,7 +472,7 @@ class Room:
                      "qwen_ms": round(getattr(self.interpret, "last_ms", 0.0)),
                      "answer": ans.text, "point_at": ans.point_at, "action": ans.action,
                      "laser_err_cm": (self.world.laser or {}).get("err_cm"),
-                     "online": bool(self.world.online), **extra, **self.last_timing})
+                     "online": bool(self.world.online), "thinking_cue": cued, **extra, **self.last_timing})
         if self.listen_mode == "click":
             return
         while say.is_alive() and not self.stop_ev.is_set():
@@ -407,6 +483,34 @@ class Room:
             elif self.clicker is None:
                 say.join(0.05)
         self.stop_ev.wait(self.echo_tail_s)
+
+    def _ask_with_cue(self, text: str) -> tuple[Answer, bool]:
+        """ask(text, "voice"); if no answer within demo.thinking_cue_s (a model is reading it, or Grok
+        is answering), say a short "let me look" so the rig doesn't sit silent. Returns (answer, cued).
+        The TTS lock queues the answer behind the cue."""
+        if self.cue_after_s <= 0 or self.tts is None or not self.cue_phrases:
+            return self.ask(text, "voice"), False
+        box: dict = {}
+        done = threading.Event()
+
+        def work() -> None:
+            try:
+                box["ans"] = self.ask(text, "voice")
+            except BaseException as ex:          # re-raised on the caller's thread
+                box["err"] = ex
+            finally:
+                done.set()
+
+        threading.Thread(target=work, name="ask", daemon=True).start()
+        cued = not done.wait(self.cue_after_s)
+        if cued:
+            phrase = self.cue_phrases[self._cues % len(self.cue_phrases)]
+            self._cues += 1
+            threading.Thread(target=self._speak, args=(phrase,), name="cue", daemon=True).start()
+            done.wait()
+        if "err" in box:
+            raise box["err"]
+        return box["ans"], cued
 
     def report(self, question: dict) -> None:
         """Send one spoken question to the n8n workflow (n8n.webhook_url), in the background so it
@@ -483,6 +587,23 @@ class Room:
 
 # ---------------------------------------------------------------- construction
 
+def clock_files(cfg: dict) -> list[str]:
+    """Files whose mtimes the wall clock can't be behind: the last run's event DB, calibrations, config."""
+    paths = cfg.get("paths") or {}
+    return [paths.get("events_db", ""), paths.get("table_cal", ""), paths.get("laser_cal", ""),
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.yaml")]
+
+
+def warn_if_clock_behind(cfg: dict) -> Optional[float]:
+    import net
+    behind = net.clock_behind(clock_files(cfg))
+    if behind is not None:
+        log.warning("the clock is %.0f min behind the last saved file: spoken times and the n8n log will be "
+                    "wrong until it is set. Join the phone hotspot so NTP sets it (timedatectl), or "
+                    "`sudo date -s` on the Jetson", behind / 60)
+    return behind
+
+
 def build(cfg: dict, fake: bool = False, camera: int = 0, with_voice: bool = True,
           video: Optional[str] = None, keyboard: Optional[bool] = None) -> tuple[Room, bool]:
     """Construct everything. Returns (room, needs_perception_thread)."""
@@ -500,6 +621,7 @@ def build(cfg: dict, fake: bool = False, camera: int = 0, with_voice: bool = Tru
         core.table.apply_saved_size(cfg)            # one-tag mode: the saved tracked area, before anything reads it
         import core.table_area
         core.table_area.apply_saved_area(cfg)       # the tabletop outline (python -m core.table --outline), if still valid
+        warn_if_clock_behind(cfg)
     if fake:
         snap = tempfile.mkdtemp(prefix="askroom_fake_snaps_")
         events = core.events.EventLog(":memory:", snap)
@@ -550,10 +672,16 @@ def build(cfg: dict, fake: bool = False, camera: int = 0, with_voice: bool = Tru
         import act.laser
         actuator = act.actuator.make_actuator(cfg)     # cfg["actuator"]: fake | pca9685 | serial
         cleanup.append(actuator.close)
+        if str(cfg.get("actuator", "fake")).lower() == "fake":
+            log.warning("actuator is 'fake': the servos will not move. On the rig set `actuator: pca9685` "
+                        "(or serial/bus) in config.local.yaml")
         laser = act.laser.Laser(actuator, frames, table, cfg["paths"]["laser_cal"], cfg=cfg)
         if laser.fit is None:
             log.warning("laser not calibrated (%s missing); answers will be spoken only",
                         cfg["paths"]["laser_cal"])
+        elif laser_older_than_table(laser.fit, table.cal_path):
+            log.warning("laser_cal.json was fitted before the last table calibration: the laser may point "
+                        "off; recalibrate it (python -m act.calibrate)")
 
     netmon = net.NetMonitor(cfg).start()
     cleanup.append(netmon.stop)

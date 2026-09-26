@@ -97,7 +97,7 @@ A 414-byte state snapshot at MTU 185 is 3 chunks: `03 00 00 …179 B`, `03 01 00
     (one question is answered at a time, and one more can wait in the queue)
 - The bridge sends the question to `POST http://127.0.0.1:8000/ask` with `{"text": q, "source": "phone"}`.
   `phone` and `dashboard` are the sources a client may name, and both speak and move the laser
-  (`main.Room.ask_and_act` treats only `sms` and `n8n` as text-only). Asking from the phone has the same
+  (`main.Room.ask_and_act` treats only `sms` as text-only; n8n only receives a report of each answer). Asking from the phone has the same
   effect as asking from the dashboard: the answer is spoken on the rig and the laser points.
 - **Dictating next to the rig (P1).** The always-on mic also hears a question the judge dictates into the
   phone. The rig drops a voice question that nearly matches (same words after normalizing) a phone question
@@ -119,6 +119,8 @@ A 414-byte state snapshot at MTU 185 is 3 chunks: `03 00 00 …179 B`, `03 01 00
 | `action` | str \| null | `point`, `circle` (lost track: circling the last-seen spot), `sweep:left\|right\|top\|bottom` (carried off that edge), or null. **An open string (P3):** later versions may add values (`trace`, `tour`, …); a client that doesn't know one pulses `point_at` at `target` if present, else shows the text only |
 | `target` | [x, y] \| null | table-cm position of `point_at`: its resolved position (a hidden object inherits its parent's), falling back to its last-seen spot; 1 decimal |
 | `ms` | int | bridge time from receiving the write to having the answer (includes `/ask` and one `/state`) |
+
+Timeouts nest so exactly one answer comes back and the rig never contradicts it: the server gives up after 10 s (`server/app.py` `ASK_TIMEOUT_S`) and answers "Sorry, that took too long. Please ask again."; an answer that finishes later is neither spoken nor aimed (`main.ANSWER_LATE_S`). The bridge waits 12 s (`ask_timeout_s`) before its own `ok: false` reply, and the app waits 15 s (`RoomStore.answerTimeout`).
 
 All keys are always present. `ok: false` texts: `"The room isn't running right now."` (the app's HTTP API is
 unreachable), `"Sorry, that took too long. Please ask again."` (over 12 s),

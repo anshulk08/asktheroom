@@ -53,7 +53,7 @@ Walk through the key files in the order data flows:
 5. `core/world.py` and `core/relations.py` hold the deterministic world model: debounce, hand contact, covers, container dwell, background change, parent chains and decay. See [`TECHNICAL_DESIGN.md`](TECHNICAL_DESIGN.md).
 6. `core/events.py` stores events, question logs and snapshots in SQLite. On startup it prunes snapshot JPEGs and state snapshots older than 24 h.
 7. `voice/stt.py` detects speech with Silero VAD and transcribes it with whisper.cpp, using a prompt that lists the object names.
-8. `voice/understand.py` decides whether overheard speech was meant for the rig, then runs the rule parser (`voice/intents.py`) and falls back to Qwen when the rules can't read it.
+8. `voice/understand.py` decides whether overheard speech was meant for the rig, then runs the rule parser (`voice/intents.py`) and falls back to Grok when the rules can't read it (offline, the rules alone answer).
 9. `voice/pipeline.py` routes the intent. `voice/answers.py` fills templates for the core intents. `voice/local_llm.py` answers open questions.
 10. `voice/tts.py` speaks. `act/laser.py` aims, circles or sweeps. `main.py` wires the threads together and reports each answered question to n8n.
 
@@ -61,7 +61,7 @@ Walk through the key files in the order data flows:
 
 A judge runs it, and it resets in under a minute:
 
-1. All eight objects start on the table. Run `python demo_check.py` first: it should print all green.
+1. All eight objects start on the table. Run `python demo_check.py` first: it should print all green. A red `clock` line means the Jetson booted offline with a stale clock: join the phone hotspot so NTP sets it, or `sudo date -s "..."` on the host.
 2. The judge puts the keys on the table, slides the notebook over them, puts the notebook into the box, and slides the box across the table.
 3. The judge asks "where are my keys?". The rig answers something like "Your keys are under the notebook, which is inside the box" and the laser points at the box.
 4. Follow-up questions: "what happened to my keys?" (the history), and "did anyone touch my pills?" (the pill-bottle wording stays neutral).
@@ -78,7 +78,7 @@ A judge runs it, and it resets in under a minute:
 | Detection | YOLO-World v2 (`models/yolov8s-worldv2-askroom.engine`), YOLO11 fine-tune planned; Ultralytics container (`scripts/dock.sh`) |
 | World model | Rule-based, deterministic (`core/world.py`, `core/relations.py`) |
 | Speech in | Silero VAD (ONNX) + whisper.cpp base.en (`pywhispercpp` on the laptop, `whisper-cli` on the Jetson) |
-| Understanding | Rule parser, then Grok (`grok-4.3`, reasoning none) for what the rules can't read; local Qwen3-1.7B via `llama-server` is an offline option (`understand.backend: qwen`) |
+| Understanding | Rule parser, then Grok (`grok-4.3`, reasoning none) for what the rules can't read; offline the rules and templates answer (use a hotspot); local Qwen3-1.7B via `llama-server` is optional, not installed on the Jetson (`understand.backend: qwen`, or `auto`) |
 | Speech out | ElevenLabs `eleven_flash_v2_5` online, Piper `en_US-lessac-medium` offline |
 | Laser | Pan-tilt servos (PCA9685, serial or bus servo) + laser diode, 2nd-order poly fit + closed-loop correction |
 | Server | FastAPI + uvicorn, vanilla JS dashboard, served locally so it works offline |
@@ -88,7 +88,7 @@ A judge runs it, and it resets in under a minute:
 
 - Python 3.10 (the Jetson's JetPack 6 version). The laptop setup uses [uv](https://github.com/astral-sh/uv).
 - For the rig: a Jetson Orin Nano with JetPack 6.2 and Docker (the Ultralytics JetPack 6 image), a USB camera, a pan-tilt head with a laser, a USB mic and speaker, and a presentation clicker.
-- `llama-server` from llama.cpp: `brew install llama.cpp` on a Mac. On the Jetson, build it with CUDA (the command is in `scripts/qwen_server.sh`). Ask the team before building on the Jetson.
+- `XAI_API_KEY` in `.env` for Grok, which reads questions the rules can't and answers open and visual questions. Local Qwen (`understand.backend: qwen`, needs `llama-server` from llama.cpp, see `scripts/qwen_server.sh`) is optional and not installed on the rig.
 - Optional: `ELEVENLABS_API_KEY` (plus `ELEVENLABS_VOICE_ID`) for the online voice, and `TWILIO_AUTH_TOKEN` for SMS.
 
 Nothing in the test suite needs hardware.
@@ -119,7 +119,9 @@ Then calibrate the laser: on the rig, `act.calibrate.calibrate(Laser(...))` is c
 
 ## Configuration
 
-Everything lives in `config.yaml`. All thresholds are starting values: tune them from replays, never live. The sections you are most likely to touch:
+Everything lives in `config.yaml`. All thresholds are starting values: tune them from replays, never live.
+
+What differs per device goes in a gitignored `config.local.yaml` next to it, merged over `config.yaml` at startup (nested sections merge key by key). Copy `config.local.yaml.example`: on the rig it sets `actuator: pca9685`, since the committed default is `fake` and `main.py` warns at startup when the servos are fake. The sections you are most likely to touch:
 
 | Section | What it controls |
 |---|---|
@@ -128,9 +130,10 @@ Everything lives in `config.yaml`. All thresholds are starting values: tune them
 | world keys (`present_k_of_n` … `answer_hedge`) | World model rule thresholds and confidences |
 | `table`, `servo_limits`, `actuator`, `laser_*` | Table size and markers, pan-tilt driver and limits |
 | `stt` | Whisper backend and VAD settings |
-| `understand` | Model on/off, `backend: grok \| qwen`, llama-server URL and model (qwen), intent timeout 1.5 s |
+| `understand` | Model on/off, `backend: grok \| qwen \| auto` (default grok; auto: Grok online, Qwen offline), llama-server URL and model (qwen), intent timeout 1.5 s |
 | `listen` | `mode: always \| wake \| click` (default `always`), `wake_words: [room]`, `idle_s`, `echo_tail_s` |
 | `n8n` | `webhook_url` for the question log (empty turns it off), shared `token` |
+| `demo` | `thinking_cue_s` (a short "Let me look." when an answer takes longer than this, default 1 s; 0 = off), `thinking_phrases`, `hold_notices` (true: reminders and the morning report never speak unasked) |
 | `sms` | `whitelist` of E.164 numbers allowed to text questions |
 | `paths` | Event DB, snapshot folder, calibration files |
 
@@ -224,7 +227,7 @@ TECHNICAL_DESIGN.md  world model, perception, voice pipeline, laser loop
 
 ## Prototype boundaries and operational notes
 
-**Privacy, stated plainly.** Audio stays on the device and is never written to disk, and speech not meant for the rig is dropped unlogged. Accepted questions (text) and event snapshots are kept; snapshots and saved table frames for 24 hours. When online: the text of a question the rules can't read, or an open question with a compact world state, goes to Grok (xAI); a question about what the camera sees sends the current table frame (and for "earlier" questions up to 6 saved frames) to Grok; when a new object appears on the table, one close-up of it is sent to Grok once to guess its name (a guess the rig says it isn't sure of; a name you teach always wins, and a taught object is never sent); with the Grok settle check on (`grok_check.enabled`, off by default), one still frame of the table goes to Grok each time the table settles, and only Grok's verdicts are kept; answer text goes to ElevenLabs for the voice; SMS answers go through Twilio. The camera looks straight down at the tabletop, so frames show the table, objects and hands.
+**Privacy, stated plainly.** Audio stays on the device and is never written to disk, and speech not meant for the rig is dropped unlogged. Accepted questions (text) and event snapshots are kept; snapshots and saved table frames for 24 hours. When online: the text of a question the rules can't read, or an open question with a compact world state, goes to Grok (xAI); a question about what the camera sees sends the current table frame (and for "earlier" questions up to 6 saved frames) to Grok; when a new object appears on the table, one close-up of it is sent to Grok once to guess its name (a guess the rig says it isn't sure of; a name you teach always wins, and a taught object is never sent); with the Grok settle check on (`grok_check.enabled`, off by default), one still frame of the table goes to Grok each time the table settles, and only Grok's verdicts are kept; answer text goes to ElevenLabs for the voice; SMS answers go through Twilio. The camera looks straight down at the tabletop, so frames show the table, objects and hands. The iPhone app reaches the rig only over Bluetooth and turns dictated questions into text on the phone; if a helper turns on "Read answers aloud" with the Grok or rig voice, the phone sends each answer's text to xAI or ElevenLabs with a key kept in the phone's Keychain (the iPhone voice sends nothing). Pictures chosen for things stay on the phone.
 
 More detail:
 - Audio exists only in memory and is never written to disk. Overheard speech the rig decides is not for it is dropped without being logged or stored. Only accepted questions (text, intent, answer, latency) go to the `questions` table.

@@ -13,6 +13,7 @@
   6 network     NetMonitor.check_once() agrees with a direct probe, and the dashboard shows it
   7 world       after reset, every object VISIBLE (at config demo_check.home_cm, if set)
   8 kill switch manual: laser on, press the kill switch, confirm the dot went out
+  9 clock       not behind the last saved file (a Jetson offline with no RTC battery boots stale)
 
 Missing hardware fails that check with the reason, so this also runs on a laptop. Parts (camera,
 table, detector, laser) are built on first use and shared; one that fails to build fails every
@@ -466,6 +467,16 @@ def check_kill_switch(rig: Rig) -> Result:
     return False, "dot stayed on: the kill switch must cut laser power before the demo"
 
 
+def check_clock(rig: Rig) -> Result:
+    import main
+    import net
+    behind = net.clock_behind(main.clock_files(rig.cfg))
+    if behind is not None:
+        return False, (f"{behind / 60:.0f} min behind the last saved file: spoken times will be wrong; "
+                       "join the hotspot (NTP) or `sudo date -s`")
+    return True, time.strftime("%a %b %d %H:%M %Z")
+
+
 CHECKS: list[tuple[str, Callable[[Rig], Result]]] = [
     ("camera", check_camera),
     ("detector", check_detector),
@@ -475,6 +486,7 @@ CHECKS: list[tuple[str, Callable[[Rig], Result]]] = [
     ("network", check_network),
     ("world", check_world),
     ("kill switch", check_kill_switch),
+    ("clock", check_clock),
 ]
 
 

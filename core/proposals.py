@@ -22,7 +22,9 @@ ChangeProposer, per frame, at a working resolution of work_px on the long side:
   3. shadows (darker by a bounded ratio, chroma unchanged) do not count;
   4. hand and known-object boxes are cut out BEFORE grouping, so an unknown object touching the
      keys or held next to a hand is its own region; open / close morphology; connected components;
-  5. reject: tiny / huge regions, regions touching the table border next to a hand (arms), small
+  5. reject: tiny / huge regions, regions touching the table border next to a hand (arms), regions
+     still moving (a hand or arm the detector missed: objects on a table do not move by themselves;
+     motion = frame-to-frame change in the last still_frames frames), small
      red regions (the laser dot), ArUco markers (masked), and ghosts: a region whose pixels now look
      like the table around it but did not in the reference is a revealed table (something that was
      in the reference moved away): the reference is healed there and nothing is proposed.
@@ -141,6 +143,9 @@ class ChangeConfig:
     max_area_frac: float = 0.15
     min_side_px: int = 3
     hand_gap_px: int = 6                # a region touching the table border this close to a hand: an arm
+    still_frames: int = 2               # a pixel that changed frame to frame in the last this many frames ...
+    moving_frac: float = 0.1            # ... is moving; a region with more than this share moving is no object
+    motion_k: float = 4.0               # frame-to-frame change above motion_k x noise x sqrt(2) + floor
     laser_max_frac: float = 0.0015      # regions smaller than this ...
     laser_red_frac: float = 0.25        # ... with this share of red pixels are the laser dot
     marker_grow: float = 0.35           # ArUco boxes grown by this fraction before masking
@@ -190,6 +195,8 @@ class ChangeProposer:
         self._changed_run = 0
         self._valid_mask, self._adopting = None, True
         self._noise_ref: Optional[tuple[float, float]] = None
+        self._prev: Optional[np.ndarray] = None     # last frame's compensated LAB, for motion
+        self._since: Optional[np.ndarray] = None    # (h, w) uint8 frames since the pixel last moved
         self._warm = max(0, int(self.cfg.warmup_frames))   # frames still to skip before collecting
 
     @property
@@ -405,15 +412,34 @@ class ChangeProposer:
         n, labels, stats, _ = cv2.connectedComponentsWithStats(m, connectivity=8)
 
         cur = cv2.subtract(lab, (float(off[0]), float(off[1]), float(off[2]), 0.0))   # comparable with the reference
-        props, rejected, heal = self._components(n, labels, stats, ev, fg, valid, cur, hands)
+        moving = self._motion(cur, s_l, s_c)
+        props, rejected, heal = self._components(n, labels, stats, ev, fg, valid, cur, hands, moving)
         for comp, (x, y) in heal:
             h, w = comp.shape
             self._ref[y:y + h, x:x + w][comp] = cur[y:y + h, x:x + w][comp]
         self._refresh(cur, changed, known, hands, [p.box_px for p in props])
-        self.debug = {'fg': fg, 'mask': m, 'shadow': shadow & valid, 'rejected': rejected,
+        self.debug = {'fg': fg, 'mask': m, 'shadow': shadow & valid, 'rejected': rejected, 'moving': moving,
                       'noise': (round(s_l, 2), round(s_c, 2)), 'offset': tuple(np.round(off, 1)),
                       'changed_frac': round(frac, 3)}
         return props
+
+    def _motion(self, cur, s_l: float, s_c: float) -> np.ndarray:
+        """Pixels that changed from one frame to the next within the last still_frames frames. Both
+        frames are lighting-compensated, so auto exposure is not motion; grain is opened away."""
+        c = self.cfg
+        if self._prev is None or self._prev.shape != cur.shape:
+            self._prev = cur.copy()
+            self._since = np.full(cur.shape[:2], 255, np.uint8)
+            return np.zeros(cur.shape[:2], bool)
+        dl, da, db = cv2.split(cv2.subtract(cur, self._prev))
+        np.copyto(self._prev, cur)
+        k2 = c.motion_k * np.sqrt(2.0)
+        m = ((np.abs(dl) > k2 * s_l + c.floor_l) | (cv2.magnitude(da, db) > k2 * s_c + c.floor_c)).astype(np.uint8)
+        if self._k_open is not None:
+            m = cv2.morphologyEx(m, cv2.MORPH_OPEN, self._k_open)
+        np.copyto(self._since, np.minimum(self._since, 254) + 1)
+        self._since[m.astype(bool)] = 0
+        return self._since < c.still_frames
 
     def _valid(self) -> np.ndarray:
         """Pixels that have a reference, lie on the table and are not a marker; cached until one of
@@ -448,7 +474,7 @@ class ChangeProposer:
             self._known |= adopt
             self._valid_mask = None
 
-    def _components(self, n, labels, stats, ev, fg, valid, cur, hands):
+    def _components(self, n, labels, stats, ev, fg, valid, cur, hands, moving=None):
         c = self.cfg
         s = self._scale
         fh, fw = self._shape
@@ -472,6 +498,9 @@ class ChangeProposer:
                                        y + h + c.hand_gap_px), hb) for hb in hand_boxes):
                 reason = 'arm'
             comp = labels[y:y + h, x:x + w] == i
+            if (reason is None and moving is not None
+                    and float(moving[y:y + h, x:x + w][comp].mean()) > c.moving_frac):
+                reason = 'moving'
             if reason is None and area < laser_a and self._is_laser(x, y, comp):
                 reason = 'laser'
             if reason is None and self._is_ghost(x, y, w, h, comp, fg, valid, cur):

@@ -59,7 +59,9 @@ final class RoomStore {
 
     /// Off until the bridge sends voice answers; see PROTOCOL_PROPOSALS.md P2.
     var showRoomVoiceAnswers = UserDefaults.standard.bool(forKey: RoomStore.voiceAnswersKey)
-    var answerTimeout: Duration = .seconds(6)
+    /// Outermost of the ask timeouts (server 10 s < bridge 12 s < this), so the rig's own
+    /// "took too long" reaches the phone before the phone gives up on its own.
+    var answerTimeout: Duration = .seconds(15)
     var highlightDuration: Duration = .seconds(5)
 
     private var transport: RoomTransport?

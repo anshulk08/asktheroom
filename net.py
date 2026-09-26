@@ -3,8 +3,10 @@ cfg net.interval_s; readers just look at `.online`, which never blocks."""
 from __future__ import annotations
 
 import logging
+import os
 import threading
-from typing import Callable, Optional
+import time
+from typing import Callable, Iterable, Optional
 
 import requests
 
@@ -79,3 +81,20 @@ class NetMonitor:
         if t is not None:
             t.join(timeout)
         self._thread = None
+
+
+CLOCK_FLOOR = 1790294400.0      # 2026-09-25 00:00 UTC: the rig never ran before HackGT 13
+
+
+def clock_behind(files: Iterable[str], now: Optional[float] = None, slack_s: float = 60.0) -> Optional[float]:
+    """Seconds the wall clock is behind the newest of `files`' mtimes (or CLOCK_FLOOR), or None when it
+    looks right. A Jetson with no RTC battery and no internet boots with a stale clock, and NTP only
+    fixes it once online: until then every time the rig speaks ('at 3:14') and logs to n8n is off."""
+    now = time.time() if now is None else now
+    floor = CLOCK_FLOOR
+    for f in files:
+        try:
+            floor = max(floor, os.path.getmtime(f))
+        except (OSError, TypeError):
+            pass
+    return floor - now if now < floor - slack_s else None

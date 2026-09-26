@@ -73,3 +73,6 @@ data/clips/
 data/finetune/
 data/hands_public/
 data/finetune_pub/
+
+# per-device config overlay (core/config.py)
+config.local.yaml
