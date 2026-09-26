@@ -462,7 +462,15 @@ def _resolve(intent: Intent, world, cfg: dict) -> tuple[Optional[str], list[str]
     """(entity, guessed): guessed is empty when a configured name or taught alias decided, else the
     things whose automatic guess fits the spoken name (see _guesses), entity being the first."""
     obj = _named(intent, world, cfg)
-    if obj is None or obj in (cfg.get("objects") or {}) or not (intent.name or intent.obj):
+    if obj is None or not (intent.name or intent.obj):
+        return obj, []
+    if obj in (cfg.get("objects") or {}):
+        # A configured prop the detector has never labelled (a new camera angle it wasn't trained on)
+        # may still be tracked as an unnamed thing that Grok named: answer through that guess, hedged.
+        if _never_seen(world, obj):
+            guessed = _prop_guesses(obj, intent, world, cfg)
+            if guessed:
+                return guessed[0], guessed
         return obj, []
     try:
         hit = world.find(obj) if hasattr(world, "find") else None
@@ -472,6 +480,33 @@ def _resolve(intent: Intent, world, cfg: dict) -> tuple[Optional[str], list[str]
         return hit, []
     guessed = _guesses(obj, world)
     return (guessed[0] if guessed else None), guessed
+
+
+def _never_seen(world, obj: str) -> bool:
+    """Never observed on the table and not placed in a room zone (spec 0009)."""
+    try:
+        e = world.get(obj)
+        if e.last_seen is not None or e.status != Status.UNKNOWN:
+            return False
+        place = world.place(obj) if hasattr(world, "place") else None
+        return place is None or place.kind != "room"
+    except Exception:
+        return False
+
+
+def _prop_guesses(obj: str, intent: Intent, world, cfg: dict) -> list[str]:
+    """Things whose automatic guess fits a configured prop: the words said, then its display name and
+    its detector prompts ('remote control', 'tv remote')."""
+    said = [intent.name or intent.obj, _dn(cfg, obj)] + list((cfg.get("prompts") or {}).get(obj) or [])
+    seen: set[str] = set()
+    for words in said:
+        if not words or words in seen:
+            continue
+        seen.add(words)
+        hits = _guesses(words, world)
+        if hits:
+            return hits
+    return []
 
 
 def _guesses(said: str, world) -> list[str]:
