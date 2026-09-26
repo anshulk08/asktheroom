@@ -277,3 +277,39 @@ def test_morning_report_said_once_under_concurrency(tmp_path):
     [t.join() for t in ts]
     assert sum(1 for g in got if g) == 1
     events.close()
+
+
+def test_morning_on_activity_loses_the_race_to_a_question(tmp_path):
+    """tick() saw the report due, then a voice question delivered it before tick's deliver(): no NULL
+    notice and nothing handed to the speaker."""
+    events = EventLog(":memory:", str(tmp_path / "s"))
+    world = real_world(events)
+    spoken, asked = [], []
+    care = Care(CFG, world, events, make_ask(CFG, world, events, other=no_grok), clock=lambda: at(7, 30))
+    care.on_notice = spoken.append
+    events.add(Event(t=at(7, 12), wall=at(7, 12), obj="keys", type="PICKED_UP"))
+
+    def question_first(now):                       # runs after tick's due() check, before its deliver()
+        asked.append(care.ask("where are my keys?", "voice"))
+        return True
+
+    care.morning.activity_since_morning = question_first
+    assert care.tick() == []
+    assert asked[0].text.startswith("Good morning")
+    assert spoken == [] and all(n.text for n in care.reminders.store.notices(0))
+    events.close()
+
+
+def test_greeting_loses_the_race_to_the_scheduler(tmp_path):
+    events = EventLog(":memory:", str(tmp_path / "s"))
+    world = real_world(events)
+    care = Care(CFG, world, events, make_ask(CFG, world, events, other=no_grok), clock=lambda: at(7, 30))
+    deliver = care.morning.deliver
+
+    def scheduler_wins(now):                       # the scheduler says it just before the greeting asks for it
+        care.morning.mark_delivered(now)
+        return deliver(now)
+
+    care.morning.deliver = scheduler_wins
+    assert care.ask("good morning", "voice").text == "Good morning."
+    events.close()

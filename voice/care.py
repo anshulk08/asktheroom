@@ -116,8 +116,9 @@ class Care:
                 return self._suggest(reply.answer, reply.suggest, source, text, now), "CARE_PROFILE"
             m = GREETING.match(t)
             if m:
-                if self.morning.due(now):
-                    return Answer(self.morning.deliver(now)), "CARE_GREETING"
+                report = self.morning.deliver(now)          # None if not due or already said
+                if report:
+                    return Answer(report), "CARE_GREETING"
                 g = m.group("g")
                 g = "Hello" if g in ("hi", "hello", "hey") else ("Good " + g if g in ("morning", "evening")
                                                                 else g.capitalize())
@@ -213,8 +214,8 @@ class Care:
                 self._say(ans)
         if self.c.get("morning_on_activity", True) and self.morning.due(now) and self.reminders.may_speak(now) \
                 and self.morning.activity_since_morning(now):
-            text = self.morning.deliver(now)
-            n = self.reminders.store.add_notice(now, "morning", text, None, None, True)
+            text = self.morning.deliver(now)          # None if a question delivered it since due()
+            n = self.reminders.store.add_notice(now, "morning", text, None, None, True) if text else None
             if n is not None:
                 out.append(n)
                 self._say(Answer(text))
