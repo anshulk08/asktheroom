@@ -26,10 +26,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))      # run as a script 
 from common import DEFAULT_DATA, class_names, trial_of  # noqa: E402
 
 
+TRAIN_ONLY = "synth"      # synthesize.py composites: always trained on, never validated on
+
+
 def split_by_trial(stems: list[str], val_frac: float = 0.2, val_trials=None,
                    seed: int = 0) -> tuple[list[str], list[str]]:
     """Frame stems -> (train, val), whole trials to one side. With no val_trials, shuffles the trials
-    (seeded) and moves them to val until about val_frac of the frames are there (at least one)."""
+    (seeded) and moves them to val until about val_frac of the frames are there (at least one).
+    Synthetic composites (trial 'synth') always go to train and don't count toward val_frac."""
+    synth = sorted(s for s in stems if trial_of(s) == TRAIN_ONLY)
+    stems = [s for s in stems if trial_of(s) != TRAIN_ONLY]
     by = defaultdict(list)
     for s in stems:
         by[trial_of(s)].append(s)
@@ -52,7 +58,7 @@ def split_by_trial(stems: list[str], val_frac: float = 0.2, val_trials=None,
             n += len(by[t])
     tr = [s for t in trials if t not in val for s in sorted(by[t])]
     va = [s for t in trials if t in val for s in sorted(by[t])]
-    return tr, va
+    return tr + synth, va
 
 
 def write_split(data: Path, names: list[str], train: list[str], val: list[str]) -> Path:
