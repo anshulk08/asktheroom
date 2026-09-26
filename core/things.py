@@ -19,7 +19,8 @@ weighted score, so every decision can be explained in one sentence:
     (a)    causal: it came out of a container / cover that holds hidden things (a hand touched that
            parent since they hid), or appeared where an UNDER thing lay: that child. Several
            children: appearance may pick one, else a new thing linked to all of them
-    (b)    a thing lost in place (no hand involved) seen again at the same spot
+    (b)    a thing lost in place (no hand involved) seen again at the same spot; with thing_identity:
+           rebirth_s, also one lost recently after a pick-up, a false pick-up or an edge exit
     (c)    appearance resurrects an archived thing only above resurrect_sim AND by resurrect_margin
            over every other thing (a twin on the table blocks it)
     (d)    a new thing, with maybe_same_as links to archived things that look similar; only inside
@@ -114,6 +115,21 @@ class ContainerConfig:
     @classmethod
     def from_config(cls, cfg) -> 'ContainerConfig':
         raw = dict(getattr(cfg, 'thing_containers', None) or {})
+        return cls(**{k: v for k, v in raw.items() if k in {f.name for f in fields(cls)}})
+
+
+@dataclass
+class IdentityConfig:
+    """The thing_identity: section of config.yaml (every key optional): one object, one thing:N. On the
+    rig most new things were an old one back at its spot after a hand passed (31 of 39 births in 13 min
+    were within 5 cm of an earlier thing), because only a thing lost in place with no hand came back."""
+    rebirth_s: float = 0.0             # a thing lost this recently (UNKNOWN / GONE / HELD, hand or no hand)
+                                       # seen again at its spot is that thing again; 0 = off (rule (b) only)
+    rebirth_cm: float = 5.0            # 'at its spot': within this of where it was last seen or picked up
+
+    @classmethod
+    def from_config(cls, cfg) -> 'IdentityConfig':
+        raw = dict(getattr(cfg, 'thing_identity', None) or {})
         return cls(**{k: v for k, v in raw.items() if k in {f.name for f in fields(cls)}})
 
 
@@ -217,6 +233,7 @@ class ThingRules:
 
     def _reset_things(self) -> None:
         self._tcfg = ThingsConfig.from_config(self.cfg)
+        self._icfg = IdentityConfig.from_config(self.cfg)
         self._area = TableArea.from_dict(getattr(self.cfg, 'table_area', None))   # tabletop outline, or none
         # Never reuse an id: the event log outlives RESET and the process, and a new thing:N would
         # inherit an old thing:N's history. Duck-typed sinks without max_number start at 0.
@@ -603,6 +620,9 @@ class ThingRules:
                 and self._size_fits(n, d.box_cm)]
         if len(spot) == 1:
             return spot[0], []
+        back = self._reborn(d, seen)
+        if back:
+            return back, []
         # (c) appearance: only a strict, clear match brings an archived thing back
         # A visible thing unseen for two batches may have jumped out of its gate (knocked, or a hand
         # the detector missed): it is still 'visible' only because absence takes ~9 batches to declare.
@@ -619,6 +639,26 @@ class ThingRules:
             return 'skip', []
         links = sorted(((n, self._look_score(vec, n)) for n in archived), key=lambda x: -x[1])
         return None, [(n, s) for n, s in links if s >= tc.maybe_sim][:tc.maybe_max]
+
+    def _reborn(self, d: Detection, seen) -> str | None:
+        """(b') thing_identity.rebirth_s: a thing lost recently, with or without a hand (picked up and put
+        back, a false pick-up while a hand passed over it, an arm at the edge), seen again of its size at
+        the spot it was last seen or picked up from: the nearest one, most recently seen on a tie."""
+        ic = self._icfg
+        if ic.rebirth_s <= 0 or self._wall is None:
+            return None
+        back = []
+        for n in self._things:
+            e = self.entities[n]
+            if e.merged_into is not None or n in seen or e.status not in ARCHIVED + (Status.HELD,) \
+                    or e.last_seen is None or self._wall - e.last_seen > ic.rebirth_s \
+                    or not self._size_fits(n, d.box_cm):
+                continue
+            dd = min((geom.dist(d.center_cm, p) for p in (e.pos_cm, e.pre_pickup_pos) if p is not None),
+                     default=float('inf'))
+            if dd <= ic.rebirth_cm:
+                back.append((dd, -e.last_seen, n))
+        return min(back)[2] if back else None
 
     def _emerged(self, name: str, d: Detection) -> bool:
         """The proposal can be this hidden thing: it lies where the thing sat under its cover, or

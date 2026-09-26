@@ -446,3 +446,12 @@ grok_check:                   # Grok checks the tracker each time the table sett
   bind_conf: 0.7              # ... at or above this confidence
   sighting_max_age_s: 900     # WHERE falls back to a sighting no older than this
   keep_h: 24                  # rows older than this are deleted on start
+
+# One object, one thing:N (core/things.py IdentityConfig). Without an appearance embedder (reid off, as on
+# the rig) only a thing lost in place with no hand came back as itself; one picked up and put back, one a
+# passing hand hid (a false pick-up), or an arm at the edge came back as a new thing:N each time (31 of 39
+# births in 13 min on the rig were within 5 cm of an earlier thing). Now a thing lost this recently and
+# seen again, of its size, where it was last seen or picked up from is that thing again.
+thing_identity:
+  rebirth_s: 60               # 0 = off
+  rebirth_cm: 5.0

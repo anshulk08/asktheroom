@@ -90,6 +90,8 @@ class Config:
     table_area: dict = field(default_factory=dict)
     # Large unnamed things that hold others (core/things.py ContainerConfig, thing_containers: section).
     thing_containers: dict = field(default_factory=dict)
+    # Fewer duplicate things (core/things.py IdentityConfig, thing_identity: section).
+    thing_identity: dict = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, raw: dict) -> "Config":
