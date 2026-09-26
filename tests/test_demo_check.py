@@ -30,7 +30,7 @@ def fake_rig():
 def test_fake_run_passes_everything(capsys):
     assert dc.main(["--fake", "--skip-manual"]) == 0
     out = capsys.readouterr().out
-    assert out.count("[PASS]") == 8 and "[SKIP] 8" in out and "all checks passed" in out
+    assert out.count("[PASS]") == 8 and "[SKIP] 8" in out and "[SKIP] 10" in out and "all checks passed" in out
 
 
 def test_missing_camera_fails_every_check_that_needs_it(monkeypatch, capsys):
@@ -204,10 +204,28 @@ def test_one_tag_markers_check_passes_with_the_tag_removed_and_catches_drift(tmp
     assert not ok and "recalibrate" in msg
 
 
-def test_clock_check_passes_on_a_set_clock_and_is_last():
+def test_clock_check_passes_on_a_set_clock_and_keeps_its_number():
     rig = dc.Rig(load_config(), fake=True)
     try:
         ok, msg = dc.check_clock(rig)
     finally:
         rig.close()
-    assert ok is True and dc.CHECKS[-1][0] == "clock" and len(dc.CHECKS) == 9
+    assert ok is True and dc.CHECKS[8][0] == "clock" and len(dc.CHECKS) == 10
+
+
+def test_room_check_skips_when_off_and_rehits_the_sim_map():
+    cfg = load_config()
+    rig = dc.Rig(cfg, fake=True)
+    try:
+        assert dc.check_room(rig)[0] is None
+        rig.cfg = dict(cfg, room=dict(cfg["room"], enabled=True))
+        ok, msg = dc.check_room(rig)
+        assert ok, msg
+        assert "re-hit" in msg and dc.CHECKS[-1][0] == "room"
+        laser, _ = rig.part("room")
+        laser.room_map.px[:, 0] += 80                    # the camera moved since the sweep
+        laser.room_map._index()
+        ok, msg = dc.check_room(rig)
+        assert not ok and "sweep again" in msg
+    finally:
+        rig.close()
