@@ -168,3 +168,81 @@ def test_overheard_open_question_needs_an_object_or_the_wake_word():
     assert u("where are you guys from", overheard=True).kind == IGNORE
     assert u("room, where are you guys from", overheard=True).kind == "OTHER"
     assert u("what is in the box", overheard=True).kind == "OTHER"
+
+
+# ---------------------------------------------------------------- Grok reads what the rules can't
+
+class FakeSession:
+    def __init__(self, content='{"kind": "WHERE", "object": "wallet"}', status=200):
+        self.content, self.status, self.posts = content, status, []
+
+    def post(self, url, timeout=None, headers=None, json=None):
+        self.posts.append({"url": url, "timeout": timeout, "headers": headers, "json": json})
+        sess = self
+
+        class R:
+            ok = sess.status == 200
+
+            def raise_for_status(self):
+                if sess.status != 200:
+                    raise requests.HTTPError(f"{sess.status}")
+
+            def json(self):
+                return {"choices": [{"message": {"content": sess.content}}]}
+        return R()
+
+
+def test_grok_interpreter_calls_xai_with_the_schema(monkeypatch):
+    from voice.understand import Grok
+    monkeypatch.setenv("XAI_API_KEY", "test-key")
+    s = FakeSession()
+    g = Grok(CFG, session=s)
+    assert g.ask("wears my wall it", timeout=1.5) == '{"kind": "WHERE", "object": "wallet"}'
+    [p] = s.posts
+    assert p["url"] == "https://api.x.ai/v1/chat/completions" and p["timeout"] == 1.5
+    assert p["headers"] == {"Authorization": "Bearer test-key"}
+    body = p["json"]
+    assert body["model"] == CFG["llm"]["model"] and body["reasoning_effort"] == "none"
+    assert body["messages"][0] == {"role": "system", "content": system_prompt(CFG)}
+    assert body["messages"][1] == {"role": "user", "content": "wears my wall it"}
+    rf = body["response_format"]
+    assert rf["type"] == "json_schema" and rf["json_schema"]["schema"] == schema(CFG) and rf["json_schema"]["strict"]
+    assert "chat_template_kwargs" not in body and "cache_prompt" not in body     # llama.cpp-only keys
+
+
+def test_grok_without_a_key_is_down_and_raises(monkeypatch):
+    from voice.understand import Grok
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+    s = FakeSession()
+    g = Grok(CFG, session=s)
+    assert not g.health()
+    with pytest.raises(RuntimeError):
+        g.ask("where did my specs go", timeout=1.0)
+    assert s.posts == []
+
+
+def test_understander_uses_grok_by_default_and_qwen_on_request(monkeypatch):
+    from voice.understand import Grok, Qwen
+    assert "backend" not in CFG["understand"] or CFG["understand"]["backend"] == "grok"
+    assert isinstance(Understander(dict(CFG, understand={"enabled": True})).model, Grok)       # the code default
+    assert isinstance(Understander(CFG).model, Grok)
+    assert isinstance(Understander(dict(CFG, understand=dict(CFG["understand"], backend="qwen"))).model, Qwen)
+    assert Understander(dict(CFG, understand=dict(CFG["understand"], enabled=False))).model is None
+
+
+def test_grok_reads_what_the_rules_cannot(monkeypatch):
+    from voice.understand import Grok
+    monkeypatch.setenv("XAI_API_KEY", "k")
+    s = FakeSession('{"kind": "WHERE", "object": "wallet"}')
+    u = Understander(CFG, model=Grok(CFG, session=s))
+    i = u("wears my wall it")
+    assert (i.kind, i.obj, u.last_by) == ("WHERE", "wallet", "grok")
+    assert u("where are my keys").kind == "WHERE" and len(s.posts) == 1       # rules sure: no call
+
+
+def test_offline_the_model_is_not_asked(monkeypatch):
+    monkeypatch.setenv("XAI_API_KEY", "k")
+    stub = StubQwen(kind="WHERE", obj="wallet")
+    u = Understander(CFG, model=stub, online=lambda: False)
+    i = u("wears my wall it")
+    assert stub.asked == [] and u.last_by == "rules" and i.kind == "OTHER"

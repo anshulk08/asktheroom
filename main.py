@@ -522,7 +522,7 @@ def build(cfg: dict, fake: bool = False, camera: int = 0, with_voice: bool = Tru
 
     netmon = net.NetMonitor(cfg).start()
     cleanup.append(netmon.stop)
-    interpret = voice.understand.Understander(cfg)
+    interpret = voice.understand.Understander(cfg, online=lambda: netmon.online)
     interpret.warm()                                   # logs and falls back to the rules if the model is down
     # Narration and visual memory (both off unless enabled in config): they attach to world.update, so
     # the perception loop and --fake's SimCamera feed them without a call here; stopped before the log closes.

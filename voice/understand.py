@@ -45,10 +45,11 @@ from __future__ import annotations
 import difflib
 import json
 import logging
+import os
 import sys
 import threading
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 import requests
 
@@ -165,7 +166,10 @@ def to_intent(raw: str, text: str, cfg: dict, obj_hint: Optional[str] = None) ->
 
 
 class Qwen:
-    """Talks to llama-server's OpenAI-compatible chat endpoint. ask() returns the raw JSON text."""
+    """Talks to llama-server's OpenAI-compatible chat endpoint. ask() returns the raw JSON text.
+    Offline option (understand.backend: qwen); the default is Grok."""
+
+    name = "qwen"
 
     def __init__(self, cfg: dict):
         u = cfg.get("understand") or {}
@@ -196,37 +200,92 @@ class Qwen:
             return False
 
 
+class Grok:
+    """Same ask()/health() as Qwen, against xAI's OpenAI-compatible API (the llm: section's base_url,
+    model and reasoning_effort; key in $XAI_API_KEY). Only the transcript leaves the device."""
+
+    name = "grok"
+
+    def __init__(self, cfg: dict, session=None):
+        llm = cfg.get("llm") or {}
+        self.url = str(llm.get("base_url", "https://api.x.ai/v1")).rstrip("/")
+        self.model = str(llm.get("model", "grok-4.3"))
+        self.reasoning = llm.get("reasoning_effort")
+        self.system = system_prompt(cfg)
+        self.schema = schema(cfg)
+        self.session = session if session is not None else requests.Session()
+
+    @staticmethod
+    def _key() -> str:
+        return os.environ.get("XAI_API_KEY", "").strip()
+
+    def ask(self, text: str, timeout: float) -> str:
+        key = self._key()
+        if not key:
+            raise RuntimeError("XAI_API_KEY is not set")
+        body = {"model": self.model, "temperature": 0, "max_tokens": 40,
+                "messages": [{"role": "system", "content": self.system}, {"role": "user", "content": text}],
+                "response_format": {"type": "json_schema",
+                                    "json_schema": {"name": "intent", "schema": self.schema, "strict": True}}}
+        if self.reasoning:
+            body["reasoning_effort"] = str(self.reasoning)
+        r = self.session.post(f"{self.url}/chat/completions", timeout=timeout,
+                              headers={"Authorization": f"Bearer {key}"}, json=body)
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]["content"]
+
+    def health(self, timeout: float = 1.0) -> bool:
+        return bool(self._key())
+
+
 class Understander:
-    """interpret(text) -> Intent. Qwen when it's up and quick, the rule parser otherwise.
+    """interpret(text) -> Intent. The model (Grok by default, understand.backend) when the rules aren't
+    sure and it is up, online and quick; the rule parser otherwise.
 
     Remembers the last transcript, so main.Room (RESET/RECAL) and the ask pipeline share one call."""
 
-    def __init__(self, cfg: dict, qwen: Optional[Qwen] = None):
+    def __init__(self, cfg: dict, model=None, qwen=None, online: Optional[Callable[[], bool]] = None):
         u = cfg.get("understand") or {}
         self.cfg = cfg
         self.enabled = bool(u.get("enabled", True))
         self.timeout_s = float(u.get("timeout_s", 1.5))
-        self.qwen = qwen if qwen is not None else (Qwen(cfg) if self.enabled else None)
+        backend = str(u.get("backend", "grok"))
+        if model is None:
+            model = qwen
+        if model is None and self.enabled:
+            model = Qwen(cfg) if backend == "qwen" else Grok(cfg)
+        self.model = model
+        self.online = online or (lambda: True)
         self._lock = threading.Lock()
         self._last: tuple[tuple[str, bool], Intent] | None = None
         self.last_ms: float = 0.0
-        self.last_by = "rules"             # who decided the last intent: qwen | rules | gate
+        self.last_by = "rules"             # who decided the last intent: grok | qwen | rules | gate
         self.wake_only = (cfg.get("listen") or {}).get("mode") == "wake"   # overheard needs "room, ..."
 
+    @property
+    def qwen(self):
+        """The model, by its old name (tests and scripts written when it was always Qwen)."""
+        return self.model
+
+    def _name(self) -> str:
+        return getattr(self.model, "name", "qwen")
+
     def warm(self) -> bool:
-        """Check llama-server and run one question, so the prompt is cached before the first visitor."""
-        if self.qwen is None:
+        """Check the model and run one question (Qwen: caches the prompt; Grok: opens the connection)."""
+        if self.model is None:
             return False
-        if not self.qwen.health():
-            log.warning("Qwen not reachable at %s; questions use the rule parser (scripts/qwen_server.sh)",
-                        self.qwen.url)
+        if not self.model.health():
+            log.warning("%s not reachable at %s; questions use the rule parser", self._name(), self.model.url)
+            return False
+        if not self.online():
+            log.info("offline: questions use the rule parser until the connection is back")
             return False
         try:
-            self.qwen.ask("where are my keys", timeout=30)
+            self.model.ask("where are my keys", timeout=30 if self._name() == "qwen" else 5)
         except Exception as ex:
-            log.warning("Qwen warm-up failed: %s", ex)
+            log.warning("%s warm-up failed: %s", self._name(), ex)
             return False
-        log.info("Qwen interpreting questions at %s", self.qwen.url)
+        log.info("%s interpreting questions at %s", self._name(), self.model.url)
         return True
 
     def __call__(self, text: str, overheard: bool = False) -> Intent:
@@ -256,22 +315,22 @@ class Understander:
 
     def _interpret(self, text: str) -> Intent:
         rules = parse(text, self.cfg)
-        if rules_sure(rules) or self.qwen is None or not text.strip():
+        if rules_sure(rules) or self.model is None or not text.strip() or not self.online():
             self.last_by, self.last_ms = "rules", 0.0
             return rules
         t0 = time.monotonic()
         try:
-            got = to_intent(self.qwen.ask(text, self.timeout_s), text, self.cfg, rules.obj)
+            got = to_intent(self.model.ask(text, self.timeout_s), text, self.cfg, rules.obj)
         except Exception as ex:
-            log.warning("Qwen failed (%s: %s); using the rule parser", type(ex).__name__, ex)
+            log.warning("%s failed (%s: %s); using the rule parser", self._name(), type(ex).__name__, ex)
             got = None
         self.last_ms = 1000 * (time.monotonic() - t0)
         if got is None:
             self.last_by = "rules"
             return rules
-        self.last_by = "qwen"
+        self.last_by = self._name()
         if (got.kind, got.obj) != (rules.kind, rules.obj):
-            log.info("Qwen read %r as %s %s (rules: %s %s) in %.0f ms", text, got.kind, got.obj,
+            log.info("%s read %r as %s %s (rules: %s %s) in %.0f ms", self._name(), text, got.kind, got.obj,
                      rules.kind, rules.obj, self.last_ms)
         return got
 

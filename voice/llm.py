@@ -1,6 +1,7 @@
-"""Grok for open-ended (OTHER) questions (spec V10). Off the voice path: the team decided Grok only
-helps the detector, so voice/pipeline.py uses voice/local_llm.py, which reuses compact_state,
-to_answer and the pill filter from here. ask_grok stays for scripts/grok_smoke.py.
+"""Grok for open-ended (OTHER) questions (spec V10), on the voice path: voice/pipeline.py's default
+answerer is ask_other(), which tries voice/local_llm.py's fixed templates first (instant, exact) and
+then ask_grok(). Offline, it gives the fallback sentence. (Team decision, Fri night: all LLM/VLM work
+goes through Grok; the local Qwen answerer, voice.local_llm.ask_local, is no longer on the path.)
 
 Only question text and a compact world-state JSON leave the device. The model gets the state in
 the system prompt, may call locate / history / changes_since, and must finish with respond().
@@ -339,6 +340,20 @@ def _run(question: str, world, events, cfg: dict, api_key: str, deadline: float)
             messages.append({"role": "tool", "tool_call_id": tc.id,
                              "content": json.dumps(result, separators=(",", ":"))})
     return fallback()
+
+
+def ask_other(question: str, world, events, cfg: dict | None = None, online: bool = True) -> Answer:
+    """The pipeline's answerer for OTHER: fixed templates for the common open questions, then Grok
+    when online, else the fallback sentence. Never raises."""
+    try:
+        cfg = cfg if cfg is not None else load_config()
+        from voice.local_llm import templated
+        fixed = templated(question, world, cfg)
+        if fixed is not None:
+            return fixed
+    except Exception:
+        log.exception("templated answer failed")
+    return ask_grok(question, world, events, cfg, online=online)
 
 
 def ask_grok(question: str, world, events, cfg: dict | None = None,
