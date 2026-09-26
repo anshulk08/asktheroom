@@ -6,18 +6,46 @@ struct SuggestionChips: View {
     var onPick: (String) -> Void
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(Self.suggestions, id: \.self) { s in
-                    Button(s) { onPick(s) }
-                        .font(.subheadline.weight(.medium))
-                        .buttonStyle(.bordered)
-                        .buttonBorderShape(.capsule)
-                        .tint(.primary)
-                }
+        // Wraps instead of scrolling sideways, so no question is cut off mid-word.
+        FlowLayout(spacing: 8) {
+            ForEach(Self.suggestions, id: \.self) { s in
+                Button(s) { onPick(s) }
+                    .font(.subheadline.weight(.medium))
+                    .buttonStyle(.bordered)
+                    .buttonBorderShape(.capsule)
+                    .tint(.primary)
             }
-            .padding(.horizontal, 16)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 16)
+    }
+}
+
+/// Suggestion chips and the ask bar, wired to dictation. Used on Home and on the Table screen.
+struct AskPanel: View {
+    var showSuggestions = true
+    var onAsk: (String) -> Void
+    @State private var draft = ""
+    @State private var dictation = Dictation()
+
+    var body: some View {
+        VStack(spacing: 10) {
+            if showSuggestions { SuggestionChips(onPick: onAsk) }
+            AskBar(text: $draft,
+                   isListening: dictation.isListening,
+                   micAvailable: dictation.isAvailable,
+                   onSend: onAsk,
+                   onMicDown: {
+                       Task {
+                           await dictation.start(onPartial: { draft = $0 }, onFinish: { heard in
+                               draft = ""
+                               onAsk(heard)
+                           })
+                       }
+                   },
+                   onMicUp: { dictation.stop() })
+        }
+        .padding(.vertical, 10)
     }
 }
 
@@ -48,7 +76,7 @@ struct AskBar: View {
                     Image(systemName: "arrow.up")
                         .font(.title2.weight(.bold))
                         .frame(width: 56, height: 56)
-                        .background(Circle().fill(Theme.laser))
+                        .background(Circle().fill(Theme.accent))
                         .foregroundStyle(.white)
                 }
                 .accessibilityLabel("Ask")
@@ -80,7 +108,7 @@ private struct MicButton: View {
         Image(systemName: isListening ? "waveform" : "mic.fill")
             .font(.title2.weight(.bold))
             .frame(width: 56, height: 56)
-            .background(Circle().fill(isListening ? Theme.laser : Color.primary.opacity(0.85)))
+            .background(Circle().fill(isListening ? Theme.accent : Color.primary.opacity(0.85)))
             .foregroundStyle(isListening ? Color.white : Color(.systemBackground))
             .scaleEffect(pressed ? 1.12 : 1)
             .animation(.easeOut(duration: 0.15), value: pressed)

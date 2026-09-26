@@ -9,9 +9,9 @@ NAME=${1:-shot}; shift || true
 mkdir -p build/shots
 xcodebuild build -project AskTheRoom/AskTheRoom.xcodeproj -scheme AskTheRoom -destination "id=$SIM" \
   -derivedDataPath build/dd -quiet 2>&1 | grep -E "error|warning: " | grep -v "appintents" || true
-xcrun simctl terminate $SIM com.asktheroom.app 2>/dev/null || true
+xcrun simctl terminate $SIM com.adrian.asktheroom 2>/dev/null || true
 xcrun simctl install $SIM build/dd/Build/Products/Debug-iphonesimulator/AskTheRoom.app
-xcrun simctl launch $SIM com.asktheroom.app "$@" >/dev/null
+xcrun simctl launch $SIM com.adrian.asktheroom "$@" >/dev/null
 sleep ${WAIT:-2.5}
 xcrun simctl io $SIM screenshot build/shots/$NAME.png >/dev/null 2>&1
 echo build/shots/$NAME.png

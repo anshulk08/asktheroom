@@ -7,7 +7,7 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(snap.v, 1)
         XCTAssertEqual(snap.tableSize, TablePoint(x: 90, y: 60))
         XCTAssertEqual(snap.laser, LaserState(on: true, target: "keys"))
-        XCTAssertEqual(snap.entities.count, 10)
+        XCTAssertEqual(snap.entities.count, 12)
         XCTAssertEqual(Set(snap.entities.map(\.status)), [.visible, .held, .under, .inside, .gone, .lost])
 
         let keys = try XCTUnwrap(snap.entity(named: "keys"))
@@ -28,6 +28,52 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(Entity.displayName(for: "pill_bottle"), "pill bottle")
         XCTAssertEqual(Entity.displayName(for: "thing:7", aliases: ["my charger"]), "my charger")
         XCTAssertEqual(Entity.displayName(for: "thing:9"), "unnamed object 9")
+    }
+
+    private func thing(_ fields: String) throws -> Entity {
+        let json = #"{"e":[{"n":"thing:7","k":"t","s":"V"\#(fields)}]}"#
+        return try XCTUnwrap(Wire.decode(Snapshot.self, from: Data(json.utf8))?.entities.first)
+    }
+
+    func testTaughtNameIsThePersons() throws {
+        let e = try thing(#","a":["my charger"],"g":"phone charger","gc":0.9"#)
+        XCTAssertTrue(e.hasTaughtName)
+        XCTAssertFalse(e.isHedged)
+        XCTAssertEqual(e.displayName, "my charger")
+        XCTAssertEqual(e.phrase, "my charger")
+    }
+
+    func testGrokNameIsHedged() throws {
+        let e = try thing(#","a":["tape roll"],"as":"grok""#)
+        XCTAssertFalse(e.hasTaughtName)
+        XCTAssertEqual(e.displayName, "tape roll?")
+        XCTAssertEqual(e.phrase, "what looks like a tape roll")
+        XCTAssertFalse(e.isNameless)
+    }
+
+    func testConfidentGuessIsHedged() throws {
+        let e = try thing(#","g":"apple","gc":0.5"#)
+        XCTAssertEqual(e.displayName, "apple?")
+        XCTAssertEqual(e.phrase, "what looks like an apple")
+        XCTAssertEqual(e.thingNumber, "7")
+        // Older bridges send no `gc`: 0.6 is enough.
+        XCTAssertEqual(try thing(#","g":"cup""#).displayName, "cup?")
+    }
+
+    func testWeakOrMissingGuessStaysUnnamed() throws {
+        for fields in [#","g":"cup","gc":0.3"#, "", #","g":"","gc":0.9"#] {
+            let e = try thing(fields)
+            XCTAssertFalse(e.isHedged, fields)
+            XCTAssertTrue(e.isNameless, fields)
+            XCTAssertEqual(e.displayName, "unnamed object 7", fields)
+        }
+    }
+
+    func testNamedTargetsIgnoreGuesses() throws {
+        let json = #"{"e":[{"n":"keys","k":"t","s":"V","g":"coins","gc":0.9}]}"#
+        let keys = try XCTUnwrap(Wire.decode(Snapshot.self, from: Data(json.utf8))?.entities.first)
+        XCTAssertFalse(keys.isHedged)
+        XCTAssertEqual(keys.displayName, "keys")
     }
 
     func testChainFollowsNestingAndStopsAtHands() {
@@ -75,6 +121,30 @@ final class ModelsTests: XCTestCase {
         XCTAssertNil(answer.id)
         XCTAssertFalse(answer.succeeded)
         XCTAssertNil(answer.laserAction)
+    }
+
+    /// The two examples in PROTOCOL.md 6a.
+    func testAnswersThePhoneDidntAskFor() throws {
+        let room = try XCTUnwrap(Wire.decode(Answer.self, from: Data("""
+            {"id": null, "src": "voice", "q": "where are my keys", "ok": true, "text": "Your keys are inside the box.",
+             "point_at": "keys", "action": "point", "target": [70.4, 38.1], "ms": null}
+            """.utf8)))
+        XCTAssertTrue(room.isRoomAnswer)
+        XCTAssertFalse(room.isNotice)
+        XCTAssertEqual(room.q, "where are my keys")
+
+        let notice = try XCTUnwrap(Wire.decode(Answer.self, from: Data("""
+            {"id": null, "src": "notice", "nid": 12, "kind": "reminder", "ok": true,
+             "text": "It's 9 and the pill bottle hasn't been picked up yet.", "point_at": "pill_bottle", "action": "point",
+             "target": [30.2, 12.0], "ms": null}
+            """.utf8)))
+        XCTAssertTrue(notice.isNotice)
+        XCTAssertFalse(notice.isRoomAnswer)
+        XCTAssertEqual(notice.nid, 12)
+        XCTAssertEqual(notice.kind, "reminder")
+
+        let mine = try XCTUnwrap(Wire.decode(Answer.self, from: Data(#"{"id": 3, "src": "voice", "text": "x"}"#.utf8)))
+        XCTAssertFalse(mine.isRoomAnswer, "an answer with an id is the phone's own")
     }
 
     func testMalformedJSONReturnsNil() {

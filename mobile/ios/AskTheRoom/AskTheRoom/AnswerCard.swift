@@ -11,7 +11,7 @@ struct AnswerCard: View {
                 .font(.body)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 7)
-                .background(Theme.laser.opacity(0.12), in: RoundedRectangle(cornerRadius: 14))
+                .background(Theme.accent.opacity(0.14), in: RoundedRectangle(cornerRadius: 14))
                 .frame(maxWidth: .infinity, alignment: .trailing)
                 .accessibilityLabel("You asked: \(exchange.question)")
 
@@ -30,7 +30,7 @@ struct AnswerCard: View {
             } else {
                 HStack(spacing: 10) {
                     ProgressView()
-                    Text("Asking the room…").foregroundStyle(.secondary)
+                    Text(exchange.slow ? "Still working on it…" : "Asking the room…").foregroundStyle(.secondary)
                 }
                 .font(.title3)
             }
@@ -41,13 +41,21 @@ struct AnswerCard: View {
     }
 }
 
-/// An answer to a question someone spoke to the rig (PROTOCOL_PROPOSALS.md P2; off by default).
+/// An answer to a question someone else asked the rig (PROTOCOL.md 6a; off by default).
 struct HeardInRoomCard: View {
     let answer: Answer
 
+    private var heading: String {
+        switch answer.src {
+        case "dashboard": return "Asked on the dashboard"
+        case "sms": return "Asked by text message"
+        default: return "Heard in the room"
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Label("Heard in the room", systemImage: "waveform")
+            Label(heading, systemImage: answer.src == "voice" ? "waveform" : "text.bubble")
                 .font(.footnote.weight(.semibold))
                 .foregroundStyle(.secondary)
             if let q = answer.q {
@@ -60,32 +68,6 @@ struct HeardInRoomCard: View {
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 18))
-    }
-}
-
-/// Earlier questions and answers, newest first.
-struct HistoryList: View {
-    let exchanges: ArraySlice<Exchange>
-
-    var body: some View {
-        if !exchanges.isEmpty {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Earlier")
-                    .font(.footnote.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                ForEach(exchanges) { e in
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(e.question).font(.footnote).foregroundStyle(.secondary)
-                        Text(e.answer?.text ?? (e.timedOut ? "No answer" : "…"))
-                            .font(.body)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    .accessibilityElement(children: .combine)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 4)
-        }
     }
 }
 

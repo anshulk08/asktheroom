@@ -9,8 +9,15 @@ import Foundation
 ///   -mockPaused YES    hold the sample snapshot still
 ///   -mockOffline YES   report the cloud voice as unavailable
 ///   -mockAppDown YES   report the room app as down
-///   -mockAsk "a|b"     ask these, a second after launch and then every 2.5 s
-///   -mockSelect name   open this entity's detail sheet
+///   -mockAsk "a|b"     ask these, a second after launch and then every 2.5 s; on Home each opens the answer sheet
+///   -mockSelect name   open this entity's detail sheet (with -mockTab table: pick it on the map)
+///   -mockFocus name    open the answer sheet on this entity
+///   -mockTab table     open on the Table (or `recent`) tab rather than Home
+///   -mockScroll YES    scroll Home to the bottom
+///   -mockSettings YES  open helper settings
+///   -mockIconPicker YES  with -mockSelect: open the picture picker over the detail sheet
+///   -mockIcons "remote=📺"  show these pictures instead of the usual ones (not saved)
+///   -mockNotice "text" a second after launch, the rig fires this reminder about the pill bottle
 @MainActor
 final class MockRoom: RoomTransport {
     static let stepInterval: Duration = .seconds(5)
@@ -41,6 +48,17 @@ final class MockRoom: RoomTransport {
                     try? await Task.sleep(for: Self.stepInterval)
                     self?.advance()
                 }
+            })
+        }
+        if let text = defaults.string(forKey: "mockNotice") {
+            tasks.append(Task { [weak store] in
+                try? await Task.sleep(for: .seconds(1))
+                var notice = Answer(id: nil, ok: true, text: text, point_at: "pill_bottle", action: "point",
+                                    target: TablePoint(x: 30.2, y: 12))
+                notice.src = "notice"
+                notice.nid = 1
+                notice.kind = "reminder"
+                store?.receive(answer: notice)
             })
         }
         if let script = defaults.string(forKey: "mockAsk") {
@@ -203,9 +221,10 @@ final class MockRoom: RoomTransport {
     }
 
     /// The entity whose name or aliases share the most words with the question; targets win ties.
+    /// Grok's guesses (`g`) aren't names the rig answers to, so they don't match.
     static func bestMatch(for words: Set<String>, in snapshot: Snapshot) -> Entity? {
         let scored = snapshot.entities.map { e -> (Entity, Int) in
-            let names = [e.displayName, e.name.replacingOccurrences(of: "_", with: " ")] + e.aliases
+            let names = [e.name.replacingOccurrences(of: "_", with: " ")] + e.aliases
             let terms = Set(names.flatMap { stems(of: $0) })
             return (e, terms.intersection(words).count)
         }
@@ -217,6 +236,7 @@ final class MockRoom: RoomTransport {
 
     private static func spokenName(_ e: Entity) -> String {
         if e.kind != .target { return "the \(e.displayName)" }
+        if e.isHedged { return e.phrase }
         if e.isThing {
             guard let alias = e.aliases.first else { return "that object" }
             return alias.hasPrefix("my ") ? "your " + alias.dropFirst(3) : "the \(alias)"

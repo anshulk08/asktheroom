@@ -49,7 +49,25 @@ final class RoomStoreTests: XCTestCase {
         XCTAssertNil(store.highlight)
     }
 
+    /// The phone must not give up before the bridge does (12 s), or a retry queues behind the first question.
+    func testPhoneWaitsLongerThanTheBridge() {
+        XCTAssertGreaterThan(store.answerTimeout, .seconds(12))
+        XCTAssertLessThan(store.slowAfter, store.answerTimeout)
+    }
+
+    func testSlowThenAnswered() async throws {
+        store.slowAfter = .milliseconds(20)
+        store.answerTimeout = .seconds(5)
+        store.ask("What's on the table?")
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertTrue(store.current!.slow)
+        XCTAssertTrue(store.current!.isPending, "slow is still waiting, not timed out")
+        store.receive(answer: answer(transport.sent[0].id))
+        XCTAssertNotNil(store.current?.answer)
+    }
+
     func testTimeoutThenLateAnswer() async throws {
+        store.slowAfter = .milliseconds(10)
         store.answerTimeout = .milliseconds(50)
         store.ask("Where are my keys?")
         try await Task.sleep(for: .milliseconds(300))
@@ -60,6 +78,7 @@ final class RoomStoreTests: XCTestCase {
     }
 
     func testRetryAsksAgain() async throws {
+        store.slowAfter = .milliseconds(10)
         store.answerTimeout = .milliseconds(20)
         store.ask("Where are my keys?")
         try await Task.sleep(for: .milliseconds(200))
@@ -95,7 +114,7 @@ final class RoomStoreTests: XCTestCase {
         XCTAssertEqual(store.current?.answer?.text, "The box moved.")
     }
 
-    func testRoomVoiceAnswersOnlyWithTheFlag() {
+    func testRoomAnswersOnlyWithTheFlag() {
         var heard = answer(nil)
         heard.src = "voice"
         heard.q = "where are my keys"
@@ -107,6 +126,53 @@ final class RoomStoreTests: XCTestCase {
         store.receive(answer: heard)
         XCTAssertEqual(store.heardInRoom?.q, "where are my keys")
         XCTAssertEqual(store.highlight?.entity, "keys")
+    }
+
+    /// The bridge forwards dashboard and SMS questions the same way (PROTOCOL.md 6a).
+    func testDashboardAndSMSAnswersShowToo() {
+        store.showRoomVoiceAnswers = true
+        for src in ["dashboard", "sms"] {
+            var heard = answer(nil, "Your wallet is on the table.")
+            heard.src = src
+            store.receive(answer: heard)
+            XCTAssertEqual(store.heardInRoom?.src, src)
+        }
+        var bare = answer(nil, "No source")
+        bare.src = nil
+        store.receive(answer: bare)
+        XCTAssertEqual(store.heardInRoom?.text, "Your wallet is on the table.", "an id-less answer with no src is ignored")
+    }
+
+    private func notice(_ nid: Int, _ text: String, pointAt: String? = "pill_bottle", kind: String = "reminder") -> Answer {
+        var a = Answer(id: nil, ok: true, text: text, point_at: pointAt, action: pointAt == nil ? nil : "point",
+                       target: pointAt == nil ? nil : TablePoint(x: 30.2, y: 12))
+        a.src = "notice"
+        a.nid = nid
+        a.kind = kind
+        return a
+    }
+
+    /// Reminders show on Home first, even with room answers off, and light up what they point at.
+    func testRigNoticesComeFirstWhateverTheSetting() {
+        store.showRoomVoiceAnswers = false
+        store.receive(answer: notice(12, "It's 9 and the pill bottle hasn't been picked up yet."))
+        XCTAssertNil(store.heardInRoom)
+        XCTAssertEqual(store.notices.first?.id, "rig|12")
+        XCTAssertEqual(store.notices.first?.kind, .rig("reminder"))
+        XCTAssertEqual(store.notices.first?.entity, "pill_bottle")
+        XCTAssertEqual(store.highlight?.entity, "pill_bottle")
+    }
+
+    func testRigNoticesAreKeptShortAndCanBePutAway() {
+        for nid in 1...5 { store.receive(answer: notice(nid, "Reminder \(nid)", pointAt: nil, kind: "morning")) }
+        store.receive(answer: notice(5, "Reminder 5", pointAt: nil, kind: "morning"))
+        XCTAssertEqual(store.rigNotices.map(\.rigID), [5, 4, 3], "newest first, no repeats, at most three")
+        XCTAssertEqual(store.rigNotices.first?.entity, "")
+
+        store.dismiss(store.rigNotices[0])
+        XCTAssertFalse(store.notices.contains { $0.rigID == 5 })
+        store.restoreNotices()
+        XCTAssertTrue(store.notices.contains { $0.rigID == 5 })
     }
 
     func testDropAfterConnectingShowsReconnecting() {

@@ -14,6 +14,8 @@ struct Exchange: Identifiable, Equatable {
     var question: String
     var answer: Answer?
     var timedOut = false
+    /// Past `RoomStore.slowAfter`: still waiting, and the card says so.
+    var slow = false
     var askedAt = Date()
 
     var isPending: Bool { answer == nil && !timedOut }
@@ -42,6 +44,7 @@ enum LinkState: Equatable {
 final class RoomStore {
     static let historyLimit = 10
     static let voiceAnswersKey = "showRoomVoiceAnswers"
+    static let rigNoticeLimit = 3
 
     var link: LinkState = .searching
     private(set) var isMock = false
@@ -54,14 +57,25 @@ final class RoomStore {
     /// Newest first, at most `historyLimit`.
     private(set) var exchanges: [Exchange] = []
     private(set) var highlight: Highlight?
-    /// Latest answer to a question spoken to the room itself (PROTOCOL_PROPOSALS.md P2).
+    /// Latest answer to a question someone else asked the rig (PROTOCOL.md 6a).
     private(set) var heardInRoom: Answer?
+    /// Reminders and morning reports the rig fired while connected, newest first.
+    private(set) var rigNotices: [Notice] = []
+    /// What changed since the app connected, newest first (Home, "Recently").
+    private(set) var activity: [ActivityEvent] = []
+    /// Notices the person has put away; each comes back if its situation changes.
+    private(set) var dismissedNotices: Set<String> = []
 
-    /// Off until the bridge sends voice answers; see PROTOCOL_PROPOSALS.md P2.
-    var showRoomVoiceAnswers = UserDefaults.standard.bool(forKey: RoomStore.voiceAnswersKey)
-    /// Outermost of the ask timeouts (server 10 s < bridge 12 s < this), so the rig's own
-    /// "took too long" reaches the phone before the phone gives up on its own.
+    /// Off by default: the rig already speaks these, and the phone may be in another room.
+    var showRoomVoiceAnswers = UserDefaults.standard.bool(forKey: RoomStore.voiceAnswersKey) {
+        didSet { UserDefaults.standard.set(showRoomVoiceAnswers, forKey: Self.voiceAnswersKey) }
+    }
+    /// Outermost of the ask timeouts (server 10 s < bridge 12 s < this, PROTOCOL.md section 6), so the
+    /// rig's own "took too long" reaches the phone first. Retrying sooner would only queue the same
+    /// question behind the one still being answered.
     var answerTimeout: Duration = .seconds(15)
+    /// Open questions answered by Grok can take several seconds.
+    var slowAfter: Duration = .seconds(5)
     var highlightDuration: Duration = .seconds(5)
 
     private var transport: RoomTransport?
@@ -71,6 +85,9 @@ final class RoomStore {
     private var highlightTask: Task<Void, Never>?
 
     var current: Exchange? { exchanges.first }
+    var notices: [Notice] {
+        (rigNotices + (snapshot.map(Dashboard.notices(in:)) ?? [])).filter { !dismissedNotices.contains($0.id) }
+    }
     var history: ArraySlice<Exchange> { exchanges.dropFirst() }
 
     var isRoomAppDown: Bool { status.map { !$0.appIsUp } ?? false }
@@ -84,7 +101,7 @@ final class RoomStore {
 
     // MARK: Source
 
-    /// Switches between the mock room and the real rig (long-press on the status pill).
+    /// Switches between the mock room and the real rig (helper settings).
     func setMock(_ on: Bool) {
         transport?.stop()
         transport = nil
@@ -93,7 +110,10 @@ final class RoomStore {
         status = nil
         highlight = nil
         heardInRoom = nil
+        rigNotices = []
         exchanges = []
+        activity = []
+        dismissedNotices = []
         timeoutTask?.cancel()
         if on {
             link = .connected
@@ -120,8 +140,11 @@ final class RoomStore {
         transport?.send(Question(id: id, q: q))
 
         timeoutTask?.cancel()
-        timeoutTask = Task { [weak self, answerTimeout] in
-            try? await Task.sleep(for: answerTimeout)
+        timeoutTask = Task { [weak self, answerTimeout, slowAfter] in
+            try? await Task.sleep(for: slowAfter)
+            guard !Task.isCancelled else { return }
+            self?.markSlow(id)
+            try? await Task.sleep(for: answerTimeout - slowAfter)
             guard !Task.isCancelled else { return }
             self?.timeOut(id)
         }
@@ -130,6 +153,11 @@ final class RoomStore {
     func retry() {
         guard let last = current, last.timedOut else { return }
         ask(last.question)
+    }
+
+    private func markSlow(_ id: Int) {
+        guard exchanges.first?.id == id, exchanges[0].answer == nil else { return }
+        exchanges[0].slow = true
     }
 
     private func timeOut(_ id: Int) {
@@ -141,7 +169,9 @@ final class RoomStore {
 
     func receive(answer: Answer) {
         guard let id = answer.id else {
-            if answer.isRoomVoice, showRoomVoiceAnswers {
+            if answer.isNotice {
+                receive(notice: answer)
+            } else if answer.isRoomAnswer, showRoomVoiceAnswers {
                 heardInRoom = answer
                 setHighlight(highlight(for: answer))
             }
@@ -155,8 +185,30 @@ final class RoomStore {
         setHighlight(highlight(for: answer))
     }
 
+    /// A reminder always shows on Home, even with room answers off: it's meant for the person.
+    private func receive(notice answer: Answer) {
+        let notice = Notice(rig: answer)
+        rigNotices.removeAll { $0.id == notice.id }
+        rigNotices.insert(notice, at: 0)
+        if rigNotices.count > Self.rigNoticeLimit { rigNotices.removeLast(rigNotices.count - Self.rigNoticeLimit) }
+        setHighlight(highlight(for: answer))
+    }
+
     func receive(state: Snapshot) {
+        if let old = snapshot {
+            activity.insert(contentsOf: Dashboard.changes(from: old, to: state).reversed(), at: 0)
+            if activity.count > Dashboard.activityLimit { activity.removeLast(activity.count - Dashboard.activityLimit) }
+        }
         snapshot = state
+    }
+
+    func dismiss(_ notice: Notice) {
+        dismissedNotices.insert(notice.id)
+    }
+
+    /// Brings back every notice put away with "Got it" (helper settings).
+    func restoreNotices() {
+        dismissedNotices = []
     }
 
     func receive(status: RigStatus) {
@@ -170,7 +222,14 @@ final class RoomStore {
 
     // MARK: Highlight
 
-    private func highlight(for answer: Answer) -> Highlight? {
+    /// Lights up a thing on the map without asking the rig (Home, "Show me").
+    func showOnMap(_ name: String) {
+        guard let entity = snapshot?.entity(named: name), let target = MapLayout.position(of: entity) else { return }
+        setHighlight(Highlight(entity: name, target: target, action: .point))
+    }
+
+    /// Where an answer points on the map, if anywhere. The answer sheet keeps its own copy.
+    func highlight(for answer: Answer) -> Highlight? {
         let entity = answer.pointAt.flatMap { snapshot?.entity(named: $0) }
         let target = answer.target ?? entity.flatMap(MapLayout.position(of:))
         let action = answer.laserAction

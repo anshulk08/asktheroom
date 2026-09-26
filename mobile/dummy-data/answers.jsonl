@@ -1,0 +1,11 @@
+{"q": "Where are my keys", "ok": false, "text": "The room isn't running right now.", "point_at": null, "target": null, "ms": 1}
+{"q": "Phone", "ok": true, "text": "Your phone was carried off the right side of the table 10 seconds ago.", "point_at": "phone", "target": [90.1, 14.3], "ms": 30}
+{"q": "When did I last pick up my pills?", "ok": true, "text": "I haven't seen anyone touch the pill bottle since I started watching.", "point_at": "pill_bottle", "target": [60.0, 37.6], "ms": 6}
+{"q": "When did I last pick up my pills?", "ok": true, "text": "I haven't seen anyone touch the pill bottle since I started watching.", "point_at": "pill_bottle", "target": [60.0, 37.6], "ms": 6}
+{"q": "Where are my keys?", "ok": true, "text": "I lost track of your keys. I last saw them near the top edge just now.", "point_at": "keys", "target": [44.6, 11.7], "ms": 6}
+{"q": "What changed?", "ok": true, "text": "The phone was picked up, then carried off the right side of the table 30 seconds ago. The remote was picked up, then moved 40 seconds ago. The wallet, notebook, pill bottle, box and keys also changed.", "point_at": null, "target": null, "ms": 5}
+{"q": "When did I last pick up my pills?", "ok": true, "text": "I haven't seen anyone touch the pill bottle since I started watching.", "point_at": "pill_bottle", "target": [60.3, 38.4], "ms": 7}
+{"q": "Where are my keys?", "ok": true, "text": "Your keys are on the table, near the wallet.", "point_at": "keys", "target": [42.7, 12.9], "ms": 7}
+{"q": "What changed?", "ok": true, "text": "The keys were picked up, then picked up just now. The phone was picked up, then carried off the right side of the table 40 seconds ago. The remote, wallet, notebook, pill bottle and box also changed.", "point_at": null, "target": null, "ms": 5}
+{"q": "Phone", "ok": true, "text": "Your phone is on the table, near the wallet.", "point_at": "phone", "target": [77.9, 14.0], "ms": 7}
+{"q": "Where are my keys?", "ok": true, "text": "Your keys are inside the box. They were put there just now.", "point_at": "keys", "target": [37.4, 24.4], "ms": 8}

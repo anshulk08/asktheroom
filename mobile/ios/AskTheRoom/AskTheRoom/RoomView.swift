@@ -6,18 +6,25 @@ struct RootView: View {
 
     var body: some View {
         if store.isMock || store.hasConnected {
-            RoomView(store: store)
+            MainView(store: store)
         } else {
             ConnectView(store: store)
         }
     }
 }
 
+/// The Table tab: the map, a short key, and one thing at a time underneath it (what was
+/// tapped, or the latest answer), so the screen never shows more than one story.
 struct RoomView: View {
     let store: RoomStore
-    @State private var draft = ""
-    @State private var selected: String?
-    @State private var dictation = Dictation()
+    /// The thing tapped on the map; MainView sets it for "Show the whole table".
+    @Binding var selected: String?
+    @State private var details: String?
+    @Environment(\.dynamicTypeSize) private var typeSize
+
+    /// At the largest text sizes the key and suggestions scroll with the card, so the map
+    /// and the card aren't squeezed out.
+    private var compact: Bool { typeSize.isAccessibilitySize }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -25,6 +32,7 @@ struct RoomView: View {
                 Text("Ask the Room").font(.title2.bold()).minimumScaleFactor(0.6)
                 Spacer()
                 StatusPill(store: store)
+                HelperSettingsButton(store: store)
             }
             .lineLimit(1)
             .dynamicTypeSize(...DynamicTypeSize.accessibility1)
@@ -35,58 +43,120 @@ struct RoomView: View {
                 .padding(.horizontal, 16)
                 .padding(.top, 8)
 
-            Group {
-                if let snapshot = store.snapshot {
-                    TableMapView(snapshot: snapshot, highlight: store.highlight,
-                                 greyed: store.isRoomAppDown) { selected = $0 }
-                } else {
-                    ContentUnavailableView("Waiting for the room", systemImage: "rectangle.dashed",
-                                           description: Text("The map appears once the rig sends what it sees."))
-                        .frame(maxHeight: 260)
+            if let snapshot = store.snapshot {
+                TableMapView(snapshot: snapshot, highlight: store.highlight,
+                             greyed: store.isRoomAppDown, selected: selected) { name in
+                    selected = selected == name ? nil : name
                 }
+                .padding(.horizontal, 4)
+                // The map keeps its full width; the card area below scrolls instead.
+                .layoutPriority(1)
+                if !compact {
+                    legend(for: snapshot)
+                        .padding(.horizontal, 16)
+                }
+            } else {
+                ContentUnavailableView("Waiting for the room", systemImage: "rectangle.dashed",
+                                       description: Text("The map appears once the rig sends what it sees."))
+                    .frame(maxHeight: 260)
             }
-            .padding(.horizontal, 4)
 
             ScrollView {
                 VStack(spacing: 14) {
+                    if let name = selected, store.snapshot?.entity(named: name) != nil {
+                        SelectedThingCard(name: name, store: store,
+                                          onAsk: { question in selected = nil; store.ask(question) },
+                                          onMore: { details = name },
+                                          onClose: { selected = nil })
+                    } else if let current = store.current {
+                        AnswerCard(exchange: current, onRetry: store.retry)
+                    } else if store.snapshot != nil {
+                        Label("Tap something on the map to see where it is.", systemImage: "hand.tap")
+                            .font(.body)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.top, 4)
+                    }
                     if store.showRoomVoiceAnswers, let heard = store.heardInRoom {
                         HeardInRoomCard(answer: heard)
                     }
-                    if let current = store.current {
-                        AnswerCard(exchange: current, onRetry: store.retry)
+                    if compact, let snapshot = store.snapshot {
+                        legend(for: snapshot)
                     }
-                    HistoryList(exchanges: store.history)
+                    if compact {
+                        SuggestionChips { question in
+                            selected = nil
+                            store.ask(question)
+                        }
+                        .padding(.horizontal, -16)
+                    }
                 }
                 .padding(.horizontal, 16)
-                .padding(.vertical, 8)
+                .padding(.vertical, 12)
+                .animation(.easeOut(duration: 0.2), value: selected)
                 .animation(.easeOut(duration: 0.2), value: store.exchanges)
             }
             .scrollDismissesKeyboard(.interactively)
 
-            VStack(spacing: 10) {
-                SuggestionChips { store.ask($0) }
-                AskBar(text: $draft,
-                       isListening: dictation.isListening,
-                       micAvailable: dictation.isAvailable,
-                       onSend: { store.ask($0) },
-                       onMicDown: {
-                           Task {
-                               await dictation.start(onPartial: { draft = $0 }, onFinish: { heard in
-                                   draft = ""
-                                   store.ask(heard)
-                               })
-                           }
-                       },
-                       onMicUp: { dictation.stop() })
+            AskPanel(showSuggestions: !compact) { question in
+                selected = nil
+                store.ask(question)
             }
-            .padding(.vertical, 10)
         }
-        .task {
-            if store.isMock, let name = UserDefaults.standard.string(forKey: "mockSelect") { selected = name }
+        .entityDetail($details, store: store)
+    }
+
+    private func legend(for snapshot: Snapshot) -> some View {
+        MapLegend(entries: MapLayout.legend(for: MapLayout.items(for: snapshot)))
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// What was tapped on the map, in words, with what can be done about it.
+private struct SelectedThingCard: View {
+    let name: String
+    let store: RoomStore
+    var onAsk: (String) -> Void
+    var onMore: () -> Void
+    var onClose: () -> Void
+
+    private var askable: Entity? {
+        guard let e = store.snapshot?.entity(named: name), e.kind == .target,
+              !e.isThing || !e.aliases.isEmpty else { return nil }
+        return e
+    }
+
+    var body: some View {
+        VStack(spacing: 10) {
+            ThingSummary(name: name, store: store)
+                .overlay(alignment: .topTrailing) {
+                    Button(action: onClose) {
+                        Image(systemName: "xmark")
+                            .font(.body.weight(.semibold))
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("Close")
+                }
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 10) { buttons }
+                VStack(spacing: 10) { buttons }
+            }
+            .buttonStyle(.bordered)
+            .tint(.primary)
+            .controlSize(.large)
         }
-        .sheet(item: Binding(get: { selected.map(SelectedEntity.init) }, set: { selected = $0?.id })) { pick in
-            EntityDetailView(name: pick.id, store: store)
-                .presentationDetents([.medium, .large])
+    }
+
+    @ViewBuilder private var buttons: some View {
+        if let e = askable {
+            Button { onAsk(Dashboard.question(for: e)) } label: {
+                Label("Ask the room", systemImage: "questionmark.bubble").frame(maxWidth: .infinity)
+            }
+        }
+        Button(action: onMore) {
+            Label("More about it", systemImage: "info.circle").frame(maxWidth: .infinity)
         }
     }
 }
@@ -95,20 +165,33 @@ private struct SelectedEntity: Identifiable {
     let id: String
 }
 
+extension View {
+    /// The detail sheet for a tapped thing, on the map or on Home.
+    func entityDetail(_ selected: Binding<String?>, store: RoomStore) -> some View {
+        sheet(item: Binding(get: { selected.wrappedValue.map(SelectedEntity.init) },
+                            set: { selected.wrappedValue = $0?.id })) { pick in
+            EntityDetailView(name: pick.id, store: store)
+                .presentationDetents([.medium, .large])
+        }
+    }
+}
+
 // MARK: Status
 
-/// Connection state; long-press toggles mock mode (spec section 7).
+/// Connection state. Demo mode is switched in helper settings, not by a hidden gesture;
+/// VoiceOver keeps a direct action for it.
 struct StatusPill: View {
     let store: RoomStore
 
     private var label: (String, Color) {
-        if store.isMock { return ("Demo mode", .orange) }
+        // Words carry the meaning; the dot is only green when all is well.
+        if store.isMock { return ("Demo mode", .gray) }
         switch store.link {
         case .connected: return ("Connected", .green)
-        case .connecting: return ("Connecting…", .yellow)
-        case .reconnecting: return ("Reconnecting…", .yellow)
-        case .searching: return ("Looking…", .yellow)
-        case .bluetoothOff, .unauthorized, .unsupported: return ("No Bluetooth", .red)
+        case .connecting: return ("Connecting…", .gray)
+        case .reconnecting: return ("Reconnecting…", .gray)
+        case .searching: return ("Looking…", .gray)
+        case .bluetoothOff, .unauthorized, .unsupported: return ("No Bluetooth", .gray)
         }
     }
 
@@ -120,16 +203,14 @@ struct StatusPill: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
         .background(Capsule().fill(Color(.secondarySystemBackground)))
-        .onLongPressGesture(minimumDuration: 0.8) { store.setMock(!store.isMock) }
         .accessibilityElement(children: .combine)
-        .accessibilityHint("Long-press to switch demo mode \(store.isMock ? "off" : "on")")
         .accessibilityAction(named: store.isMock ? "Turn off demo mode" : "Turn on demo mode") {
             store.setMock(!store.isMock)
         }
     }
 }
 
-private struct Banners: View {
+struct Banners: View {
     let store: RoomStore
 
     var body: some View {
@@ -141,7 +222,7 @@ private struct Banners: View {
                 EmptyView()
             }
             if store.isRoomAppDown {
-                Banner(icon: "exclamationmark.triangle.fill", tint: .orange,
+                Banner(icon: "exclamationmark.triangle", tint: .secondary,
                        text: "The room app isn't running. The map may be out of date.")
             } else if store.isOffline {
                 Banner(icon: "icloud.slash", tint: .secondary, text: "Offline: using the on-device voice.")
@@ -211,6 +292,7 @@ struct ConnectView: View {
             HStack {
                 Spacer()
                 StatusPill(store: store)
+                HelperSettingsButton(store: store)
             }
             Spacer()
             if store.link == .bluetoothOff || store.link == .unauthorized || store.link == .unsupported {
@@ -260,12 +342,24 @@ struct ConnectView: View {
 struct EntityDetailView: View {
     let name: String
     let store: RoomStore
+    @State private var picking = UserDefaults.standard.bool(forKey: "mockIconPicker")
 
     var body: some View {
         NavigationStack {
             Group {
                 if let snapshot = store.snapshot, let entity = snapshot.entity(named: name) {
                     List {
+                        Section {
+                            Button { picking = true } label: {
+                                HStack(spacing: 14) {
+                                    ThingIconView(icon: IconStore.shared.icon(for: name, title: entity.displayName), size: 30)
+                                        .frame(width: 48, height: 48)
+                                        .background(Circle().fill(Theme.iconWell))
+                                    Text("Change picture")
+                                }
+                            }
+                            .tint(.primary)
+                        }
                         Section {
                             LabeledContent("Status", value: EntityDetailView.statusWords(entity, in: snapshot))
                             if let seen = entity.lastSeen {
@@ -282,6 +376,12 @@ struct EntityDetailView: View {
                                     LabeledContent(child.displayName,
                                                    value: "\(child.status == .under ? "under" : "inside") \(parent.displayName)")
                                 }
+                            }
+                        }
+                        if let guess = entity.hedgedName, let number = entity.thingNumber {
+                            Section("Not named yet") {
+                                LabeledContent("Looks like", value: guess)
+                                LabeledContent("Object", value: number)
                             }
                         }
                         if !entity.aliases.isEmpty {
@@ -302,9 +402,14 @@ struct EntityDetailView: View {
                     ContentUnavailableView("No longer on the map", systemImage: "questionmark.circle")
                 }
             }
-            .navigationTitle(store.snapshot?.entity(named: name)?.displayName ?? Entity.displayName(for: name))
+            .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
+            .sheet(isPresented: $picking) { IconPicker(name: name, title: title) }
         }
+    }
+
+    private var title: String {
+        store.snapshot?.entity(named: name)?.displayName ?? Entity.displayName(for: name)
     }
 
     static func statusWords(_ e: Entity, in snapshot: Snapshot) -> String {

@@ -1,8 +1,13 @@
 import SwiftUI
 
 enum Theme {
-    /// Same red as the laser dot (spec section 6).
+    /// Same red as the laser dot (spec section 6). Only for "the laser points here":
+    /// map highlights, the reticle and the connect pulse. Buttons use `accent`.
     static let laser = Color(red: 1, green: 0.231, blue: 0.188)
+    /// Calm slate blue (AccentColor in the asset catalog) for buttons and selection.
+    static let accent = Color.accentColor
+    /// Behind icons on cards.
+    static let iconWell = Color(.tertiarySystemFill)
 
     static func surface(_ scheme: ColorScheme) -> Color {
         scheme == .dark ? Color(red: 0.17, green: 0.20, blue: 0.24) : Color(red: 0.95, green: 0.91, blue: 0.84)
@@ -12,6 +17,7 @@ enum Theme {
         scheme == .dark ? Color(red: 0.31, green: 0.36, blue: 0.43) : Color(red: 0.82, green: 0.74, blue: 0.62)
     }
 
+    /// A pin's disc and the badge behind a name.
     static func chip(_ scheme: ColorScheme) -> Color {
         scheme == .dark ? Color(red: 0.10, green: 0.11, blue: 0.13) : .white
     }
@@ -22,6 +28,12 @@ struct TableMapView: View {
     var snapshot: Snapshot
     var highlight: Highlight?
     var greyed = false
+    /// Keep a ring on the highlight after the pulses, until it's cleared (the answer sheet).
+    var steady = false
+    /// Where the real laser dot is. Off in the answer sheet, so only one thing is lit up there.
+    var showsLaser = true
+    /// The thing tapped on the Table tab, ringed in the accent colour.
+    var selected: String? = nil
     var onSelect: (String) -> Void = { _ in }
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -30,8 +42,7 @@ struct TableMapView: View {
         let items = MapLayout.items(for: snapshot)
         GeometryReader { proxy in
             let geo = MapGeometry(table: snapshot.tableSize, size: proxy.size)
-            let placement = MapLayout.placements(for: items, in: geo)
-            let places = placement.points
+            let places = MapLayout.placements(for: items, in: geo)
 
             ZStack {
                 TableSurface(geo: geo)
@@ -39,13 +50,13 @@ struct TableMapView: View {
                 ForEach(items.filter { $0.exitEdge != nil }) { item in
                     let from = places[item.id] ?? .zero
                     ExitArrow(from: from, to: geo.exitPoint(from: from, through: item.exitEdge!))
-                        .stroke(.primary.opacity(0.7), style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+                        .stroke(.primary.opacity(0.6), style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
                         .opacity(item.opacity)
                 }
 
                 ForEach(items) { item in
-                    MapItemView(item: item, scale: geo.scale, showsCaption: !placement.hiddenCaptions.contains(item.id))
-                        .position(places[item.id] ?? .zero)
+                    MapItemView(item: item, scale: geo.scale, isSelected: item.id == selected)
+                        .position(MapLayout.viewCenter(of: item, at: places[item.id] ?? .zero))
                         .zIndex(Double(item.layer))
                         .onTapGesture { onSelect(item.id) }
                         .accessibilityElement(children: .ignore)
@@ -54,13 +65,14 @@ struct TableMapView: View {
                 }
 
                 if let highlight {
-                    HighlightView(highlight: highlight, geo: geo, at: highlightPoint(highlight, places: places, geo: geo))
+                    HighlightView(highlight: highlight, geo: geo, at: highlightPoint(highlight, places: places, geo: geo),
+                                  steady: steady)
                         .id(highlight.id)
                         .zIndex(90)
                         .allowsHitTesting(false)
                 }
 
-                if let laser = snapshot.laser, laser.on, let target = laser.target, let point = places[target] {
+                if showsLaser, let laser = snapshot.laser, laser.on, let target = laser.target, let point = places[target] {
                     Reticle()
                         .position(point)
                         .zIndex(100)
@@ -71,7 +83,9 @@ struct TableMapView: View {
             }
             .animation(reduceMotion ? nil : .easeInOut(duration: 0.3), value: items)
             .animation(reduceMotion ? nil : .spring(duration: 0.4), value: snapshot.laser)
+            .animation(reduceMotion ? nil : .spring(duration: 0.3, bounce: 0.3), value: selected)
         }
+        .sensoryFeedback(.selection, trigger: selected)
         .aspectRatio(MapGeometry.aspectRatio(for: snapshot.tableSize), contentMode: .fit)
         .dynamicTypeSize(...DynamicTypeSize.xLarge)
         .saturation(greyed ? 0 : 1)
@@ -98,17 +112,8 @@ private struct TableSurface: View {
             let table = Path(roundedRect: rect, cornerRadius: 14)
             context.fill(table, with: .color(Theme.surface(scheme)))
 
-            // 10 cm grid.
-            var grid = Path()
-            let step = geo.length(10)
-            if step > 4 {
-                var x = rect.minX + step
-                while x < rect.maxX - 1 { grid.move(to: CGPoint(x: x, y: rect.minY)); grid.addLine(to: CGPoint(x: x, y: rect.maxY)); x += step }
-                var y = rect.minY + step
-                while y < rect.maxY - 1 { grid.move(to: CGPoint(x: rect.minX, y: y)); grid.addLine(to: CGPoint(x: rect.maxX, y: y)); y += step }
-            }
-            context.stroke(grid, with: .color(.primary.opacity(0.07)), lineWidth: 1)
-            context.stroke(table, with: .color(.primary.opacity(0.35)), lineWidth: 1.5)
+            // No grid: the table's edge is the only line that isn't a thing.
+            context.stroke(table, with: .color(.primary.opacity(0.2)), lineWidth: 1)
         }
         .accessibilityHidden(true)
     }
@@ -117,74 +122,137 @@ private struct TableSurface: View {
 private struct MapItemView: View {
     let item: MapItem
     let scale: CGFloat
-    var showsCaption = true
+    var isSelected = false
     @Environment(\.colorScheme) private var scheme
+
+    private var icon: ThingIcon { IconStore.shared.icon(for: item.id, title: item.title) }
 
     var body: some View {
         switch item.shape {
         case .block(let w, let h):
             block(width: w * scale, height: h * scale)
-        case .chip:
-            chip
+        case .pin:
+            pin
         }
     }
 
-    private var outline: StrokeStyle {
-        StrokeStyle(lineWidth: 1.5, dash: item.dashed ? [5, 3] : [])
+    /// Plain things get a faint edge; only hidden and held things get a strong dashed one,
+    /// so the lines that are there mean something.
+    private var edge: (Color, StrokeStyle) {
+        item.dashed
+            ? (.primary.opacity(0.6), StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
+            : (.primary.opacity(0.12), StrokeStyle(lineWidth: 1))
     }
 
     private func block(width: CGFloat, height: CGFloat) -> some View {
-        RoundedRectangle(cornerRadius: 6)
+        RoundedRectangle(cornerRadius: 8)
             .fill(Theme.block(scheme))
-            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.primary.opacity(0.45), style: outline))
+            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(edge.0, style: edge.1))
+            .overlay {
+                if isSelected {
+                    RoundedRectangle(cornerRadius: 10).strokeBorder(Theme.accent, lineWidth: 3).padding(-3)
+                }
+            }
             .frame(width: width, height: height)
             .overlay(alignment: .top) {
-                Text(item.title)
-                    .font(.footnote.weight(.semibold))
-                    .fixedSize()
-                    .offset(y: -19)
+                // The picture and name sit inside the block, so nothing floats above it.
+                HStack(spacing: 3) {
+                    ThingIconView(icon: icon, size: 14)
+                    Text(item.label).font(.caption.weight(.semibold))
+                }
+                .fixedSize()
+                .frame(height: MapLayout.blockTitleHeight)
             }
-            .overlay(alignment: .bottom) { caption.offset(y: 19) }
             .opacity(item.opacity)
             .contentShape(Rectangle())
     }
 
-    private var chip: some View {
-        HStack(spacing: 4) {
-            if let glyph = item.glyph {
-                Image(systemName: glyph).font(.footnote.weight(.bold))
-            }
-            Text(item.title).font(.subheadline.weight(.semibold))
-            if item.linkBadge {
-                Text("? link")
-                    .font(.caption2.weight(.bold))
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 1)
-                    .background(Capsule().fill(.primary.opacity(0.15)))
-            }
+    /// Find My's pin: the thing's picture on a disc, its name underneath, and status as a
+    /// badge (held, lost), a dashed ring (hidden) or a fade (not sure).
+    private var pin: some View {
+        let d = MapLayout.pinDiameter(for: item)
+        return VStack(spacing: 1) {
+            ThingIconView(icon: icon, size: d * 0.62)
+                .frame(width: d, height: d)
+                .background(Circle().fill(Theme.chip(scheme)).shadow(color: .black.opacity(0.2), radius: 3, y: 1.5))
+                .overlay(Circle().strokeBorder(edge.0, style: edge.1))
+                .overlay(alignment: .topTrailing) {
+                    if let glyph = item.glyph { PinBadge(symbol: glyph).offset(x: 5, y: -4) }
+                }
+                .overlay(alignment: .topLeading) {
+                    if item.linkBadge { PinBadge(symbol: "link", quiet: true).offset(x: -5, y: -4) }
+                }
+                .overlay {
+                    if isSelected { Circle().strokeBorder(Theme.accent, lineWidth: 3).padding(-4) }
+                }
+                .scaleEffect(isSelected ? 1.15 : 1)
+            Text(item.label)
+                .font(.caption.weight(.semibold))
+                .lineLimit(1)
+                .fixedSize()
+                .padding(.horizontal, 5)
+                .frame(height: MapLayout.pinLabelHeight - 1)
+                .background(Capsule().fill(Theme.chip(scheme).opacity(0.85)))
         }
-        .lineLimit(1)
-        .fixedSize()
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(Capsule().fill(Theme.chip(scheme)))
-        .overlay(Capsule().strokeBorder(.primary.opacity(0.55), style: outline))
-        .overlay(alignment: .top) { caption.offset(y: MapLayout.chipHeight - 1) }
+        .frame(minWidth: 44, minHeight: d + MapLayout.pinLabelHeight, alignment: .top)
         .opacity(item.opacity)
-        .contentShape(Capsule())
+        .contentShape(Rectangle())
+    }
+}
+
+/// A status mark on a pin's corner, the way Find My and Messages badge a picture.
+private struct PinBadge: View {
+    let symbol: String
+    var quiet = false
+
+    var body: some View {
+        Image(systemName: symbol)
+            .font(.system(size: 9, weight: .bold))
+            .foregroundStyle(quiet ? Color.primary : Color(.systemBackground))
+            .frame(width: 17, height: 17)
+            .background(Circle().fill(quiet ? Color(.systemBackground) : Color.primary))
+            .overlay(Circle().strokeBorder(Color(.systemBackground), lineWidth: 1.5))
+            .accessibilityHidden(true)
+    }
+}
+
+/// The key under the map: only the marks in use, each with its words.
+struct MapLegend: View {
+    let entries: [MapLayout.LegendEntry]
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        if !entries.isEmpty {
+            FlowLayout(spacing: 14, lineSpacing: 6) {
+                ForEach(entries, id: \.self) { entry in
+                    HStack(spacing: 6) {
+                        mark(entry)
+                        Text(entry.words)
+                    }
+                }
+            }
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Key: " + entries.map(\.words).joined(separator: ", "))
+        }
     }
 
-    @ViewBuilder private var caption: some View {
-        if showsCaption, let caption = item.caption {
-            Text(caption)
-                .font(.footnote)
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 4)
-                .background(RoundedRectangle(cornerRadius: 4).fill(Theme.surface(scheme).opacity(0.85)))
-                // Wrap long captions at a fixed width instead of the chip's.
-                .frame(width: MapLayout.captionMaxWidth)
-                .fixedSize()
+    @ViewBuilder private func mark(_ entry: MapLayout.LegendEntry) -> some View {
+        switch entry {
+        case .held:
+            PinBadge(symbol: "hand.raised.fill")
+        case .hidden:
+            Circle().strokeBorder(.primary.opacity(0.6), style: StrokeStyle(lineWidth: 1.5, dash: [3, 2]))
+                .frame(width: 17, height: 17)
+        case .left:
+            Image(systemName: "arrow.left").foregroundStyle(.primary)
+        case .lost:
+            PinBadge(symbol: "questionmark")
+        case .unsure:
+            Circle().fill(Theme.chip(scheme)).overlay(Circle().strokeBorder(.primary.opacity(0.18)))
+                .frame(width: 17, height: 17)
+                .opacity(MapLayout.uncertainOpacity)
         }
     }
 }
@@ -214,11 +282,12 @@ private struct Reticle: View {
     @State private var landed = false
 
     var body: some View {
+        // Hugs the pin, so the names around it stay readable.
         ZStack {
             Circle().stroke(Theme.laser, lineWidth: 3)
-            Circle().stroke(Theme.laser.opacity(0.45), lineWidth: 1.5).padding(-6)
+            Circle().stroke(Theme.laser.opacity(0.45), lineWidth: 1.5).padding(-4)
         }
-        .frame(width: 58, height: 58)
+        .frame(width: 40, height: 40)
         .scaleEffect(landed || reduceMotion ? 1 : 2.5)
         .onAppear {
             withAnimation(.spring(duration: 0.4)) { landed = true }
@@ -227,10 +296,12 @@ private struct Reticle: View {
 }
 
 /// The answer's highlight: a 1 s pulse on the target, plus a sweep along an edge or a circle.
+/// `steady` leaves a still ring (and the sweep) behind once the pulses finish.
 private struct HighlightView: View {
     let highlight: Highlight
     let geo: MapGeometry
     let at: CGPoint?
+    var steady = false
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var progress: CGFloat = 0
@@ -238,6 +309,12 @@ private struct HighlightView: View {
     var body: some View {
         ZStack {
             if let at {
+                if steady {
+                    Circle()
+                        .stroke(Theme.laser, lineWidth: 3)
+                        .frame(width: 52, height: 52)
+                        .position(at)
+                }
                 Circle()
                     .stroke(Theme.laser, lineWidth: 3)
                     .frame(width: 36, height: 36)

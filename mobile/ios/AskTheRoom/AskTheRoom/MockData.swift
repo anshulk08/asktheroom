@@ -1,7 +1,8 @@
 import Foundation
 
 enum MockData {
-    /// The sample snapshot from spec section 4, byte for byte.
+    /// The sample snapshot from spec section 4, plus the bridge's naming hints: thing:9 has a
+    /// weak guess (still "unnamed"), thing:11 a confident one, and Grok named thing:12.
     static let sampleSnapshotJSON = """
     {"v":1,"t":1790380000.0,"table":[90,60],"online":true,"laser":{"on":true,"target":"keys"},
      "e":[
@@ -14,7 +15,9 @@ enum MockData {
       {"n":"glasses","k":"t","s":"X","xy":[80.0,50.0],"c":0.4},
       {"n":"remote","k":"t","s":"H","p":"hand:2","xy":[50.0,45.0],"r":[50.0,45.0],"c":0.9},
       {"n":"thing:7","k":"t","s":"V","xy":[33.0,12.0],"r":[33.0,12.0],"c":1.0,"a":["my charger"]},
-      {"n":"thing:9","k":"t","s":"V","xy":[82.0,10.0],"r":[82.0,10.0],"c":0.6,"m":[["thing:4",0.62]]}
+      {"n":"thing:9","k":"t","s":"V","xy":[82.0,10.0],"r":[82.0,10.0],"c":0.6,"m":[["thing:4",0.62]],"g":"cup","gc":0.3},
+      {"n":"thing:11","k":"t","s":"V","xy":[45.0,24.0],"r":[45.0,24.0],"c":1.0,"g":"phone charger","gc":0.8},
+      {"n":"thing:12","k":"t","s":"V","xy":[14.0,6.0],"r":[14.0,6.0],"c":1.0,"a":["tape roll"],"as":"grok"}
      ]}
     """
 
