@@ -229,3 +229,81 @@ def test_room_check_skips_when_off_and_rehits_the_sim_map():
         assert not ok and "sweep again" in msg
     finally:
         rig.close()
+
+
+class BlockingSoundDevice:
+    """sounddevice whose streams never finish and whose stop() never returns (a wedged ALSA device)."""
+
+    def __init__(self):
+        self.gate, self.rec_device = __import__("threading").Event(), None
+
+    def rec(self, n, samplerate, channels, dtype, device=None):
+        self.rec_device = device
+        return np.zeros((n, channels), np.float32)
+
+    def get_stream(self):
+        return type("S", (), {"active": True})()
+
+    def stop(self):
+        self.gate.wait()
+
+    def wait(self):
+        self.gate.wait()
+
+
+def test_a_blocking_audio_device_cannot_hang_the_run(monkeypatch, capsys):
+    import sys
+    import time
+    import voice.tts
+    sd = BlockingSoundDevice()
+    monkeypatch.setitem(sys.modules, "sounddevice", sd)
+    monkeypatch.setattr(voice.tts, "play_pcm", lambda pcm, rate, device=None: sd.gate.wait())
+    monkeypatch.setattr(voice.tts, "resolve_output_device", lambda spec: None)
+    monkeypatch.setattr(dc, "DEFAULT_DEADLINE_S", 1.0)
+    monkeypatch.setattr(dc, "AUDIO_GRACE_S", 0.2)
+    t0 = time.monotonic()
+    try:
+        assert dc.main(["--skip-manual", "--only", "5", "9"]) == 1
+    finally:
+        sd.gate.set()
+    assert time.monotonic() - t0 < 5.0
+    out = capsys.readouterr().out
+    assert "[FAIL] 5 audio" in out and "timed out after 1 s" in out and "[PASS] 9 clock" in out
+
+
+def test_mic_and_tone_have_their_own_deadlines(monkeypatch):
+    import sys
+    import voice.tts
+    sd = BlockingSoundDevice()
+    sd.stop = lambda: None                                   # stop works, the stream just never ends
+    monkeypatch.setitem(sys.modules, "sounddevice", sd)
+    monkeypatch.setattr(dc, "AUDIO_GRACE_S", 0.1)
+    rig = dc.Rig(dict(CFG, stt={"input_device": 4}, tts={"output_device": "Jabra"}), manual=False)
+    try:
+        with pytest.raises(TimeoutError, match="mic recording"):
+            rig.record(0.1)
+        assert sd.rec_device == 4
+        played = []
+        monkeypatch.setattr(voice.tts, "resolve_output_device", lambda spec: 7 if spec == "Jabra" else None)
+        monkeypatch.setattr(voice.tts, "play_pcm", lambda pcm, rate, device=None: played.append(device))
+        rig.play(np.zeros(2205, np.int16), 22050)
+        assert played == [7]                                 # the configured speaker, not the default (HDMI)
+        monkeypatch.setattr(voice.tts, "play_pcm", lambda pcm, rate, device=None: sd.gate.wait())
+        with pytest.raises(TimeoutError, match="test tone"):
+            rig.play(np.zeros(2205, np.int16), 22050)
+    finally:
+        sd.gate.set()
+        rig.close()
+
+
+def test_a_hung_part_fails_its_check_and_later_ones_fast(fake_rig):
+    import threading
+    gate = threading.Event()
+    fake_rig._make_thing = lambda: gate.wait() or 1
+    try:
+        ok, msg = dc.run_check_with_deadline(fake_rig, "x", lambda r: r.part("thing"), timeout=0.3)
+        assert ok is False and "timed out after 0 s" in msg and "wait" in msg
+        ok, msg = dc.run_check_with_deadline(fake_rig, "y", lambda r: r.part("thing"), timeout=5)
+        assert ok is False and "hung while starting" in msg
+    finally:
+        gate.set()

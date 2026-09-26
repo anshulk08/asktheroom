@@ -19,7 +19,10 @@
 
 Missing hardware fails that check with the reason, so this also runs on a laptop. Parts (camera,
 table, detector, laser) are built on first use and shared; one that fails to build fails every
-check that needs it, with the same reason.
+check that needs it, with the same reason. Every check has a deadline (DEADLINE_S: the detector and
+world checks 180 s for a TensorRT load, prompts 300 s, the rest 30 s): a check that hangs (a speaker
+that never takes the tone, a camera that never answers) fails "timed out" with its stack on stderr,
+and the run goes on. Recording and the test tone have their own shorter deadlines.
 
 --fake: the camera is a FrameBuffer over a rendered home layout (server.sim's painter and LAYOUT,
 with ArUco 0-3 drawn in), the detector's backend reads boxes off that layout, the laser is an
@@ -29,6 +32,7 @@ network check is real.
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import math
 import os
 import shutil
@@ -36,7 +40,9 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+import traceback
 from typing import Callable, Optional, Union
 from urllib.parse import urlparse
 
@@ -56,6 +62,11 @@ SPEECH_DBFS = -35.0             # loudest 32 ms block while someone talks, at ar
 SILENT_DBFS = -90.0             # below this the mic is sending digital zeros (muted or wrong device)
 
 Result = tuple[Optional[bool], str]         # ok (None = skipped), message
+
+DEADLINE_S = {"detector": 180.0, "world": 180.0}   # may load the TensorRT engine
+MANUAL_DEADLINE_S = 300.0                          # checks that wait for a person to answer
+DEFAULT_DEADLINE_S = 30.0
+AUDIO_GRACE_S = 3.0                                # recording / tone may overrun their length by this
 
 
 # ---------------------------------------------------------------- fake hardware
@@ -140,6 +151,7 @@ class Rig:
         self.cfg = fake_cfg(cfg) if fake else cfg
         self.camera, self.manual, self._ask = camera, manual, ask
         self._parts: dict[str, object] = {}
+        self.building: set[str] = set()             # parts being made right now (a hung check marks them)
         self._cleanup: list[Callable[[], None]] = []
         self.tmp = tempfile.mkdtemp(prefix="askroom_check_")
         self.home_cm = (fake_layout(self.cfg) if fake else
@@ -149,11 +161,15 @@ class Rig:
     def part(self, name: str):
         got = self._parts.get(name)
         if got is None:
+            self.building.add(name)
             try:
                 got = getattr(self, f"_make_{name}")()
             except Exception as e:                 # noqa: BLE001 - reported as the check's reason
                 got = e
-            self._parts[name] = got
+            finally:
+                self.building.discard(name)
+            self._parts.setdefault(name, got)      # a timeout may have marked it failed meanwhile
+            got = self._parts[name]
         if isinstance(got, Exception):
             raise got
         return got
@@ -246,14 +262,31 @@ class Rig:
         import sounddevice as sd
         dev = (self.cfg.get("stt") or {}).get("input_device")
         a = sd.rec(int(seconds * 16000), samplerate=16000, channels=1, dtype="float32", device=dev)
-        sd.wait()
+        deadline = time.monotonic() + seconds + AUDIO_GRACE_S
+        while time.monotonic() < deadline and sd.get_stream().active:   # sd.wait() can wait forever
+            time.sleep(0.05)
+        done = not sd.get_stream().active
+        sd.stop()
+        if not done:
+            raise TimeoutError(f"mic recording didn't finish in {seconds + AUDIO_GRACE_S:.0f} s "
+                               f"(stt.input_device {dev!r})")
         return a[:, 0]
 
     def play(self, pcm: np.ndarray, rate: int) -> None:
+        """The test tone on tts.output_device (what the voice uses; the default is HDMI in the container,
+        which can block forever), on a thread with a deadline."""
         if self.fake:
             return
-        from voice.tts import play_pcm
-        play_pcm(pcm, rate)
+        from voice.tts import play_pcm, resolve_output_device
+        spec = (self.cfg.get("tts") or {}).get("output_device")
+        dev = resolve_output_device(spec)
+        t = threading.Thread(target=play_pcm, args=(pcm, rate, dev), name="tone", daemon=True)
+        t.start()
+        t.join(len(pcm) / rate + AUDIO_GRACE_S)
+        if t.is_alive():
+            raise TimeoutError(f"speaker didn't finish the test tone (tts.output_device {spec!r}"
+                               f"{' = default device' if dev is None else f' = {dev}'}): "
+                               "check it with python -m voice.tts --devices")
 
 
 def dbfs(x: np.ndarray) -> float:
@@ -370,7 +403,7 @@ def _check_tag(table, img) -> Result:
 def check_laser(rig: Rig) -> Result:
     laser = rig.part("laser")
     if laser.fit is None:
-        return False, f"not calibrated ({laser.cal_path} missing): run python -m act.calibrate"
+        return False, f"not calibrated ({laser.cal_path} missing): run python -m act.calibrate --rig"
     fe = laser.fit.fit_error_cm or {}
     med, mx = float(fe.get("median", math.inf)), float(fe.get("max", math.inf))
     w, h = laser.table_size
@@ -577,6 +610,42 @@ def run_check(rig: Rig, fn: Callable[[Rig], Result]) -> Result:
         return False, f"{type(e).__name__}: {e}"
 
 
+def deadline_for(name: str, rig: Rig) -> float:
+    if rig.manual and name in ("audio", "kill switch"):
+        return MANUAL_DEADLINE_S
+    return DEADLINE_S.get(name, DEFAULT_DEADLINE_S)
+
+
+def run_check_with_deadline(rig: Rig, name: str, fn: Callable[[Rig], Result],
+                            timeout: Optional[float] = None) -> Result:
+    """run_check on a daemon thread. Past the deadline the check fails "timed out", its stack goes to
+    stderr, and any part it was still building is marked failed so later checks don't wait on it too."""
+    timeout = deadline_for(name, rig) if timeout is None else timeout
+    box: list[Result] = []
+    t = threading.Thread(target=lambda: box.append(run_check(rig, fn)), name=f"check-{name}", daemon=True)
+    try:                                                   # a long check shows where it is, every minute
+        faulthandler.dump_traceback_later(60, repeat=True, file=sys.__stderr__)
+    except (AttributeError, OSError, ValueError):          # no real stderr (e.g. under a test runner)
+        pass
+    try:
+        t.start()
+        t.join(timeout)
+    finally:
+        faulthandler.cancel_dump_traceback_later()
+    if box:
+        return box[0]
+    frame = sys._current_frames().get(t.ident or -1)
+    where = ""
+    if frame is not None:
+        stack = traceback.extract_stack(frame)
+        print(f"--- check {name!r} stuck after {timeout:.0f} s:", file=sys.stderr)
+        print("".join(traceback.format_list(stack)), file=sys.stderr, flush=True)
+        where = f" in {stack[-1].name} ({os.path.basename(stack[-1].filename)}:{stack[-1].lineno})"
+    for part in list(rig.building):
+        rig._parts[part] = TimeoutError(f"{part} hung while starting (check {name!r} timed out)")
+    return False, f"timed out after {timeout:.0f} s{where}"
+
+
 def line(i: int, name: str, ok: Optional[bool], msg: str, color: bool = True) -> str:
     tag, c = ("PASS", GREEN) if ok else ("SKIP", YELLOW) if ok is None else ("FAIL", RED)
     s = f"[{tag}] {i} {name:<12s} {msg}"
@@ -604,14 +673,21 @@ def main(argv=None) -> int:
         for i, (name, fn) in enumerate(CHECKS, 1):
             if a.only and i not in a.only:
                 continue
-            ok, msg = run_check(rig, fn)
+            ok, msg = run_check_with_deadline(rig, name, fn)
             print(line(i, name, ok, msg, color), flush=True)
             failed += ok is False
     finally:
-        rig.close()
-    print(f"{failed} failed" if failed else "all checks passed")
+        closer = threading.Thread(target=rig.close, name="close", daemon=True)
+        closer.start()
+        closer.join(10.0)
+        if closer.is_alive():
+            print("(cleanup still running after 10 s; exiting anyway)", file=sys.stderr)
+    print(f"{failed} failed" if failed else "all checks passed", flush=True)
     return 1 if failed else 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    code = main()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)           # a hung check's thread or an audio library's exit hook can't hold the process
