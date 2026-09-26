@@ -17,7 +17,8 @@ works too). It answers out loud
 ("under the notebook, you slid it over them 2 minutes ago") and a pan-tilt laser points at the spot.
 
 The hard part is object permanence. A detector only says what is visible right now, so the world model
-keeps a belief for every object: VISIBLE, HELD by a hand, UNDER a cover, INSIDE a container, or GONE off
+keeps a belief for every object: VISIBLE, HELD by a hand, UNDER a cover, INSIDE a container (the box, or
+any large unnamed thing such as a tub or a bag), or GONE off
 an edge of the table. Hidden objects inherit their parent's position through a chain
 (keys → notebook → table), so moving the notebook moves where the laser points. For unnamed things,
 identity is causal first (it went under the box, so what comes out is probably it); appearance only

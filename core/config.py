@@ -88,6 +88,8 @@ class Config:
     teach_zone_cm: tuple[float, float, float, float] | None = None
     # The tabletop outline (core/table_area.py, table_area: section): new things are born only inside it.
     table_area: dict = field(default_factory=dict)
+    # Large unnamed things that hold others (core/things.py ContainerConfig, thing_containers: section).
+    thing_containers: dict = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, raw: dict) -> "Config":
