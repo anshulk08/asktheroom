@@ -1,11 +1,13 @@
-"""Qwen interprets spoken questions, on the Jetson: transcript -> Intent (same as voice.intents.parse).
+"""Grok (default) or a local Qwen interprets spoken questions: transcript -> Intent (same as
+voice.intents.parse).
 
 The rule parser knows the phrasings it was written for. People at a demo talk however they like
 ("has anybody messed with my meds", "can you point at the pill bottle") and Whisper mishears, and
-every "I can tell you where things are..." breaks the illusion. A small Qwen, served by llama.cpp's
-llama-server on the Jetson (scripts/qwen_server.sh), reads what the rules can't and returns
-{kind, object}. A JSON schema limits it to a valid kind and one of the known objects. Nothing
-leaves the device. Scores per model: scripts/eval_understand.py on tests/understand_eval.json.
+every "I can tell you where things are..." breaks the illusion. A model reads what the rules can't
+and returns {kind, object}; a JSON schema limits it to a valid kind and one of the known objects.
+understand.backend: grok (the default) sends only the transcript to Grok; qwen / auto use a local Qwen
+served by llama.cpp (scripts/qwen_server.sh, not installed on the rig), where nothing leaves the device.
+Scores per model: scripts/eval_understand.py on tests/understand_eval.json.
 
 Two ways speech arrives (listen.mode in config.yaml):
   asked      the visitor pressed the clicker, so the speech is meant for the rig.

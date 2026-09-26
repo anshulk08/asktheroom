@@ -1,6 +1,6 @@
 # 0003: Grok on the detection side (measure first)
 
-Status: planned, spec only. No code. **Needs team OK before any xAI spend.** Nothing here runs on the voice path (spec 0001).
+Status: partly superseded. Grok now does all LLM/VLM work (team decision, Fri night), and case (c) shipped in another form: `voice/visual.py` draws the tracked objects as numbered marks and Grok picks one (`look()`, and `pick()` for "where is my X" with an unknown name, which also names the thing). The box measurement (step 1) was run on laptop desk photos: Grok boxes 0–2/5, a bare point 4/5, picking a mark 5/5 (see `docs/FEATURE_STATUS.md`). (a) auto-labelling and (b) second opinion are not built.
 
 ## Problem
 
