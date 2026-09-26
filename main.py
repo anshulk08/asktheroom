@@ -569,7 +569,11 @@ def build(cfg: dict, fake: bool = False, camera: int = 0, with_voice: bool = Tru
     import voice.visual
     narrator = core.narration.from_config(cfg, events, world, online=lambda: netmon.online)
     visual = voice.visual.from_config(cfg, world, events, frames, table, online=lambda: netmon.online)
-    cleanup += [x.stop for x in (narrator, visual) if x is not None]
+    # Automatic names for new things (off unless auto_name.enabled): attached after the visual layer, so
+    # the crop store already knows which views are each thing's when a new one is queued for Grok.
+    import core.auto_name
+    namer = core.auto_name.from_config(cfg, world, online=lambda: netmon.online)
+    cleanup += [x.stop for x in (narrator, visual, namer) if x is not None]
     ask = voice.pipeline.make_ask(cfg, world, events, net=netmon, interpret=interpret, visual=visual)
     tts = voice.tts.TTS(cfg, net=netmon)
     tts.warm()

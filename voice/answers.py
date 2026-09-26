@@ -352,7 +352,7 @@ def answer(intent: Intent, world, events, cfg: Optional[dict] = None,
     if k == "WHAT_DOING":
         return _what_doing(intent, events, _with_things(cfg, world), now)
     if k in ("WHERE", "HISTORY", "HANDLED"):
-        obj = _target(intent, world, cfg)
+        obj, guessed = _resolve(intent, world, cfg)
         if obj is None:
             said = intent.name or intent.obj
             narrated = _narrated_about([said], events, now) if said and k != "WHERE" else None
@@ -367,6 +367,8 @@ def answer(intent: Intent, world, events, cfg: Optional[dict] = None,
         except Exception:
             return Answer(f"I'm not tracking a {_dn(cfg, obj)} right now.")
         cfg = _with_things(cfg, world)
+        if guessed:
+            return _guessed_answer(k, intent, guessed, world, events, cfg, now)
         if k == "WHERE":
             return _maybe_back(obj, _where(obj, world, events, cfg, now), world, cfg)
         if k == "HISTORY":
@@ -379,7 +381,44 @@ def answer(intent: Intent, world, events, cfg: Optional[dict] = None,
 
 def _target(intent: Intent, world, cfg: dict) -> Optional[str]:
     """Entity the question is about. A taught alias in the words wins ('where is my phone charger'
-    is the charger, not the phone); names outside the config resolve through world.find."""
+    is the charger, not the phone); names outside the config resolve through world.find, and failing
+    that through an automatic guess of what an unnamed thing is (core/auto_name.py)."""
+    return _resolve(intent, world, cfg)[0]
+
+
+def _resolve(intent: Intent, world, cfg: dict) -> tuple[Optional[str], list[str]]:
+    """(entity, guessed): guessed is empty when a configured name or taught alias decided, else the
+    things whose automatic guess fits the spoken name (see _guesses), entity being the first."""
+    obj = _named(intent, world, cfg)
+    if obj is None or obj in (cfg.get("objects") or {}) or not (intent.name or intent.obj):
+        return obj, []
+    try:
+        hit = world.find(obj) if hasattr(world, "find") else None
+    except Exception:
+        hit = None
+    if hit is not None:
+        return hit, []
+    guessed = _guesses(obj, world)
+    return (guessed[0] if guessed else None), guessed
+
+
+def _guesses(said: str, world) -> list[str]:
+    """Things whose automatic name guess fits said (world.find_guess, best first). One, or of several
+    equally good fits the one in view; else the two best (visible first, then most recently seen):
+    the answer names both places."""
+    try:
+        hits = list(world.find_guess(said)) if hasattr(world, "find_guess") else []
+        top = [n for n, s in hits if s == hits[0][1]] if hits else []
+        if len(top) > 1:
+            vis = [n for n in top if world.get(n).status == Status.VISIBLE]
+            if len(vis) == 1:
+                return vis
+        return [str(n) for n in top[:2]]
+    except Exception:
+        return []
+
+
+def _named(intent: Intent, world, cfg: dict) -> Optional[str]:
     obj = intent.obj
     try:
         phrases = world.alias_phrases() if hasattr(world, "alias_phrases") else []
@@ -389,13 +428,7 @@ def _target(intent: Intent, world, cfg: dict) -> Optional[str]:
         again = parse(intent.raw, cfg, aliases=phrases)
         if again.obj in phrases:
             obj = again.obj
-    obj = obj or intent.name
-    if obj is None or obj in (cfg.get("objects") or {}):
-        return obj
-    try:
-        return world.find(obj) if hasattr(world, "find") else None
-    except Exception:
-        return None
+    return obj or intent.name
 
 
 def _with_things(cfg: dict, world) -> dict:
@@ -411,6 +444,55 @@ def _with_things(cfg: dict, world) -> dict:
     for n, label in labels.items():
         names[n], objects[n] = label or UNNAMED, "target"
     return {**cfg, "display_names": names, "objects": objects}
+
+
+def _hedge(text: str, n: str) -> str:
+    """An answer about a thing found only by its guessed name, hedged: 'Your deodorant, I think, is
+    under the notebook.' (a 'probably' in the same place goes: one hedge is enough)."""
+    for lead in (f"Your {n} ", f"The {n} "):
+        if text.startswith(lead):
+            rest = re.sub(r"^(is|are|was|were) probably\b", r"\1", text[len(lead):])
+            return f"{lead.rstrip()}, I think, {rest}"
+    for phrase in (f"your {n}", f"the {n}"):
+        if phrase in text:
+            return text.replace(phrase, f"what I think is {phrase}", 1)
+    return f"I think {text[:1].lower()}{text[1:]}"
+
+
+def _place(e: Entity, world, cfg: dict) -> str:
+    """Predicate for where an entity is, for listing two places: 'is under the notebook'."""
+    if e.status == Status.VISIBLE:
+        return f"is {area(e.pos_cm, cfg)}"
+    if e.status in (Status.INSIDE, Status.UNDER):
+        return f"is {_rel(world, cfg, e.parent, e.status)}"
+    if e.status == Status.HELD:
+        return "is in someone's hand"
+    if e.status == Status.GONE:
+        return f"went off the {e.edge} side of the table" if e.edge else "went off the table"
+    return f"was last seen {area(e.pos_cm, cfg)}"
+
+
+def _guessed_answer(k: str, intent: Intent, guessed: list[str], world, events, cfg: dict, now: float) -> Answer:
+    """A question answered through automatic name guesses: the thing is spoken as the person named
+    it, and the answer hedges. Two equally good fits (neither, or both, in view): both places."""
+    from core.things import norm_name
+    said = norm_name(intent.name or intent.obj) or "thing"
+    cfg = {**cfg, "display_names": {**(cfg.get("display_names") or {}), **{n: said for n in guessed}}}
+    obj = guessed[0]
+    if len(guessed) > 1 and k == "WHERE":
+        try:
+            p1, p2 = (_place(world.get(n), world, cfg) for n in guessed[:2])
+            return Answer(f"Two things might be your {said}: one {p1}, the other {p2}.",
+                          point_at=obj, action="point")
+        except Exception:
+            pass
+    if k == "WHERE":
+        ans = _where(obj, world, events, cfg, now)
+    elif k == "HISTORY":
+        ans = _history(obj, world, cfg, now)
+    else:
+        ans = _handled(obj, world, events, cfg, now)
+    return Answer(_hedge(ans.text, said), ans.point_at, ans.action)
 
 
 def _maybe_back(obj: str, ans: Answer, world, cfg: dict) -> Answer:

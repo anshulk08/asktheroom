@@ -1,0 +1,326 @@
+"""Automatic names for new things (core/auto_name.py): one Grok look at a close-up of each new thing,
+stored as a soft guess that questions fall back to after taught names, with hedged answers."""
+import json
+import time
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+import core.crops
+from core.auto_name import AutoNameConfig, AutoNamer, clean_name, from_config, match_score
+from core.config import Config, load_config
+from core.events import EventLog
+from core.narration import ProviderError, Reply
+from core.types import Status
+from core.world import World
+from tests.synth import Scene
+from voice.answers import answer
+from voice.intents import parse
+
+ROOT = Path(__file__).resolve().parents[1]
+CFG = load_config()
+DEO = {"name": "deodorant stick", "also": ["deodorant"], "confidence": 0.9}
+
+
+class FakeGrok:
+    """provider.narrate(system, parts, schema) -> Reply; replies are dicts or exceptions, used in order
+    (the last one repeats). Records every call."""
+    name, model = "grok", "fake"
+
+    def __init__(self, *replies):
+        self.replies = list(replies) or [DEO]
+        self.calls = []
+
+    def narrate(self, system, parts, schema):
+        self.calls.append((system, parts, schema))
+        r = self.replies[min(len(self.calls) - 1, len(self.replies) - 1)]
+        if isinstance(r, Exception):
+            raise r
+        return Reply(json.dumps(r), {}, 5)
+
+
+class Clock:
+    def __init__(self, t=0.0):
+        self.t = t
+
+    def __call__(self):
+        return self.t
+
+
+@pytest.fixture
+def cfg():
+    return Config.load(ROOT / "config.yaml")
+
+
+@pytest.fixture
+def scene(cfg):
+    return Scene(cfg, fps=10, t0=1000.0, render=True)
+
+
+@pytest.fixture
+def world(cfg, scene, tmp_path):
+    return World(cfg, EventLog(":memory:", str(tmp_path / "snaps")), embed=scene.embed)
+
+
+@pytest.fixture(autouse=True)
+def no_crop_store():
+    old = core.crops.active()
+    core.crops.set_active(None)
+    yield
+    core.crops.set_active(old)
+
+
+def make(world, *replies, online=True, clock=None, **kw):
+    net = {"on": online}
+    grok = FakeGrok(*replies)
+    c = AutoNameConfig(**{"enabled": True, **kw})
+    namer = AutoNamer(CFG, world, provider=grok, online=lambda: net["on"], clock=clock or Clock(), c=c,
+                      start=False).attach(world)
+    return namer, grok, net
+
+
+def put(scene, world, key, at, **kw):
+    scene.thing(key, *at, **kw)
+    return scene.run(world, 1.5)
+
+
+def hide_under_notebook(scene, world, key, at):
+    """Slide the notebook over the thing (as in test_openworld's cover test)."""
+    x, y = at
+    scene.place("notebook", x + 50, y)
+    scene.run(world, 1.0)
+    for i in range(1, 6):
+        scene.place("notebook", x + 50 - 10 * i, y)
+        world.update(*scene.step())
+    scene.remove(key)
+    scene.run(world, 1.5)
+
+
+def ask(world, text):
+    return answer(parse(text, CFG), world, world.events, CFG, now=world._wall)
+
+
+# ----- the namer -----------------------------------------------------------------------------------
+
+def test_a_new_thing_is_named_in_the_background_and_the_guess_is_in_state(scene, world):
+    namer, grok, _ = make(world)
+    put(scene, world, "deo", (40, 30))
+    assert world.get("thing:1").status == Status.VISIBLE
+    assert grok.calls == []                         # perception never waits for Grok
+    assert namer.step() is True
+    assert len(grok.calls) == 1
+    system, parts, schema = grok.calls[0]
+    assert [k for k, _ in parts].count("image") == 1          # one close-up, nothing else
+    assert set(schema["required"]) == {"name", "also", "confidence"}
+    assert namer.guess("thing:1") == {"name": "deodorant stick", "also": ["deodorant"], "confidence": 0.9}
+    st = world.state_json()
+    ent = next(e for e in st["entities"] if e["name"] == "thing:1")
+    assert ent["guess"]["name"] == "deodorant stick"
+    assert ent["label"] is None                     # a guess is not a taught name
+    assert "disclosure" in st["auto_name"] and "close-up" in st["auto_name"]["disclosure"]
+    assert namer.step() is False                    # one successful name per thing
+    scene.run(world, 3.0)
+    assert namer.step() is False and len(grok.calls) == 1
+
+
+def test_the_close_up_comes_from_the_crop_store_when_it_has_one(scene, world):
+    seen = []
+
+    class Store:
+        def for_entity(self, ent):
+            seen.append(ent.name)
+            crop = core.crops.Crop(img=np.full((40, 60, 3), 90, np.uint8), box_px=(0, 0, 60, 40),
+                                   box_cm=(0, 0, 6, 4), t=0.0, score=1.0)
+            return core.crops.CropTrack("p1", "thing", (0, 0, 60, 40), (0, 0, 6, 4), 0.0, best=crop)
+
+    core.crops.set_active(Store())
+    namer, grok, _ = make(world)
+    put(scene, world, "deo", (40, 30))
+    namer.step()
+    assert seen == ["thing:1"] and len(grok.calls) == 1
+
+
+def test_hidden_under_the_notebook_where_is_my_deodorant_is_answered_hedged(scene, world):
+    namer, _, _ = make(world)
+    put(scene, world, "deo", (40, 30))
+    namer.step()
+    hide_under_notebook(scene, world, "deo", (40, 30))
+    assert (world.get("thing:1").status, world.get("thing:1").parent) == (Status.UNDER, "notebook")
+    a = ask(world, "where is my deodorant")
+    assert a.text == "Your deodorant, I think, is under the notebook."
+    assert (a.point_at, a.action) == ("thing:1", "point")
+    b = ask(world, "where's my deodorant stick?")
+    assert b.text == "Your deodorant stick, I think, is under the notebook."
+    c = ask(world, "what happened to my deodorant")
+    assert c.text.startswith("Your deodorant, I think, was first seen"), c.text
+    assert "notebook" in c.text
+
+
+def test_a_visible_guessed_thing_is_answered_hedged(scene, world):
+    namer, _, _ = make(world)
+    put(scene, world, "deo", (40, 30))
+    namer.step()
+    a = ask(world, "where are my deodorants")
+    assert a.text.startswith("Your deodorants, I think, are on the table") or \
+        a.text.startswith("Your deodorants, I think,"), a.text
+    assert a.point_at == "thing:1"
+
+
+def test_without_a_guess_the_name_is_still_unknown(scene, world):
+    namer, _, _ = make(world, online=False)
+    put(scene, world, "deo", (40, 30))
+    namer.step()
+    assert ask(world, "where is my deodorant").text.startswith("I don't know what your deodorant is yet")
+
+
+def test_a_taught_name_wins_over_a_guess(scene, world):
+    namer, _, _ = make(world)
+    put(scene, world, "deo", (40, 30))
+    namer.step()                                     # thing:1 guessed 'deodorant stick'
+    put(scene, world, "other", (80, 30))
+    assert world.bind_alias("thing:2", "deodorant")
+    a = ask(world, "where is my deodorant")
+    assert "I think" not in a.text and a.point_at == "thing:2", a.text
+    # a guessed thing that was then taught another name is no longer found by its guess
+    assert world.bind_alias("thing:1", "lotion")
+    assert namer.find_guess("deodorant stick") == []
+    assert ask(world, "where is my lotion").point_at == "thing:1"
+
+
+def test_a_thing_with_a_taught_name_is_never_sent(scene, world):
+    namer, grok, _ = make(world)
+    put(scene, world, "deo", (40, 30))
+    assert world.bind_alias("thing:1", "charger")
+    namer.step()
+    assert grok.calls == [] and namer.guess("thing:1") is None
+
+
+def test_a_failed_call_is_retried_once_later_then_given_up(scene, world):
+    clock = Clock(100.0)
+    namer, grok, _ = make(world, ProviderError("timeout"), DEO, clock=clock, retry_after_s=30)
+    put(scene, world, "deo", (40, 30))
+    assert namer.step() is True and len(grok.calls) == 1
+    assert namer.guess("thing:1") is None
+    assert namer.step() is False and len(grok.calls) == 1      # not due yet
+    clock.t += 31
+    assert namer.step() is True and len(grok.calls) == 2
+    assert namer.guess("thing:1")["name"] == "deodorant stick"
+
+    put(scene, world, "cup", (80, 30))                           # thing:2: fails twice
+    grok.replies = [ProviderError("down")]
+    namer.step()
+    clock.t += 31
+    namer.step()
+    clock.t += 300
+    assert namer.step() is False and len(grok.calls) == 4
+    assert namer.guess("thing:2") is None and namer.status()["failed"] == 1
+
+
+def test_offline_no_call_until_the_connection_is_back(scene, world):
+    namer, grok, net = make(world, online=False)
+    put(scene, world, "deo", (40, 30))
+    assert namer.step() is False and grok.calls == []
+    net["on"] = True
+    assert namer.step() is True and len(grok.calls) == 1
+
+
+def test_calls_are_rate_limited_per_minute(scene, world):
+    clock = Clock(0.0)
+    namer, grok, _ = make(world, clock=clock, max_per_minute=2)
+    for i, x in enumerate((20, 50, 80)):
+        put(scene, world, f"t{i}", (x, 30))
+    for _ in range(5):
+        namer.step()
+    assert len(grok.calls) == 2
+    clock.t += 61
+    namer.step()
+    assert len(grok.calls) == 3
+    assert {namer.guess(f"thing:{i}")["name"] for i in (1, 2, 3)} == {"deodorant stick"}
+
+
+def test_a_low_confidence_name_is_not_kept_or_retried(scene, world):
+    namer, grok, _ = make(world, {"name": "thing", "also": [], "confidence": 0.9},
+                          {"name": "stapler", "also": [], "confidence": 0.2})
+    put(scene, world, "a", (40, 30))
+    put(scene, world, "b", (80, 30))
+    namer.step()
+    namer.step()
+    namer.step()
+    assert len(grok.calls) == 2
+    assert namer.guess("thing:1") is None and namer.guess("thing:2") is None
+
+
+def test_a_pill_bottle_is_named_plainly_and_the_prompt_forbids_claims(scene, world):
+    namer, grok, _ = make(world, {"name": "Pill Bottle", "also": ["medicine", "pills taken today"],
+                                  "confidence": 0.8})
+    put(scene, world, "meds", (40, 30))
+    namer.step()
+    system = grok.calls[0][0]
+    assert "medication" in system.lower() and "never" in system.lower()
+    g = namer.guess("thing:1")
+    assert g["name"] == "pill bottle"
+    assert all("taken" not in a for a in g["also"])
+
+
+def test_equal_guesses_prefer_the_visible_one_else_both_places_are_said(scene, world):
+    namer, _, _ = make(world, {"name": "mug", "also": [], "confidence": 0.9})
+    put(scene, world, "m1", (40, 30))
+    put(scene, world, "m2", (100, 30))
+    namer.step()
+    namer.step()
+    a = ask(world, "where is my mug")                   # both in view: genuinely ambiguous
+    assert a.text == "Two things might be your mug: one is on the right side, the other is in the middle."
+    assert a.point_at == "thing:2"                      # the most recently seen of the two
+    hide_under_notebook(scene, world, "m1", (40, 30))
+    a = ask(world, "where is my mug")
+    assert (a.point_at, a.text) == ("thing:2", "Your mug, I think, is on the table."), a.text
+    scene.remove("m2")                                  # the other one is lost from view
+    scene.run(world, 3.0)
+    assert world.get("thing:2").status in (Status.UNKNOWN, Status.UNDER)
+    a = ask(world, "where is my mug")
+    assert a.text == ("Two things might be your mug: one was last seen on the right side, "
+                      "the other is under the notebook."), a.text
+
+
+def test_the_worker_thread_names_things_and_stops(scene, world):
+    grok = FakeGrok()
+    namer = AutoNamer(CFG, world, provider=grok, online=lambda: True,
+                      c=AutoNameConfig(enabled=True), start=True).attach(world)
+    try:
+        put(scene, world, "deo", (40, 30))
+        deadline = time.monotonic() + 3.0
+        while namer.guess("thing:1") is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert namer.guess("thing:1")["name"] == "deodorant stick"
+    finally:
+        namer.stop()
+    assert not namer._thread.is_alive()
+
+
+# ----- pieces ------------------------------------------------------------------------------------
+
+def test_clean_name():
+    assert clean_name("A Deodorant Stick.") == "deodorant stick"
+    assert clean_name("  the   blue coffee mug with handle ") == "blue coffee mug"
+    assert clean_name("object") is None and clean_name("") is None and clean_name(None) is None
+    assert clean_name("unknown") is None
+
+
+def test_match_score():
+    g = {"name": "deodorant stick", "also": ["deodorant"], "confidence": 0.9}
+    assert match_score("deodorant stick", g) > match_score("deodorant", {"name": "deodorant stick", "also": []}) > 0
+    assert match_score("deodorant", {"name": "deodorant stick", "also": []}) > 0     # token overlap
+    assert match_score("deodorants", g) > 0                                          # plural
+    assert match_score("my blue mug", {"name": "coffee mug", "also": []}) > 0         # head noun
+    assert match_score("phone case", {"name": "phone charger", "also": []}) == 0
+    assert match_score("stick", {"name": "deodorant stick", "also": []}) > 0
+    assert match_score("glue stick", {"name": "deodorant stick", "also": []}) == 0
+
+
+def test_config_off_by_default_and_from_config():
+    assert AutoNameConfig.from_dict(None).enabled is False
+    assert from_config({}, object()) is None
+    c = AutoNameConfig.from_dict(CFG.get("auto_name"))
+    assert c.enabled and c.max_per_minute >= 1 and 0 < c.min_confidence < 1
+    assert list(CFG)[-1] == "auto_name"             # a new section goes at the end (AGENTS.md)

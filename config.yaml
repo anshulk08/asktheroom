@@ -399,3 +399,14 @@ table_tag:
 table_area:
   polygon_cm: []              # [[x, y], ...] tabletop corners in table cm, in order around the table
   edge_cm: 3.0                # band inside the outline where existing things are followed but none is born
+
+# Automatic names for new things (core/auto_name.py). When a new unnamed thing:N appears, one close-up of
+# it goes to Grok once (visual_memory:'s provider/model/timeout), in the background and only while online,
+# for a soft guess of what it is ('deodorant stick'). The guess is not a taught name: "where's my
+# deodorant?" falls back to it only when no configured name or taught alias matches, and the answer hedges
+# ("Your deodorant, I think, is under the notebook."). A thing with a taught name is never sent.
+auto_name:
+  enabled: true
+  max_per_minute: 10          # Grok calls per minute; more new things wait their turn
+  min_confidence: 0.5         # a guess below this is not kept (and not asked again)
+  retry_after_s: 30           # a failed call is tried once more this much later

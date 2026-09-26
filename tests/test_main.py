@@ -371,6 +371,7 @@ def test_build_fake_runs_without_hardware(monkeypatch, tmp_path):
         room.tts = SpeakLog()
         room.ask_and_act("where is my wallet?", "dashboard")
         assert wait_for(lambda: room.tts.said)
+        assert "close-up" in room.world.state_json()["auto_name"]["disclosure"]     # auto-naming wired
     finally:
         room.shutdown()
 
