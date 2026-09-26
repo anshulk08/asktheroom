@@ -175,6 +175,32 @@ def test_an_identity_change_on_an_untouched_prop_is_caught(tmp_path):
     assert crit(r, "identity changes")["result"] == "FAIL" and r["pass"] is False
 
 
+def test_a_prop_picked_up_again_after_its_step_is_followed_not_handed_to_a_neighbour(tmp_path):
+    """A is put down 7 cm from static clutter C, then (after its step resolved, still in the same
+    motion) lifted again and set down 30 cm away. The world follows A; C, now nearest A's first spot,
+    is not A: no identity change."""
+    take = Take(tmp_path)
+    take.scene.place("box", *BOX_AT)
+    take.scene.thing("C", 46, 34)
+    take.run(3)
+    t_place = take.now
+    take.put("A", (40, 30))
+    take.run(2.5)
+    take.scene.hand(1, 40, 30)
+    take.run(0.5)
+    take.scene.remove("A")
+    take.scene.hand(1, 70, 30)
+    take.run(0.5)
+    take.scene.thing("A", 70, 30)
+    take.run(0.5)
+    take.scene.hand_off(1)
+    take.run(4)
+    r = score(take, {"props": {"A": "charger", "BOX": "box"},
+                     "steps": [{"t": t_place, "event": "place", "obj": "A", "parent": None, "note": ""}]})
+    assert [m["entity"] for m in r["mapping"]["A"]] == ["thing:2"], r["mapping"]["A"]
+    assert r["identity_changes"] == []
+
+
 def test_a_phantom_thing_while_a_hand_waves_is_a_false_birth(tmp_path):
     take = Take(tmp_path)
     take.scene.place("box", *BOX_AT)

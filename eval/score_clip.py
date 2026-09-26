@@ -119,6 +119,7 @@ class Bars:
     pre_s: float = 1.0                  # ... or this long before it (people act as they are told)
     match_cm: float = 8.0               # an entity this close to a resting prop's spot is that prop
     hand_near_cm: float = 10.0          # a hand box this close to a prop is handling it
+    touch_s: float = 3.0                # a prop handled this recently may have moved: follow its entity
     initial_s: float = 3.0              # identities admitted this soon after the first frame are the scene
     false_births_per_min: float = 0.5
     identity_changes: int = 0
@@ -590,6 +591,10 @@ class _Scorer:
         if vis and (a is None or _dist(v[2], a) <= self.bars.match_cm):
             self.anchor[p] = v[2]
             return
+        if a is not None and self._touched(p, a, s.t):     # the person moved it on after its step:
+            if vis:                                         # its entity went with it, the spot is stale
+                self.anchor[p] = v[2]
+            return
         if a is not None:
             there = sorted((_dist(x[2], a), n) for n, x in s.ents.items()
                            if n != self.cur[p] and n not in claimed and x[0] == "VISIBLE" and x[2] is not None
@@ -601,6 +606,17 @@ class _Scorer:
                 return
         if vis:
             self.anchor[p] = v[2]
+
+    def _touched(self, p: str, spot, t: float) -> bool:
+        """A hand near the prop's spot, or its entity held, within touch_s before t."""
+        ent = self.cur[p]
+        for smp in self.between(t - self.bars.touch_s, t):
+            v = smp.ents.get(ent)
+            if v is not None and v[0] == "HELD":
+                return True
+            if any(_box_dist(spot, h) <= self.bars.hand_near_cm for h in smp.hands):
+                return True
+        return False
 
     def _bind_initial(self, p: str, s: Sample, claimed: set) -> None:
         """A prop on the table from the start: its configured object by name if the world ever saw it,

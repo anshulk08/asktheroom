@@ -72,3 +72,4 @@ experiments/**/frames/
 data/clips/
 data/finetune/
 data/hands_public/
+data/finetune_pub/
