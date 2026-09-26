@@ -41,13 +41,21 @@ struct AnswerCard: View {
     }
 }
 
-/// An answer to a question someone spoke to the rig (PROTOCOL_PROPOSALS.md P2; off by default).
+/// An answer to a question someone else asked the rig (PROTOCOL.md 6a; off by default).
 struct HeardInRoomCard: View {
     let answer: Answer
 
+    private var heading: String {
+        switch answer.src {
+        case "dashboard": return "Asked on the dashboard"
+        case "sms": return "Asked by text message"
+        default: return "Heard in the room"
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Label("Heard in the room", systemImage: "waveform")
+            Label(heading, systemImage: answer.src == "voice" ? "waveform" : "text.bubble")
                 .font(.footnote.weight(.semibold))
                 .foregroundStyle(.secondary)
             if let q = answer.q {

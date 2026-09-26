@@ -42,6 +42,7 @@ enum LinkState: Equatable {
 final class RoomStore {
     static let historyLimit = 10
     static let voiceAnswersKey = "showRoomVoiceAnswers"
+    static let rigNoticeLimit = 3
 
     var link: LinkState = .searching
     private(set) var isMock = false
@@ -54,14 +55,16 @@ final class RoomStore {
     /// Newest first, at most `historyLimit`.
     private(set) var exchanges: [Exchange] = []
     private(set) var highlight: Highlight?
-    /// Latest answer to a question spoken to the room itself (PROTOCOL_PROPOSALS.md P2).
+    /// Latest answer to a question someone else asked the rig (PROTOCOL.md 6a).
     private(set) var heardInRoom: Answer?
+    /// Reminders and morning reports the rig fired while connected, newest first.
+    private(set) var rigNotices: [Notice] = []
     /// What changed since the app connected, newest first (Home, "Recently").
     private(set) var activity: [ActivityEvent] = []
     /// Notices the person has put away; each comes back if its situation changes.
     private(set) var dismissedNotices: Set<String> = []
 
-    /// Off until the bridge sends voice answers; see PROTOCOL_PROPOSALS.md P2.
+    /// Off by default: the rig already speaks these, and the phone may be in another room.
     var showRoomVoiceAnswers = UserDefaults.standard.bool(forKey: RoomStore.voiceAnswersKey) {
         didSet { UserDefaults.standard.set(showRoomVoiceAnswers, forKey: Self.voiceAnswersKey) }
     }
@@ -76,7 +79,7 @@ final class RoomStore {
 
     var current: Exchange? { exchanges.first }
     var notices: [Notice] {
-        snapshot.map(Dashboard.notices(in:))?.filter { !dismissedNotices.contains($0.id) } ?? []
+        (rigNotices + (snapshot.map(Dashboard.notices(in:)) ?? [])).filter { !dismissedNotices.contains($0.id) }
     }
     var history: ArraySlice<Exchange> { exchanges.dropFirst() }
 
@@ -100,6 +103,7 @@ final class RoomStore {
         status = nil
         highlight = nil
         heardInRoom = nil
+        rigNotices = []
         exchanges = []
         activity = []
         dismissedNotices = []
@@ -150,7 +154,9 @@ final class RoomStore {
 
     func receive(answer: Answer) {
         guard let id = answer.id else {
-            if answer.isRoomVoice, showRoomVoiceAnswers {
+            if answer.isNotice {
+                receive(notice: answer)
+            } else if answer.isRoomAnswer, showRoomVoiceAnswers {
                 heardInRoom = answer
                 setHighlight(highlight(for: answer))
             }
@@ -161,6 +167,15 @@ final class RoomStore {
         timeoutTask?.cancel()
         exchanges[0].answer = answer
         exchanges[0].timedOut = false
+        setHighlight(highlight(for: answer))
+    }
+
+    /// A reminder always shows on Home, even with room answers off: it's meant for the person.
+    private func receive(notice answer: Answer) {
+        let notice = Notice(rig: answer)
+        rigNotices.removeAll { $0.id == notice.id }
+        rigNotices.insert(notice, at: 0)
+        if rigNotices.count > Self.rigNoticeLimit { rigNotices.removeLast(rigNotices.count - Self.rigNoticeLimit) }
         setHighlight(highlight(for: answer))
     }
 

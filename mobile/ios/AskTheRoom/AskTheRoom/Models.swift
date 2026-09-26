@@ -182,13 +182,19 @@ struct Answer: Codable, Equatable {
     var action: String?
     var target: TablePoint?
     var ms: Int?
-    /// Proposed (PROTOCOL_PROPOSALS.md P2): "voice" for answers to questions spoken to the room.
+    /// Only when `id` is nil (PROTOCOL.md 6a): where the question came from (`voice`, `dashboard`,
+    /// `sms`), or `notice` for a reminder or the morning report the rig just fired.
     var src: String?
-    /// Proposed (P2): the transcript the room heard.
+    /// Room answers: the question as the rig heard it.
     var q: String?
+    /// Notices: the rig's notice id, and what fired it (`reminder`, `morning`, …).
+    var nid: Int?
+    var kind: String?
 
     var succeeded: Bool { ok ?? true }
-    var isRoomVoice: Bool { id == nil && src == "voice" }
+    /// A question someone else asked the rig: out loud, on the dashboard or by SMS.
+    var isRoomAnswer: Bool { id == nil && src != nil && src != "notice" }
+    var isNotice: Bool { id == nil && src == "notice" }
     var pointAt: String? { point_at }
     var laserAction: LaserAction? { action.map(LaserAction.init) }
 }

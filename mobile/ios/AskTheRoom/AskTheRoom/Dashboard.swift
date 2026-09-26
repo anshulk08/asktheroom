@@ -17,7 +17,8 @@ struct ActivityEvent: Identifiable, Equatable {
 
 /// Something worth telling the person without being asked ("The room noticed").
 struct Notice: Identifiable, Equatable {
-    enum Kind: Equatable { case leftTable, lostTrack, unnamed }
+    /// `rig`: a reminder or morning report the rig fired, with its `kind`.
+    enum Kind: Equatable { case leftTable, lostTrack, unnamed, rig(String?) }
 
     var kind: Kind
     var entity: String
@@ -28,6 +29,8 @@ struct Notice: Identifiable, Equatable {
     /// so the notice doesn't change (and come back after "Got it") every minute.
     var lastSeen: Date? = nil
     var seenWords: String? = nil
+    /// The rig's notice id, for notices the rig sent.
+    var rigID: Int? = nil
 
     /// "They were last seen on the table, 5 minutes ago."
     func detail(now: Date) -> String? {
@@ -36,7 +39,23 @@ struct Notice: Identifiable, Equatable {
     }
 
     /// Changes when the situation changes, so a dismissed notice comes back if it happens again.
-    var id: String { "\(entity)|\(text)" }
+    var id: String { rigID.map { "rig|\($0)" } ?? "\(entity)|\(text)" }
+
+    /// The rig's own words, unchanged: it already keeps pill wording neutral.
+    init(rig answer: Answer) {
+        self.init(kind: .rig(answer.kind), entity: answer.pointAt ?? "", text: answer.text, rigID: answer.nid)
+    }
+
+    init(kind: Kind, entity: String, text: String, question: String? = nil,
+         lastSeen: Date? = nil, seenWords: String? = nil, rigID: Int? = nil) {
+        self.kind = kind
+        self.entity = entity
+        self.text = text
+        self.question = question
+        self.lastSeen = lastSeen
+        self.seenWords = seenWords
+        self.rigID = rigID
+    }
 }
 
 /// A line on the Recent tab: something that changed, or something the person asked.

@@ -191,6 +191,14 @@ private struct NoticeCard: View {
         case .leftTable: return ("arrow.left.square", .secondary)
         case .lostTrack: return ("questionmark.circle", .secondary)
         case .unnamed: return ("sparkles", .secondary)
+        case .rig(let kind): return (kind == "morning" ? "sun.max" : "bell", .secondary)
+        }
+    }
+
+    private var showWords: String {
+        switch notice.kind {
+        case .leftTable, .lostTrack: return "Help me find it"
+        case .unnamed, .rig: return "Show me"
         }
     }
 
@@ -213,11 +221,14 @@ private struct NoticeCard: View {
             // Stacked at the largest text sizes so neither button gets squeezed.
             let layout = typeSize.isAccessibilitySize ? AnyLayout(VStackLayout(spacing: 10)) : AnyLayout(HStackLayout(spacing: 10))
             layout {
-                Button(action: onShow) {
-                    Label(notice.kind == .unnamed ? "Show me" : "Help me find it", systemImage: "scope")
-                        .frame(maxWidth: .infinity)
+                // A reminder that doesn't point at anything only needs "Got it".
+                if !notice.entity.isEmpty {
+                    Button(action: onShow) {
+                        Label(showWords, systemImage: "scope")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
                 }
-                .buttonStyle(.borderedProminent)
                 Button(action: onDismiss) {
                     Text("Got it").frame(maxWidth: typeSize.isAccessibilitySize ? .infinity : nil)
                 }

@@ -77,6 +77,30 @@ final class ModelsTests: XCTestCase {
         XCTAssertNil(answer.laserAction)
     }
 
+    /// The two examples in PROTOCOL.md 6a.
+    func testAnswersThePhoneDidntAskFor() throws {
+        let room = try XCTUnwrap(Wire.decode(Answer.self, from: Data("""
+            {"id": null, "src": "voice", "q": "where are my keys", "ok": true, "text": "Your keys are inside the box.",
+             "point_at": "keys", "action": "point", "target": [70.4, 38.1], "ms": null}
+            """.utf8)))
+        XCTAssertTrue(room.isRoomAnswer)
+        XCTAssertFalse(room.isNotice)
+        XCTAssertEqual(room.q, "where are my keys")
+
+        let notice = try XCTUnwrap(Wire.decode(Answer.self, from: Data("""
+            {"id": null, "src": "notice", "nid": 12, "kind": "reminder", "ok": true,
+             "text": "It's 9 and the pill bottle hasn't been picked up yet.", "point_at": "pill_bottle", "action": "point",
+             "target": [30.2, 12.0], "ms": null}
+            """.utf8)))
+        XCTAssertTrue(notice.isNotice)
+        XCTAssertFalse(notice.isRoomAnswer)
+        XCTAssertEqual(notice.nid, 12)
+        XCTAssertEqual(notice.kind, "reminder")
+
+        let mine = try XCTUnwrap(Wire.decode(Answer.self, from: Data(#"{"id": 3, "src": "voice", "text": "x"}"#.utf8)))
+        XCTAssertFalse(mine.isRoomAnswer, "an answer with an id is the phone's own")
+    }
+
     func testMalformedJSONReturnsNil() {
         XCTAssertNil(Wire.decode(Snapshot.self, from: Data("{\"e\":[".utf8)))
         XCTAssertNil(Wire.decode(Answer.self, from: Data("not json".utf8)))
