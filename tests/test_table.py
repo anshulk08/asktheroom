@@ -117,6 +117,10 @@ def test_failed_calibration_warns_once_until_markers_change(table, caplog):
 # ---------------------------------------------------------------- one AprilTag, no measuring
 
 TAG_CM = 16.0
+# OpenCV before 4.10 decodes a turned tag in only about half of these scenes (measured: 4.8.0 on the Jetson
+# host 8/16, 4.11.0 in the app's container 16/16, 5.0.0 on the laptop 16/16). The app runs in the container.
+NEW_CV = tuple(int(v) for v in cv2.__version__.split(".")[:2]) >= (4, 10)
+needs_new_cv = pytest.mark.skipif(not NEW_CV, reason=f"OpenCV {cv2.__version__}: tag detection unreliable before 4.10")
 
 
 def tag_cfg(tmp_path, **kw):
@@ -158,6 +162,7 @@ def calibrate_tag(t, h, n=10, **kw):
     return ok
 
 
+@needs_new_cv
 def test_one_tag_calibrates_the_table_without_measuring(tmp_path):
     t = Table(tag_cfg(tmp_path))
     assert not t.ok
@@ -170,6 +175,7 @@ def test_one_tag_calibrates_the_table_without_measuring(tmp_path):
     assert err.max() < 1.5, err.max()
 
 
+@needs_new_cv
 def test_the_tracked_area_is_what_the_camera_sees(tmp_path):
     t = Table(tag_cfg(tmp_path))
     calibrate_tag(t, true_h())
@@ -184,6 +190,7 @@ def test_the_tracked_area_is_what_the_camera_sees(tmp_path):
     assert right[0] - left[0] > 50 and abs(right[1] - left[1]) < 10
 
 
+@needs_new_cv
 def test_axes_ignore_how_the_tag_was_turned(tmp_path):
     a, b = Table(tag_cfg(tmp_path / "a")), Table(tag_cfg(tmp_path / "b"))
     (tmp_path / "a").mkdir(), (tmp_path / "b").mkdir()
@@ -192,6 +199,7 @@ def test_axes_ignore_how_the_tag_was_turned(tmp_path):
     assert abs(a.size_cm[0] - b.size_cm[0]) < 3 and abs(a.size_cm[1] - b.size_cm[1]) < 3
 
 
+@needs_new_cv
 def test_one_tag_needs_several_frames_and_keeps_the_old_calibration_without_it(tmp_path):
     t = Table(tag_cfg(tmp_path, frames=5))
     assert not any(t.calibrate(render_tag(true_h(), noise=10, seed=i)) for i in range(4))   # still averaging
@@ -201,6 +209,7 @@ def test_one_tag_needs_several_frames_and_keeps_the_old_calibration_without_it(t
     assert t.ok and np.allclose(t.H, before)
 
 
+@needs_new_cv
 def test_tag_calibration_and_the_area_size_are_saved_and_applied_at_startup(tmp_path):
     from core.table import apply_saved_size
     cfg = tag_cfg(tmp_path)

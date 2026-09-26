@@ -187,6 +187,8 @@ def tag_rig(tmp_path, tag_img, cal_img):
     return SimpleNamespace(part=lambda name: {"table": t, "frames": frames}[name])
 
 
+@pytest.mark.skipif(tuple(int(v) for v in __import__("cv2").__version__.split(".")[:2]) < (4, 10),
+                    reason="tag detection unreliable before OpenCV 4.10 (the app's container has 4.11)")
 def test_one_tag_markers_check_passes_with_the_tag_removed_and_catches_drift(tmp_path):
     import sys
     sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
