@@ -352,6 +352,14 @@ def test_yoloe_drops_boxes_that_are_part_of_a_person():
     assert sorted(q.box_px for q in props) == [(650, 600, 760, 690), (900, 300, 990, 380)]
 
 
+def test_yoloe_never_proposes_inside_ignored_regions():
+    """The floor / chair / people strip beside the table (proposals.yoloe.ignore_px, full-res px)."""
+    m = FakeYOLOE([(0, 0.6, (100, 500, 180, 600)),           # centre in the ignored strip: dropped
+                   (0, 0.6, (600, 300, 690, 380))])
+    y = YOLOEProposer({'ignore_px': [[0, 0, 340, 720]]}, model=m)
+    assert [q.box_px for q in y.propose(np.zeros((H, W, 3), np.uint8), [], [])] == [(600, 300, 690, 380)]
+
+
 # ------------------------------------------------------------------ Detector integration
 
 class FakeBackend:

@@ -521,6 +521,15 @@ class ThingRules:
             if pick:
                 self._unsure_until[pick] = self._now + tc.ambiguous_s
                 return pick, []
+            # Hidden only by 'something undetected' (world._background_changed: the pixels there are not
+            # bare table): no cover, so no event tells them apart, and a new thing per return piles up
+            # (on the rig, a knee at the table edge made 7 things in 30 s). The nearest one of the right
+            # size, most recently hidden on a tie, is back. A real cover keeps the ambiguity below.
+            blind = [n for n in cause if self.entities[n].parent == 'unknown' and n not in seen
+                     and self.entities[n].pos_cm is not None and self._size_ok(d.box_cm, self.entities[n].box_cm)]
+            if blind and all(self.entities[n].parent == 'unknown' for n in cause):
+                return min(blind, key=lambda n: (geom.dist(d.center_cm, self.entities[n].pos_cm),
+                                                 -self._hidden_at.get(n, NEG))), []
             for n in cause:        # one of them came out, but which is unknown
                 self.entities[n].confidence *= self.cfg.ambiguity_penalty
             return None, [(n, self._look_score(vec, n)) for n in cause]

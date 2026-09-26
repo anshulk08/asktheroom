@@ -560,6 +560,7 @@ class YOLOEConfig:
     half: bool = False                  # .pt on a GPU only; an .engine has its precision baked in
     iou: float = 0.5                    # class-agnostic NMS inside the model call
     max_det: int = 100
+    ignore_px: list = field(default_factory=list)      # [x1, y1, x2, y2] full-res boxes never proposed in
     min_area_frac: float = 0.0004
     max_area_frac: float = 0.15
     masks: bool = False                 # keep box-sized masks (seg checkpoints)
@@ -625,6 +626,9 @@ class YOLOEProposer:
             if not lo <= geom.area(box) <= hi:
                 continue
             if self._roi is not None and cv2.pointPolygonTest(self._roi, geom.center(box), False) < 0:
+                continue
+            cx, cy = geom.center(box)
+            if any(x1 <= cx <= x2 and y1 <= cy <= y2 for x1, y1, x2, y2 in c.ignore_px):
                 continue
             m = masks[j][box[1]:box[3], box[0]:box[2]].copy() if masks is not None else None
             cands.append(Proposal(box_px=box, conf=round(float(s), 3), mask=m))

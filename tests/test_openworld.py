@@ -95,6 +95,28 @@ def test_an_object_slid_into_place_becomes_one_thing_once_it_stops(scene, world)
     assert world.get('thing:1').pos_cm == pytest.approx((31.2, 30), abs=0.5)
 
 
+def test_flicker_under_an_undetected_cover_does_not_pile_up_things(cfg):
+    """On the rig, a knee at the table edge showed up as two overlapping regions that kept vanishing
+    and coming back. Each vanishing read as 'covered by something undetected' (the pixels there are
+    never bare table), and each return was ambiguous between the hidden ones, so a new thing was made
+    every cycle: 7 things at one spot in 30 s. With nothing to tell them apart, the most recently
+    hidden one of the right size comes back."""
+    from core.relations import BackgroundModel
+    rs = Scene(cfg, fps=10, t0=1000.0, render=True)
+    w = World(cfg, embed=rs.embed)
+    rs.run(w, (BackgroundModel.MIN_READY + 0.5) * cfg.bg_update_every_s)
+    for _ in range(4):
+        rs.overlays.pop('knee', None)
+        rs.thing('k1', 12, 34, w=3, h=3)             # two regions 4 cm apart: one spot (same_spot_cm 5)
+        rs.thing('k2', 16, 34, w=3, h=3)
+        rs.run(w, 1.5)
+        rs.remove('k1')
+        rs.remove('k2')
+        rs.overlay('knee', 14, 34, 12, 8)            # the pixels there are not bare table
+        rs.run(w, 1.5)
+    assert len(things(w)) == 2, [(n, w.get(n).status, w.get(n).parent) for n in things(w)]
+
+
 def test_the_hand_itself_reported_as_a_proposal_is_ignored(scene, world):
     scene.hand(1, 40, 30)
     scene.thing('hand-blob', 40, 30, 12, 12)
