@@ -2,7 +2,8 @@
 
   capture     30 fps     core.capture.FrameBuffer runs its own thread
   perception  10-15 fps  wait_new -> detector.detect -> hands.update -> world.update (world logs events)
-  voice       on click   clicker -> stt.record_until_silence -> stt.transcribe -> ask -> speak + aim
+  voice       on click   clicker -> stt.record_until_silence -> stt.transcribe -> Qwen reads it -> ask
+                         -> speak + aim
   net         every 5 s  NetMonitor probes; world.online follows it
   server      5 Hz       server.app.create_app(...) under uvicorn
 
@@ -11,8 +12,10 @@
     python main.py --no-voice       # dashboard and /ask only
     python main.py --camera 2
 
-Typed questions (/ask) and texts (/sms) go through the same ask(); dashboard questions also speak
-and move the laser, texts only answer by text. Aiming never blocks speech: an uncalibrated laser
+Questions are spoken. Whisper transcribes them and Qwen (voice/understand.py, llama-server on the
+Jetson, scripts/qwen_server.sh) works out what was meant; without it the rule parser does. The
+dashboard's /ask (for testing) and texts (/sms) go through the same ask(); dashboard questions also
+speak and move the laser, texts only answer by text. Aiming never blocks speech: an uncalibrated laser
 raises RuntimeError, which is logged, and the answer still plays.
 
 --fake wiring (mirrors server/sim.py): server.sim.SimCamera plays the scripted tabletop story and
@@ -33,14 +36,15 @@ import time
 from typing import Callable, Optional
 
 import numpy as np
+import requests
 
 from core.config import load_config
-from core.types import Answer
-from voice.intents import parse
+from core.types import Answer, Intent
 
 log = logging.getLogger("askroom.main")
 
 OFF = {"on": False, "target": None, "err_cm": None}
+NOT_HEARD = "Sorry, I didn't catch that."
 
 
 class FlatTable:
@@ -65,15 +69,21 @@ class Room:
     """Owns every part and thread. build() wires the rig or the fake; run() starts the threads."""
 
     def __init__(self, cfg: dict, world, events, table, frames, laser, ask: Callable[[str, str], Answer],
-                 netmon=None, tts=None, stt=None, clicker=None, detector=None, hands=None):
+                 netmon=None, tts=None, stt=None, clicker=None, detector=None, hands=None,
+                 interpret: Optional[Callable[[str], Intent]] = None):
         self.cfg, self.world, self.events, self.table = cfg, world, events, table
         self.frames, self.laser, self.base_ask = frames, laser, ask
         self.netmon, self.tts, self.stt, self.clicker = netmon, tts, stt, clicker
         self.detector, self.hands = detector, hands
+        if interpret is None:
+            from voice.intents import parse
+            interpret = lambda text: parse(text, cfg)     # noqa: E731
+        self.interpret = interpret
         m = cfg.get("main") or {}
         self.max_fps = float(m.get("perception_max_fps", 15))
         self.net_copy_s = float(m.get("net_copy_s", 5))
         self.laser_timeout_s = float(cfg.get("laser_timeout_s", 10))
+        self.webhook_url = str((cfg.get("n8n") or {}).get("webhook_url") or "")
         self.stop_ev = threading.Event()
         self._aim_lock = threading.Lock()
         self._aim_gen = 0
@@ -88,7 +98,7 @@ class Room:
     def ask(self, text: str, source: str) -> Answer:
         """The router, plus the two intents that act on the room (reset, recalibrate)."""
         ans = self.base_ask(text, source)
-        kind = parse(text, self.cfg).kind
+        kind = self.interpret(text).kind           # the same Intent the router used (cached)
         if kind == "RESET":
             self.world.reset()
             if self.hands is not None:
@@ -232,11 +242,14 @@ class Room:
                 continue
             t_heard = time.monotonic()
             if not text:
-                self._speak("Sorry, I didn't catch that.")
+                self._speak(NOT_HEARD)
+                self.report({"heard": "", "answer": NOT_HEARD,
+                             "record_transcribe_s": round(t_heard - t_press, 2)})
                 continue
             log.info("heard: %r", text)
             ans = self.ask(text, "voice")
             t_ans = time.monotonic()
+            intent = self.interpret(text)
             say, aim = self.respond(ans)
             aim.join()
             self.last_timing = {"record_transcribe_s": round(t_heard - t_press, 2),
@@ -244,6 +257,26 @@ class Room:
                                 "click_to_laser_s": round(time.monotonic() - t_press, 2),
                                 "stt_ms": dict(self.stt.last_ms)}
             log.info("timing %s", self.last_timing)
+            self.report({"heard": text, "intent": intent.kind, "object": intent.obj,
+                         "understood_by": getattr(self.interpret, "last_by", "rules"),
+                         "qwen_ms": round(getattr(self.interpret, "last_ms", 0.0)),
+                         "answer": ans.text, "point_at": ans.point_at, "action": ans.action,
+                         "laser_err_cm": (self.world.laser or {}).get("err_cm"),
+                         "online": bool(self.world.online), **self.last_timing})
+
+    def report(self, question: dict) -> None:
+        """Send one spoken question to the n8n workflow (n8n.webhook_url), in the background so it
+        never delays an answer. Empty URL: off."""
+        if not self.webhook_url:
+            return
+
+        def post() -> None:
+            try:
+                requests.post(self.webhook_url, json=dict(question, t=time.time()), timeout=3)
+            except requests.RequestException as ex:
+                log.debug("n8n webhook: %s", ex)
+
+        threading.Thread(target=post, name="report", daemon=True).start()
 
     def net_loop(self) -> None:
         while not self.stop_ev.is_set():
@@ -307,6 +340,7 @@ def build(cfg: dict, fake: bool = False, camera: int = 0, with_voice: bool = Tru
     import net
     import voice.pipeline
     import voice.tts
+    import voice.understand
 
     cleanup: list[Callable[[], None]] = []
     if fake:
@@ -365,7 +399,9 @@ def build(cfg: dict, fake: bool = False, camera: int = 0, with_voice: bool = Tru
 
     netmon = net.NetMonitor(cfg).start()
     cleanup.append(netmon.stop)
-    ask = voice.pipeline.make_ask(cfg, world, events, net=netmon)
+    interpret = voice.understand.Understander(cfg)
+    interpret.warm()                                   # logs and falls back to the rules if Qwen is down
+    ask = voice.pipeline.make_ask(cfg, world, events, net=netmon, interpret=interpret)
     tts = voice.tts.TTS(cfg, net=netmon)
     tts.warm()
     cleanup.append(tts.stop)
@@ -380,7 +416,7 @@ def build(cfg: dict, fake: bool = False, camera: int = 0, with_voice: bool = Tru
         stt.warm()
 
     room = Room(cfg, world, events, table, frames, laser, ask, netmon=netmon, tts=tts, stt=stt,
-                clicker=clicker, detector=detector, hands=hands)
+                clicker=clicker, detector=detector, hands=hands, interpret=interpret)
     room.cleanup = cleanup
     return room, perception
 

@@ -185,6 +185,31 @@ def test_voice_loop_nothing_heard(tmp_path, cal_path):
     t.join(2)
 
 
+def test_voice_loop_reports_each_question_to_n8n(tmp_path, cal_path, monkeypatch):
+    posted = []
+    monkeypatch.setattr(main.requests, "post", lambda url, json, timeout: posted.append((url, json)))
+    clicker = FakeClicker()
+    room, rig = make_room(tmp_path, cal_path, stt=FakeSTT("where's my wallet"), clicker=clicker)
+    room.webhook_url = "http://laptop:5678/webhook/ask-the-room"
+    t = threading.Thread(target=room.voice_loop, daemon=True)
+    t.start()
+    clicker.presses.release()
+    assert wait_for(lambda: posted)
+    url, q = posted[0]
+    assert url == room.webhook_url and q["heard"] == "where's my wallet"
+    assert (q["intent"], q["object"], q["understood_by"], q["point_at"]) == ("WHERE", "wallet", "rules", "wallet")
+    assert "wallet" in q["answer"].lower() and q["click_to_laser_s"] < 3.0
+    room.stop_ev.set()
+    t.join(2)
+
+
+def test_no_webhook_no_post(tmp_path, cal_path, monkeypatch):
+    monkeypatch.setattr(main.requests, "post", lambda *a, **k: pytest.fail("posted"))
+    room, _ = make_room(tmp_path, cal_path)
+    assert room.webhook_url == ""
+    room.report({"heard": "x"})
+
+
 def test_dashboard_ask_route_moves_fake_laser(tmp_path, cal_path):
     room, rig = make_room(tmp_path, cal_path)
     app = create_app(CFG, room.world, room.events, frames=None, ask_fn=room.ask_and_act, table=room.table)
@@ -230,7 +255,9 @@ def test_perception_loop_feeds_world(tmp_path):
 
 def test_build_fake_runs_without_hardware(monkeypatch, tmp_path):
     import net
+    import voice.understand
     monkeypatch.setattr(net.NetMonitor, "probe", lambda self: False)
+    monkeypatch.setattr(voice.understand.Qwen, "health", lambda self, timeout=1.0: False)   # no llama-server
     room, perception = main.build(CFG, fake=True, with_voice=False)
     try:
         assert perception is False and room.laser.fit is not None

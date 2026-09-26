@@ -8,15 +8,20 @@ from __future__ import annotations
 import time
 from typing import Callable, Optional
 
-from core.types import Answer
+from core.types import Answer, Intent
 
 AskFn = Callable[[str, str], Answer]
 
 
-def make_ask(cfg: dict, world, events, net=None, grok: Optional[Callable] = None) -> AskFn:
-    """Returns ask(text, source) -> Answer. `net` has `.online`; `grok` defaults to voice.llm.ask_grok."""
+def make_ask(cfg: dict, world, events, net=None, grok: Optional[Callable] = None,
+             interpret: Optional[Callable[[str], Intent]] = None) -> AskFn:
+    """Returns ask(text, source) -> Answer. `net` has `.online`; `grok` defaults to voice.llm.ask_grok;
+    `interpret` (text -> Intent) defaults to the rule parser (main.py passes voice.understand's Qwen)."""
     from voice.answers import answer
-    from voice.intents import parse
+
+    if interpret is None:
+        from voice.intents import parse
+        interpret = lambda text: parse(text, cfg)     # noqa: E731
 
     if grok is None:
         from voice.llm import ask_grok as grok
@@ -24,7 +29,7 @@ def make_ask(cfg: dict, world, events, net=None, grok: Optional[Callable] = None
     def ask(text: str, source: str = "voice") -> Answer:
         t0 = time.perf_counter()
         online = bool(net and net.online)
-        intent = parse(text, cfg)
+        intent = interpret(text)
         if intent.kind == "OTHER" and online:
             ans = grok(text, world, events, cfg, online=True)
         else:

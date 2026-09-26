@@ -33,3 +33,6 @@ models/**/*.pt
 models/**/*.engine
 models/**/*.onnx
 models/**/*.onnx.json
+models/**/*.gguf
+models/**/*.gguf.part
+models/**/*.bin
