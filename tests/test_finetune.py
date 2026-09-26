@@ -107,3 +107,11 @@ def test_public_hand_frames_always_train_and_never_validate():
         tr, va = split_by_trial(stems, seed=seed)
         assert va and not any(s.startswith(("pubhand_", "synth_")) for s in va), seed
         assert sum(s.startswith("pubhand_") for s in tr) == 30
+
+
+def test_negatives_are_counted(tmp_path):
+    (tmp_path / "labels").mkdir()
+    (tmp_path / "labels" / "cap0_empty-00.txt").write_text("")
+    (tmp_path / "labels" / "cap0_mug-00.txt").write_text("\n")
+    (tmp_path / "labels" / "cap0_keys-00.txt").write_text("0 0.5 0.5 0.1 0.1\n")
+    assert train.count_negatives(tmp_path, ["cap0_empty-00", "cap0_mug-00", "cap0_keys-00"]) == 2
