@@ -51,6 +51,24 @@ def test_qwen_reads_what_the_rules_cannot():
     assert u.last_by == "qwen"
 
 
+@pytest.mark.parametrize("text, kind, name", [
+    ("where is my charger", "WHERE", "charger"),                 # open world: world.find resolves it
+    ("where is the charger", "WHERE", "charger"),
+    ("what happened to my charger", "HISTORY", "charger"),
+    ("did anyone touch my charger", "HANDLED", "charger"),
+    ("what was I doing this morning", "WHAT_DOING", None),        # Qwen has no such kind
+    ("this is my charger", "TEACH", "charger"),
+])
+def test_rules_keep_names_and_rule_only_kinds_without_qwen(text, kind, name):
+    u = understander(kind="OTHER", obj="none")
+    i = u(text)
+    assert (i.kind, i.name) == (kind, name) and u.last_by == "rules" and u.qwen.asked == []
+
+
+def test_qwen_may_not_teach():
+    assert to_intent(json.dumps({"kind": "TEACH", "object": "keys"}), "my keys", CFG) is None
+
+
 def test_rules_object_beats_qwens():
     u = understander(kind="WHERE", obj="phone")
     assert u("I've lost the clicker again").obj == "remote"      # clicker is a synonym for the remote
@@ -62,7 +80,7 @@ def test_rules_object_beats_qwens():
     ("where is the charger", "phone", False),
 ])
 def test_qwen_object_must_sound_like_what_was_said(text, obj, keep):
-    i = understander(kind="WHERE", obj=obj)(text)
+    i = to_intent(json.dumps({"kind": "WHERE", "object": obj}), text, CFG)
     assert (i.kind, i.obj) == (("WHERE", obj) if keep else ("OTHER", None))
 
 
