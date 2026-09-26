@@ -25,6 +25,7 @@ Asked: rules first, then Qwen.
   - Qwen down, slower than understand.timeout_s, or bad output: the rules' answer stands.
 
 Overheard: decide "was that for me?" without the model, then read it like an asked question.
+  - A whole teaching sentence ("this is my vaseline") is for the rig, whatever else is true below.
   - listen.mode wake: only speech with the wake word counts (a loud hall defeats the rest).
   - Keyword gate: no object, command word or wake word ("we built this in twenty hours") -> IGNORE.
   - Addressed: the wake word ("room, ...") or a question/request opening ("where", "did", "can",
@@ -304,6 +305,10 @@ class Understander:
 
     def _overheard(self, text: str) -> Intent:
         ignore = Intent(kind=IGNORE, obj=None, raw=text)
+        taught = parse(text, self.cfg)
+        if taught.kind == "TEACH":             # "this is my vaseline": only a whole teaching sentence parses so
+            self.last_by, self.last_ms = "rules", 0.0     # (idioms like "call it a day" don't), and it
+            return taught                      # has no question opening or known object for the gate
         woke = has_wake_word(text, self.cfg)
         if (not text.strip() or not gate(text, self.cfg) or not addressed(text, self.cfg)
                 or (self.wake_only and not woke)):

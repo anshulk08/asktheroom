@@ -142,7 +142,7 @@ def test_placement_teach_and_question_point_at_the_one_identity(tmp_path):
                      "checkpoints": [{"t": t_ask + 1, "expect": at_rest("A", "BOX")}]})
     assert [m["entity"] for m in r["mapping"]["A"]] == ["thing:1"]
     assert r["commands"][0]["point_at"] == "thing:1" and "charger" in r["commands"][0]["answer"]
-    assert r["commands"][0]["overheard_ignored"] is True       # always-on mic alone would have dropped it
+    assert r["commands"][0]["overheard_ignored"] is False      # the always-on mic accepts teaching sentences
     q = r["questions"][0]
     assert q["point_at"] == "thing:1" and q["expected_entity"] == "thing:1" and q["correct"] is True
     assert r["question_accuracy"] == 1.0

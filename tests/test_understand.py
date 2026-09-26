@@ -246,3 +246,15 @@ def test_offline_the_model_is_not_asked(monkeypatch):
     u = Understander(CFG, model=stub, online=lambda: False)
     i = u("wears my wall it")
     assert stub.asked == [] and u.last_by == "rules" and i.kind == "OTHER"
+
+
+def test_an_overheard_teaching_sentence_is_for_the_rig():
+    """With the mic always on, "this is my vaseline" has no wake word, no question opening and no known
+    object, so the gate dropped it and teaching by voice only worked with the clicker."""
+    u = Understander(dict(CFG, understand={"enabled": False}))
+    for text, name in [("this is my vaseline", "vaseline"), ("that's my travel charger", "travel charger"),
+                       ("call this my lucky coin", "lucky coin")]:
+        i = u(text, overheard=True)
+        assert (i.kind, i.name) == ("TEACH", name), (text, i)
+    for text in ["let's call it a day", "that's my point", "it is a mess", "what do you call that"]:
+        assert u(text, overheard=True).kind == IGNORE, text
