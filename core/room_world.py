@@ -21,6 +21,19 @@ One instance per prop class is an M0 demo assumption, not identity evidence: a s
 appears in a zone after the keys leave the table would inherit them. The first-seen-after-departure and
 consume-once rules only keep decoys that were already there, or later ones, from doing so.
 
+Unnamed things (spec 0009 section 3, 'Identity: unnamed things'). A thing:N has no class the room detector
+could recognise, so the room pass tracks unnamed objects as cls 'thing' tracks and Grok names each crop
+(RoomTrack.guess); the table thing's own Grok name comes from world.thing_guess (core/auto_name.py). A
+confirmed 'thing' track that is not a thing's own track is handed over (Acquire, tentative) only when all
+hold: exactly one candidate (a thing, not merged, GONE / UNKNOWN on the table, with an unconsumed table
+departure within handoff_s and before the track's first_seen); no other pending 'thing' track anywhere in
+the rooms first seen after that departure (one-to-one: two new objects, one departure, could be either);
+and both Grok names exist and match (names_match). A mismatch is final ('ignored'); anything still open
+waits thing_name_wait_s from the track's first_seen, then is given up ('ignored'). 'ignored' and 'conflict'
+thing tracks are never re-decided. Refresh, Absence, Reacquire (same zone, one missing or absent thing
+there) and Return are the props' rules, keyed by track id (_thing_tracks) instead of class. Nothing about
+things is a conflict: 'thing' is not identity evidence.
+
 Room positions are full-frame px (RoomState.box_px); pos_cm stays None for a room entity, and freshness
 reads RoomState timestamps, never ent.last_seen (one table flicker rewrites that through _debounce).
 
@@ -32,7 +45,9 @@ import time
 from typing import Optional
 
 from core import relations
+from core.auto_name import match_score
 from core.room_types import TABLE, Conflict, Place, RoomConfig, RoomState, RoomTrack, ZoneVisit
+from core.things import is_thing
 from core.types import Entity, Event, EventType, Status
 
 DEPART_BACKDATE_MAX_S = 5.0  # a departure is dated back to the last table evidence at most this far
@@ -40,6 +55,21 @@ DEPARTURES = (EventType.EXITED_VIEW, EventType.LOST_TRACK)
 TABLE_HIDDEN = (Status.UNDER, Status.INSIDE, Status.HELD)
 OFF_TABLE = (Status.GONE, Status.UNKNOWN)
 TABLE_SAY = 'the table'
+THING = 'thing'                         # RoomTrack.cls of an unnamed object in a zone
+FINAL = ('conflict', 'ignored')         # a thing track in one of these roles is never re-decided
+
+
+def names_match(a: Optional[dict], b: Optional[dict], min_score: float) -> bool:
+    """Two Grok guesses name the same kind of object: some phrase of one (its name or an alternative) fits
+    the other at min_score or better (core.auto_name.match_score: 2 = the head noun shared), either way
+    round. 'remote' fits {'remote control', also 'remote'}; 'shoe' fits nothing about a remote."""
+    if not isinstance(a, dict) or not isinstance(b, dict):
+        return False
+    for g, other in ((a, b), (b, a)):
+        for phrase in [g.get('name')] + list(g.get('also') or []):
+            if isinstance(phrase, str) and match_score(phrase, other) >= min_score:
+                return True
+    return False
 
 
 class RoomRules:
@@ -49,19 +79,38 @@ class RoomRules:
         self._room: dict[str, RoomState] = {}
         self._departures: dict[str, tuple[float, float]] = {}   # name -> (t, wall) of its unconsumed departure
         self._conflicts: dict[str, dict[str, Conflict]] = {}     # name -> track id -> Conflict
+        self._thing_tracks: dict[str, str] = {}                  # 'thing' track id -> the thing:N it is
+        self._pending_things: dict[str, RoomTrack] = {}          # confirmed 'thing' tracks not decided yet
         self.room_cfg = RoomConfig.from_dict(getattr(self, '_room_raw', None))
+
+    def thing_guess(self, name: str) -> Optional[dict]:
+        """Grok's {name, also, confidence} for a thing on the table. core/auto_name.py's attach replaces
+        this on the instance; without a namer no thing has a name, so none is ever handed over."""
+        return None
 
     # ----- public API -----------------------------------------------------------------------------
 
     def room_update(self, visit: ZoneVisit) -> list[Event]:
-        """Apply one zone visit. Tracks of a class that is not an entity are ignored."""
+        """Apply one zone visit. Tracks of a class that is not an entity (nor 'thing') are ignored."""
         with self.lock:
             out: list[Event] = []
+            things = self.room_cfg.things
             # Each entity's own track first: its refresh this visit must be seen by the other tracks'
             # decisions (a same-class track while the own one still matches stays a conflict).
-            own = [t for t in visit.confirmed if (st := self._room.get(t.cls)) is not None and st.track == t.tid]
-            for trk in own + [t for t in visit.confirmed if t not in own]:
-                if trk.cls in self.entities:
+            own = [t for t in visit.confirmed if self._own_track(t) is not None]
+            rest = [t for t in visit.confirmed if t not in own]
+            # Every new thing track of this visit is known before any is decided: two that confirm together
+            # make each other ambiguous, whichever is decided first.
+            for trk in rest:
+                if things and trk.cls == THING and trk.role not in FINAL:
+                    if trk.role == 'assoc':           # its thing went back to the table (Return)
+                        trk.role, trk.entity = 'pending', None
+                    self._pending_things[trk.tid] = trk
+            for trk in own + rest:
+                if trk.cls == THING:
+                    if things:
+                        out += self._room_thing(trk, visit)
+                elif trk.cls in self.entities:
                     out += self._room_confirmed(trk.cls, trk, visit)
             for trk in visit.missed:
                 out += self._room_missed(trk, visit)
@@ -89,15 +138,18 @@ class RoomRules:
                 return Place(kind='room', zone=st.zone, say=st.say, status=vent.status, chain=chain, via=via,
                              box_px=st.box_px, observed_directly=via == name, fresh=fresh, absent=st.absent,
                              arrived_wall=st.arrived_wall, last_seen_wall=st.seen_wall,
-                             arrival_observed=st.arrival_observed, conflicts=conflicts)
+                             arrival_observed=st.arrival_observed, conflicts=conflicts,
+                             tentative=st.tentative)
             say = TABLE_SAY if vent.zone == TABLE else f'the {vent.zone}'
             return Place(kind='table', zone=vent.zone, say=say, status=vent.status, chain=chain, via=via,
                          pos_cm=pos, observed_directly=via == name, conflicts=conflicts)
 
     def room_json(self) -> dict:
         """For state_json: name -> its room state, plus 'conflicts' (every recorded conflict sighting)."""
+        # 'tentative' only when true (a thing handed over by name): a prop's entry keeps its M0 shape.
         out: dict = {n: {'zone': st.zone, 'say': st.say, 'box_px': list(st.box_px), 'seen_wall': st.seen_wall,
-                         'absent': st.absent, 'arrival_observed': st.arrival_observed}
+                         'absent': st.absent, 'arrival_observed': st.arrival_observed,
+                         **({'tentative': True} if st.tentative else {})}
                      for n, st in self._room.items()}
         out['conflicts'] = [{'entity': c.entity, 'zone': c.zone, 'say': c.say, 'track': c.track,
                              'box_px': list(c.box_px), 'seen_wall': c.seen_wall}
@@ -126,14 +178,22 @@ class RoomRules:
         the old track; the next visit re-decides it against the table (ignored while the table sees it)."""
         self._room.pop(name, None)
         self._conflicts.pop(name, None)
+        for tid in [tid for tid, n in self._thing_tracks.items() if n == name]:
+            del self._thing_tracks[tid]       # a thing's old room track is just an unnamed track again
         return [self._emit(name, EventType.MOVED, to_cm=ent.pos_cm)]
 
     # ----- transitions ---------------------------------------------------------------------------------
 
+    def _own_track(self, trk: RoomTrack) -> Optional[str]:
+        """The entity whose associated track trk is (a prop by its class, a thing by the track id), or None."""
+        name = self._thing_tracks.get(trk.tid) if trk.cls == THING else trk.cls
+        st = self._room.get(name) if name is not None else None
+        return name if st is not None and st.track == trk.tid else None
+
     def _room_confirmed(self, name: str, trk: RoomTrack, visit: ZoneVisit) -> list[Event]:
         st = self._room.get(name)
         if st is not None and st.track == trk.tid:
-            self._room_refresh(st, trk)
+            self._room_refresh(name, st, trk)
             return []
         if trk.role == 'conflict':            # never upgrades
             self._room_conflict(name, trk, visit)
@@ -174,12 +234,92 @@ class RoomRules:
             return 'reacquire'
         return 'conflict'
 
-    def _room_acquire(self, name: str, trk: RoomTrack, visit: ZoneVisit) -> list[Event]:
+    def _room_thing(self, trk: RoomTrack, visit: ZoneVisit) -> list[Event]:
+        """A confirmed 'thing' track: its thing's own track refreshes; a final one stays as it is; any other
+        is decided (see the module docstring) and, once handed over, is that thing's track."""
+        name = self._own_track(trk)
+        if name is not None:
+            self._room_refresh(name, self._room[name], trk)
+            return []
+        if trk.role in FINAL:
+            return []
+        op, name = self._thing_decide(trk, visit)
+        if op == 'pending':
+            return []
+        self._pending_things.pop(trk.tid, None)
+        if op == 'ignored':
+            trk.role, trk.entity = 'ignored', None
+            return []
+        old = self._room[name].track if op == 'reacquire' else None
+        self._thing_tracks.pop(old, None)
+        self._thing_tracks[trk.tid] = name
+        if op == 'reacquire':
+            return self._room_reacquire(name, trk, visit)     # keeps RoomState.tentative
+        return self._room_acquire(name, trk, visit, tentative=True)
+
+    def _thing_decide(self, trk: RoomTrack, visit: ZoneVisit) -> tuple[str, Optional[str]]:
+        """('acquire' | 'reacquire', thing) or ('pending' | 'ignored', None) for a thing track that is not
+        its thing's own. Reacquire first (a thing missing in this zone: the props' rule, one such thing
+        only), then the handoff: one candidate, one new track, matching names. Undecided stays pending
+        while the track is younger than thing_name_wait_s (a name or the other track's fate may still
+        come); after that it is given up."""
+        rc = self.room_cfg
+        name = self._thing_reacquire(trk, visit)
+        if name is not None:
+            return 'reacquire', name
+        cands = self._thing_candidates(trk, visit)
+        if len(cands) == 1:
+            name, dep_t = cands[0]
+            others = [p for tid, p in self._pending_things.items()
+                      if tid != trk.tid and p.role == 'pending' and p.first_seen > dep_t]
+            mine, theirs = trk.guess, self.thing_guess(name)
+            if not others and mine is not None and theirs is not None:
+                if names_match(mine, theirs, rc.name_match_min):
+                    return 'acquire', name
+                return 'ignored', None    # a shoe left the table; this is a remote: never that thing
+        if visit.t - trk.first_seen >= rc.thing_name_wait_s:
+            return 'ignored', None
+        return 'pending', None
+
+    def _thing_candidates(self, trk: RoomTrack, visit: ZoneVisit) -> list[tuple[str, float]]:
+        """(thing, departure t) for every thing this track could be: carried off the table (unconsumed
+        departure within handoff_s, before the track was first seen), still off it, not merged away and
+        not already some other track's."""
+        taken = set(self._thing_tracks.values())
+        out = []
+        for name, (dep_t, _) in self._departures.items():
+            ent = self.entities.get(name)
+            if (ent is None or not is_thing(name) or ent.merged_into is not None or name in taken
+                    or name in self._room):
+                continue
+            if (ent.zone == TABLE and ent.status in OFF_TABLE and visit.t - dep_t <= self.room_cfg.handoff_s
+                    and dep_t < trk.first_seen):
+                out.append((name, dep_t))
+        return out
+
+    def _thing_reacquire(self, trk: RoomTrack, visit: ZoneVisit) -> Optional[str]:
+        """The one thing in this zone whose own track is missing or absent and was last matched before trk
+        was first seen (moved within the zone), or None. Two such things: none (a thing has no class to
+        tell them apart). A track whose Grok name contradicts the thing's is not it."""
+        hits = []
+        for name, st in self._room.items():
+            ent = self.entities.get(name)
+            if (not is_thing(name) or ent is None or ent.merged_into is not None or st.zone != visit.zone
+                    or trk.first_seen <= st.seen_t or not (st.absent or st.misses > 0)):
+                continue
+            theirs = self.thing_guess(name)
+            if trk.guess is not None and theirs is not None and not names_match(trk.guess, theirs,
+                                                                               self.room_cfg.name_match_min):
+                continue
+            hits.append(name)
+        return hits[0] if len(hits) == 1 else None
+
+    def _room_acquire(self, name: str, trk: RoomTrack, visit: ZoneVisit, tentative: bool = False) -> list[Event]:
         del self._departures[name]            # consumed: one departure, one acquisition
         ent = self.entities[name]
         self._room[name] = RoomState(zone=visit.zone, say=visit.say, box_px=trk.box_px, track=trk.tid,
                                      seen_t=trk.last_seen, seen_wall=trk.last_wall, arrived_wall=trk.first_wall,
-                                     arrival_observed=True, table_pos_cm=ent.pos_cm)
+                                     arrival_observed=True, table_pos_cm=ent.pos_cm, tentative=tentative)
         return self._room_settle(name, ent, trk, visit)
 
     def _room_reacquire(self, name: str, trk: RoomTrack, visit: ZoneVisit) -> list[Event]:
@@ -204,12 +344,12 @@ class RoomRules:
         trk.role, trk.entity = 'assoc', name
         return [self._emit(name, EventType.FOUND, t=visit.t, wall=visit.wall, img=visit.crop)]
 
-    def _room_refresh(self, st: RoomState, trk: RoomTrack) -> None:
+    def _room_refresh(self, name: str, st: RoomState, trk: RoomTrack) -> None:
         """Its own track matched again. An observation older than the one last applied is ignored."""
         if trk.last_seen < st.seen_t:
             return
         st.box_px, st.seen_t, st.seen_wall, st.misses = trk.box_px, trk.last_seen, trk.last_wall, 0
-        ent = self.entities.get(trk.cls)
+        ent = self.entities.get(name)
         if ent is not None:
             ent.last_seen = trk.last_wall
 
@@ -222,10 +362,10 @@ class RoomRules:
     def _room_missed(self, trk: RoomTrack, visit: ZoneVisit) -> list[Event]:
         """A valid visit without a match for the entity's own track. Blocked visits never reach here (the
         tracker leaves them out), so a person in front of the zone counts for nothing."""
-        name = trk.cls
-        st = self._room.get(name)
-        if st is None or st.track != trk.tid:
+        name = self._own_track(trk)
+        if name is None:
             return []
+        st = self._room[name]
         st.misses = trk.misses
         rc = self.room_cfg
         if st.misses < rc.absent_visits or visit.t - st.seen_t < rc.absent_min_s or st.absent:
@@ -237,9 +377,11 @@ class RoomRules:
         return [self._emit(name, EventType.LOST_TRACK, t=visit.t, wall=visit.wall, img=visit.crop)]
 
     def _room_dropped(self, trk: RoomTrack) -> None:
-        st = self._room.get(trk.cls)
-        if st is not None and st.track == trk.tid:
-            st.track = None                   # released; the state stays (absent) for reacquire
+        name = self._own_track(trk)
+        if name is not None:
+            self._room[name].track = None     # released; the state stays (absent) for reacquire
+        self._thing_tracks.pop(trk.tid, None)
+        self._pending_things.pop(trk.tid, None)
         for name in list(self._conflicts):
             self._conflicts[name].pop(trk.tid, None)
             if not self._conflicts[name]:

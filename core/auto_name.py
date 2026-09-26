@@ -391,7 +391,8 @@ class AutoNamer:
 
     def attach(self, world) -> "AutoNamer":
         """After every world.update, queue close-ups of new things; state_json's things carry their
-        guess and the status carries the disclosure; world.find_guess(said) looks guesses up."""
+        guess and the status carries the disclosure; world.find_guess(said) looks guesses up and
+        world.thing_guess(thing) reads one (the room handoff, core/room_world.py)."""
         update = getattr(world, "update", None)
         if callable(update):
             def update_and_name(dets, frame):
@@ -419,6 +420,7 @@ class AutoNamer:
 
         world.state_json = state_json
         world.find_guess = self.find_guess
+        world.thing_guess = self.guess     # room memory: a departed thing's name, matched against room tracks
         return self
 
     def stop(self) -> None:
