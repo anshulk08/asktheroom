@@ -511,9 +511,9 @@ room:
 # pick-up leaves the band of table around the object's spot as it was once the hand is off it; a cover
 # leaves it changed all round. The band (ring_cm wide) is remembered in colour once it looked the same for
 # adopt_s with the object detected and no hand over it. An object that vanishes with sides_min sides of its
-# band changed (pixel_diff per channel on side_changed of a side's pixels, hand boxes left out), settled
-# for settle_s, is UNDER the cover: a named cover that qualifies, a thing laid over it (a napkin the
-# proposer sees whole), else 'unknown'. An absence waits on an unclear band (hands hide it) or a settling
+# band changed (pixel_diff per channel on side_changed of a side's pixels, hand boxes left out; on average
+# mean_changed) and at rest (as it was settle_s before) is UNDER the cover: a named cover that qualifies, a
+# thing laid over it (a napkin the proposer sees whole), else 'unknown'. An absence waits on an unclear band (hands hide it) or a settling
 # one at most wait_max_s. An object no hand touched is judged by its band only when the lost grace runs out
 # (an undetected arm lying across it looks alike for a while). A HELD object whose band settles covered was
 # covered, not carried. Lifted: objects seen again are UNCOVERED as themselves; one whose band is bare again
@@ -523,7 +523,8 @@ unknown_cover:
   ring_cm: 4.0                # band of table around an object's box
   pixel_diff: 30              # 0-255, in any colour channel (grey could not tell a red blanket from wood)
   side_changed: 0.5           # share of a side's pixels that differ: that side is changed
-  sides_min: 3                # sides changed (of left, right, top, bottom): something lies over the spot
-  settle_s: 0.3               # covered at every look this long: a cover at rest, not an arm passing
+  sides_min: 3                # sides changed (of left, right, top, bottom): something lies over the spot ...
+  mean_changed: 0.75          # ... and those sides changed this much on average (a dim sleeve: about 0.55)
+  settle_s: 0.5               # the covered band unchanged over this long: a cover at rest, not a moving arm
   adopt_s: 1.0                # the band must look the same this long before it is remembered
   wait_max_s: 2.0             # longest wait on an unclear or settling band before the other rules decide

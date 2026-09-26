@@ -105,9 +105,9 @@ class World(ThingRules):
             self._gray_img = None                       # this update's grey frame, made on demand
             self._ucfg = UnknownCoverConfig.from_config(self.cfg)
             self._bands = SurroundMemory(self._ucfg)    # the band of table around each object (unknown covers)
-            self._laid_t: dict[str, float] = {}         # obj -> since when its band has looked covered
             self._laid_wait: dict[str, float] = {}      # obj -> since when its absence waits on the band
             self._bare_at: dict[str, float] = {}        # obj UNDER 'unknown' -> since when its band looks bare
+            self._unknown_uncovered: set[str] = set()   # last seen again from under 'unknown'
             self._reset_things()
 
     def get(self, name: str) -> Entity:
@@ -263,6 +263,9 @@ class World(ThingRules):
 
     def _observe(self, name: str, ent: Entity) -> list[Event]:
         prev, origin, known = ent.status, ent.pre_pickup_pos, name in self._confirmed
+        # seen again where something unknown lay over it: found in place, not put down (teach, _refound)
+        (self._unknown_uncovered.add if prev == Status.UNDER and ent.parent == 'unknown'
+         else self._unknown_uncovered.discard)(name)
         ent.status, ent.parent, ent.candidates, ent.confidence, ent.edge = Status.VISIBLE, None, [], 1.0, None
         ent.zone, ent.pre_pickup_pos, ent.held_since = 'table', None, None
         self._confirmed.add(name)
@@ -532,26 +535,24 @@ class World(ThingRules):
     # the cover: a named cover that qualifies, a thing laid over it, else 'unknown'.
 
     def _laid_over(self, name: str, ent: Entity, settled: bool = False):
-        """A verdict once the band around the object's spot has looked covered for settle_s; NO_CHANGE
-        while it is settling or hands hide too much of it to tell (at most wait_max_s); None when the
-        band shows table (or there is no memory of it): the other rules decide. settled: the absence has
-        lasted the whole lost grace already, so one covered look is enough."""
+        """A verdict once the band around the object's spot looks covered and has been at rest for
+        settle_s (a cover lying there; an arm keeps moving); NO_CHANGE while it settles or hands hide
+        too much of it to tell (at most wait_max_s); None when the band shows table (or there is no
+        memory of it): the other rules decide. settled: the lost grace has run out, decide now."""
         uc, img = self._ucfg, (self._frame.img if self._frame is not None else None)
         band = self._bands.memory(name) if uc.enabled and img is not None else None
         if band is None:
             return None
-        now = self._now
-        if now - self._laid_wait.setdefault(name, now) > uc.wait_max_s:
-            self._laid_t.pop(name, None)
+        now, hands = self._now, [self._hands[h][1] for h in self._hands_now]
+        self._bands.sample(name, img, now)
+        if not settled and now - self._laid_wait.setdefault(name, now) > uc.wait_max_s:
             return None
-        look = self._bands.look(name, img, [self._hands[h][1] for h in self._hands_now])
+        look = self._bands.look(name, img, hands)
         if look is False:
-            self._laid_t.pop(name, None)
             self._laid_wait.pop(name, None)
             return None
-        if look is None or (not settled and now - self._laid_t.setdefault(name, now) < uc.settle_s - 1e-9):
-            return NO_CHANGE
-        self._laid_t.pop(name, None)
+        if look is None or not self._bands.still(name, img, now, uc.settle_s, hands):
+            return None if settled else NO_CHANGE
         self._laid_wait.pop(name, None)
         ent.box_cm, ent.pos_cm = band.box_cm, geom.center(band.box_cm)    # it lies where it rested
         self._box_px[name] = band.box_px
@@ -627,9 +628,9 @@ class World(ThingRules):
 
     def _settled_band(self, name: str) -> None:
         """Seen again, or set down: no cover is settling over it; a band remembered elsewhere is stale."""
-        self._laid_t.pop(name, None)
         self._laid_wait.pop(name, None)
         self._bare_at.pop(name, None)
+        self._bands.drop_samples(name)
         band, pos = self._bands.memory(name), self.entities[name].pos_cm
         if band is not None and pos is not None and geom.dist(geom.center(band.box_cm), pos) >= self.cfg.moved_min_cm:
             self._bands.forget(name)
@@ -643,6 +644,9 @@ class World(ThingRules):
             ent = self.entities[name]
             if ent.status == Status.VISIBLE and self._present[name] and ent.zone == 'table':
                 self._bands.observe(name, img, det.box_px, det.box_cm, self._now, hands_px)
+        for name, ent in self.entities.items():     # not seen now: keep views, to tell a cover at rest
+            if name not in seen and ent.status in (Status.VISIBLE, Status.HELD) and ent.zone == 'table':
+                self._bands.sample(name, img, self._now)
 
     # ----- rule 5: HELD objects ------------------------------------------------------------------
 

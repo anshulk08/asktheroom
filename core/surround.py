@@ -19,6 +19,7 @@ a side with too few pixels left is not judged.
 """
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, fields
 
 import cv2
@@ -31,6 +32,8 @@ MAX_DIM = 64            # the stored band is downscaled so its longer side is at
 MIN_VISIBLE = 0.3       # a side with less than this share of its pixels clear of hand boxes is not judged
 SAME_MAX = 0.1          # two views of the band with at most this share of pixels changed are the same
 SAME_BOX_IOU = 0.7      # a detection box this much like the remembered one is the object in place
+STILL_MAX = 0.15        # a band that changed on at most this share of its pixels over settle_s is at rest
+SAMPLES = 40            # recent views of a band kept per object, for the at-rest check
 
 
 @dataclass
@@ -40,8 +43,9 @@ class UnknownCoverConfig:
     ring_cm: float = 4.0        # width of the band of table around an object that is remembered
     pixel_diff: float = 30.0    # a pixel differs from memory by more than this in some channel (0-255)
     side_changed: float = 0.5   # a side of the band is changed when this share of its pixels differ
-    sides_min: int = 3          # this many sides changed (none clear of change): something lies over the spot
-    settle_s: float = 0.3       # ... at every look for this long: a cover at rest, not an arm passing
+    sides_min: int = 3          # this many sides changed: something lies over the spot ...
+    mean_changed: float = 0.75  # ... and those sides_min most changed sides average at least this
+    settle_s: float = 0.5       # ... and at rest this long: a cover lying there, not an arm moving
     adopt_s: float = 1.0        # the band is remembered once it looked the same this long
     wait_max_s: float = 2.0     # the longest an absence waits on an unclear or settling band
 
@@ -66,6 +70,7 @@ class SurroundMemory:
         self.cfg = cfg
         self._mem: dict[str, Band] = {}
         self._pending: dict[str, Band] = {}
+        self._recent: dict[str, deque] = {}     # name -> (t, crop) views of the remembered band
 
     # ----- remembering ---------------------------------------------------------------------------
 
@@ -75,6 +80,7 @@ class SurroundMemory:
     def forget(self, name: str) -> None:
         self._mem.pop(name, None)
         self._pending.pop(name, None)
+        self._recent.pop(name, None)
 
     def observe(self, name: str, img: np.ndarray, box_px: BoxPx, box_cm: BoxCm, t: float,
                 hands_px: list[BoxPx]) -> None:
@@ -89,6 +95,7 @@ class SurroundMemory:
             if now is not None and self._same(p, now):
                 if t - p.t >= self.cfg.adopt_s:
                     self._mem[name] = Band(t, p.outer, p.box_px, p.box_cm, now)
+                    self._recent.pop(name, None)
                 return
         crop = self._crop(img, outer)
         if crop is not None:
@@ -120,19 +127,48 @@ class SurroundMemory:
         return out
 
     def look(self, name: str, img: np.ndarray, hands_px: list[BoxPx]) -> bool | None:
-        """True: changed on at least sides_min sides (something lies over the spot and around it).
-        False: some side is clear of change (the table shows there). None: no memory, or every side that
+        """True: changed on at least sides_min sides, and those average mean_changed (something lies over
+        the spot and around it; a dim sleeve lying across changed them only by half, place_1). False: some
+        side is clear of change (the table shows there), or the change is too faint. None: no memory, or every side that
         can be seen is changed but hands hide too many to tell."""
         s = self.sides(name, img, hands_px)
         if s is None:
             return None
-        seen = [v for v in s if v is not None]
+        seen = sorted((v for v in s if v is not None), reverse=True)
         changed = sum(v >= self.cfg.side_changed for v in seen)
         if changed >= self.cfg.sides_min:
-            return True
+            top = seen[:self.cfg.sides_min]
+            return sum(top) / len(top) >= self.cfg.mean_changed
         if changed < len(seen):
             return False
         return None
+
+    def sample(self, name: str, img: np.ndarray, t: float) -> None:
+        """Keep this view of the remembered band, for still()."""
+        band = self._mem.get(name)
+        cur = self._crop(img, band.outer) if band is not None and img is not None else None
+        if cur is not None:
+            q = self._recent.setdefault(name, deque(maxlen=SAMPLES))
+            if not q or q[-1][0] < t:
+                q.append((t, cur))
+
+    def drop_samples(self, name: str) -> None:
+        self._recent.pop(name, None)
+
+    def still(self, name: str, img: np.ndarray, t: float, span: float, hands_px: list[BoxPx]) -> bool | None:
+        """The band now looks as it did span seconds ago (at most STILL_MAX of its pixels clear of hands
+        changed): what lies there is at rest. None when no view that old was sampled."""
+        band, q = self._mem.get(name), self._recent.get(name)
+        old = [c for ts, c in (q or ()) if t - span - 1.0 <= ts <= t - span + 1e-9]
+        cur = self._crop(img, band.outer) if band is not None and img is not None else None
+        if not old or cur is None or cur.shape != old[-1].shape:
+            return None
+        diff = np.abs(cur.astype(np.int16) - old[-1].astype(np.int16)).max(axis=2) > self.cfg.pixel_diff
+        mask = self._clear_mask(band, hands_px, diff.shape)
+        bx1, by1 = self._to_crop(band, band.box_px[0], band.box_px[1], diff.shape)
+        bx2, by2 = self._to_crop(band, band.box_px[2], band.box_px[3], diff.shape)
+        mask[by1:by2, bx1:bx2] = False
+        return bool(mask.any()) and float(diff[mask].mean()) <= STILL_MAX
 
     def bare(self, name: str, img: np.ndarray, hands_px: list[BoxPx]) -> bool:
         """The band looks as remembered again: at least sides_min sides seen, at most one of them changed

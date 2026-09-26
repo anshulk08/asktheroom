@@ -306,3 +306,27 @@ def test_a_band_hidden_by_hands_is_unclear():
     covered[200:400, 300:560] = (30, 30, 200)
     hands = [(350, 230, 520, 400)]                         # a hand box over the spot and most of the band
     assert mem.look('keys', covered, hands) is None
+
+
+def test_an_undetected_arm_moving_over_untouched_keys_is_not_a_cover(cfg, world):
+    """place_1: a sleeved arm (no hand detected) lay across the phone for the whole lost grace. It covers
+    the band all round like a blanket, but it keeps moving; a cover lies at rest. So the phone is lost as
+    before, not UNDER something (and found again when the arm goes)."""
+    s = Scene(cfg, fps=10, t0=1000.0, render=True)
+    s.place('keys', *KEYS_AT)
+    s.run(world, 2.0)
+    s.miss('keys')
+    events = []
+    for i in range(int((cfg.lost_grace_s + 1.0) * 10)):
+        s.overlay('sleeve', 40 + (i % 5) - 2, 30 + (i % 3), 24, 16)    # shifts a little every batch
+        events += world.update(*s.step())
+    assert of(events, 'keys') == [EventType.LOST_TRACK]
+
+
+def test_objects_seen_again_when_the_blanket_is_lifted_were_not_put_down(rscene, world):
+    """'this is my X' names what was just put down; the blanket lifting off the table puts nothing down."""
+    table_of_three(rscene, world)
+    lay_blanket(rscene, world)
+    placed = dict(world._placed_t)                 # when each was last put down in view
+    lift_blanket(rscene, world)
+    assert world._placed_t == placed
