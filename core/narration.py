@@ -961,7 +961,7 @@ def from_config(cfg: dict, events, world=None, online: Optional[Callable[[], boo
 # ---------------------------------------------------------------- selftest (a real provider call)
 
 def _selftest(argv=None) -> int:
-    """python -m core.narration --selftest [--photos a.jpg b.jpg ...] [--n 2]
+    """python -m core.narration --selftest [--photos a.jpg b.jpg ...] [--n 2] [--reasoning none]
 
     Narrates real episodes with the configured provider (default Grok; needs $XAI_API_KEY) and prints
     latency, token usage and the validated JSON. Without --photos, episodes come from server/sim.py's
@@ -978,10 +978,13 @@ def _selftest(argv=None) -> int:
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--photos", nargs="*", help="still photos played as one episode, oldest first")
     ap.add_argument("--n", type=int, default=2, help="episodes to narrate")
+    ap.add_argument("--reasoning", help="override narration.reasoning_effort (grok: none | low | ...)")
     a = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     cfg = load_config()
     nc = dict(cfg.get("narration") or {}, enabled=True)
+    if a.reasoning:
+        nc["reasoning_effort"] = a.reasoning
     cfg = {**cfg, "narration": nc}
     c = NarrationConfig.from_dict(nc)
     key_env = c.api_key_env or ("XAI_API_KEY" if c.provider == "grok" else "ANTHROPIC_API_KEY")
