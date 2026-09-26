@@ -26,8 +26,9 @@ import subprocess
 import time
 from pathlib import Path
 
-JETSON = "guru@192.168.55.1"
-DEVICE = "/dev/v4l/by-id/usb-046d_0809_A1C0DC94-video-index0"
+import os
+JETSON = os.environ.get("ASKROOM_JETSON", "guru@10.90.84.178")            # Wi-Fi; guru@192.168.55.1 over USB
+DEVICE = os.environ.get("ASKROOM_CAMERA", "/dev/v4l/by-id/usb-046d_Logitech_BRIO_3675F8D2-video-index0")
 PROPS = {"A": "wallet", "B": "small object", "C": "phone", "NB": "notebook", "BOX": "box"}   # B: keys or any small solid object; BOX: any open container
 ALL_ON_TABLE = {p: {"state": "on_table"} for p in PROPS}
 
@@ -76,6 +77,25 @@ CLIPS = {
         "checkpoints": [{"at": 15, "expect": {"B": {"state": "under", "parent": "NB"}}},
                         {"at": 26, "expect": {"B": {"state": "inside", "parent": "BOX"}}},
                         {"at": 36, "expect": {"B": {"state": "inside", "parent": "BOX"}}}],
+    },
+    "blanket": {
+        "props": {"B": "small object", "C": "phone", "NB": "notebook", "BL": "blanket (a cover the rig has no class for)"},
+        "seconds": 30,
+        "setup": "The AirPods case (B), the phone and the notebook spread out on the table. Hold the blanket, off the table.",
+        "steps": [{"at": 0, "say": "Recording. Hands away.", "event": "hands_out"},
+                  {"at": 4, "say": "Lay the blanket over everything, then hands away.", "event": "cover", "obj": "B",
+                   "parent": "BL"},
+                  {"at": 4.01, "say": "", "event": "cover", "obj": "C", "parent": "BL"},
+                  {"at": 4.02, "say": "", "event": "cover", "obj": "NB", "parent": "BL"},
+                  {"at": 16, "say": "Lift the blanket off and take it away, then hands away.", "event": "uncover",
+                   "obj": "B", "parent": "BL"},
+                  {"at": 16.01, "say": "", "event": "uncover", "obj": "C", "parent": "BL"},
+                  {"at": 16.02, "say": "", "event": "uncover", "obj": "NB", "parent": "BL"}],
+        "questions": [{"at": 12, "text": "where is my phone?", "expect_prop": "C", "expect_parent": "BL"}],
+        "checkpoints": [{"at": 13, "expect": {"B": {"state": "under", "parent": "BL"},
+                                              "C": {"state": "under", "parent": "BL"}}},
+                        {"at": 27, "expect": {"B": {"state": "on_table"}, "C": {"state": "on_table"},
+                                              "NB": {"state": "on_table"}}}],
     },
     "exit": {
         "props": {"C": "phone", "NB": "notebook"}, "seconds": 18,
@@ -137,11 +157,12 @@ def say(text: str) -> subprocess.Popen:
     return subprocess.Popen(["say", "-r", "185", text])
 
 
-def run_clip(name: str, clip_id: str, exposure: int = 333, gain: int = 96) -> Path:
+def run_clip(name: str, clip_id: str, exposure: int = 333, gain: int = 96, setup: bool = True) -> Path:
     clip = CLIPS[name]
     git = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
-    ssh("C=$(docker ps -q --filter ancestor=askroom:latest); [ -n \"$C\" ] && docker stop $C >/dev/null; "
-        f"cd ~/askroom && scripts/camera_setup.sh {exposure} {DEVICE} {gain} >/dev/null", timeout=90)
+    cam = f"cd ~/askroom && scripts/camera_setup.sh {exposure} {DEVICE} {gain} >/dev/null" if setup else "true"
+    ssh("C=$(docker ps -q --filter ancestor=askroom:latest); [ -n \"$C\" ] && docker stop $C >/dev/null; " + cam,
+        timeout=90)
     offset = clock_offset()
     controls = camera_controls()
     out = f"data/clips/{clip_id}"
@@ -163,7 +184,8 @@ def run_clip(name: str, clip_id: str, exposure: int = 333, gain: int = 96) -> Pa
     for s in clip["steps"]:
         time.sleep(max(0.0, t_zero + s["at"] - time.time()))
         cues.append(time.time())
-        say(s["say"])
+        if s["say"]:
+            say(s["say"])
         print(f"  {cues[-1] - t_zero:5.1f} s  {s['say']}", flush=True)
     rec.wait(timeout=clip["seconds"] + 60)
     say("Done.")
@@ -185,12 +207,13 @@ def main(argv=None) -> int:
     ap.add_argument("--id")
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--gain", type=int, default=96)
+    ap.add_argument("--no-setup", action="store_true", help="keep the camera's current settings (a tuned camera)")
     a = ap.parse_args(argv)
     if a.list or not a.clip:
         for k, c in CLIPS.items():
             print(f"{k:18s} {c['seconds']:3d} s  setup: {c['setup']}")
         return 0
-    run_clip(a.clip, a.id or f"{a.clip}_{time.strftime('%H%M%S')}", gain=a.gain)
+    run_clip(a.clip, a.id or f"{a.clip}_{time.strftime('%H%M%S')}", gain=a.gain, setup=not a.no_setup)
     return 0
 
 
