@@ -50,7 +50,8 @@ MATCH_DIAG = 0.5            # ... or a centre within 0.5 track-box diagonals
 DEDUPE_IOU = 0.5            # two boxes of one class this overlapped in one crop are one object (two prompts)
 THING = "thing"             # cls of an unnamed object (a YOLOE proposal); never matches a prop's track
 PROP_IOU = 0.5              # a proposal this overlapped with a prop observation is that prop
-NAME_MARGIN = 0.15          # a thing's close-up for Grok: its box grown by this per side
+NAME_MARGIN = 0.5           # a thing's close-up for Grok: its box grown by this per side (small, far objects
+                            # need the surroundings to be recognisable: rig run Sat 26 Sep)
 ERR_LOG_S = 10.0            # a failing proposer is logged at most this often
 DILATE = np.ones((5, 5), np.uint8)
 
@@ -165,10 +166,10 @@ class RoomTracker:
 # Grok names for thing tracks
 
 class _Job:
-    __slots__ = ("track", "img", "attempts", "due")
+    __slots__ = ("track", "img", "attempts", "due", "hints")
 
-    def __init__(self, track: RoomTrack, img: np.ndarray, due: float):
-        self.track, self.img, self.attempts, self.due = track, img, 0, due
+    def __init__(self, track: RoomTrack, img: np.ndarray, due: float, hints=None):
+        self.track, self.img, self.attempts, self.due, self.hints = track, img, 0, due, hints
 
 
 class RoomNamer:
@@ -180,8 +181,10 @@ class RoomNamer:
 
     def __init__(self, name_fn: Callable[[np.ndarray], Optional[dict]], per_minute: int = 6,
                  online: Optional[Callable[[], bool]] = None, clock: Callable[[], float] = time.monotonic,
-                 retry_s: float = 5.0, max_pending: int = 8, start: bool = True):
+                 retry_s: float = 5.0, max_pending: int = 8, start: bool = True,
+                 verify_fn: Optional[Callable[[np.ndarray, list], Optional[dict]]] = None):
         self.name_fn = name_fn
+        self.verify_fn = verify_fn         # (img, hints) -> guess: "is this one of these?" beats open naming
         self.per_minute = int(per_minute)
         self.online = online or (lambda: True)
         self.clock = clock
@@ -196,9 +199,11 @@ class RoomNamer:
             self._thread = threading.Thread(target=self._run, name="room-name", daemon=True)
             self._thread.start()
 
-    def submit(self, track: RoomTrack, img: np.ndarray) -> None:
+    def submit(self, track: RoomTrack, img: np.ndarray, hints: Optional[list] = None) -> None:
+        """hints: Grok names of things that just left the table (the handoff candidates), asked about
+        directly when a verify_fn is set."""
         with self._lock:
-            self._jobs.append(_Job(track, img, self.clock()))
+            self._jobs.append(_Job(track, img, self.clock(), list(hints) if hints else None))
         self._wake.set()
 
     def pending(self) -> int:
@@ -209,7 +214,7 @@ class RoomNamer:
         """Try the next due job. True when a call was made."""
         now = self.clock() if now is None else now
         with self._lock:
-            job = next((j for j in self._jobs if j.due <= now), None)
+            job = next((j for j in reversed(self._jobs) if j.due <= now), None)   # newest first: the fresh arrival
             if job is None or not self.online():
                 return False
             while self._calls and self._calls[0] <= now - 60.0:
@@ -220,7 +225,8 @@ class RoomNamer:
             self._calls.append(now)
         job.attempts += 1
         try:
-            g = self.name_fn(job.img)
+            g = (self.verify_fn(job.img, job.hints) if job.hints and self.verify_fn is not None
+                 else self.name_fn(job.img))
         except Exception as e:
             log.info("naming room track %s failed (attempt %d): %s", job.track.tid, job.attempts, e)
             g = None
@@ -309,7 +315,8 @@ class RoomMemory:
     @classmethod
     def from_config(cls, cfg: dict, world, backend, table_rect: Optional[BoxPx], proposer=None,
                     name_fn: Optional[Callable[[np.ndarray], Optional[dict]]] = None,
-                    online: Optional[Callable[[], bool]] = None) -> Optional["RoomMemory"]:
+                    online: Optional[Callable[[], bool]] = None,
+                    verify_fn: Optional[Callable[[np.ndarray, list], Optional[dict]]] = None) -> Optional["RoomMemory"]:
         """RoomMemory from config.yaml's room_memory: section, or None (logged) when it can't run. With a
         `proposer` (and room_memory.things) zones also track unnamed things; with a `name_fn` too, their
         confirmed tracks are named by it in the background (names_per_minute, only while `online()`)."""
@@ -344,7 +351,7 @@ class RoomMemory:
         hand_conf = float(ct.get("hand", ct.get("default", 0.35))) if isinstance(ct, dict) else float(ct)
         if not rc.things:
             proposer = None
-        namer = RoomNamer(name_fn, per_minute=rc.names_per_minute, online=online) \
+        namer = RoomNamer(name_fn, per_minute=rc.names_per_minute, online=online, verify_fn=verify_fn) \
             if proposer is not None and name_fn is not None else None
         log.info("room memory on: zones %s; things %s", ", ".join(f"{z.name} ({z.say})" for z in zones.zones.values()),
                  "off" if proposer is None else ("named by Grok" if namer is not None else "unnamed"))
@@ -450,13 +457,27 @@ class RoomMemory:
         visit = self.tracker.visit(zone.name, zone.say, obs, hands, changes, full.t, full.wall, full.idx,
                                    lum=lum, crop=crop.copy())
         if self.namer is not None:
+            hints = self._hints(full.t)
             for tr in visit.confirmed:
-                if tr.cls == THING and tr.guess is None and not tr.name_asked:
+                if tr.cls == THING and tr.guess is None and not tr.name_asked and hints != []:
                     img = _close_up(visit.crop, tr.box_px, x1, y1)
                     if img is not None:
                         tr.name_asked = True
-                        self.namer.submit(tr, img)
+                        self.namer.submit(tr, img, hints)
         return visit
+
+    def _hints(self, t: float) -> Optional[list]:
+        """Grok names of things that left the table and could still be handed off, or None when the world
+        can't say (then every new room thing is named, as before). [] means no handoff is possible: room
+        clutter is not sent to Grok, which keeps the per-minute cap for the object that matters."""
+        fn = getattr(self.world, "room_handoff_hints", None)
+        if not callable(fn):
+            return None
+        try:
+            return list(fn(t))
+        except Exception:
+            log.debug("room_handoff_hints failed", exc_info=True)
+            return None
 
     def _things(self, zone: Zone, full: Frame, small: np.ndarray, known: list[BoxPx], hands_small: list[BoxPx],
                 hands: list[BoxPx], props: list[RoomObservation], to_full) -> list[RoomObservation]:
@@ -664,3 +685,45 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+VERIFY_SYSTEM = ("You look at a close-up of one object seen from across a room by a ceiling camera. The person "
+                 "is looking for one of the objects listed. Say which one it is, or 'none' if it is none of them "
+                 "or you can't tell. Also say what the object is in 1-3 words. Reply with strict JSON.")
+VERIFY_SCHEMA = {
+    "type": "object", "additionalProperties": False, "required": ["match", "name", "confidence"],
+    "properties": {"match": {"type": "string"}, "name": {"type": "string"}, "confidence": {"type": "number"}},
+}
+
+
+def make_verify_fn(namer) -> Callable[[np.ndarray, list], Optional[dict]]:
+    """(img, hints) -> guess, through the auto-namer's Grok provider. Asking "is it one of these?" (the
+    names of things that just left the table) is far more reliable than open naming for a small, far
+    object: open naming called the remote on the couch a phone and an eyeglasses case (rig run). A match
+    returns that hint's guess, so the World's name check passes; 'none' returns what Grok says it is."""
+    from core.auto_name import _jpeg, clean_name
+    from core.narration import _parse_json
+
+    def verify(img: np.ndarray, hints: list) -> Optional[dict]:
+        named = [h for h in hints if isinstance(h, dict) and h.get("name")]
+        if not named:
+            return None
+        listed = "; ".join(h["name"] + (f" (also: {', '.join(h.get('also') or [])})" if h.get("also") else "")
+                           for h in named)
+        reply = namer.provider.narrate(VERIFY_SYSTEM, [("text", f"Looking for: {listed}"),
+                                                       ("image", _jpeg(img, namer.c.crop_px)),
+                                                       ("text", "Which one is it, or none?")], VERIFY_SCHEMA)
+        d = _parse_json(reply.text) or {}
+        try:
+            conf = min(1.0, max(0.0, float(d.get("confidence", 0.0))))
+        except (TypeError, ValueError):
+            conf = 0.0
+        match = clean_name(d.get("match")) or ""
+        if conf >= namer.c.min_confidence:
+            for h in named:
+                if match == clean_name(h["name"]):
+                    return dict(h)
+        name = clean_name(d.get("name"))
+        return {"name": name, "also": [], "confidence": round(conf, 3)} if name else None
+
+    return verify

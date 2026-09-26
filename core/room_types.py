@@ -46,9 +46,9 @@ class RoomConfig:
     change_area_ratio: float = 1.5                 # a change blob this much bigger than the track box blocks it
     max_crop_px: int = 1280                        # zone crops with a longer side are resized down to this
     things: bool = True                            # also track unnamed objects (YOLOE) in zones; handoff by Grok name
-    thing_name_wait_s: float = 15.0                # a confirmed thing track waits this long for its Grok name
+    thing_name_wait_s: float = 45.0                # a confirmed thing track waits this long for its Grok answer
     name_match_min: float = 2.0                    # core.auto_name.match_score two guesses need (head noun shared)
-    names_per_minute: int = 6                      # Grok calls for room crops, at most
+    names_per_minute: int = 20                     # Grok calls for room crops, at most (only while a handoff is possible)
 
     @classmethod
     def from_dict(cls, d: Optional[dict]) -> "RoomConfig":

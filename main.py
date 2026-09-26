@@ -743,7 +743,9 @@ def room_things(cfg: dict, world, detector) -> dict:
         kw = {"proposer": proposer, "online": online}
         from core.auto_name import AutoNameConfig, AutoNamer
         if AutoNameConfig.from_dict(cfg.get("auto_name")).enabled:
-            kw["name_fn"] = AutoNamer(cfg, world, online=online, start=False)._ask
+            namer = AutoNamer(cfg, world, online=online, start=False)
+            from core.room import make_verify_fn
+            kw["name_fn"], kw["verify_fn"] = namer._ask, make_verify_fn(namer)
         else:
             log.info("room things are not named: auto_name.enabled is false")
         return kw

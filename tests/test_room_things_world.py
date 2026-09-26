@@ -283,3 +283,13 @@ def test_covered_by_a_known_cover_is_not_a_departure(scene, world):
     trk = room_thing(scene, world, 'r:1', guess={"name": "remote control", "also": [], "confidence": 0.7})
     seen(scene, world, trk, zone='couch')
     assert world.get('thing:1').zone == 'table'
+
+
+def test_handoff_hints_are_the_names_of_things_that_just_left(scene, world):
+    assert world.room_handoff_hints(scene.t) == []
+    named_thing_leaves(scene, world, namer_for(world, REMOTE))
+    assert world.room_handoff_hints(scene.t) == [REMOTE]
+    assert world.room_handoff_hints(scene.t + world.room_cfg.handoff_s + 1) == []    # too long ago
+    trk = room_thing(scene, world, 'r:1', guess=dict(REMOTE))
+    seen(scene, world, trk, zone='couch')
+    assert world.room_handoff_hints(scene.t) == []                                   # consumed

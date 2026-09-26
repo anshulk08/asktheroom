@@ -202,7 +202,7 @@ def test_a_confirmed_thing_is_named_once_in_the_background():
         rm.step(frame(4))
         time.sleep(0.1)
         assert len(fn.imgs) == 1                                   # once per track
-        assert fn.imgs[0].shape == (52, 52, 3)                     # 40x40 box + 15% per side, native px
+        assert fn.imgs[0].shape == (80, 80, 3)                     # 40x40 box + 50% per side (NAME_MARGIN), native px
     finally:
         namer.stop()
 
@@ -218,7 +218,7 @@ def test_a_named_crop_is_a_copy_of_the_native_zone_crop():
     f2.img[:] = 0
     assert namer.step(0.0)
     img = fn.imgs[0]
-    assert img.shape == (130, 130, 3) and img.min() == 128        # 100x100 full px + 15%, copied before f2 changed
+    assert img.shape == (200, 200, 3) and img.min() == 128        # 100x100 full px + 50%, copied before f2 changed
 
 
 def test_props_are_never_sent_to_grok():
@@ -476,3 +476,94 @@ def test_make_room_memory_falls_back_to_props_when_the_namer_fails(tmp_path, mon
         rm = main.make_room_memory(main_cfg(tmp_path), StubWorld(), yoloe_det(), TABLE_RECT)
     assert rm is not None and rm.proposer is None and rm.namer is None
     assert any("room things" in r.getMessage() for r in caplog.records)
+
+
+# ----- naming only while a handoff is possible; "is it one of these?" ------------------------------
+
+class HintWorld(StubWorld):
+    def __init__(self, hints):
+        super().__init__()
+        self.hints = hints
+
+    def room_handoff_hints(self, t):
+        return list(self.hints)
+
+
+REMOTE = {"name": "remote control", "also": ["remote"], "confidence": 0.7}
+
+
+def _confirm_one(rm):
+    rm.step(frame(1))
+    rm.step(frame(2))
+
+
+def test_room_clutter_is_not_named_while_no_handoff_is_possible():
+    fn = Namer()
+    namer = RoomNamer(fn, start=False, clock=lambda: 0.0)
+    rm, _, _ = make(props=[Proposal((100, 100, 140, 140), 0.5)], namer=namer)
+    rm.world = HintWorld([])
+    _confirm_one(rm)
+    assert namer.pending() == 0 and not any(t.name_asked for t in rm.tracker.tracks())
+    rm.world.hints = [REMOTE]                                # something just left the table
+    rm.step(frame(3))
+    assert namer.pending() == 1
+
+
+def test_a_candidate_is_verified_by_name_not_named_openly():
+    asked = []
+
+    def verify(img, hints):
+        asked.append(hints)
+        return dict(hints[0])
+
+    fn = Namer()
+    namer = RoomNamer(fn, start=False, clock=lambda: 0.0, verify_fn=verify)
+    rm, _, _ = make(props=[Proposal((100, 100, 140, 140), 0.5)], namer=namer)
+    rm.world = HintWorld([REMOTE])
+    _confirm_one(rm)
+    assert namer.step(0.0)
+    [th] = [t for t in rm.tracker.tracks() if t.cls == "thing"]
+    assert asked == [[REMOTE]] and th.guess == REMOTE and fn.imgs == []
+
+
+def test_the_newest_job_goes_first():
+    order = []
+    namer = RoomNamer(lambda img: order.append(img.shape[0]) or {"name": "x", "also": [], "confidence": 0.9},
+                      start=False, clock=lambda: 0.0)
+    from core.room_types import RoomTrack
+    for n in (10, 20, 30):
+        namer.submit(RoomTrack(f"r:{n}", "couch", "thing", (0, 0, 1, 1), 0, 0, 0, 0), np.zeros((n, n, 3), np.uint8))
+    namer.step(0.0)
+    assert order == [30]
+
+
+def test_verify_fn_maps_a_match_to_the_hint_and_none_to_its_own_name():
+    import json
+
+    from core.room import make_verify_fn
+
+    class Reply:
+        def __init__(self, d):
+            self.text = json.dumps(d)
+
+    class Provider:
+        def __init__(self, d):
+            self.d, self.calls = d, []
+
+        def narrate(self, system, parts, schema):
+            self.calls.append(parts)
+            return Reply(self.d)
+
+    class N:
+        pass
+
+    n = N()
+    n.c = type("C", (), {"crop_px": 384, "min_confidence": 0.5})()
+    img = np.full((60, 60, 3), 128, np.uint8)
+    n.provider = Provider({"match": "remote control", "name": "tv remote", "confidence": 0.8})
+    assert make_verify_fn(n)(img, [REMOTE]) == REMOTE
+    assert "remote control" in n.provider.calls[0][0][1]
+    n.provider = Provider({"match": "none", "name": "phone", "confidence": 0.7})
+    assert make_verify_fn(n)(img, [REMOTE])["name"] == "phone"
+    n.provider = Provider({"match": "remote control", "name": "remote", "confidence": 0.2})
+    assert make_verify_fn(n)(img, [REMOTE])["name"] == "remote"     # too unsure to call it a match

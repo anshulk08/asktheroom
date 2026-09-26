@@ -145,6 +145,22 @@ class RoomRules:
             return Place(kind='table', zone=vent.zone, say=say, status=vent.status, chain=chain, via=via,
                          pos_cm=pos, observed_directly=via == name, conflicts=conflicts)
 
+    def room_handoff_hints(self, t: float) -> list[dict]:
+        """Grok guesses of things that left the table (an unconsumed table departure within handoff_s of
+        t) and could be handed off now. The room pass only asks Grok about new room things while this is
+        non-empty, and asks "is it one of these?" instead of an open name."""
+        with self.lock:
+            out = []
+            for name, (dep_t, _) in list(self._departures.items()):
+                ent = self.entities.get(name)
+                if (ent is None or not is_thing(name) or ent.merged_into is not None or ent.zone != TABLE
+                        or not _off_table(ent) or t - dep_t > self.room_cfg.handoff_s):
+                    continue
+                g = self.thing_guess(name)
+                if g:
+                    out.append(g)
+            return out
+
     def room_json(self) -> dict:
         """For state_json: name -> its room state, plus 'conflicts' (every recorded conflict sighting)."""
         # 'tentative' only when true (a thing handed over by name): a prop's entry keeps its M0 shape.
