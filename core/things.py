@@ -732,6 +732,11 @@ class ThingRules:
             # size, most recently hidden on a tie, is back. A real cover keeps the ambiguity below.
             blind = [n for n in cause if self.entities[n].parent == 'unknown' and n not in seen
                      and self.entities[n].pos_cm is not None and self._size_ok(d.box_cm, self.entities[n].box_cm)]
+            if not blind:  # none of a like size, but some lie right here: a box of another size over them
+                # (live Sun 27 Sep: a thermos's top, then all of it with its shadow, made 3 things for one)
+                blind = [n for n in cause if self.entities[n].parent == 'unknown' and n not in seen
+                         and self.entities[n].pos_cm is not None
+                         and geom.dist(d.center_cm, self.entities[n].pos_cm) <= tc.same_spot_cm]
             if blind and all(self.entities[n].parent == 'unknown' for n in cause):
                 return min(blind, key=lambda n: (geom.dist(d.center_cm, self.entities[n].pos_cm),
                                                  -self._hidden_at.get(n, NEG))), []

@@ -832,3 +832,26 @@ def test_a_thing_left_still_appears_as_soon_as_still_s_has_passed(cfg):
             break
     still_s = world._tcfg.still_s
     assert appeared is not None and still_s - 1e-6 <= appeared - first <= still_s + scene.dt + 1e-6
+
+
+def test_a_bigger_box_back_at_the_spot_of_a_thing_under_something_undetected_is_that_thing(cfg):
+    """Live, Sun 27 Sep 03:00: arms over the table left things UNDER 'unknown'; the thermos came back as a
+    box of another size (its top, then all of it with its shadow) and each size was a new thing: three
+    things for one thermos, 7-8 births a minute. Back at its spot it is itself, whatever the size."""
+    from core.relations import BackgroundModel
+    rs = Scene(cfg, fps=10, t0=1000.0, render=True)
+    w = World(cfg)
+    rs.run(w, (BackgroundModel.MIN_READY + 0.5) * cfg.bg_update_every_s)
+    rs.thing('thermos', 38, 30, w=3, h=3)            # its top and its foot: two things 4 cm apart
+    rs.thing('foot', 42, 30, w=3, h=3)
+    rs.run(w, 2.0)
+    rs.remove('thermos')
+    rs.remove('foot')
+    rs.overlay('arm', 40, 30, 12, 8)                 # the pixels there are not bare table
+    rs.run(w, 3.0)
+    assert [(w.get(n).status, w.get(n).parent) for n in things(w)] == [(Status.UNDER, 'unknown')] * 2
+    rs.overlays.pop('arm')
+    rs.thing('thermos-all', 40, 30.5, w=8, h=9)       # 8x either's area: outside the size gate
+    events = rs.run(w, 2.0)
+    assert EventType.APPEARED not in types(events)
+    assert things(w) == ['thing:1', 'thing:2'] and EventType.UNCOVERED in types(events)
