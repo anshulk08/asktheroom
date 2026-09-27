@@ -1050,3 +1050,54 @@ def test_a_question_after_a_bare_wake_word_is_still_answered(tmp_path, cal_path)
     assert wait_for(lambda: room.tts.said)
     stop_voice(room, t)
     assert len(room.tts.said) >= 1 and room.tts.said[0] != main.NOT_HEARD
+
+
+class ListensSTT(FakeSTT):
+    """listen() gives each scripted question in turn (the rig heard the wake word twice)."""
+
+    def __init__(self, listens, overheard=()):
+        super().__init__("", overheard=overheard)
+        self.listens = list(listens)
+
+    def listen(self):
+        return self.listens.pop(0) if self.listens else ""
+
+
+def wake_room(tmp_path, cal_path, stt):
+    from voice.understand import Understander
+    cfg = dict(CFG, understand={"enabled": False}, listen=dict(CFG["listen"], mode="wake"))
+    room, _ = make_room(tmp_path, cal_path, stt=stt, clicker=FakeClicker(), interpret=Understander(cfg))
+    return room
+
+
+@pytest.mark.parametrize("wake", ["Room!", "Hey, bro!", "Hey Drew!", "Goodroom."])
+def test_wake_mode_answers_the_question_after_a_bare_wake_word(tmp_path, cal_path, wake):
+    """Rig (Sat 26 Sep, listen.mode wake): "Room!" ... "What do you see?" was dropped because the question had no
+    wake word of its own, and "Hey room" came back as "Hey, bro!" / "Hey Drew!" / "Goodroom."."""
+    stt = ListensSTT(["where is my wallet"], overheard=[wake])
+    room = wake_room(tmp_path, cal_path, stt)
+    t = always_on(room)
+    assert wait_for(lambda: room.tts.said)
+    stop_voice(room, t)
+    assert "wallet" in room.tts.said[0].lower()
+
+
+def test_the_wake_word_said_again_listens_again(tmp_path, cal_path):
+    """Rig: "Hey Drew!" ... "Okay, room." ... "Where's my pill bottle?"."""
+    stt = ListensSTT(["Okay, room.", "Where's my pill bottle?"], overheard=["Hey Drew!"])
+    room = wake_room(tmp_path, cal_path, stt)
+    t = always_on(room)
+    assert wait_for(lambda: room.tts.said)
+    stop_voice(room, t)
+    assert "pill bottle" in room.tts.said[0].lower() and stt.listens == []
+
+
+def test_wake_mode_ignores_room_in_chatter(tmp_path, cal_path):
+    stt = ListensSTT([], overheard=["I'm in the room.", "Try this room.", "This is the best news.", "That's my name.",
+                                    "Okay, bro, where are my keys?"])
+    room = wake_room(tmp_path, cal_path, stt)
+    t = always_on(room)
+    assert wait_for(lambda: not stt.overheard)
+    time.sleep(0.2)
+    stop_voice(room, t)
+    assert room.tts.said == []

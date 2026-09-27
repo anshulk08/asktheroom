@@ -571,7 +571,41 @@ def test_tts_passed_to_the_constructor(monkeypatch):
     assert s.tts is tts and s.listen() == "" and s.last_stop == "tts"
 
 
-def test_prompt_leads_with_the_wake_word():
+def test_prompt_leads_with_the_greetings():
+    """'Hey room' came back as 'Hey, bro!' and 'Hey Drew!' (rig, Sat 26 Sep): the prompt primes the greetings,
+    with the wake word only opening sentences."""
     p = stt.initial_prompt(CFG)
-    assert p.startswith("Room, where are my ") and "keys" in p
-    assert stt.initial_prompt(dict(CFG, listen={"wake_words": ["jarvis"]})).startswith("Jarvis, where")
+    assert p.startswith("Hey Room! Okay Room. Room, where are my ") and "keys" in p
+    jarvis = stt.initial_prompt(dict(CFG, listen={"wake_words": ["jarvis"]}))
+    assert jarvis.startswith("Hey Jarvis! Okay Jarvis. Jarvis, where")
+
+
+@pytest.mark.parametrize("text", ["you", "You.", "Thank you.", "Thanks!", "Thank you so much.", "you you"])
+def test_whisper_fillers_for_noise_are_dropped(text, monkeypatch):
+    """The rig's Whisper wrote 'you' 12 times and 'Thank you.' 6 times for noise (Sat 26 Sep)."""
+    assert stt.filler_only(text)
+    s, _ = make(monkeypatch, quiet(10) + loud(20) + quiet(200))
+    s._backend = FakeBackend(text)
+    assert s.hear() == ""
+
+
+def test_a_clicked_thank_you_is_kept(monkeypatch):
+    """'Thank you' after a click acknowledges a care notice (core/reminders.py): only the always-on mic drops it."""
+    s, _ = make(monkeypatch, quiet(10) + loud(20) + quiet(200))
+    s._backend = FakeBackend("Thank you.")
+    assert s.listen() == "Thank you."
+
+
+@pytest.mark.parametrize("text", ["Thank you, where are my keys?", "So.", "You know it!", "Room, what do you see?"])
+def test_real_speech_with_you_is_kept(text):
+    assert not stt.filler_only(text)
+
+
+def test_speech_under_min_speech_ms_is_dropped(monkeypatch):
+    """A cough or a clack (a few VAD blocks) is not sent to Whisper, which writes 'you' for it."""
+    s, _ = make(monkeypatch, quiet(10) + loud(5) + quiet(200))        # 5 blocks: 160 ms
+    assert s.hear() == "" and not s.last_speech and s.backend.calls == []
+    s, _ = make(monkeypatch, quiet(10) + loud(10) + quiet(200))       # 320 ms: a short "Room!"
+    assert s.hear() and s.last_speech
+    s, _ = make(monkeypatch, quiet(10) + loud(5) + quiet(200))        # asked (a click, "Room!"): kept
+    assert len(s.record_until_silence()) > 0

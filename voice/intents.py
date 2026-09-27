@@ -99,10 +99,11 @@ ARTICLES = {"my", "the", "a", "your", "our"}
 _ART = r"(?:my|the|our|a|an|his|her|their)"
 _OWN = r"(?:my|our|his|her|their)"
 # Whole sentence, said as a statement: 'what do you call that thing', 'lets call it a day', 'it is a
-# mess' and 'thats the problem' are not teaching. 'a/an' only after 'called'.
+# mess' and 'thats the problem' are not teaching. 'a/an' only after 'called', and 'this is the X' is chatter
+# ('this is the best news', 'this is the official edition': 5 of 15 false wakes on the rig, Sat 26 Sep).
 _START = r"^(?:and\s+|now\s+)?"
 TEACH = [re.compile(p) for p in (
-    rf"{_START}(?:this|that)(?:\s+one|\s+thing)?\s+is\s+(?:called\s+(?:{_ART}\s+)?|(?:{_OWN}|the)\s+)(?P<n>.+)$",
+    rf"{_START}(?:this|that)(?:\s+one|\s+thing)?\s+is\s+(?:called\s+(?:{_ART}\s+)?|{_OWN}\s+)(?P<n>.+)$",
     rf"{_START}thats\s+{_OWN}\s+(?P<n>.+)$",
     rf"{_START}(?:(?:can|could|will|would)\s+you\s+)?remember\s+(?:this|it|that)(?:\s+one|\s+thing)?\s+as\s+"
     rf"(?:{_ART}\s+)?(?P<n>.+)$",
@@ -110,7 +111,13 @@ TEACH = [re.compile(p) for p in (
 )]
 TEACH_TAIL = {"here", "now", "right", "please", "thanks", "thank", "you", "ok", "okay"}
 NOT_A_NAME = {"day", "mess", "point", "bad", "fault", "problem", "idea", "thing", "deal", "plan", "turn", "job",
-              "life", "way", "one", "question", "guess", "best", "worst", "last", "first", "end", "even", "quits"}
+              "life", "way", "one", "question", "guess", "best", "worst", "last", "first", "end", "even", "quits",
+              "name", "news"}
+# A name never opens with these ('thats my name', 'this is my best friend'), and ends at the first of NAME_END:
+# Whisper runs sentences on ('this is my process to protect the hospital' taught 'process to protect the').
+NOT_A_NAME_START = {"best", "worst", "official", "process", "same", "whole", "crazy"}
+NAME_END = {"to", "the", "a", "an", "of", "for", "with", "and", "or", "but", "is", "are", "was", "were", "that",
+            "this", "it", "i", "you", "we", "what", "where", "who", "how", "why"}
 # Words that end a spoken name ('where is my charger in the box' -> 'charger'), or are not one.
 NAME_STOP = {
     "is", "are", "was", "were", "be", "been", "go", "gone", "went", "to", "at", "in", "on", "under",
@@ -296,12 +303,18 @@ def _teach_name(t: str) -> Optional[str]:
         m = rx.search(t)
         if m:
             words = m.group("n").split()
+            for k, w in enumerate(words):
+                if k and w in NAME_END:
+                    words = words[:k]
+                    break
             while words and words[-1] in TEACH_TAIL:
                 words.pop()
             while words and words[0] in ARTICLES:
                 words.pop(0)
             name = " ".join(words[:4])
-            return name if name and name not in NOT_A_NAME else None   # 'thats my point'
+            if not name or name in NOT_A_NAME or words[0] in NOT_A_NAME_START:
+                return None                    # 'thats my point', 'thats my name'
+            return name
     return None
 
 
@@ -336,10 +349,15 @@ PEOPLE = {"wife", "husband", "partner", "friend", "friends", "girlfriend", "boyf
           "guy", "guys", "man", "woman", "baby", "dog", "cat", "group", "project", "demo", "startup", "hack"}
 
 
+NOT_PEOPLE_LAST = {"dog", "cat", "group", "project", "demo", "startup", "hack", "team"}   # 'hot dog', 'team' mug
+
+
 def names_a_person(name: Optional[str], raw: str = "") -> bool:
     """A TEACH name that is a person, pet or the project ('wife karen', 'friend', 'team'), not a thing
     ('friend's mug', said with the possessive, is a mug)."""
     words = (name or "").split()
+    if len(words) > 1 and words[-1] in PEOPLE - NOT_PEOPLE_LAST:
+        return True                             # 'crazy 14th friend'
     if not words or words[0] not in PEOPLE:
         return False
     stem = words[0][:-1] if words[0].endswith("s") else words[0]    # normalize drops the apostrophe

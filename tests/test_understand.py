@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 import requests
@@ -6,8 +7,10 @@ import requests
 from core.config import load_config
 from core.events import EventLog
 from core.fakeworld import demo_world
+from scripts import eval_wake
 from voice.pipeline import make_ask
-from voice.understand import IGNORE, Understander, gate, schema, sounds_like, system_prompt, to_intent
+from voice.understand import (IGNORE, Understander, bare_wake, gate, has_wake_word, schema, sounds_like, system_prompt,
+                              to_intent)
 
 CFG = load_config()
 
@@ -494,3 +497,92 @@ def test_ask_the_room_opens_a_reset_with_the_default_wake_words():
     assert u("ask the room, reset", overheard=True).kind == "RESET"
     assert u("okay ask the room reset everything", overheard=True).kind == "RESET"
     assert u("lets reset, ask the room", overheard=True).kind not in ("RESET", "RECAL")
+
+
+# -- wake-word precision (rig, Sat 26 Sep: 15 of 38 answered sentences only had "room" in them)
+
+WAKE_CFG = dict(CFG, understand={"enabled": False}, listen=dict(CFG["listen"], mode="wake"))
+
+
+@pytest.mark.parametrize("text", [
+    "I'm in the room.", "Try this room.", "Is there a room?", "Who's the guy in the room?",
+    "You made people are in this room.", "Why is this room worse than this?", "You can look forward. A room.",
+    "I went out and found a street in front of the home room.", "I really ask the rooms.",
+    "Oh, this is Ask the Room, speaking for the books.", "the living room is where we sit", "the room, where is it",
+    "Okay, bro, where are my keys?", "We just tell them to do that, bro.", "Is that the play-room where they sleep?",
+    "the kitchen and room where we eat",
+])
+def test_room_in_a_sentence_is_not_the_wake_word(text):
+    assert not has_wake_word(text, CFG), text
+    assert Understander(WAKE_CFG)(text, overheard=True).kind == IGNORE, text
+
+
+@pytest.mark.parametrize("text", [
+    "Room, what do you see?", "Okay, room, what color are the laptops?", "Hey room, what changed with the table?",
+    "Room, room, what's on the table right now?", "That's there, room, where is the wallet?",
+    "Really? Room, is my wallet here?", "so room what's on the couch", "Ask the room, what do you see?",
+    "Hello room, what do you see?", "Yo room what's on the table", "Uhm room where are my keys",
+])
+def test_the_wake_word_said_to_the_rig(text):
+    """It opens the sentence (after fillers), or a clause right before the question."""
+    assert has_wake_word(text, CFG), text
+    assert Understander(WAKE_CFG)(text, overheard=True).kind != IGNORE, text
+
+
+@pytest.mark.parametrize("text", ["Room!", "Okay, room.", "hey ask the room um", "room room", "Hey, bro!",
+                                  "Okay, bro!", "Hey Drew!", "Goodroom.", "ok broom", "Really? Okay room.",
+                                  "We're done here. Hey room!", "Great new ones. Goodroom."])
+def test_bare_wake_words_and_misheard_greetings(text):
+    """Whisper wrote 'Hey room' as 'Hey, bro!', 'Hey Drew!', 'Goodroom.' (1 greeting in 4 missed); a greeting
+    that ends a longer clip still opens the mic."""
+    assert bare_wake(text, CFG), text
+
+
+@pytest.mark.parametrize("text", ["Bro!", "Drew.", "It's decent, bro.", "Okay, bro, this is our game.",
+                                  "What a life-shifting trick, bro.", "the room", "A room.", "living room",
+                                  "room where is it", "Let's go to the bathroom.", "Hey, Valentine's Day!",
+                                  "they said hey room", "Yo, bro!", "Hi bro"])
+def test_bro_and_room_in_chatter_do_not_open_the_mic(text):
+    assert not bare_wake(text, CFG), text
+
+
+def test_misheard_greetings_are_configurable():
+    cfg = dict(CFG, listen=dict(CFG["listen"], greeting_misheard=[], greeting_merged=[]))
+    assert not bare_wake("Hey, bro!", cfg) and not bare_wake("Goodroom.", cfg) and bare_wake("Hey room!", cfg)
+
+
+@pytest.mark.parametrize("text", ["This is the best news.", "This is the official edition.", "That's my name.",
+                                  "This is my crazy 14th friend.", "This is my charger."])
+def test_wake_mode_teaching_needs_the_wake_word(text):
+    """The TEACH reading was accepted before the wake-mode check: chatter was answered and taught junk names."""
+    assert Understander(WAKE_CFG)(text, overheard=True).kind == IGNORE, text
+
+
+def test_wake_mode_teaches_with_the_wake_word():
+    i = Understander(WAKE_CFG)("Room, this is my charger.", overheard=True)
+    assert (i.kind, i.name) == ("TEACH", "charger")
+
+
+@pytest.mark.parametrize("text", ["What do you see?", "The laptop charging.", "Can you tell me what's on the table?",
+                                  "Where's my pill bottle?", "what color is my shirt", "this is my charger"])
+def test_the_question_after_a_bare_wake_word_needs_no_wake_word(text):
+    """'Room!' ... 'What do you see?': screen() in wake mode dropped every follow-up without its own wake word."""
+    assert Understander(WAKE_CFG).after_wake(text), text
+
+
+@pytest.mark.parametrize("text", ["", "Really?", "No, no.", "See?", "where are you guys from", "reset everything",
+                                  "we built this in like twenty hours", "this is my wife Karen",
+                                  "can you put your phone away", "are you guys ready?"])
+def test_chatter_after_a_bare_wake_word_is_dropped(text):
+    assert not Understander(WAKE_CFG).after_wake(text), text
+
+
+def test_rig_transcripts_replay():
+    """scripts/eval_wake.py on every transcript the rig logged (tests/wake_eval.json): no false line answered,
+    every genuine one answered, every bare or misheard greeting opens the mic, no chatter answered."""
+    doc = json.loads((Path(__file__).parent / "wake_eval.json").read_text())
+    lines = eval_wake.replay(eval_wake.rig_config(CFG), doc["sessions"])
+    assert len(lines) > 900
+    got = eval_wake.score(lines)
+    assert all(ok == n for ok, n in got.values()), got
+    assert [e["text"] for e in lines if e.get("label") is None and e["got"] != "-"] == []

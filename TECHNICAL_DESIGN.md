@@ -85,7 +85,7 @@ mic ─▶ Silero VAD ─▶ whisper.cpp base.en ─▶ overheard filter ─▶ 
 
 1. **Listening** (`main.Room.voice_loop`, `listen` config).
    - `always` (the default) listens continuously.
-   - `wake` only accepts speech containing a wake word (`wake_words: [room]`).
+   - `wake` only accepts speech addressed with a wake word (`wake_words: [room, ask the room]`): it opens the sentence, or a clause right before the question ("that's there, room, where..."), never "in the room" (`voice.understand.has_wake_word`).
    - `click` only listens after a clicker press.
    - In every mode, a clicker press means "listen now", and it stops the current answer (barge-in).
    - The mic is not read while the rig is speaking, and stays shut for `echo_tail_s` (0.4 s) afterwards, so the rig never answers itself.
