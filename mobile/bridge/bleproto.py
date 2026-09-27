@@ -10,6 +10,10 @@ Framing (every NOTIFY on answer / state / status):
     3..     payload      UTF-8 JSON bytes, at most MTU - 3 (ATT) - 3 (this header) per chunk
 A message is at most 256 chunks. A receiver keeps one partial message per characteristic; a chunk
 with a different msg_id discards any incomplete previous message.
+
+The user's frame (PROTOCOL.md 5b, 7): GET /state carries "view" (core/viewframe.py View.to_json()), and
+positions, sizes, edges and sweep actions sent to the phone are turned into it here with the plain affine
+"m" (the bridge's host has no numpy and no repo package, so this does not import core.viewframe).
 """
 from __future__ import annotations
 
@@ -36,6 +40,16 @@ MAX_QUESTION_BYTES = 180
 
 STATUS_LETTER = {"VISIBLE": "V", "HELD": "H", "UNDER": "U", "INSIDE": "I", "GONE": "G", "UNKNOWN": "X"}
 KIND_LETTER = {"target": "t", "container": "c", "cover": "v"}
+
+FRONTS = ("bottom", "right", "top", "left")
+# Camera edge -> viewer edge, per front (the same table as core/viewframe.py _EDGE): the side the user sits
+# at becomes 'bottom', nearest them.
+VIEW_EDGE = {
+    "bottom": {"left": "left", "right": "right", "top": "top", "bottom": "bottom"},
+    "top": {"left": "right", "right": "left", "top": "bottom", "bottom": "top"},
+    "right": {"right": "bottom", "left": "top", "bottom": "left", "top": "right"},
+    "left": {"left": "bottom", "right": "top", "top": "left", "bottom": "right"},
+}
 
 ROOM_DOWN_TEXT = "The room isn't running right now."
 TOO_LONG_TEXT = "Question too long."
@@ -143,6 +157,25 @@ def parse_voice(value: bytes) -> Optional[dict]:
     return {"engine": v.get("e"), "grok_voice": v.get("v"), "speed": v.get("s")}
 
 
+def parse_orient(value: bytes) -> Optional[dict]:
+    """An orientation write ({"orient": {"front": "right"}}, PROTOCOL.md 5b) -> the app's POST /orientation
+    body {"front"} (None: back to the configured seat), {} for an orient write naming no valid side (ignored),
+    or None when the write is not one (a question)."""
+    if len(value) > MAX_QUESTION_BYTES:
+        return None
+    try:
+        obj = json.loads(bytes(value).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    o = obj.get("orient") if isinstance(obj, dict) else None
+    if not isinstance(o, dict):
+        return None
+    if "front" in o and o["front"] is None:
+        return {"front": None}                # "use the rig's default": the app goes back to its configured seat
+    front = str(o.get("front")).strip().lower()
+    return {"front": front} if front in FRONTS else {}
+
+
 def parse_question(value: bytes) -> tuple[int, Optional[str], Optional[str]]:
     """question write -> (id, text, error_text). error_text is set when it must be rejected."""
     qid = 0
@@ -178,15 +211,58 @@ def room_msg(src: str, text: str, point_at: Optional[str] = None, action: Option
             "action": action, "target": target, "ms": None}
 
 
-def target_of(state: Optional[dict], name: Optional[str]) -> Optional[list]:
-    """Resolved table-cm position of an entity in a WorldState (falls back to its last-seen spot)."""
+def target_of(state: Optional[dict], name: Optional[str], view: Optional[dict] = None) -> Optional[list]:
+    """Resolved table-cm position of an entity in a WorldState (falls back to its last-seen spot); in the
+    user's frame when view (GET /state's "view") is given."""
     if not name or not isinstance(state, dict):
         return None
+    v = view_of(view)
     for e in state.get("entities") or []:
         if isinstance(e, dict) and e.get("name") == name:
-            p = _xy(e.get("resolved_cm")) or _xy(e.get("pos_cm"))
-            return p
+            return _vxy(v, e.get("resolved_cm")) or _vxy(v, e.get("pos_cm"))
     return None
+
+
+def view_action(action: Optional[str], view: Optional[dict] = None) -> Optional[str]:
+    """An answer's action for the phone: 'sweep:<camera edge>' becomes 'sweep:<viewer edge>' (the laser
+    already swept the camera edge in the app); anything else is unchanged."""
+    v = view_of(view)
+    if v is None or not isinstance(action, str) or not action.startswith("sweep:"):
+        return action
+    e = VIEW_EDGE[v["front"]].get(action[len("sweep:"):])
+    return f"sweep:{e}" if e else action
+
+
+# ---------------------------------------------------------------- the user's frame
+
+def view_of(view: Any) -> Optional[dict]:
+    """GET /state's "view" ({"front", "table", "m", "outline"}, core/viewframe.py) checked -> {"front", "table",
+    "m", "outline"} with floats, or None (an older app without one, or anything malformed: camera frame)."""
+    if not isinstance(view, dict):
+        return None
+    front = str(view.get("front") or "").strip().lower()
+    m, t = view.get("m"), view.get("table")
+    if front not in FRONTS or not isinstance(m, (list, tuple)) or len(m) != 2:
+        return None
+    try:
+        rows = [[float(x) for x in r] for r in m]
+        tw, th = float(t[0]), float(t[1])
+    except (TypeError, ValueError, IndexError, KeyError):
+        return None
+    if any(len(r) != 3 for r in rows) or any(math.isnan(x) or math.isinf(x) for r in rows for x in r):
+        return None
+    return {"front": front, "table": (tw, th), "m": rows, "outline": bool(view.get("outline"))}
+
+
+def _vxy(v: Optional[dict], p: Any) -> Optional[list]:
+    """A camera-frame [x, y] -> [x, y] cm, 1 decimal: the user's with v (as checked by view_of), else as it is;
+    None when p isn't a finite point."""
+    q = _xy(p)
+    if v is None or q is None:
+        return q
+    x, y = float(p[0]), float(p[1])            # finite: _xy checked them
+    (a, b, c), (d, e, f) = v["m"]
+    return _xy((a * x + b * y + c, d * x + e * y + f))
 
 
 # ---------------------------------------------------------------- state
@@ -239,18 +315,19 @@ def _best_guess(e: dict) -> tuple[Optional[str], Optional[float]]:
     return max(opts, key=lambda o: -1.0 if o[1] is None else o[1])   # max keeps the first on a tie
 
 
-def compact_entity(e: dict) -> dict:
-    """One WorldState entity -> the compact phone form. Unknown extra fields are ignored."""
+def compact_entity(e: dict, view: Optional[dict] = None) -> dict:
+    """One WorldState entity -> the compact phone form. Unknown extra fields are ignored. With view (as
+    checked by view_of) xy, r and edge are the user's."""
     status = str(e.get("status") or "UNKNOWN")
     out: dict = {"n": str(e.get("name")),
                  "k": KIND_LETTER.get(str(e.get("kind")), "t"),
                  "s": STATUS_LETTER.get(status, "X")}
     if e.get("parent"):
         out["p"] = str(e["parent"])
-    xy = _xy(e.get("pos_cm"))
+    xy = _vxy(view, e.get("pos_cm"))
     if xy:
         out["xy"] = xy
-    r = _xy(e.get("resolved_cm"))
+    r = _vxy(view, e.get("resolved_cm"))
     if r:
         out["r"] = r
     try:
@@ -260,7 +337,8 @@ def compact_entity(e: dict) -> dict:
     except (TypeError, ValueError):
         pass
     if e.get("edge"):
-        out["edge"] = str(e["edge"])
+        edge = str(e["edge"])
+        out["edge"] = VIEW_EDGE[view["front"]].get(edge, edge) if view else edge
     zone = e.get("zone")
     if zone and zone != "table":                          # room memory (spec 0009/0010): the room zone it is in
         out["z"] = str(zone)
@@ -306,15 +384,31 @@ def _stale_thing(e: dict, now: float) -> bool:
     return ls is not None and now - ls > STALE_THING_S
 
 
-def compact_state(state: Optional[dict], table_cm: tuple, now: float) -> dict:
-    """WorldState (GET /state's "state") -> the state notification JSON. state=None: an empty room."""
+def compact_state(state: Optional[dict], table_cm: tuple, now: float, view: Optional[dict] = None,
+                  sides: Optional[dict] = None) -> dict:
+    """WorldState (GET /state's "state") -> the state notification JSON. state=None: an empty room.
+
+    view: GET /state's "view" (core/viewframe.py). With one, positions, edges and "table" are in the user's
+    frame (x their left to right, y far to near, 'bottom' the edge nearest them) and "view" says so:
+    {"f": front, "o": outline, "s": {camera side: label}} (GET /state's "sides", keyed like "f" by camera
+    side, only when there are any). Without one (an older app), the camera frame and table_cm as before."""
     st = state if isinstance(state, dict) else {}
+    v = view_of(view)
     laser = st.get("laser") if isinstance(st.get("laser"), dict) else {}
     las = {"on": bool(laser.get("on")), "target": str(laser["target"]) if laser.get("target") else None}
-    ents = [compact_entity(e) for e in (st.get("entities") or [])
+    ents = [compact_entity(e, v) for e in (st.get("entities") or [])
             if isinstance(e, dict) and e.get("name") and not _stale_thing(e, now)]
-    return {"v": 1, "t": round(now, 1), "table": [_r1(table_cm[0]), _r1(table_cm[1])],
-            "online": bool(st.get("online")), "laser": las, "e": ents}
+    size = v["table"] if v else table_cm
+    out = {"v": 1, "t": round(now, 1), "table": [_r1(size[0]), _r1(size[1])],
+           "online": bool(st.get("online")), "laser": las, "e": ents}
+    if v:
+        out["view"] = {"f": v["front"], "o": v["outline"]}
+        edges = VIEW_EDGE[v["front"]]
+        lab = {str(k): str(val) for k, val in (sides.items() if isinstance(sides, dict) else ())
+               if str(k) in edges and val}
+        if lab:
+            out["view"]["s"] = lab
+    return out
 
 
 POS_DEADBAND_CM = 0.5
@@ -335,7 +429,7 @@ def state_changed(prev: Optional[dict], cur: dict) -> bool:
     0.05)."""
     if prev is None:
         return True
-    for k in ("table", "online", "laser"):
+    for k in ("table", "online", "laser", "view"):
         if prev.get(k) != cur.get(k):
             return True
     pe = {e["n"]: e for e in prev.get("e", [])}

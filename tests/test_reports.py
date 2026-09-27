@@ -98,7 +98,7 @@ def test_morning_report_mentions_lost_track(events):
                           last_seen=at(19, day=24), confidence=0.3)], events)
     ev(events, "remote", "LOST_TRACK", at(19, day=24))
     text = morning_report(w, events, CFG, at(8))
-    assert text == ("Good morning. Yesterday I lost track of your remote at 7 PM, near the bottom right. "
+    assert text == ("Good morning. Yesterday I lost track of your remote at 7 PM, on your right, near you. "
                     "You don't have any reminders today.")
 
 
@@ -201,3 +201,30 @@ def test_spoken_summary(w, events):
     text = spoken_summary(date(2026, 9, 24), w, events, CFG, now=at(7, 30))
     assert len(sentences(text)) <= 3 and "8:02 AM" in text
     safe(text)
+
+
+# ---------------------------------------------------------------- the user's seat (core/viewframe.py)
+
+SEAT_OFF = {"bottom": "the table on your left", "top": "the table on your right",
+            "right": "the far side of the table", "left": "the side of the table nearest you"}
+
+
+def seat(front):
+    return {**CFG, "table": {**CFG["table"], "size_cm": [100, 60]}, "table_area": {"polygon_cm": []},
+            "viewer": {"front": front}}
+
+
+@pytest.mark.parametrize("front", SEAT_OFF)
+def test_care_words_say_sides_from_the_seat_and_sweep_the_camera_edge(w, events, front):
+    from core.carewords import event_place, where_sentence
+    from core.reports import _object_clause
+    cfg = seat(front)
+    s, action = where_sentence(w, cfg, "phone", named=True)
+    assert s == f"Your phone was carried off {SEAT_OFF[front]}." and action == "sweep:left"
+    gone = events.last_of_type("phone", ["EXITED_VIEW"])
+    assert event_place(gone, w, cfg) == f"off {SEAT_OFF[front]}"
+    assert _object_clause(w, cfg, "phone", gone, Status.GONE) == f"your phone went off {SEAT_OFF[front]} at 9 AM"
+    moved = Event(t=0.0, wall=0.0, obj="wallet", type="MOVED", to_cm=(90.0, 5.0))
+    assert event_place(moved, w, cfg) == "on the table, " + {
+        "bottom": "at the far right", "top": "on your left, near you",
+        "right": "on your right, near you", "left": "at the far left"}[front]

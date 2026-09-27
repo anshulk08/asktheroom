@@ -100,10 +100,10 @@ def test_where_was_it_before_that(room):
     ask, _, _ = room
     ask("where are my keys?")
     a = ask("where were they before that?", now=NOW + 5)
-    assert a.text == "Before that, your keys were on the table, near the top left, until 2 minutes ago."
+    assert a.text == "Before that, your keys were on the table, at the far left, until 2 minutes ago."
     ask("where is my pill bottle?", now=NOW + 10)
     a = ask("where was it before that?", now=NOW + 15)
-    assert a.text.startswith("Before that, your pill bottle was on the table, on the left side")
+    assert a.text.startswith("Before that, your pill bottle was on the table, on your left")
 
 
 def test_before_that_without_history(room):

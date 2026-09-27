@@ -23,7 +23,11 @@ venv/
 # Runtime state and hardware calibration
 data/events.db*
 data/snapshots/
+data/viewer.json
 table_cal.json
+table_cal.json.tmp
+table_cal_view.png
+table_cal_view.png.tmp
 table_area.json
 laser_cal.json
 room_map.json

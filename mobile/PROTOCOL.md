@@ -5,8 +5,15 @@ and the link is one phone to one rig. The Jetson is the GATT **peripheral** (`mo
 BlueZ 5.64). The phone is the **central** (CoreBluetooth). The reference implementation of everything
 below is `mobile/bridge/bleproto.py`; `tests/test_mobile_protocol.py` pins it down.
 
-Positions are table centimetres: origin at ArUco marker 0 (top-left), x to the right, y down. The
-table is `table` = `[w, h]` from `config.yaml` `table.size_cm` (default `[90, 60]`).
+Positions are table centimetres. Whenever the app publishes a view (`GET /state` `"view"`, and then the state
+message carries `"view"`, section 7), every position and size the phone gets is in the **user's frame**, the
+table as seen from the side they sit at: x runs from the user's left to their right, y from the far side to
+the side nearest them, (0, 0) is the far-left corner, and the `bottom` edge is the one nearest the user.
+That covers `table`, `e[].xy`, `e[].r`, `e[].edge`, the answer's `target` and the edge in a `sweep:` action;
+the phone draws them as they come, with `bottom` at the bottom of the screen. The user picks their side with
+the orientation write (section 5b). An older app without a view sends the camera's frame: origin at the
+top-left of the camera's table view, x to the right, y down, and `table` = `[w, h]` from `config.yaml`
+`table.size_cm` (default `[90, 60]`).
 
 ## 1. Advertising
 
@@ -123,6 +130,39 @@ question). The rig's speaker then uses the same voice as the phone would.
 - No answer comes back. The bridge sends it to `POST /voice` (`{"engine", "grok_voice", "speed"}`).
 - Offline, or when the cloud voice fails before any audio, the rig speaks with Piper.
 
+## 5b. orientation (write to question)
+
+```json
+{"orient": {"front": "right"}}
+```
+
+The phone's "I sit here": which side of the table the user sits at, written to the **question**
+characteristic. `front` is that side **in the camera's frame** (the frame of an app without a view):
+`bottom` (the camera's side, the default), `right`, `top` or `left`. The phone can work it out from the map it
+is showing: the side the user tapped, turned back through the current `view.f` with the table below.
+
+- No answer comes back. The bridge sends it to `POST /orientation` (`{"front"}`); the rig keeps it across
+  restarts (`data/viewer.json`, over `config.yaml` `viewer.front`). Spoken answers use it from the next one
+  ("carried off the table on your left", "at the far right").
+- Right after the app accepts it the bridge sends a fresh state message, so the map turns at once.
+- `{"orient": {"front": null}}` goes back to the rig's configured seat (config `viewer.front`) and forgets the saved one: the phone's "use the rig's default".
+- An `orient` object naming anything else is ignored (no answer); a write over 180 bytes is not an orientation write.
+
+How a camera side becomes the user's, per `front` (camera edge → user edge; the camera table is `[w, h]`,
+the user's `table` is `[w, h]` for bottom and top and `[h, w]` for right and left):
+
+| `front` | camera `left` | camera `right` | camera `top` | camera `bottom` | camera point (x, y) → user (x, y) |
+|---|---|---|---|---|---|
+| `bottom` | left | right | top | bottom | (x, y) |
+| `top` | right | left | bottom | top | (w − x, h − y) |
+| `right` | top | bottom | right | left | (h − y, x) |
+| `left` | bottom | top | left | right | (y, w − x) |
+
+Example: a 100 × 60 cm camera table, `front: right`: the user's `table` is `[60, 100]`, and the camera
+view's top-right point (90, 5) is at (55, 90), near the user on their right. With a tabletop outline
+(`table_area.json`) the user's table is the outline's enclosing rectangle, squared to it; the affine `m` in
+`GET /state` `"view"` does both, and the bridge applies it.
+
 ## 6. answer (notify)
 
 ```json
@@ -136,8 +176,8 @@ question). The rig's speaker then uses the same voice as the phone would.
 | `ok` | bool | false = the bridge's own reply (rejected, room down, timeout, error) |
 | `text` | str | what the rig speaks; show it on the answer card |
 | `point_at` | str \| null | entity the laser aims at (`keys`, `box`, `thing:3`, …) |
-| `action` | str \| null | `point`, `circle` (lost track: circling the last-seen spot), `sweep:left\|right\|top\|bottom` (carried off that edge), or null. **An open string (P3):** later versions may add values (`trace`, `tour`, …); a client that doesn't know one pulses `point_at` at `target` if present, else shows the text only |
-| `target` | [x, y] \| null | table-cm position of `point_at`: its resolved position (a hidden object inherits its parent's), falling back to its last-seen spot; 1 decimal |
+| `action` | str \| null | `point`, `circle` (lost track: circling the last-seen spot), `sweep:left\|right\|top\|bottom` (carried off that edge, the user's edge with a view: `bottom` is nearest them), or null. **An open string (P3):** later versions may add values (`trace`, `tour`, …); a client that doesn't know one pulses `point_at` at `target` if present, else shows the text only |
+| `target` | [x, y] \| null | table-cm position of `point_at` (the user's frame with a view): its resolved position (a hidden object inherits its parent's), falling back to its last-seen spot; 1 decimal |
 | `ms` | int | bridge time from receiving the write to having the answer (includes `/ask` and one `/state`) |
 
 Timeouts nest so exactly one answer comes back and the rig never contradicts it: the server gives up after 10 s (`server/app.py` `ASK_TIMEOUT_S`) and answers "Sorry, that took too long. Please ask again."; an answer that finishes later is neither spoken nor aimed (`main.ANSWER_LATE_S`). The bridge waits 12 s (`ask_timeout_s`) before its own `ok: false` reply, and the app waits 15 s (`RoomStore.answerTimeout`).
@@ -181,8 +221,8 @@ A full snapshot every time; there are no diffs. It is sent:
 
 "Changed" ignores detector jitter: a position has to move more than 0.5 cm, or confidence (`c`) or guess
 confidence (`gc`) more than 0.05 (`gc` appearing or disappearing counts), or a status, parent, edge, alias,
-`maybe_same_as`, guess (`g`) or `as` value has to change, or an entity has to be added or removed, or `online`
-or `laser` has to change. A visible object's `ls` ticking does not count.
+`maybe_same_as`, guess (`g`) or `as` value has to change, or an entity has to be added or removed, or `online`,
+`laser`, `table` or `view` has to change. A visible object's `ls` ticking does not count.
 
 Stale things are left out: an unnamed `thing:N` (no aliases) whose status is GONE or UNKNOWN and whose
 last-seen time is more than **600 s** before the snapshot's `t` is not in `e` (one with no last-seen time
@@ -191,6 +231,7 @@ is kept). Named things and the configured objects are always sent. When a stale 
 
 ```json
 {"v": 1, "t": 1790389843.0, "table": [90.0, 60.0], "online": false,
+ "view": {"f": "bottom", "o": false},
  "laser": {"on": true, "target": "box"},
  "e": [{"n": "keys", "k": "t", "s": "I", "p": "box", "xy": [41.2, 29.0], "r": [70.4, 38.1], "c": 0.85, "ls": 1790389800.4},
        {"n": "box", "k": "c", "s": "V", "xy": [70.4, 38.1], "r": [70.4, 38.1], "c": 1.0, "ls": 1790389843.0},
@@ -203,7 +244,8 @@ is kept). Named things and the configured objects are always sent. When a stale 
 |---|---|---|
 | `v` | int | protocol version, 1 |
 | `t` | float | wall time of the snapshot (Unix s, 1 decimal) |
-| `table` | [w, h] | table size in cm |
+| `table` | [w, h] | table size in cm, as the user sees it with a view (width across from their seat, depth away from them) |
+| `view` | {f, o, s?} | present when the app publishes the user's frame; then `table`, `xy`, `r`, `edge` (and answers' `target` and `sweep:` edge) are the user's (see the top of this file and 5b). `f`: the side they sit at, in the camera's frame (`bottom`/`right`/`top`/`left`). `o`: true when the map is the tabletop outline's rectangle, false for the whole calibrated area. `s`: optional labels for the table's sides from `config.yaml` `viewer.sides`, keyed like `f` by camera side, e.g. `{"right": "couch"}` (the phone turns them to its edges with `f`). Absent: an older app, camera frame |
 | `online` | bool | the rig has internet: the cloud voice (ElevenLabs) and Grok (questions about what the camera sees, open questions, narration). Where-is and history answers always work offline |
 | `laser` | {on, target} | laser on, and which entity it points at (`target` is present, null when none) |
 | `e` | list | every entity |
@@ -211,10 +253,10 @@ is kept). Named things and the configured objects are always sent. When a stale 
 | `e[].k` | `t`/`c`/`v` | kind: target / container / cover. Always present |
 | `e[].s` | `V`/`H`/`U`/`I`/`G`/`X` | VISIBLE / HELD / UNDER / INSIDE / GONE / UNKNOWN. Always present |
 | `e[].p` | str | parent: an entity name (`box`, `notebook`), `hand:N`, or `unknown` |
-| `e[].xy` | [x, y] | last observed centre (cm, 1 decimal) |
+| `e[].xy` | [x, y] | last observed centre (cm, 1 decimal; the user's frame with `view`) |
 | `e[].r` | [x, y] | resolved position: where it is now, through the parent chain (keys → box → table). Draw hidden objects here |
 | `e[].c` | float | confidence 0–1, 2 decimals (a heuristic, not a probability) |
-| `e[].edge` | str | `left`/`right`/`top`/`bottom`: the edge a GONE object left by |
+| `e[].edge` | str | `left`/`right`/`top`/`bottom`: the edge a GONE object left by (the user's edge with `view`: `bottom` is nearest them) |
 | `e[].z` | str | room memory (specs 0009, 0010): the room zone the object is in (`couch`, `side_table`, `counter`), when it is off the table. Such an object has no `xy`/`r` (no table position): list it by zone, don't draw it on the table. The answer's `text` already says the place ("Your wallet, I think, is on the kitchen counter."). Optional |
 | `e[].a` | [str] | taught names (aliases), newest first. **Things only**, and present for every thing (may be `[]`) |
 | `e[].m` | [[name, score]] | "maybe the same as" an earlier thing (score 2 decimals). Optional |

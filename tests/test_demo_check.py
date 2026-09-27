@@ -217,7 +217,7 @@ def test_clock_check_passes_on_a_set_clock_and_keeps_its_number():
         ok, msg = dc.check_clock(rig)
     finally:
         rig.close()
-    assert ok is True and dc.CHECKS[8][0] == "clock" and len(dc.CHECKS) == 16
+    assert ok is True and dc.CHECKS[8][0] == "clock" and len(dc.CHECKS) == 17
 
 
 def test_room_check_skips_when_off_and_rehits_the_sim_map():
@@ -671,5 +671,178 @@ def test_without_pulse_server_a_null_speaker_still_fails(tmp_path, monkeypatch):
         pactl = FakePactl([(BT, "RUNNING")], default_sink=BT)
         ok, msg = dc.check_devices(rig, asound=str(tmp_path), pactl=pactl)
         assert ok is False and "HDMI, silent" in msg and not pactl.calls
+    finally:
+        rig.close()
+
+
+# ---------------------------------------------------------------- 17 table view (27 Sep: the table moved)
+
+ROOM_1440 = {"enabled": True, "capture_size": [2560, 1440], "zoom": 100, "table_view_rect": [0, 980, 817, 1440]}
+TAG_QUAD = np.array([[560.0, 300.0], [680.0, 290.0], [690.0, 380.0], [565.0, 390.0]])    # table-view px
+
+
+def wood(w=1280, h=720, seed=3):
+    """A textured table: smoothed noise, so a moved view decorrelates (a flat colour would not)."""
+    import cv2
+    n = np.random.default_rng(seed).normal(0, 1, (h, w)).astype(np.float32)
+    n = cv2.GaussianBlur(n, (0, 0), 6)
+    g = np.clip(128 + 60 * n / n.std(), 0, 255).astype(np.uint8)
+    return cv2.cvtColor(g, cv2.COLOR_GRAY2BGR)
+
+
+def with_tag(img):
+    import cv2
+    out = img.copy()
+    cv2.fillPoly(out, [np.int32(core_table().tag_patch(TAG_QUAD, (1280, 720))["mask"])], (255, 255, 255))  # sheet
+    cv2.fillPoly(out, [np.int32(TAG_QUAD)], (0, 0, 0))
+    return out
+
+
+def core_table():
+    import core.table
+    return core.table
+
+
+def view_rig(tmp_path, cal_img, now_img, room=None, cal_room=None, old_format=False, outline=False):
+    """A one-tag rig whose table_cal.json (+ thumbnail) was saved from cal_img (under cal_room's view);
+    the camera now shows now_img, under `room`'s config."""
+    from types import SimpleNamespace
+
+    from core.table_area import set_outline
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    paths = dict(CFG["paths"], table_cal=str(tmp_path / "table_cal.json"))
+    base = dict(CFG, paths=paths, table_tag=dict(CFG.get("table_tag") or {}, enabled=True), frame_size_px=[1280, 720],
+                table_area={})
+    ct = core_table()
+    t = ct.Table(dict(base, room_memory=cal_room or {"enabled": False}))
+    t._set(np.array([[0.1, 0.0, 0.0], [0.0, 0.1, 0.0], [0.0, 0.0, 1.0]]))
+    if old_format:
+        t.save({"tag": TAG_QUAD.tolist()})
+    else:
+        t.save({"tag": TAG_QUAD.tolist()}, cal_img, ct.tag_patch(TAG_QUAD, (1280, 720)))
+    cfg = dict(base, room_memory=room or {"enabled": False})
+    if outline:
+        set_outline(t, cfg, [(5, 5), (100, 5), (100, 60), (5, 60)])
+    rig = dc.Rig(cfg, manual=False)
+    rig._parts["table"] = ct.Table(cfg)
+    rig._parts["frames"] = SimpleNamespace(latest=lambda: SimpleNamespace(img=now_img))
+    return rig
+
+
+def test_table_view_passes_when_the_scene_matches_under_other_light(tmp_path):
+    scene = wood()
+    darker = np.clip(scene.astype(np.float32) * 0.6 + 30, 0, 255).astype(np.uint8)     # evening light, tag gone
+    rig = view_rig(tmp_path, with_tag(scene), darker, outline=True)
+    try:
+        ok, msg = dc.check_table_view(rig)
+        assert ok is True, msg
+        assert "calibrated at this view" in msg and "tag spot matches" in msg and "outline 4 corners" in msg
+    finally:
+        rig.close()
+
+
+def test_table_view_fails_when_the_scene_at_the_tag_spot_moved(tmp_path):
+    scene = wood()
+    moved = np.roll(scene, 60, axis=1)                                     # the table slid 60 px
+    rig = view_rig(tmp_path, with_tag(scene), moved, outline=True)
+    try:
+        ok, msg = dc.check_table_view(rig)
+        assert ok is False and "the scene at the tag spot changed" in msg and "recalibrate" in msg, msg
+    finally:
+        rig.close()
+
+
+def test_table_view_objects_moving_on_the_table_do_not_trip_the_shift(tmp_path):
+    import cv2
+    scene = wood()
+    busy = scene.copy()
+    cv2.rectangle(busy, (100, 450), (400, 700), (30, 30, 30), -1)           # a laptop put down, away from the tag
+    rig = view_rig(tmp_path, with_tag(scene), busy, outline=True)
+    try:
+        ok, msg = dc.check_table_view(rig)
+        assert ok is True and "view shift 0.0%" in msg, msg
+    finally:
+        rig.close()
+
+
+def test_table_view_fails_at_another_view(tmp_path):
+    scene = wood()
+    moved = dict(ROOM_1440, table_view_rect=[0, 900, 817, 1360])
+    rig = view_rig(tmp_path, with_tag(scene), scene, room=moved, cal_room=ROOM_1440, outline=True)
+    try:
+        ok, msg = dc.check_table_view(rig)
+        assert ok is False and msg.startswith("calibrated at another view (table_view_rect"), msg
+        assert "lay the tag flat on the table and recalibrate" in msg
+    finally:
+        rig.close()
+
+
+def test_table_view_1080p_calibration_is_the_same_view_at_1440p(tmp_path):
+    from core.room_view import cut
+    full = wood(2560, 1440, seed=5)
+    tv = cut(full, ROOM_1440["table_view_rect"])
+    room_1080 = {"enabled": True, "capture_size": [1920, 1080], "zoom": 100, "table_view_rect": [0, 735, 613, 1080]}
+    rig = view_rig(tmp_path, with_tag(tv), full, room=ROOM_1440, cal_room=room_1080, outline=True)
+    try:
+        ok, msg = dc.check_table_view(rig)                                  # the camera frame is the full view
+        assert ok is True and "calibrated at this view" in msg and "tag spot matches" in msg, msg
+    finally:
+        rig.close()
+
+
+def test_table_view_warns_without_a_recorded_view_or_an_outline(tmp_path):
+    scene = wood()
+    rig = view_rig(tmp_path, None, scene, old_format=True)
+    try:
+        ok, msg = dc.check_table_view(rig)
+        assert ok is None and msg.startswith(dc.WARN), msg
+        assert "no view recorded: recalibrate" in msg
+        assert "no tabletop outline: the map shows the camera's whole view; draw it " \
+               "(python -m core.table --outline)" in msg
+        shown = dc.line(17, "table view", ok, msg, color=False)
+        assert shown.startswith("[WARN] 17 table view") and "warning:" not in shown
+    finally:
+        rig.close()
+
+
+def test_table_view_warns_about_the_outline_alone(tmp_path):
+    scene = wood()
+    rig = view_rig(tmp_path, with_tag(scene), scene)
+    try:
+        ok, msg = dc.check_table_view(rig)
+        assert ok is None and "no tabletop outline" in msg and "tag spot matches" in msg, msg
+    finally:
+        rig.close()
+
+
+def test_table_view_live_cuts_the_apps_full_frame(tmp_path):
+    import cv2
+
+    from core.room_view import cut
+    full = wood(2560, 1440, seed=7)
+    tv = cut(full, ROOM_1440["table_view_rect"])
+    rig = view_rig(tmp_path, with_tag(tv), None, room=ROOM_1440, cal_room=ROOM_1440, outline=True)
+    rig.live = True
+    small = cv2.resize(full, (1280, 720), interpolation=cv2.INTER_AREA)            # /full.jpg is 1280 wide
+    jpg = cv2.imencode(".jpg", small, [cv2.IMWRITE_JPEG_QUALITY, 80])[1].tobytes()
+    urls = []
+    try:
+        ok, msg = dc.check_table_view(rig, get=lambda url, timeout: (urls.append(url), Resp(content=jpg))[1])
+        assert ok is True and "compared with the app's /full.jpg" in msg and "tag spot matches" in msg, msg
+        assert urls == ["http://127.0.0.1:8000/full.jpg?raw=1"]
+        ok, msg = dc.check_table_view(rig, get=lambda url, timeout: Resp(404))
+        assert ok is None and "scene not compared: no frame from" in msg, msg
+    finally:
+        rig.close()
+
+
+def test_table_view_ignores_a_thumbnail_from_another_calibration(tmp_path):
+    scene = wood()
+    rig = view_rig(tmp_path, with_tag(scene), scene, outline=True)
+    try:
+        (tmp_path / "table_cal_view.png").write_bytes(
+            __import__("cv2").imencode(".png", np.zeros((180, 320), np.uint8))[1].tobytes())
+        ok, msg = dc.check_table_view(rig)
+        assert ok is None and "from another calibration" in msg, msg
     finally:
         rig.close()

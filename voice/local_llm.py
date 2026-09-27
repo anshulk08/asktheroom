@@ -76,7 +76,7 @@ def user_prompt(question: str, world, events, cfg: dict) -> str:
         except Exception:
             pass
     state = json.dumps(compact_state(world, cfg), separators=(",", ":"))
-    recent = json.dumps([_event_dict(ev, now, True) for ev in evs], separators=(",", ":"))
+    recent = json.dumps([_event_dict(ev, now, True, cfg=cfg) for ev in evs], separators=(",", ":"))
     return f"State: {state}\nRecent events (s_ago = seconds ago): {recent}\nQuestion: {question}"
 
 

@@ -28,6 +28,7 @@ from typing import Optional, Union
 from core.carewords import (event_place, pill_claim, pill_guard, plural, say_clock, spoken, where_sentence,
                             your)
 from core.reminders import ReminderStore, Reminders, care_cfg
+from core.viewframe import View
 from core.types import Status
 
 PILL = "pill_bottle"
@@ -125,8 +126,7 @@ def _object_clause(world, cfg: dict, obj: str, ev, st: Status) -> str:
         where = f"under the {spoken(world, cfg, p)}" if p else "under something"
         return f"{n} {'were' if pl else 'was'} last seen {where} at {T}"
     if st == Status.GONE:
-        side = f"the {e.edge} side of the table" if e.edge else "the table"
-        return f"{n} went off {side} at {T}"
+        return f"{n} went off {View.from_cfg(cfg).off_table(e.edge)} at {T}"
     from voice.answers import area
     return f"I lost track of {n} at {T}, {area(e.pos_cm, cfg)}"
 

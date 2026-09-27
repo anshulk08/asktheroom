@@ -136,7 +136,7 @@ def test_digest_records_what_the_world_believed(log):
                     Entity("pill_bottle", "target", Status.UNDER, parent="notebook", pos_cm=(50.0, 30.0)),
                     Entity("notebook", "cover", Status.VISIBLE, pos_cm=(80.0, 30.0))], log)
     d = digest(fw, CFG)
-    assert {"name": "keys", "area": "left"} in d["visible"] and {"name": "notebook", "area": "right"} in d["visible"]
+    assert {"name": "keys", "area": "your left"} in d["visible"] and {"name": "notebook", "area": "your right"} in d["visible"]
     assert d["hidden"] == [{"name": "pill bottle", "status": "under", "parent": "notebook"}]
     a = archive(log, world=fw)
     a.feed(frame(0.0, img()), dets(0.0), [])

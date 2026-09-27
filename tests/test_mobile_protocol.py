@@ -450,6 +450,11 @@ class FakeHTTP:
             self.voiced = getattr(self, "voiced", []) + [body]
             return {"engine": body.get("engine") or "grok", "grok_voice": body.get("grok_voice") or "eve",
                     "speed": body.get("speed") or 1.0}
+        if path == "/orientation":
+            from core.viewframe import View
+            self.oriented = getattr(self, "oriented", []) + [body]
+            self.meta["view"] = View.make(body["front"], (100, 60)).to_json()
+            return dict(self.meta["view"])
         assert path == "/ask"
         self.asked.append(body)
         return dict(self.reply)
@@ -890,3 +895,172 @@ def test_a_voice_write_is_applied_and_never_answered():
         t.join(2)
     assert http.voiced == [{"engine": "rig", "grok_voice": "", "speed": 0.9}]
     assert core.asks.empty() and len(phone.msgs["answer"]) == before and http.asked == []
+
+
+# -- the user's frame (PROTOCOL.md 5b, state "view"): a 100 x 60 cm camera table, worked out by hand
+
+from core.viewframe import View  # noqa: E402
+
+# camera point -> the user's, per front: A (90, 5) is the camera view's top right, B (10, 50) its bottom left
+FRAMES = {
+    "bottom": {"table": [100.0, 60.0], "A": [90.0, 5.0], "B": [10.0, 50.0],
+               "edges": {"left": "left", "right": "right", "top": "top", "bottom": "bottom"}},
+    "top": {"table": [100.0, 60.0], "A": [10.0, 55.0], "B": [90.0, 10.0],
+            "edges": {"left": "right", "right": "left", "top": "bottom", "bottom": "top"}},
+    "right": {"table": [60.0, 100.0], "A": [55.0, 90.0], "B": [10.0, 10.0],
+              "edges": {"left": "top", "right": "bottom", "top": "right", "bottom": "left"}},
+    "left": {"table": [60.0, 100.0], "A": [5.0, 10.0], "B": [50.0, 90.0],
+             "edges": {"left": "bottom", "right": "top", "top": "left", "bottom": "right"}},
+}
+
+
+def view(front, size=(100, 60), outline=None):
+    return View.make(front, size, outline).to_json()
+
+
+def cam_state():
+    return {"t": 1.0, "online": True, "laser": {"on": True, "target": "a"}, "entities": [
+        {"name": "a", "kind": "target", "status": "VISIBLE", "pos_cm": [90, 5], "resolved_cm": [90, 5]},
+        {"name": "b", "kind": "target", "status": "INSIDE", "parent": "box", "pos_cm": [10, 50],
+         "resolved_cm": [90, 5]},
+        {"name": "wallet", "kind": "target", "status": "GONE", "edge": "left", "pos_cm": [1, 30]},
+        {"name": "phone", "kind": "target", "status": "GONE", "edge": "top", "pos_cm": [50, 1]},
+        {"name": "remote", "kind": "target", "status": "VISIBLE", "zone": "couch"}]}
+
+
+def test_parse_orient():
+    assert P.parse_orient(P.dumps({"orient": {"front": "right"}})) == {"front": "right"}
+    assert P.parse_orient(P.dumps({"orient": {"front": " Left "}})) == {"front": "left"}
+    for f in P.FRONTS:
+        assert P.parse_orient(P.dumps({"orient": {"front": f}})) == {"front": f}
+    assert P.parse_orient(P.dumps({"id": 1, "q": "where are my keys?"})) is None
+    assert P.parse_orient(P.dumps({"voice": {"e": "grok"}})) is None
+    for raw in (b"not json", b"[1]", P.dumps({"orient": "right"}),
+                P.dumps({"orient": {"front": "right", "pad": "x" * 200}})):
+        assert P.parse_orient(raw) is None, raw
+    assert P.parse_orient(P.dumps({"orient": {"front": None}})) == {"front": None}     # back to the rig's default
+    for bad in ({}, {"front": "sideways"}, {"front": 3}):
+        assert P.parse_orient(P.dumps({"orient": bad})) == {}, bad                     # an orient write, ignored
+
+
+@pytest.mark.parametrize("front", list(FRAMES))
+def test_compact_state_in_the_users_frame_for_every_front(front):
+    want = FRAMES[front]
+    c = P.compact_state(cam_state(), (100, 60), 5.0, view(front))
+    assert c["table"] == want["table"] and c["view"] == {"f": front, "o": False}
+    e = {x["n"]: x for x in c["e"]}
+    assert e["a"]["xy"] == want["A"] and e["a"]["r"] == want["A"]
+    assert e["b"]["xy"] == want["B"] and e["b"]["r"] == want["A"]
+    assert e["wallet"]["edge"] == want["edges"]["left"] and e["phone"]["edge"] == want["edges"]["top"]
+    assert "xy" not in e["remote"] and e["remote"]["z"] == "couch"           # a room object: no table position
+    assert c["laser"] == {"on": True, "target": "a"} and c["online"] is True
+
+
+@pytest.mark.parametrize("front", list(FRAMES))
+def test_edges_targets_and_sweeps_for_every_front(front):
+    want, v = FRAMES[front], view(front)
+    for cam, user in want["edges"].items():
+        assert P.VIEW_EDGE[front][cam] == user == View.make(front, (100, 60)).edge(cam)
+        assert P.view_action(f"sweep:{cam}", v) == f"sweep:{user}"
+    assert P.target_of(cam_state(), "a", v) == want["A"]
+    assert P.target_of(cam_state(), "wallet", v) == P.compact_entity(cam_state()["entities"][2], P.view_of(v))["xy"]
+    assert P.target_of(cam_state(), "nobody", v) is None
+    for a in ("point", "circle", None, "sweep:sideways", "tour"):
+        assert P.view_action(a, v) == a
+
+
+def test_a_hand_written_view_is_applied_without_core():
+    """The bridge's own affine, checked against literal numbers (not View.make)."""
+    right = {"front": "right", "table": [60, 100], "m": [[0, -1, 60], [1, 0, 0]], "outline": False}
+    c = P.compact_state(cam_state(), (100, 60), 5.0, right)
+    assert c["table"] == [60.0, 100.0] and {x["n"]: x.get("xy") for x in c["e"]}["a"] == [55.0, 90.0]
+    # an outline cropped 10 cm off the left and 5 off the top, seen from the camera's side
+    crop = {"front": "bottom", "table": [80, 40], "m": [[1, 0, -10], [0, 1, -5]], "outline": True}
+    c = P.compact_state(cam_state(), (100, 60), 5.0, crop, sides={"right": "couch", "bottom": "", "up": "x"})
+    assert c["table"] == [80.0, 40.0] and c["view"] == {"f": "bottom", "o": True, "s": {"right": "couch"}}
+    assert {x["n"]: x.get("xy") for x in c["e"]}["a"] == [80.0, 0.0]
+    assert P.target_of(cam_state(), "b", crop) == [80.0, 0.0]
+    assert [[round(x, 6) + 0.0 for x in r] for r in view("right")["m"]] == right["m"]   # the same numbers
+    c = P.compact_state(cam_state(), (100, 60), 5.0, right, sides={"right": "couch"})
+    assert c["view"]["s"] == {"right": "couch"}           # keyed by camera side, like "f"
+
+
+def test_sides_are_labelled_by_camera_side_like_f():
+    c = P.compact_state(cam_state(), (100, 60), 5.0, view("right"), sides={"right": "couch", "top": "window"})
+    assert c["view"]["s"] == {"right": "couch", "top": "window"}
+
+
+def test_no_view_or_a_bad_one_keeps_the_camera_frame():
+    plain = P.compact_state(cam_state(), (100, 60), 5.0)
+    assert "view" not in plain and plain["table"] == [100.0, 60.0]
+    assert {x["n"]: x.get("xy") for x in plain["e"]}["a"] == [90.0, 5.0]
+    assert {x["n"]: x.get("edge") for x in plain["e"]}["wallet"] == "left"
+    for bad in (None, {}, {"front": "diagonal", "table": [1, 1], "m": [[1, 0, 0], [0, 1, 0]]},
+                {"front": "right", "table": [60, 100], "m": [[0, -1], [1, 0]]},
+                {"front": "right", "m": [[0, -1, 60], [1, 0, 0]]},
+                {"front": "right", "table": [60, 100], "m": [[0, "x", 60], [1, 0, 0]]}):
+        assert P.compact_state(cam_state(), (100, 60), 5.0, bad) == plain, bad
+        assert P.target_of(cam_state(), "a", bad) == [90.0, 5.0]
+        assert P.view_action("sweep:left", bad) == "sweep:left"
+
+
+def test_state_changed_on_a_view_change():
+    a = P.compact_state(cam_state(), (100, 60), 5.0, view("bottom"))
+    assert not P.state_changed(a, P.compact_state(cam_state(), (100, 60), 6.0, view("bottom")))
+    assert P.state_changed(a, P.compact_state(cam_state(), (100, 60), 5.0, view("right")))
+    assert P.state_changed(a, P.compact_state(cam_state(), (100, 60), 5.0))              # view gone
+    b = json.loads(json.dumps(a))
+    b["view"]["o"] = True
+    assert P.state_changed(a, b)
+    b = json.loads(json.dumps(a))
+    b["table"] = [99.0, 60.0]
+    assert P.state_changed(a, b)
+
+
+def test_the_bridge_sends_the_users_frame_when_the_app_publishes_a_view():
+    core, http, phone, mono = make()
+    http.meta = {"view": view("right", (90, 60)), "sides": {"right": "couch"}}
+    core.poll_once()
+    core.set_notifying("state", True)
+    snap = phone.msgs["state"][-1]
+    assert snap["table"] == [60.0, 90.0] and snap["view"] == {"f": "right", "o": False, "s": {"right": "couch"}}
+    keys = next(e for e in snap["e"] if e["n"] == "keys")
+    assert keys["xy"] == [31.0, 41.2] and keys["r"] == [21.9, 70.4]       # camera (41.234, 29.01), (70.449, 38.15)
+    http.meta = {}                                                         # an older app: back to the camera frame
+    mono.t += 1.0
+    core.poll_once()
+    snap = phone.msgs["state"][-1]
+    assert "view" not in snap and snap["table"] == [90.0, 60.0]
+
+
+def test_answers_and_room_answers_carry_the_users_target_and_sweep():
+    core, http, phone, mono = make()
+    http.meta = {"view": view("right", (90, 60)), "answers": []}
+    core.set_notifying("answer", True)
+    core.poll_once()
+    msg = core.answer(1, "where are my keys?")
+    assert msg["target"] == [21.9, 70.4] and msg["action"] == "point"
+    http.reply = {"text": "The wallet was carried off the far side of the table.", "point_at": None,
+                  "action": "sweep:top"}
+    assert core.answer(2, "where is my wallet?")["action"] == "sweep:right"
+    http.meta = dict(http.meta, answers=[dict(room_answer(1), action="sweep:left")])
+    core.poll_once()
+    [m] = phone.msgs["answer"]
+    assert m["target"] == [21.9, 70.4] and m["action"] == "sweep:top"
+
+
+def test_an_orient_write_turns_the_map_at_once_and_is_never_answered():
+    core, http, phone, mono = make()
+    core.poll_once()
+    core.set_notifying("state", True)
+    core.set_notifying("answer", True)
+    assert "view" not in phone.msgs["state"][-1]
+    sent = len(phone.msgs["state"])
+    core.on_question(P.dumps({"orient": {"front": "right"}}))
+    for t in [t for t in B.threading.enumerate() if t.name == "orient"]:
+        t.join(2)
+    assert http.oriented == [{"front": "right"}]
+    assert len(phone.msgs["state"]) == sent + 1                            # right away, not at the next poll
+    assert phone.msgs["state"][-1]["view"] == {"f": "right", "o": False}
+    assert phone.msgs["state"][-1]["table"] == [60.0, 100.0]
+    assert core.asks.empty() and phone.msgs["answer"] == [] and http.asked == []

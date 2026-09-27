@@ -41,6 +41,7 @@ from typing import Callable, Optional, Union
 from core.config import display_name
 from core.narration_store import NarrationStore, med_claim, redact_meds
 from core.types import Event, EventType
+from core.viewframe import View
 
 log = logging.getLogger(__name__)
 
@@ -228,7 +229,7 @@ def _name(obj: Optional[str], names: Optional[dict], cfg: Optional[dict] = None)
 
 
 def event_desc(e: dict, names: Optional[dict] = None, cfg: Optional[dict] = None) -> str:
-    """'keys PICKED_UP by hand', 'keys PUT_INSIDE box', 'phone EXITED_VIEW off the left edge'."""
+    """'keys PICKED_UP by hand', 'keys PUT_INSIDE box', 'phone EXITED_VIEW off the table on your left'."""
     typ, parent = e.get("type"), e.get("parent")
     s = f"{_name(e.get('obj'), names, cfg)} {typ}"
     if parent and parent.startswith("hand"):
@@ -238,8 +239,8 @@ def event_desc(e: dict, names: Optional[dict] = None, cfg: Optional[dict] = None
         s += {"COVERED": f" by {p}", "TAKEN_OUT": f" of {p}"}.get(typ, f" {p}")
     elif parent == "unknown":
         s += " by something" if typ == "COVERED" else ""
-    if e.get("edge"):
-        s += f" off the {e['edge']} edge"
+    if e.get("edge"):                      # the camera's edge, said from the user's seat when cfg is given
+        s += f" off {View.from_cfg(cfg).off_table(e['edge'])}" if cfg else f" off the {e['edge']} edge"
     return s
 
 

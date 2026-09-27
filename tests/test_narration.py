@@ -705,7 +705,7 @@ def test_sim_story_end_to_end_with_the_real_world(tmp_path):
     rows = n.store.between(WALL0 - 1, WALL0 + 3600)
     assert len(rows) >= 5, [r.summary for r in rows]
     alltext = " | ".join(j.events_text for j in jobs)
-    assert "keys PUT_INSIDE box" in alltext and "phone EXITED_VIEW off the right edge" in alltext
+    assert "keys PUT_INSIDE box" in alltext and "phone EXITED_VIEW off the table on your right" in alltext
     keys_job = next(j for j in jobs if "keys PUT_INSIDE box" in j.events_text)
     assert "box MOVED" not in keys_job.events_text          # the box move is its own episode
     for j in jobs:
