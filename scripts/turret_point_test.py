@@ -36,7 +36,7 @@ OBJECTS = [
 
 
 def main(port: str, laser: bool = False) -> int:
-    cfg = {"servo_limits": {"pan": [1500 - 1700, 1500 + 1700], "tilt": [1500 - 450, 1500 + 900]},
+    cfg = {"servo_limits": {"pan": [1500 - 900, 1500 + 900], "tilt": [1500 - 900, 1500 + 900]},
            "turret": {"port": port}}   # the firmware's own limits, at 10 us/deg
     act = TurretActuator(cfg)
     failures = 0

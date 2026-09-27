@@ -56,8 +56,8 @@ Run CAL on each driver with the belt off before first use, and again after any m
 | Pan | 20T → 80T, 4:1 | right | measured: ±90° swings exact |
 | Tilt | 20T → 64T, 3.2:1 | up | direction confirmed; ratio from the build guide, not yet measured |
 
-These live in `GEAR_RATIO` and `INVERT_DIR` in `turret.ino`. The firmware's soft limits are pan
-±170° and tilt −45° to +90° (`MIN_DEG`/`MAX_DEG`); `act/pointing.py` `FIRMWARE_LIMITS_DEG` mirrors
+These live in `GEAR_RATIO` and `INVERT_DIR` in `turret.ino`. The firmware's soft limits are the
+mount's travel, ±90° on both axes (`MIN_DEG`/`MAX_DEG`); `act/pointing.py` `FIRMWARE_LIMITS_DEG` mirrors
 them. Opening the serial port resets the Uno, and wherever the mount points then becomes 0,0, so
 line it up level and facing forward first.
 

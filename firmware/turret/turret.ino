@@ -40,8 +40,8 @@ const char *AXIS_NAME[2] = {"pan", "tilt"};
 const float MOTOR_STEPS_PER_REV = 200.0 * 16;
 const float GEAR_RATIO[2] = {4.0, 3.2};
 const bool  INVERT_DIR[2] = {true, true};    // + pans right, + tilts up
-const float MIN_DEG[2] = {-170, -45};
-const float MAX_DEG[2] = { 170,  90};
+const float MIN_DEG[2] = {-90, -90};   // the mount's travel: 90 deg each way on both axes
+const float MAX_DEG[2] = { 90,  90};
 
 // ---- Motion -----------------------------------------------------------------
 const uint16_t TICK_HZ = 20000;             // step interrupt rate

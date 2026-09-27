@@ -24,7 +24,7 @@ from typing import Optional
 
 DegLimits = tuple[tuple[float, float], tuple[float, float]]
 # The firmware's own soft limits (MIN_DEG/MAX_DEG in firmware/turret/turret.ino).
-FIRMWARE_LIMITS_DEG: DegLimits = ((-170.0, 170.0), (-45.0, 90.0))
+FIRMWARE_LIMITS_DEG: DegLimits = ((-90.0, 90.0), (-90.0, 90.0))
 
 
 def head_axes(pan_deg, tilt_deg):

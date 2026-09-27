@@ -636,8 +636,8 @@ capture:
 # firmware/README.md. The rest of act/ thinks in servo pulses, so the turret takes servo-equivalent
 # pulses: pulse = center_us + degrees * us_per_deg. With 10 us/deg the servo-tuned values keep their
 # scale (laser_anti_backlash_us 25 = 2.5 deg, room.deadband_us 8 = 0.8 deg), and servo_limits
-# [1050, 1950] means +/-45 deg. Keep servo_limits inside the firmware's own limits (pan +/-170,
-# tilt -45..90 deg) and, for act.calibrate, covering just the table.
+# [1050, 1950] means +/-45 deg. Keep servo_limits inside the firmware's own limits (+/-90 deg on
+# both axes, the mount's travel) and, for act.calibrate, covering just the table.
 # Opening the port resets the Uno: wherever the mount points then is 0,0 (center_us), so line it up
 # first; close() parks it back at 0,0. On the rig set the port in config.local.yaml
 # (Jetson: /dev/ttyACM0, the user needs the dialout group).
