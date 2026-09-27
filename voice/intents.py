@@ -49,7 +49,7 @@ from core.config import display_name
 from core.narration_store import has_time_phrase
 from core.types import Intent
 
-__all__ = ["Intent", "parse", "normalize", "fuzzy_match", "matched_exactly"]
+__all__ = ["Intent", "parse", "normalize", "fuzzy_match", "matched_exactly", "firm_question", "names_a_person"]
 
 FILLER = {"um", "umm", "uh", "uhh", "uhm", "er", "erm", "ah", "eh", "hmm", "hm", "hey", "hi",
           "okay", "ok", "so", "like", "please", "well", "oh", "actually", "yo"}
@@ -63,10 +63,12 @@ _DONE = r"(?:touched|moved|picked|taken|handled|grabbed|used|opened|messed|distu
 RECAL = re.compile(r"\b(?:re)?calibrat\w*")
 RESET = re.compile(r"\breset\b|\bstart (?:over|fresh)\b")
 WHERE = re.compile(r"\bwhere")  # where, whered, wheres, whereabouts (not 'anywhere')
-HANDLED = re.compile(
+HANDLED_ASKED = re.compile(                      # 'did anyone move', 'has it been touched'
     rf"\b(?:(?:did|have|has|had)\s+(?:{_SUBJ}|(?:my|the|our|your)\s+[a-z]+)|ive|weve)\b(?:\s+\w+){{0,2}}?\s+{_VERB}"
-    rf"|\b(?:been|get|got|gotten|was|were)\s+{_DONE}\b"
-    rf"|\b(?:was|were|is|are|has|have)\s+(?:my|the|our|your)\s+[a-z_]+(?:\s+[a-z_]+)?\s+(?:been\s+)?{_DONE}\b")
+    rf"|\b(?:been|get|got|gotten|was|were)\s+{_DONE}\b")
+HANDLED_PASSIVE = re.compile(                    # 'was the remote touched' (also 'were the posters moved')
+    rf"\b(?:was|were|is|are|has|have)\s+(?:my|the|our|your)\s+[a-z_]+(?:\s+[a-z_]+)?\s+(?:been\s+)?{_DONE}\b")
+HANDLED = re.compile(f"{HANDLED_ASKED.pattern}|{HANDLED_PASSIVE.pattern}")
 # 'who ...' / 'when ...' opening the question asks for the history, even with a touch verb in it.
 ASKS_WHO_WHEN = re.compile(r"^(?:and\s+|now\s+|then\s+)?(?:who|whos|when|whens)\b")
 CHANGES = re.compile(r"\bchang(?:e|ed|es|ing)\b|\bdifferent\b|\bwhat did i miss\b|\bmissed\b"
@@ -112,6 +114,9 @@ NAME_STOP = {
     "middle", "anything", "something", "everything", "stuff", "things", "thing", "one", "ones",
     "weather", "time", "please", "day", "calibration", "laser", "for", "of", "about", "lately",
     "show", "showed", "shown", "appear", "appeared", "arrive", "arrived", "turn", "turned", "come", "came",
+    # participles end a name too: 'was my charger moved' -> 'charger'
+    "moved", "touched", "taken", "took", "grabbed", "picked", "handled", "used", "opened", "messed",
+    "disturbed", "tampered", "gone", "missing", "lost", "stolen",
 }
 _POSS = re.compile(r"\b(?:my|the|your|our)\s+([a-z0-9]+(?:\s+[a-z0-9]+){0,3})")
 
@@ -190,13 +195,21 @@ _DET_SPAN = re.compile(r"\b(?:my|the|your|our)\s+([a-z]+)(?:\s+([a-z]+))?")
 
 def _fuzzy(t: str, phrases: dict[str, str]) -> Optional[tuple[str, str]]:
     """(heard span, phrase) for the best 1-2 word span after my/the/your/our that sounds like an
-    object name or synonym, or None."""
+    object name or synonym, or None. The span must cover the whole spoken noun phrase: in 'my wall
+    charger', 'wall' is part of a longer name, not a misheard wallet ('wall it' is: 'it' ends a name)."""
     best, score = None, 0.0
     for m in _DET_SPAN.finditer(t):
         one = m.group(1)
+        if one in NAME_STOP or one in ARTICLES:
+            continue
+        noun = 0                        # words in the spoken noun phrase after the determiner
+        for w in t[m.start(1):].split()[:4]:
+            if w in NAME_STOP or w in ARTICLES:
+                break
+            noun += 1
         spans = [one] + ([f"{one} {m.group(2)}"] if m.group(2) else [])
         for span in spans:
-            if one in NAME_STOP or one in ARTICLES:
+            if len(span.split()) < noun:
                 continue
             for p in phrases:
                 sc = fuzzy_match(span, p)
@@ -260,6 +273,34 @@ def _spoken_name(t: str) -> Optional[str]:
         if words:
             return " ".join(words)
     return None
+
+
+def firm_question(text: str) -> bool:
+    """Phrased as a question about a thing, not just with a show verb or a passive ('show me the money',
+    'were the posters moved' are just as likely said to a person). Overheard speech about a name nobody
+    taught needs this (voice.understand.screen)."""
+    t = normalize(text)
+    return bool(WHERE.search(t) or WHERE2.search(t) or HANDLED_ASKED.search(t) or HISTORY.search(t)
+                or ASKS_WHO_WHEN.search(t))
+
+
+# 'this is my wife Karen' introduces a person; overheard, it isn't teaching a thing's name.
+PEOPLE = {"wife", "husband", "partner", "friend", "friends", "girlfriend", "boyfriend", "fiance", "fiancee",
+          "son", "daughter", "kid", "kids", "child", "children", "mom", "mum", "mother", "dad", "father",
+          "brother", "sister", "sibling", "cousin", "aunt", "uncle", "grandma", "grandpa", "grandmother",
+          "grandfather", "family", "boss", "manager", "colleague", "coworker", "teammate", "team", "mentor",
+          "roommate", "buddy", "pal", "classmate", "professor", "teacher", "advisor", "neighbor", "neighbour",
+          "guy", "guys", "man", "woman", "baby", "dog", "cat", "group", "project", "demo", "startup", "hack"}
+
+
+def names_a_person(name: Optional[str], raw: str = "") -> bool:
+    """A TEACH name that is a person, pet or the project ('wife karen', 'friend', 'team'), not a thing
+    ('friend's mug', said with the possessive, is a mug)."""
+    words = (name or "").split()
+    if not words or words[0] not in PEOPLE:
+        return False
+    stem = words[0][:-1] if words[0].endswith("s") else words[0]    # normalize drops the apostrophe
+    return not re.search(rf"\b{re.escape(stem)}['’]s\b", raw.lower())
 
 
 def matched_exactly(text: str, obj: Optional[str], cfg: dict, aliases=()) -> bool:

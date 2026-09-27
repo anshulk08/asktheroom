@@ -239,3 +239,16 @@ def test_wear_is_only_where_as_the_first_word():
     assert normalize("wears my wallet") == "wheres my wallet"
     assert normalize("what she wears my wallet") == "what she wears my wallet"
     assert normalize("wear sunscreen") == "wear sunscreen"
+
+
+def test_passive_participles_end_a_spoken_name():
+    it = parse("was my charger moved", CFG)
+    assert (it.kind, it.name) == ("HANDLED", "charger")
+    assert parse("has my stapler been taken", CFG).name == "stapler"
+
+
+def test_teaching_a_person_is_recognised():
+    from voice.intents import names_a_person
+    assert names_a_person(parse("This is my wife Karen", CFG).name)
+    assert names_a_person("friend") and not names_a_person("travel charger")
+    assert not names_a_person("friends mug", "this is my friend's mug")

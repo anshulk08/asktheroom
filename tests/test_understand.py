@@ -61,8 +61,8 @@ def test_qwen_reads_what_the_rules_cannot():
 ])
 def test_rules_keep_taught_names_and_rule_only_kinds_without_qwen(text, kind, name):
     u = Understander(CFG, qwen=StubQwen(kind="OTHER", obj="none"), aliases=lambda: ["charger"])
-    i = u(text)
-    assert (i.kind, i.name) == (kind, name) and u.last_by == "rules" and u.qwen.asked == []
+    i = u(text)                             # a taught name is matched like an object name (obj = the alias)
+    assert (i.kind, i.obj or i.name) == (kind, name) and u.last_by == "rules" and u.qwen.asked == []
 
 
 @pytest.mark.parametrize("text, kind, name", [
@@ -336,3 +336,93 @@ def test_backend_qwen_is_asked_offline(monkeypatch):
     local.local = True
     u = Understander(CFG, model=local, online=lambda: False)
     assert u("wears my wall it").obj == "wallet" and local.asked
+
+
+# -- overheard chatter (review of fix/voice): none of this is for the rig, offline or with Grok saying OTHER
+
+CHATTER = [
+    "I'll grab my keys on the way out", "my phone's about to die", "so the camera sees the whole table",
+    "we built this in like twenty hours", "put the wallet in the box", "that's a cool laser",
+    "hold on let me check my phone", "I think I left my glasses in the car",
+    "watch what happens when I move the notebook", "yeah the keys are under there now", "where are you guys from",
+    "show me the money", "show me your notes", "point at the screen please", "was the demo moved to three",
+    "were the posters moved", "who is presenting next", "this is my wife Karen", "this is my friend Sam",
+    "that's my teammate", "show me how it works", "can you show me the slides", "point me to the exit",
+    "where's the bathroom", "where did you guys park", "where is the registration desk", "who made this",
+    "when does judging start", "has anyone seen the judges", "did you guys get pizza", "was the talk moved to three",
+    "is the wifi down", "show me what you built", "can you show us the demo", "light it up",
+    "when is the next talk", "who won last year", "where are the stickers", "did someone take my seat",
+    "has the schedule been changed", "is the keynote moved", "where do I sign up", "can you point me to the food",
+    "where is it", "where did it go", "where are they",          # no live conversation turn to follow up
+]
+
+
+class OtherGrok(StubQwen):
+    name, local = "grok", False
+
+    def __init__(self):
+        super().__init__(kind="OTHER", obj="none")
+
+
+@pytest.mark.parametrize("text", CHATTER)
+def test_overheard_chatter_is_ignored_offline_and_by_grok(text):
+    rules = Understander(dict(CFG, understand={"enabled": False}))
+    grok = Understander(CFG, model=OtherGrok())
+    assert rules(text, overheard=True).kind == IGNORE
+    assert grok(text, overheard=True).kind == IGNORE
+
+
+@pytest.mark.parametrize("text, kind, what", [
+    ("okay so where's my wallet", "WHERE", "wallet"), ("can you show me the remote", "WHERE", "remote"),
+    ("show me my keys", "WHERE", "keys"), ("point at the pill bottle", "WHERE", "pill_bottle"),
+    ("where's my charger", "WHERE", "charger"),                  # an untaught name of one's own thing
+    ("did anyone touch my pills", "HANDLED", "pill_bottle"), ("did anything change while I was gone", "CHANGES", None),
+    ("room, where are the stickers", "WHERE", "stickers"),       # the wake word: for the rig
+    ("this is my friend's mug", "TEACH", "friends mug"),         # a thing, said with the possessive
+    ("this is my vaseline", "TEACH", "vaseline"),
+])
+def test_overheard_questions_for_the_rig_still_pass(text, kind, what):
+    u = Understander(dict(CFG, understand={"enabled": False}))
+    i = u(text, overheard=True)
+    assert (i.kind, i.obj or i.name) == (kind, what), (text, i)
+
+
+def test_grok_vetoes_a_guessed_or_untaught_name_overheard_but_not_asked():
+    grok = Understander(CFG, model=OtherGrok())
+    assert grok("where's my charger", overheard=True).kind == IGNORE
+    assert grok("where are my kiss", overheard=True).kind == IGNORE
+    asked = Understander(CFG, model=OtherGrok())
+    assert (asked("where are my kiss").kind, asked("where are my kiss").obj) == ("WHERE", "keys")
+    woke = Understander(CFG, model=OtherGrok())
+    assert woke("room, where's my charger", overheard=True).name == "charger"
+    exact = Understander(CFG, model=OtherGrok())
+    assert exact("what about my keys", overheard=True).kind == "OTHER"   # a configured object: no veto
+
+
+def test_overheard_follow_ups_pass_only_while_a_turn_is_live():
+    live = {"on": False}
+    u = Understander(CFG, model=OtherGrok(), followup=lambda: live["on"])
+    for text in ["where is it now", "where did it go", "where are they", "where did I put them", "where's my stuff"]:
+        u._last = None
+        live["on"] = False
+        assert u(text, overheard=True).kind == IGNORE, text
+        u._last = None
+        live["on"] = True
+        assert u(text, overheard=True).kind == "WHERE" and u.last_by == "rules", text   # no model: conversation resolves it
+    assert u.qwen.asked == []
+
+
+def test_a_name_with_a_misheard_looking_first_word_is_not_forced_onto_an_object():
+    """'wall' is 0.8 like 'wallet': 'where's my wall charger' was answered with the wallet."""
+    rules = Understander(dict(CFG, understand={"enabled": False}))
+    i = rules("where's my wall charger")
+    assert (i.kind, i.obj, i.name) == ("WHERE", None, "wall charger")
+    taught = Understander(dict(CFG, understand={"enabled": False}), aliases=lambda: ["wall charger"])
+    assert taught("where's my wall charger").obj == "wall charger"
+
+
+def test_certain_is_what_the_model_cannot_reject():
+    u = Understander(CFG, model=OtherGrok(), aliases=lambda: ["charger"])
+    assert u.certain("room, where's my stapler") and u.certain("where are my keys")
+    assert u.certain("what about my keys") and u.certain("where's my charger")          # configured / taught
+    assert not u.certain("where's my stapler") and not u.certain("where are my kiss")   # the model decides
