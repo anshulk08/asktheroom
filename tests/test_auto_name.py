@@ -418,8 +418,11 @@ def test_not_object():
     for n in ("hand", "hands", "persons leg", "table leg", "grey shirt", "socks", "person", "wooden table",
               "jeans button", "clothing tag"):
         assert not_object(n), n
-    for n in ("tv remote", "watch", "white sneaker", "glasses", "hand sanitizer", "laptop", "arm band"):
+    for n in ("tv remote", "watch", "white sneaker", "glasses", "hand sanitizer", "laptop", "arm band",
+              "robot arm", "shower head", "power button", "microphone arm", "remote button"):
         assert not not_object(n), n
+    for n in ("left hand", "persons hand", "bare foot", "white hand", "hand fingers", "denim jeans", "button"):
+        assert not_object(n), n
 
 
 def test_match_score():

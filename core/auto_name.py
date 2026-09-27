@@ -15,7 +15,7 @@ waits: the update hook only copies crops and queues them.
 Naming accuracy (eval/naming.py, 120 hand-labelled rig crops, Sun 27 Sep, mean of 3 runs): the Sat 26 Sep
 namer (a 128 px table-view crop, an overhead-camera prompt) got 44/120 right: it named 48 of 61 hands,
 feet, worn watches and jeans as objects. The corner-camera prompt, the context view, the object flag,
-NOT_OBJECTS and min_confidence 0.65 get 83/120: 50 of 61 rejected, wrong names for real things 26 -> 9 of 59.
+NOT_OBJECTS / PARTS and min_confidence 0.65 get 83/120: 50 of 61 rejected, wrong names for real things 26 -> 9 of 59.
 
 Rules: calls only while online (offline, the job waits); at most max_per_minute calls; one successful
 name per thing; a failed call is retried once, retry_after_s later, then given up; a thing that has a
@@ -55,19 +55,27 @@ log = logging.getLogger(__name__)
 GENERIC = {"object", "objects", "thing", "things", "item", "items", "unknown", "something", "stuff",
            "unclear", "none", "nothing", "table", "tabletop", "unidentified object", "unidentifiable",
            "unidentified", "shape", "blob", "piece"}
-# A name whose last word is one of these is not an object someone would ask about: a body part, a person,
-# worn clothing, the furniture or the room, a trick of the light. Rig logs, Sat 26 Sep: room tracks named
-# hand x97, arm, finger, ear, person, persons leg, shirt, shorts, fabric, wooden table. Shoes, watches and
-# glasses are not here: lying on a table they are objects (the prompt's object flag says when they are worn).
-NOT_OBJECTS = {"hand", "hands", "finger", "fingers", "thumb", "palm", "fist", "arm", "arms", "forearm",
-               "elbow", "wrist", "shoulder", "leg", "legs", "knee", "thigh", "foot", "feet", "toe", "ankle",
-               "face", "head", "hair", "nose", "ear", "eye", "mouth", "lip", "neck", "chin", "skin", "body",
-               "person", "people", "man", "woman", "boy", "girl", "child", "human", "lap",
+# Names that are not objects someone would ask about. Rig logs, Sat 26 Sep: room tracks named hand x97, arm,
+# finger, ear, person, persons leg, shirt, shorts, fabric, wooden table. Shoes, watches and glasses are not
+# here: lying on a table they are objects (the prompt's object flag says when they are worn).
+# A person, clothing or the room: no object, whatever comes before it ('denim jeans', 'grey shirt').
+NOT_OBJECTS = {"skin", "body", "hair", "lap",
+               "person", "people", "man", "woman", "boy", "girl", "child", "human",
                "sleeve", "shirt", "tshirt", "t shirt", "sweater", "hoodie", "sweatshirt", "jeans", "pants",
                "trousers", "shorts", "sock", "socks", "fabric", "clothing",
-               "button", "zipper", "pocket", "collar", "logo", "clothing tag",
+               "zipper", "pocket", "collar", "clothing tag",
                "floor", "wall", "carpet", "rug", "couch", "sofa", "tabletop", "surface", "wooden table",
                "shadow", "reflection", "glare"}
+# A body part, or a part of something worn: no object alone or after only a qualifier ('hand', 'persons leg',
+# 'table leg', 'jeans button'), but the last word of many real things ('robot arm', 'shower head', 'power
+# button', 'microphone arm'), so another word before it keeps the name.
+PARTS = {"hand", "hands", "finger", "fingers", "thumb", "palm", "fist", "arm", "arms", "forearm", "elbow",
+         "wrist", "shoulder", "leg", "legs", "knee", "thigh", "foot", "feet", "toe", "ankle", "face", "head",
+         "nose", "ear", "eye", "mouth", "lip", "neck", "chin", "button", "logo"}
+# Words that leave a PARTS word a body part: whose it is, which one, where, and what it looks like.
+PART_QUALIFIERS = {"persons", "person", "human", "mans", "womans", "childs", "someones", "left", "right",
+                   "bare", "open", "closed", "raised", "partial", "blurry", "dark", "light", "pale", "tan",
+                   "table", "chair", "desk", "couch", "sofa", "bed", "wooden", "metal"}
 MAX_WORDS = 3
 TRAILING = {"of", "with", "and", "for", "on", "in", "or", "a", "the"}      # never the last word of a name
 MAX_ALSO = 3
@@ -160,11 +168,20 @@ def clean_name(text) -> Optional[str]:
 
 
 def not_object(name: str) -> bool:
-    """True when a cleaned name is a body part, a person, worn clothing or part of the room (NOT_OBJECTS,
-    by its last word or the whole name, plurals folded): 'hand', 'persons leg', 'table leg', 'grey shirt'."""
+    """True when a cleaned name is a person, clothing or the room (NOT_OBJECTS, by the whole name or its last
+    word: 'grey shirt', 'denim jeans'), or a body part (PARTS) alone or after only qualifiers, colours,
+    other body parts or clothing ('hand', 'persons leg', 'table leg', 'jeans button'). 'robot arm', 'shower
+    head' and 'power button' are objects. Plurals folded."""
     words = norm_name(name).split()
-    return bool(words) and (" ".join(words) in NOT_OBJECTS or words[-1] in NOT_OBJECTS
-                            or _singular(words[-1]) in NOT_OBJECTS)
+    if not words:
+        return False
+    last = words[-1]
+    if " ".join(words) in NOT_OBJECTS or last in NOT_OBJECTS or _singular(last) in NOT_OBJECTS:
+        return True
+    if last not in PARTS and _singular(last) not in PARTS:
+        return False
+    return all(w in PART_QUALIFIERS or w in MODIFIERS or w in PARTS or w in NOT_OBJECTS or _singular(w) in PARTS
+               or _singular(w) in NOT_OBJECTS for w in words[:-1])
 
 
 def _tokens(phrase: str) -> list[str]:
