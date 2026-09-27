@@ -296,6 +296,13 @@ struct Snapshot: Codable, Equatable {
     /// Present when the rig has turned the map to the person's frame. Missing from older rigs,
     /// whose maps are in the camera's frame.
     var view: ViewInfo?
+    /// State-characteristic chunks the bridge had sent before this message, for measuring link
+    /// loss (`LinkStats`). Diagnostics only; missing from older bridges.
+    var tx: Int?
+    /// Hash of the room layout. `lay` comes only when it changes or on subscribe, so the store
+    /// keeps the last one and checks it against this.
+    var lh: String?
+    var lay: RoomLayout?
 
     var entities: [Entity] { e }
     var tableSize: TablePoint { table ?? Self.defaultTable }
@@ -321,6 +328,76 @@ struct Snapshot: Codable, Equatable {
             next = entity.isInHand ? nil : entity.p
         }
         return out
+    }
+}
+
+/// The room around the table (state `lay`): its size, the table's place in it, named zones and
+/// where the person is. Every field is optional, and a field of the wrong type is ignored rather
+/// than failing the whole state message.
+struct RoomLayout: Codable, Equatable {
+    struct Table: Codable, Equatable {
+        var rect: [Double]?
+        var origin: [Double]?
+
+        init(rect: [Double]? = nil, origin: [Double]? = nil) {
+            self.rect = rect
+            self.origin = origin
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try? decoder.container(keyedBy: CodingKeys.self)
+            rect = try? c?.decodeIfPresent([Double].self, forKey: .rect)
+            origin = try? c?.decodeIfPresent([Double].self, forKey: .origin)
+        }
+    }
+
+    struct Zone: Codable, Equatable {
+        var id: String?
+        var say: String?
+        var rect: [Double]?
+        var kind: String?
+
+        init(id: String? = nil, say: String? = nil, rect: [Double]? = nil, kind: String? = nil) {
+            self.id = id
+            self.say = say
+            self.rect = rect
+            self.kind = kind
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try? decoder.container(keyedBy: CodingKeys.self)
+            id = try? c?.decodeIfPresent(String.self, forKey: .id)
+            say = try? c?.decodeIfPresent(String.self, forKey: .say)
+            rect = try? c?.decodeIfPresent([Double].self, forKey: .rect)
+            kind = try? c?.decodeIfPresent(String.self, forKey: .kind)
+        }
+    }
+
+    var v: Int?
+    var size: [Double]?
+    var front: String?
+    var table: Table?
+    var zones: [Zone]?
+    var you: [Double]?
+
+    init(v: Int? = nil, size: [Double]? = nil, front: String? = nil, table: Table? = nil,
+         zones: [Zone]? = nil, you: [Double]? = nil) {
+        self.v = v
+        self.size = size
+        self.front = front
+        self.table = table
+        self.zones = zones
+        self.you = you
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try? decoder.container(keyedBy: CodingKeys.self)
+        v = try? c?.decodeIfPresent(Int.self, forKey: .v)
+        size = try? c?.decodeIfPresent([Double].self, forKey: .size)
+        front = try? c?.decodeIfPresent(String.self, forKey: .front)
+        table = try? c?.decodeIfPresent(Table.self, forKey: .table)
+        zones = try? c?.decodeIfPresent([Zone].self, forKey: .zones)
+        you = try? c?.decodeIfPresent([Double].self, forKey: .you)
     }
 }
 
@@ -439,6 +516,26 @@ struct OrientSettings: Codable, Equatable {
 
     /// Nil for a reset (or a side this app doesn't know).
     var front: Side? { orient.front.flatMap(Side.init(rawValue:)) }
+
+    /// The JSON to write to the question characteristic, like `VoiceSettings`.
+    func encoded() -> Data? {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        guard let data = try? encoder.encode(self), data.count <= Question.maxBytes else { return nil }
+        return data
+    }
+}
+
+/// Written first on every connect (PROTOCOL.md): tells the bridge this app can inflate
+/// compressed messages (`z`: 1), so it may set the COMPRESSED flag. Exactly `{"hello":{"z":1}}`.
+struct Hello: Codable, Equatable {
+    struct Caps: Codable, Equatable {
+        var z: Int
+    }
+
+    var hello: Caps
+
+    static let current = Hello(hello: Caps(z: 1))
 
     /// The JSON to write to the question characteristic, like `VoiceSettings`.
     func encoded() -> Data? {

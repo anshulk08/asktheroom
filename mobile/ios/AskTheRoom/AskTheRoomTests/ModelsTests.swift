@@ -343,4 +343,59 @@ final class ModelsTests: XCTestCase {
             XCTAssertEqual(Edge.allCases.compactMap { try? view(f).name(at: $0) }, ["couch"], f)
         }
     }
+
+    // MARK: Link additions
+
+    func testStateTxIsOptional() throws {
+        let with = try XCTUnwrap(Wire.decode(Snapshot.self, from: Data(#"{"e":[],"tx":812}"#.utf8)))
+        XCTAssertEqual(with.tx, 812)
+        let without = try XCTUnwrap(Wire.decode(Snapshot.self, from: Data(#"{"e":[]}"#.utf8)))
+        XCTAssertNil(without.tx)
+        XCTAssertNil(try XCTUnwrap(Wire.decode(Snapshot.self, from: Data(MockData.sampleSnapshotJSON.utf8))).tx)
+    }
+
+    func testHelloBytesAreExact() throws {
+        let data = try XCTUnwrap(Hello.current.encoded())
+        XCTAssertEqual(String(decoding: data, as: UTF8.self), #"{"hello":{"z":1}}"#)
+        XCTAssertEqual(data, Data(#"{"hello":{"z":1}}"#.utf8))
+    }
+
+    func testLayoutAndHashDecode() throws {
+        let json = #"""
+        {"e":[],"lh":"a1b2c3","lay":{"v":1,"size":[400,300],"front":"right",
+         "table":{"rect":[150,100,90,60],"origin":[150,100]},
+         "zones":[{"id":"door","say":"the door","rect":[0,0,40,10],"kind":"door"}],
+         "you":[200,280]}}
+        """#
+        let snap = try XCTUnwrap(Wire.decode(Snapshot.self, from: Data(json.utf8)))
+        XCTAssertEqual(snap.lh, "a1b2c3")
+        let lay = try XCTUnwrap(snap.lay)
+        XCTAssertEqual(lay.v, 1)
+        XCTAssertEqual(lay.size, [400, 300])
+        XCTAssertEqual(lay.front, "right")
+        XCTAssertEqual(lay.table, RoomLayout.Table(rect: [150, 100, 90, 60], origin: [150, 100]))
+        XCTAssertEqual(lay.zones, [RoomLayout.Zone(id: "door", say: "the door", rect: [0, 0, 40, 10], kind: "door")])
+        XCTAssertEqual(lay.you, [200, 280])
+
+        let plain = try XCTUnwrap(Wire.decode(Snapshot.self, from: Data(#"{"e":[]}"#.utf8)))
+        XCTAssertNil(plain.lh)
+        XCTAssertNil(plain.lay)
+    }
+
+    /// A layout with odd fields mustn't cost the whole state message.
+    func testLayoutIsTolerant() throws {
+        let json = #"{"e":[{"n":"keys","k":"t","s":"V"}],"lh":"x","lay":{"v":"one","size":[1,"b"],"front":3,"table":[],"zones":[{"id":7,"say":"sofa"},5],"you":null,"extra":{}}}"#
+        let snap = try XCTUnwrap(Wire.decode(Snapshot.self, from: Data(json.utf8)))
+        XCTAssertEqual(snap.entities.count, 1)
+        let lay = try XCTUnwrap(snap.lay)
+        XCTAssertNil(lay.v)
+        XCTAssertNil(lay.size)
+        XCTAssertNil(lay.front)
+        XCTAssertEqual(lay.table, RoomLayout.Table())
+        XCTAssertEqual(lay.zones, [RoomLayout.Zone(say: "sofa"), RoomLayout.Zone()])
+        XCTAssertNil(lay.you)
+
+        let notAnObject = try XCTUnwrap(Wire.decode(Snapshot.self, from: Data(#"{"e":[],"lay":"soon"}"#.utf8)))
+        XCTAssertEqual(notAnObject.lay, RoomLayout())
+    }
 }

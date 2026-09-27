@@ -73,6 +73,10 @@ struct HelperSettings: View {
                          ? "No notices have been put away."
                          : "\(store.dismissedNotices.count) put away with “Got it”.")
                 }
+
+                if let stats = store.linkStats {
+                    ConnectionSection(stats: stats)
+                }
             }
             .onDisappear(perform: saveKeys)
             .task(id: hasGrokKey) { voices = await Grok.fetchVoices(key: Speaker.grokKey) }
@@ -231,6 +235,45 @@ struct HelperSettings: View {
         case .unauthorized: return "Bluetooth not allowed"
         case .unsupported: return "No Bluetooth on this device"
         }
+    }
+}
+
+/// How the Bluetooth link is doing, for someone chasing dropouts. Collapsed by default, at the bottom.
+private struct ConnectionSection: View {
+    let stats: LinkStats
+    /// `-mockConnection YES` opens it, for screenshots.
+    @State private var open = UserDefaults.standard.bool(forKey: "mockConnection")
+
+    var body: some View {
+        Section {
+            DisclosureGroup(isExpanded: $open) {
+                // Ticks once a second only while open, for the "ago" and "connected for" times.
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    VStack(alignment: .leading, spacing: 6) {
+                        line(stats.connectionLine(now: context.date))
+                        line(stats.channelLine(.state))
+                        line(stats.lossLine)
+                        line(stats.lastUpdateLine(now: context.date))
+                        line(stats.reconnectsLine)
+                        line(stats.channelLine(.answer))
+                        line(stats.channelLine(.status))
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityElement(children: .contain)
+                }
+            } label: {
+                Text("Connection")
+            }
+        } footer: {
+            Text("Counts are since the phone last connected to the rig. Lost chunks are over the last minute.")
+        }
+    }
+
+    private func line(_ text: String) -> some View {
+        Text(text)
+            .font(.footnote.monospacedDigit())
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
     }
 }
 

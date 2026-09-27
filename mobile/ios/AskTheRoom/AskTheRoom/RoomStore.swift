@@ -76,6 +76,12 @@ final class RoomStore {
     private(set) var activity: [ActivityEvent] = []
     /// Notices the person has put away; each comes back if its situation changes.
     private(set) var dismissedNotices: Set<String> = []
+    /// How the Bluetooth link is doing (helper settings, "Connection"). Nil until the transport reports.
+    private(set) var linkStats: LinkStats?
+    /// The last room layout the rig sent (state `lay`), and its hash (`lh`). The rig sends the layout
+    /// only when it changes or on subscribe, so it's kept across state messages.
+    private(set) var layout: RoomLayout?
+    private(set) var layoutHash: String?
 
     /// Off by default: the rig already speaks these, and the phone may be in another room.
     var showRoomVoiceAnswers = UserDefaults.standard.bool(forKey: RoomStore.voiceAnswersKey) {
@@ -100,6 +106,8 @@ final class RoomStore {
         (rigNotices + (snapshot.map(Dashboard.notices(in:)) ?? [])).filter { !dismissedNotices.contains($0.id) }
     }
     var history: ArraySlice<Exchange> { exchanges.dropFirst() }
+    /// The kept layout is the one the latest state names (or the rig doesn't send hashes).
+    var layoutIsCurrent: Bool { layout != nil && (snapshot?.lh == nil || snapshot?.lh == layoutHash) }
 
     var isRoomAppDown: Bool { status.map { !$0.appIsUp } ?? false }
     /// The map is showing, but it isn't live: saved from last time, or the link has dropped.
@@ -140,6 +148,9 @@ final class RoomStore {
         exchanges = []
         activity = []
         dismissedNotices = []
+        linkStats = nil
+        layout = nil
+        layoutHash = nil
         timeoutTask?.cancel()
         if on {
             link = .connected
@@ -157,12 +168,16 @@ final class RoomStore {
               let saved = try? JSONDecoder().decode(Snapshot.self, from: data) else { return }
         snapshot = saved
         isSavedMap = true
+        keepLayout(from: saved)
     }
 
     private func saveMap(_ state: Snapshot, now: Date = Date()) {
         guard !isMock, let savedMapURL else { return }
         if let lastSaved, now.timeIntervalSince(lastSaved) < Self.saveEvery { return }
         lastSaved = now
+        // Keep the layout with the map, since the next state may not carry it.
+        var state = state
+        if state.lay == nil, layoutIsCurrent { state.lay = layout }
         do {
             try FileManager.default.createDirectory(at: savedMapURL.deletingLastPathComponent(),
                                                     withIntermediateDirectories: true)
@@ -249,7 +264,18 @@ final class RoomStore {
         }
         snapshot = state
         isSavedMap = false
+        keepLayout(from: state)
         saveMap(state)
+    }
+
+    private func keepLayout(from state: Snapshot) {
+        guard let lay = state.lay else { return }
+        layout = lay
+        layoutHash = state.lh
+    }
+
+    func receive(linkStats: LinkStats) {
+        if self.linkStats != linkStats { self.linkStats = linkStats }
     }
 
     func dismiss(_ notice: Notice) {
