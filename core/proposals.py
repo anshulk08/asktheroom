@@ -673,8 +673,10 @@ class YOLOEProposer:
             box = tuple(int(round(v)) for v in b)
             if not lo <= geom.area(box) <= hi:
                 continue
-            if self._roi is not None and cv2.pointPolygonTest(self._roi, geom.center(box), False) < 0:
-                continue
+            if self._roi is not None and cv2.pointPolygonTest(self._roi, geom.center(box), False) < 0 \
+                    and cv2.pointPolygonTest(self._roi, ((box[0] + box[2]) / 2, box[3]), False) < 0:
+                continue                         # neither its centre nor where it stands (a tall thing
+                                                 # at the far edge) is on the table
             cx, cy = geom.center(box)
             if any(x1 <= cx <= x2 and y1 <= cy <= y2 for x1, y1, x2, y2 in c.ignore_px):
                 continue

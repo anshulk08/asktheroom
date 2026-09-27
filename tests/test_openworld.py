@@ -622,6 +622,17 @@ def test_a_new_thing_is_born_only_inside_the_tabletop_outline(scene, table_world
     assert table_world.get('thing:1').pos_cm == pytest.approx((60, 30))
 
 
+def test_a_tall_thing_standing_at_the_far_edge_is_born_where_it_stands(scene, table_world):
+    """From the corner camera a speaker or a paper bag at the far edge has its box centre past the edge
+    while its foot stands on the table: born, like a flat thing there would be. One with its foot off
+    the table (a chair back) is not."""
+    scene.thing('speaker', 60, 7, 6, 16)           # y 0..15: centre 7 in the band, foot 15 inside
+    scene.thing('chair', 90, 0, 8, 6)              # y -3..3: off the table
+    events = scene.run(table_world, 3.0)
+    assert [(e.obj, e.type) for e in events] == [('thing:1', EventType.APPEARED)]
+    assert table_world.get('thing:1').pos_cm == pytest.approx((60, 7))
+
+
 def test_without_an_outline_the_whole_view_is_the_table(scene, world):
     scene.thing('rim', 11.5, 30)
     assert types(scene.run(world, 3.0)) == [EventType.APPEARED]

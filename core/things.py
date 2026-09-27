@@ -27,7 +27,8 @@ weighted score, so every decision can be explained in one sentence:
     (c)    appearance resurrects an archived thing only above resurrect_sim AND by resurrect_margin
            over every other thing (a twin on the table blocks it)
     (d)    a new thing, with maybe_same_as links to archived things that look similar; only inside
-           the tabletop outline clear of its edge band (table_area:, core/table_area.py), and never
+           the tabletop outline clear of its edge band (table_area:, core/table_area.py; its centre or,
+           for a tall thing at the far edge, where it stands), and never
            from a proposal flagged occluded (inside a person box). Either can still be an existing
            thing, so one slid off the table leaves as itself and a carried one stays itself
 Exemplars (per-thing appearance banks) are learned only from isolated, confident, unambiguous
@@ -219,6 +220,13 @@ def _singular(key: str) -> str:
 
 def _grow(box, d: float):
     return (box[0] - d, box[1] - d, box[2] + d, box[3] + d)
+
+
+def _footprint(box):
+    """Where a box stands on the table: the middle of its side nearest the camera (table y grows toward
+    it). A tall thing at the far edge (a speaker, a paper bag, the pill bottle) has its centre past the
+    edge while it stands on the table."""
+    return ((box[0] + box[2]) / 2, box[3])
 
 
 def _box_dist(p, box) -> float:
@@ -663,7 +671,7 @@ class ThingRules:
         if self._vetoes and any(until > (self._wall or 0) and b[0] - r <= d.center_cm[0] <= b[2] + r
                                 and b[1] - r <= d.center_cm[1] <= b[3] + r for b, until, r in self._vetoes):
             return False                    # where retired clutter lay (retire_thing)
-        return not d.occluded and self._area.interior(d.center_cm)
+        return not d.occluded and (self._area.interior(d.center_cm) or self._area.interior(_footprint(d.box_cm)))
 
     def _identify(self, d: Detection, vec, seen, may_create: bool = True):
         """Ordered identity rules (a) causal, (b) continuity, (c) decisive appearance; returns

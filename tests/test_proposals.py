@@ -392,6 +392,14 @@ def test_yoloe_respects_the_table_roi():
     assert [q.box_px for q in y.propose(np.zeros((H, W, 3), np.uint8), [], [])] == [(600, 300, 690, 380)]
 
 
+def test_yoloe_keeps_a_tall_box_standing_inside_the_roi():
+    m = FakeYOLOE([(0, 0.6, (600, 20, 660, 160)),        # a bottle at the far edge: its foot is inside
+                   (0, 0.6, (300, 10, 360, 60))])         # wholly beyond it
+    y = YOLOEProposer({}, model=m)
+    y.set_roi([(200, 100), (1100, 100), (1100, 650), (200, 650)])
+    assert [q.box_px for q in y.propose(np.zeros((H, W, 3), np.uint8), [], [])] == [(600, 20, 660, 160)]
+
+
 def test_yoloe_flags_boxes_that_are_part_of_a_person():
     """Prompt-free YOLOE sees a hand as 'person' and boxes pieces of it as objects ('battery',
     'bracelet', 'gadget' on the rig). A box mostly inside a person box is kept but flagged occluded:
