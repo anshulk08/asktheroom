@@ -226,7 +226,8 @@ class RoomNamer:
         """Try the next due job. True when a call was made."""
         now = self.clock() if now is None else now
         with self._lock:
-            job = next((j for j in reversed(self._jobs) if j.due <= now), None)   # newest first: the fresh arrival
+            due = [j for j in reversed(self._jobs) if j.due <= now]              # newest first: the fresh arrival
+            job = next((j for j in due if j.hints), due[0] if due else None)     # a verification first
             if job is None or not self.online():
                 return False
             while self._calls and self._calls[0] <= now - 60.0:
