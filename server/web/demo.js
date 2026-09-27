@@ -17,7 +17,8 @@
   // Defaults that keep the rig's perception at >= 4.5 fps (WS7 measures): 2 frames a second, 1280 px wide.
   const FPS = Math.min(10, Math.max(0.5, parseFloat(params.get("fps")) || 2));
   const FRAME_W = Math.min(2560, Math.max(640, parseInt(params.get("w"), 10) || 1280));
-  const BOXES_EVERY_MS = 1000;                // table boxes move slowly: at most once a second
+  const BOXES_EVERY_MS = 2000;                // table boxes move slowly: every 2 s (each costs a state_json)
+  const WS_HZ = Math.min(5, Math.max(0.5, parseFloat(params.get("hz")) || 2));   // /ws pushes a second
   const FONT = '"Atkinson Next", system-ui, sans-serif';
   const COL = {
     visible: "#9ff0b4", hidden: "#8ec5ff", carried: "#ffc24d", last_seen: "#b3c0ba", found: "#fff17a",
@@ -712,7 +713,7 @@
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     let ws;
     try {
-      ws = new WebSocket(proto + "//" + location.host + "/ws?since=" + Math.floor(now() - 600));
+      ws = new WebSocket(proto + "//" + location.host + "/ws?hz=" + WS_HZ + "&since=" + Math.floor(now() - 600));
     } catch (e) {
       setTimeout(connect, backoff);
       return;

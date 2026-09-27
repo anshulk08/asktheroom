@@ -489,3 +489,17 @@ def test_full_raw_frame_shrinks_to_w_and_listening_is_in_state(tmp_path):
         assert c.get("/state").json()["listening"] is False
     with TestClient(create_app(cfg, world, events, frames=FullView())) as c:
         assert "listening" not in c.get("/state").json()
+
+
+def test_ws_hz_asks_for_fewer_pushes_never_more(env):
+    """/demo asks /ws?hz=2: each push builds state_json, which costs the Jetson's perception."""
+    def pushes(q, seconds=0.6):
+        n, t0 = 0, time.monotonic()
+        with env["client"].websocket_connect("/ws" + q) as ws:
+            while time.monotonic() - t0 < seconds:
+                ws.receive_json()
+                n += 1
+        return n
+    fast, slow = pushes(""), pushes("?hz=4")               # the fixture's push_hz is 50
+    assert fast > 10 and slow <= 4
+    assert pushes("?hz=500") > 10 and pushes("?hz=bad") > 10
