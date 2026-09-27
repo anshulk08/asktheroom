@@ -98,8 +98,7 @@ only; this is the Devpost number too, `docs/DEVPOST.md`).
 ## 4. Mic and speaker bring-up
 
 The full procedure (device discovery, level checks, the wake-word gate in expo noise, the own-speaker echo
-test, spoken trials with `scripts/voice_trials.py`) is **`docs/runbooks/room-voice.md`** (room/voice branch;
-in this build once that branch is merged). The rig-side prerequisites, in `~/askroom_room/config.local.yaml`:
+test, spoken trials with `scripts/voice_trials.py`) is **`docs/runbooks/room-voice.md`**. The rig-side prerequisites, in `~/askroom_room/config.local.yaml`:
 
 ```yaml
 stt: {input_device: "<USB mic name part>"}      # not the corner Brio's mic: it can't hear a judge over the hall
@@ -121,8 +120,7 @@ new room object gets a name.
 
 ## 6. Retrain slot (P1-1, Anshul's 10:15 PM rig slot)
 
-The full checklist is **`docs/corner_retrain.md`** (room/detector branch; in this build once that branch is
-merged). In short:
+The full checklist is **`docs/corner_retrain.md`**. In short:
 
 - **A** (no camera): a scratch copy `~/askroom_ft` of room/detector on the Jetson with `~/askroom_room`'s
   `config.local.yaml` and `room_zones.json` copied in; props and 4 distractors ready; demo lighting.
@@ -144,7 +142,7 @@ merged). In short:
   (RUNNING) passes. `null` fails on purpose: the corner Brio's mic and silent HDMI.
 - **demo_check 15 says "no app log":** it reads `data/room/app.log`, which `room_app.sh` maintains; for a
   hand-launched app point `room_check.app_log` at its log.
-- **Presence acts odd** (with room/detector merged: objects flip present/absent too fast or too slow after the time-based debounce):
+- **Presence acts odd** (objects flip present/absent too fast or too slow after the time-based debounce):
   `presence: {hz: null}` in `config.local.yaml` restores the old frame-count debounce; restart the app.
 - **The camera is gone after a replug:** `ls /dev/v4l/by-id/` on the host; if it's there but not in the
   container, restart the app (`room_app.sh restart`), or with `ASKROOM_DEV_BIND=0` if the `/dev` bind is the
