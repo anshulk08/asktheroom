@@ -126,7 +126,8 @@ enum Dashboard {
         return "Where \(isPlural(e.displayName) ? "are" : "is") \(e.displayName.hasPrefix("my ") ? "" : "my ")\(e.displayName)?"
     }
 
-    /// Things to point out, most urgent first: gone, then lost, then unnamed newcomers.
+    /// Things to point out, most urgent first: gone, then lost, then newcomers the room has a
+    /// guess for. Nameless things get no card: a crowded table would bury the rest in them.
     static func notices(in snapshot: Snapshot) -> [Notice] {
         var out: [Notice] = []
         for e in snapshot.entities {
@@ -146,7 +147,7 @@ enum Dashboard {
             default:
                 break
             }
-            if e.isThing, !e.hasTaughtName, e.status == .visible {
+            if e.isThing, !e.hasTaughtName, !e.isNameless, e.status == .visible {
                 // The room's own guess, hedged, then an older thing only if the person named it.
                 let looks = e.hedgedName.map { " It looks like \(Entity.withArticle($0))." } ?? ""
                 let known = e.maybeSameAs.lazy.compactMap { snapshot.entity(named: $0.name) }
@@ -164,17 +165,16 @@ enum Dashboard {
     }
 
     /// What changed from `old` to `new`, one line per entity. Neutral wording throughout:
-    /// the pill bottle is "picked up", never "taken".
+    /// the pill bottle is "picked up", never "taken". Nameless things are left out: a line
+    /// about "something new" in Recent says nothing the map doesn't.
     static func changes(from old: Snapshot, to new: Snapshot, now: Date = Date()) -> [ActivityEvent] {
         let time = new.time ?? now
         var out: [ActivityEvent] = []
-        for e in new.entities {
+        for e in new.entities where !e.isNameless {
             let name = e.phrase
             guard let before = old.entity(named: e.name) else {
                 if e.kind == .target {
-                    out.append(ActivityEvent(entity: e.name, text: e.isNameless
-                                             ? "Something new appeared on the table" : "\(capitalized(name)) appeared on the table",
-                                             time: time))
+                    out.append(ActivityEvent(entity: e.name, text: "\(capitalized(name)) appeared on the table", time: time))
                 }
                 continue
             }
@@ -220,18 +220,21 @@ enum Dashboard {
         return (all.filter { $0.time >= cutoff }, all.filter { $0.time < cutoff })
     }
 
-    /// "the box", but "my charger" stays as the person named it, and a guess stays hedged.
+    /// "the box", but "my charger" stays as the person named it, a guess stays hedged,
+    /// and "something new" takes no article.
     static func the(_ name: String) -> String {
-        name.hasPrefix("my ") || name.hasPrefix(Entity.hedgePrefix) || name == "something" ? name : "the \(name)"
+        name.hasPrefix("my ") || name.hasPrefix(Entity.hedgePrefix) || name == "something" || name == Entity.namelessName
+            ? name : "the \(name)"
     }
 
-    /// "your keys" for the person's things, "the box" for furniture and nameless things,
-    /// "my charger" as the person named it, "what looks like a tape roll" for the room's guess.
+    /// "your keys" for the person's things, "the box" for furniture, "something new" for
+    /// nameless things, "my charger" as the person named it, "what looks like a tape roll"
+    /// for the room's guess.
     static func your(_ e: Entity) -> String {
         if e.isHedged { return e.phrase }
         let name = e.displayName
         if name.hasPrefix("my ") { return name }
-        return isTheirs(e) ? "your \(name)" : "the \(name)"
+        return isTheirs(e) ? "your \(name)" : the(name)
     }
 
     /// Names that take "are": "Where are my keys?", "Keys were picked up".

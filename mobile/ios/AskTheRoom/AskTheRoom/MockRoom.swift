@@ -247,7 +247,7 @@ final class MockRoom: RoomTransport {
     }
 
     private static func spokenName(_ e: Entity) -> String {
-        if e.kind != .target { return "the \(e.displayName)" }
+        if e.kind != .target { return the(e) }
         if e.isHedged { return e.phrase }
         if e.isThing {
             guard let alias = e.aliases.first else { return "that object" }
@@ -264,8 +264,13 @@ final class MockRoom: RoomTransport {
     private static func whereHidden(_ e: Entity, in snapshot: Snapshot) -> String {
         let chain = snapshot.chain(from: e.name)
         return zip(chain, chain.dropFirst())
-            .map { child, parent in "\(child.status == .under ? "under" : "inside") the \(parent.displayName)" }
+            .map { child, parent in "\(child.status == .under ? "under" : "inside") \(the(parent))" }
             .joined(separator: ", ")
+    }
+
+    /// "the box", but a nameless thing is just "something new".
+    private static func the(_ e: Entity) -> String {
+        e.isNameless ? e.displayName : "the \(e.displayName)"
     }
 
     private static func capitalized(_ s: String) -> String {
