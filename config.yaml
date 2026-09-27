@@ -254,6 +254,7 @@ stt:
   # auto: whisper-server (model stays loaded) > whisper-cli > pywhispercpp, whichever this machine has,
   # so one config works on the Mac (build-mac) and the Jetson (build). scripts/build_whisper.sh builds both.
   backend: auto               # auto | server | cli | pywhispercpp
+  gpu: true                   # false: whisper runs on the CPU (-ng), when the GPU is needed by others (the laser build)
   model: base.en              # ggml model name (models/whisper/ggml-base.en.bin) or a path
   cli_binary: whisper-cli     # name, path, or found in third_party/whisper.cpp/build{,-mac}/bin
   server_binary: whisper-server

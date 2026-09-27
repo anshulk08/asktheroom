@@ -748,3 +748,47 @@ def test_one_word_over_and_over_is_whisper_on_noise(text, monkeypatch):
 
 def test_room_twice_is_still_a_wake_word():
     assert not stt.filler_only("Room, room.") and not stt.filler_only("Okay Room. Room.")
+
+
+# ----- stt.gpu: false puts whisper on the CPU (-ng) so it never fights the laser build for the GPU
+
+@pytest.mark.parametrize("gpu", [True, False])
+def test_whisper_cli_gets_no_gpu_flag_only_when_stt_gpu_is_false(tmp_path, monkeypatch, gpu):
+    import subprocess
+    import numpy as np
+    from voice import stt as S
+    (tmp_path / "ggml-base.en.bin").write_bytes(b"x")
+    exe = tmp_path / "whisper-cli"
+    exe.write_text("")
+    b = S.WhisperCliBackend("base.en", str(exe), models_dir=tmp_path, gpu=gpu)
+    seen = []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **k: seen.append(cmd) or
+                        subprocess.CompletedProcess(cmd, 0, stdout="hi\n", stderr=""))
+    b.transcribe(np.zeros(1600, np.float32), "", 768)
+    assert ("-ng" in seen[0]) is (not gpu)
+
+
+@pytest.mark.parametrize("gpu", [True, False])
+def test_whisper_server_gets_no_gpu_flag_only_when_stt_gpu_is_false(tmp_path, monkeypatch, gpu):
+    import subprocess
+    from voice import stt as S
+    b = S.WhisperServerBackend("base.en", "whisper-server", models_dir=tmp_path, start=False, gpu=gpu)
+    b.exe = "whisper-server"
+    seen = []
+
+    class P:
+        def poll(self):
+            return None
+    monkeypatch.setattr(subprocess, "Popen", lambda cmd, **k: seen.append(cmd) or P())
+    monkeypatch.setattr(b, "healthy", lambda timeout=0.5: True)
+    b.start()
+    assert ("-ng" in seen[0]) is (not gpu)
+    b.proc = None
+
+
+def test_stt_gpu_reaches_the_backends_from_config(tmp_path, monkeypatch):
+    from voice import stt as S
+    made = {}
+    monkeypatch.setattr(S, "WhisperServerBackend", lambda *a, **k: made.setdefault("server", k) or object())
+    S._server({"gpu": False}, "base.en", 4, None)
+    assert made["server"]["gpu"] is False

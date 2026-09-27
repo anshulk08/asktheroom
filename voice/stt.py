@@ -342,7 +342,7 @@ class WhisperCliBackend:
     goes in /dev/shm (RAM) where there is one (the Jetson), so audio never touches the disk."""
 
     def __init__(self, model: str = "base.en", binary: str = "whisper-cli",
-                 models_dir: Path = WHISPER_DIR, threads: int = 4):
+                 models_dir: Path = WHISPER_DIR, threads: int = 4, gpu: bool = True):
         path = model_path(model, models_dir)
         if not path.exists():
             raise FileNotFoundError(f"{path} missing; whisper.cpp: models/download-ggml-model.sh {model}")
@@ -350,13 +350,15 @@ class WhisperCliBackend:
         if exe is None:
             raise FileNotFoundError(f"{binary} not found; build whisper.cpp or set stt.cli_binary")
         self.model, self.exe, self.threads = str(path), exe, threads
+        self.gpu = gpu                  # stt.gpu false: -ng (the GPU is someone else's, e.g. the laser build's)
 
     def transcribe(self, audio: np.ndarray, prompt: str, audio_ctx: int) -> str:
         ram = "/dev/shm" if os.path.isdir("/dev/shm") else None
         with tempfile.NamedTemporaryFile(suffix=".wav", dir=ram) as f:
             write_wav(f.name, audio)
             r = subprocess.run([self.exe, "-m", self.model, "-f", f.name, "-l", "en", "-nt", "-np",
-                                "-t", str(self.threads), "-ac", str(audio_ctx), "--prompt", prompt],
+                                "-t", str(self.threads), "-ac", str(audio_ctx), "--prompt", prompt]
+                               + ([] if self.gpu else ["-ng"]),
                                capture_output=True, text=True, timeout=30)
         if r.returncode != 0:
             raise RuntimeError(f"whisper-cli failed ({r.returncode}): {r.stderr[-300:]}")
@@ -421,8 +423,9 @@ class WhisperServerBackend:
     def __init__(self, model: str = "base.en", binary: str = "whisper-server",
                  models_dir: Path = WHISPER_DIR, threads: int = 4, host: str = "127.0.0.1",
                  port: int = 8178, start_timeout: float = 60.0, request_timeout: float = 15.0,
-                 fallback: Optional[Backend] = None, start: bool = True):
+                 fallback: Optional[Backend] = None, start: bool = True, gpu: bool = True):
         import requests
+        self.gpu = gpu                  # stt.gpu false: -ng
         self._http = requests.Session()
         self.url = f"http://{host}:{port}"
         self.host, self.port, self.threads = host, int(port), threads
@@ -452,7 +455,7 @@ class WhisperServerBackend:
         import atexit
         self._log = tempfile.NamedTemporaryFile(prefix="whisper-server-", suffix=".log", delete=False)
         cmd = [self.exe, "-m", self.model, "-t", str(self.threads), "-l", "en", "-nt",
-               "--host", self.host, "--port", str(self.port)]
+               "--host", self.host, "--port", str(self.port)] + ([] if self.gpu else ["-ng"])
         log.info("starting %s", " ".join(cmd))
         self.proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=self._log,
                                      stdin=subprocess.DEVNULL,
@@ -582,13 +585,15 @@ BACKENDS = {"pywhispercpp": PyWhisperCppBackend, "cli": WhisperCliBackend,
 
 def _server(s: dict, model: str, threads: int, fallback: Optional[Backend]) -> WhisperServerBackend:
     return WhisperServerBackend(model, s.get("server_binary", "whisper-server"), threads=threads,
-                                port=int(s.get("server_port", 8178)), fallback=fallback)
+                                port=int(s.get("server_port", 8178)), fallback=fallback,
+                                gpu=bool(s.get("gpu", True)))
 
 
 def _cli_or_none(s: dict, model: str, threads: int) -> Optional[Backend]:
     try:
         return WhisperCliBackend(model, find_binary(s.get("cli_binary", "whisper-cli")) or
-                                 s.get("cli_binary", "whisper-cli"), threads=threads)
+                                 s.get("cli_binary", "whisper-cli"), threads=threads,
+                                 gpu=bool(s.get("gpu", True)))
     except FileNotFoundError:
         return None
 
@@ -602,7 +607,7 @@ def make_backend(cfg: dict) -> Backend:
     model, threads = s.get("model", "base.en"), int(s.get("threads", 4))
     if kind == "cli":
         binary = s.get("cli_binary", "whisper-cli")
-        return WhisperCliBackend(model, find_binary(binary) or binary, threads=threads)
+        return WhisperCliBackend(model, find_binary(binary) or binary, threads=threads, gpu=bool(s.get("gpu", True)))
     if kind in ("server", "auto"):
         cli = _cli_or_none(s, model, threads)
         if kind == "server" or (find_binary(s.get("server_binary", "whisper-server"))
