@@ -6,7 +6,8 @@ final class DashboardTests: XCTestCase {
 
     func testThingsAreTargetsAndNamedUnknowns() {
         let names = Dashboard.things(in: sample).map(\.name)
-        XCTAssertEqual(names, ["keys", "pill_bottle", "wallet", "phone", "glasses", "remote", "thing:7"])
+        // In sight first, with the room's guesses (thing:11, thing:12); never-seen props (glasses) left out.
+        XCTAssertEqual(names, ["keys", "pill_bottle", "wallet", "remote", "thing:7", "thing:11", "thing:12", "phone"])
     }
 
     func testWhereaboutsInPlainWords() {
@@ -39,7 +40,7 @@ final class DashboardTests: XCTestCase {
 
     func testGrokNamedThingsArentThePersons() {
         let tape = sample.entity(named: "thing:12")!
-        XCTAssertFalse(Dashboard.things(in: sample).contains { $0.name == "thing:12" })
+        XCTAssertTrue(Dashboard.things(in: sample).contains { $0.name == "thing:12" })   // on Home as the room's guess
         XCTAssertEqual(Dashboard.your(tape), "what looks like a tape roll")
         XCTAssertEqual(Dashboard.question(for: tape), "Where is the tape roll?")
         XCTAssertEqual(Dashboard.your(sample.entity(named: "thing:11")!), "what looks like a phone charger")

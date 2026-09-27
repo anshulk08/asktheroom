@@ -238,23 +238,17 @@ final class RigReplayTests: XCTestCase {
         XCTAssertEqual(store.activity.map(\.text), ["What looks like a coffee mug appeared on the table"])
     }
 
-    /// Home's "Your things" lists targets the person named. A guess isn't a name the person gave,
-    /// so the room's visible guessed things aren't on it: with the rig's real data, Home lists
-    /// only the six configured props, all "Can't see it right now". They used to show under
-    /// "The room noticed" ("Something new is on the table. It looks like a remote control."),
-    /// which is gone, so today they appear on no Home list at all.
-    func testHomeListsOnlyThePropsWithTheRealData() throws {
+    /// Home's "Your things" with the rig's real data: the things in sight with the room's guesses,
+    /// never the eight configured props it has never seen ("Can't see it right now" x 8 read as broken).
+    func testHomeListsTheGuessedThingsInSightAndNotNeverSeenProps() throws {
         for payload in try payloads() { try deliver(payload) }
         let snapshot = try XCTUnwrap(store.snapshot)
-        let home = Dashboard.things(in: snapshot).map(\.name)
-        XCTAssertEqual(home, ["keys", "pill_bottle", "wallet", "glasses", "phone", "remote"])
-        XCTAssertTrue(Dashboard.things(in: snapshot).allSatisfy {
-            Dashboard.whereabouts($0, in: snapshot) == "Can't see it right now"
-                || Dashboard.whereabouts($0, in: snapshot) == "Can't see them right now"
-        })
-        XCTExpectFailure("Home leaves out things the room only has a guess for (Dashboard.isTheirs); see the 27 Sep report") {
-            XCTAssertTrue(home.contains("thing:50"), "the remote control? on the table should be on Home")
-        }
+        let home = Dashboard.things(in: snapshot)
+        XCTAssertEqual(Set(home.map(\.name)), ["thing:50", "thing:51", "thing:52", "thing:53", "thing:54", "thing:56", "thing:57"])
+        XCTAssertFalse(home.contains { $0.name == "keys" })
+        let remote = try XCTUnwrap(home.first { $0.name == "thing:50" })
+        XCTAssertEqual(remote.displayName, "remote control?")
+        XCTAssertEqual(Dashboard.question(for: remote), "Where is the remote control?")
     }
 
     // MARK: Helpers

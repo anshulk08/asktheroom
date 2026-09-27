@@ -84,11 +84,29 @@ enum Dashboard {
     static let activityLimit = 50
     static let recentHour: TimeInterval = 60 * 60
 
-    /// The person's own things: targets, plus unknown objects someone has named. Containers
-    /// and covers are furniture here; they show up in "where" words instead. Things only Grok
-    /// has named are the room's guess, not the person's, so they stay in "The room noticed".
+    /// Home's "Your things": targets, unknown objects someone has named, and things in sight the room
+    /// has a guess for ("remote control?"), in sight first. Containers and covers are furniture here;
+    /// they show up in "where" words instead. A configured prop the room has never seen is left out:
+    /// eight "Can't see it right now" tiles read as broken (rig, 27 Sep 06:40).
     static func things(in snapshot: Snapshot) -> [Entity] {
-        snapshot.entities.filter(isTheirs)
+        let shown = snapshot.entities.filter { (isTheirs($0) || isGuessedInSight($0)) && !neverSeen($0) }
+        return shown.enumerated()
+            .sorted { (inSight($0.element) ? 0 : 1, $0.offset) < (inSight($1.element) ? 0 : 1, $1.offset) }
+            .map(\.element)
+    }
+
+    /// A thing the room only has a guess for, somewhere it can be shown now.
+    static func isGuessedInSight(_ e: Entity) -> Bool {
+        e.kind == .target && e.isHedged && inSight(e) && (e.xy != nil || e.r != nil || e.zone != nil)
+    }
+
+    static func inSight(_ e: Entity) -> Bool {
+        [.visible, .held, .inside, .under].contains(e.status)
+    }
+
+    /// A configured prop with no sighting at all yet.
+    static func neverSeen(_ e: Entity) -> Bool {
+        !e.isThing && e.status == .lost && e.lastSeen == nil && e.zone == nil
     }
 
     /// Something the person owns and named: "your keys", never "your tape roll" from Grok.
@@ -171,7 +189,7 @@ enum Dashboard {
 
     /// The question a tap on a thing asks. A name Grok gave isn't the person's: "the tape roll".
     static func question(for e: Entity) -> String {
-        if e.isHedged, let alias = e.aliases.first { return "Where is the \(alias)?" }
+        if let name = e.hedgedName { return "Where is the \(name)?" }
         return "Where \(isPlural(e.displayName) ? "are" : "is") \(e.displayName.hasPrefix("my ") ? "" : "my ")\(e.displayName)?"
     }
 
