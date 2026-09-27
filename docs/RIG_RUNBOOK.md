@@ -26,7 +26,9 @@ CAM=/dev/v4l/by-id/usb-046d_Logitech_BRIO_3675F8D2-video-index0
 
 ## 1. Hygiene (only after the orchestrator's OK, given at that moment)
 
-These stop other people's processes. Do not run them on your own.
+These stop other people's processes. Do not run them on your own. (Sat 26 Sep ~20:00: the room app and
+baby-tau were stopped with the user's OK; `~/askroom_rig` was prepared; the USB link was still down, so the
+Jetson is on Wi-Fi only. Check `docker ps` and skip what is already done.)
 
 ```bash
 docker ps --format '{{.Names}}  {{.Image}}  {{.Status}}'      # note what runs
@@ -69,7 +71,9 @@ ls -d ~/askroom_*                                               # stale scratch 
 
    ```bash
    $D python3 -m core.table --outline                  # prints these steps
-   # grab a frame: with the app running, Mac: curl -o frame.jpg http://10.90.84.178:8000/frame.jpg
+   # grab a 1280x720 frame (app stopped):
+   $D python3 -c "import cv2; c = cv2.VideoCapture('$CAM', cv2.CAP_V4L2); c.set(3, 1280); c.set(4, 720); [c.read() for _ in range(30)]; cv2.imwrite('frame.jpg', c.read()[1])"
+   # Mac: scp guru@10.90.84.178:askroom_rig/frame.jpg . and open it in Preview (Tools > Show Inspector shows px)
    # read the tabletop's corners in px (a little inside the real edge), in order around the table, then:
    $D python3 -m core.table --outline-px X1,Y1 X2,Y2 X3,Y3 X4,Y4 --image frame.jpg
    ```
@@ -84,14 +88,146 @@ ls -d ~/askroom_*                                               # stale scratch 
    # restore: cp -p calib_frozen/*.json . && restart the app
    ```
 
-## 3. Laser calibration and 10 ruler spots
+## 2b. Brio regression clips (guided, about 25 min)
 
-*Laser section: supplied by the laser/demo_check workstream (asktheroom-6c), pasted here when its branch is
-merged.* It covers `act.calibrate --rig` (latency, servo limits, fit, save), aiming at 10 ruler spots with the
-error in cm, the kill switch check, and setting `actuator: pca9685` in `config.local.yaml`.
+The replay clips the fixes are measured on were recorded on the old camera; these replace them. Record them
+right after step 2 (same light, camera settings, table frame and outline: each clip stores its calibration and
+outline), **before** step 3 (a laser dot in the frame would be a new object), with the app stopped.
 
-Done when: fit error < 1.5 cm, a point at the table centre lands < 3 cm away, the 10 ruler spots are logged,
-the kill switch cuts the dot, and `cp -p laser_cal.json calib_frozen/` is done.
+`eval.guided` runs on a **Mac next to the table**: the Mac speaks each cue out loud (`say`), you do what it
+says, and the Jetson records. Nobody annotates afterwards: the cues are the ground truth. It needs the
+integration branch on that Mac (`~/asktheroom/wt-integration` on the orchestrating Mac) and SSH to the Jetson.
+
+```bash
+# Mac, in the integration worktree
+export ASKROOM_JETSON=guru@10.90.84.178 ASKROOM_REMOTE_DIR=askroom_rig
+PY=~/asktheroom/askroom/.venv/bin/python
+$PY -m eval.guided --list                          # each clip's setup and length
+$PY -m eval.guided shell --id brio_shell_1 --no-setup
+```
+
+`--no-setup` keeps the camera exactly as step 2.2 locked it. Each run prints the setup: lay the props out as it
+says, then press nothing: it says "Get ready", then the cues. It ends with "Done." and copies the clip to
+`data/clips/<id>` on the Mac (and leaves it in `~/askroom_rig/data/clips/<id>` on the Jetson).
+
+Props (the same every clip): A wallet, B a small solid object (the keys), C the phone, NB the notebook, BOX the
+open box (open side up).
+
+| # | Command | Length | What the cues ask |
+|---|---|---|---|
+| 1 | `$PY -m eval.guided still --id brio_still_1 --no-setup` | 32 s | Notebook, wallet, keys, phone, box spread out, not touching; hands away the whole time |
+| 2 | `$PY -m eval.guided hands --id brio_hands_1 --no-setup` | 32 s | Same layout; wave a hand over the table, rest a forearm on an empty part, hands away |
+| 3 | `$PY -m eval.guided place_name_pickup --id brio_place_1 --no-setup` | 28 s | Only the notebook down, wallet in hand: put the wallet in the middle, pick it up and hold it, put it down on the right |
+| 4-6 | `$PY -m eval.guided shell --id brio_shell_1 --no-setup` (then `brio_shell_2`, `brio_shell_3`) | 40 s each | Box and notebook apart, keys in hand: keys in the middle; slide the notebook over them; lift it, keys into the box, notebook aside; slide the box to a new spot. Vary the hand and where the box ends up |
+| 7 | `$PY -m eval.guided shell --id brio_shell_dim_1 --no-setup` | 40 s | The same game with the room lights partly off (**do not** rerun camera_setup: the point is a darker picture at the locked exposure). Lights back on after |
+| 8 | `$PY -m eval.guided blanket --id brio_blanket_1 --no-setup` | 30 s | Keys, phone and notebook spread out, blanket in hand: lay it over everything; lift it off and take it away |
+
+Between clips: reset the props (about 1-2 min). If a cue was missed or a hand stayed in view, rerun with the
+same `--id` (it overwrites). Done when: 8 clips, each printed `... frames, ... s (~30 fps)`. Tell the
+orchestrator; the replays move to these clips.
+
+## 3. Laser (F6): calibrate, ruler check, kill switch
+
+*From the laser/demo_check workstream (fix/laser-check).* **Needs:** fix/laser-check merged; the table
+calibrated and its outline set (step 2); the app stopped (it holds the Brio). Keep the kill switch within
+reach and nobody's eyes at table height. The laser turns itself off after 10 s idle.
+
+### 3.0 Image and driver (once)
+
+1. Put servokit's wheels into `docker/wheels`: the `pip3 download adafruit-circuitpython-servokit==1.3.24
+   Jetson.GPIO==2.1.11 ...` command is in the header of `docker/Dockerfile`.
+2. Rebuild: `docker build -t askroom:latest docker/` (adds espeak-ng too if the build has network, e.g. a hotspot).
+3. On the host, `sudo i2cdetect -y -r 7` must show `40` (the board on I2C bus 7).
+4. `$D python3 -c "import board, adafruit_servokit; print(board.board_id)"` must print the board.
+5. In `config.local.yaml` set `actuator: pca9685`.
+
+If servokit is missing or the board isn't found, main.py logs `LASER DISABLED ...` and answers by voice only
+(it no longer crashes).
+
+### 3.1 Calibrate
+
+```bash
+$D python3 -m act.calibrate --rig        # from a real terminal (ssh -t): the jog reads single keys
+```
+
+- **Jog.** The dot starts mid-travel. `a`/`d` (or left/right) pan, `w`/`s` (or up/down) tilt, `[`/`]` change
+  the step (2-50 µs a press; start at 10). Drive the dot to each corner of the tabletop in order (top-left,
+  top-right, bottom-right, bottom-left, as the camera sees it) and press Enter at each. `u` undoes the last
+  corner, `l` toggles the laser, `q` quits. If the dot goes out (10 s auto-off), any key lights it again.
+- **Then it runs by itself for 1-2 min:** latency measurement, the grid fit (dots off the tabletop outline
+  are dropped), 10 held-out aims, the centre aim.
+- **It prints** `fit: N points ... error median X cm`, then `F6 gate: fit median X < 1.5 cm PASS/FAIL; centre
+  ... Y cm < 3 cm PASS/FAIL`, and a `servo_limits:` / `camera_latency_s:` block: copy that block into
+  `config.local.yaml`.
+- It saves `laser_cal.json`, which also stores the table homography, so a later table recalibration is
+  remapped. Recalibrate the laser only if the camera or the laser head moves. Then
+  `cp -p laser_cal.json calib_frozen/`.
+- Redo without jogging: `$D python3 -m act.calibrate --rig --limits PAN_LO PAN_HI TILT_LO TILT_HI` with the
+  printed limits.
+- "only N dots seen": the room is too bright or exposure isn't locked (step 2.2); re-jog the corners.
+
+### 3.2 Ruler check (10 spots)
+
+```bash
+$D python3 -m act.calibrate --rig --check
+```
+
+- Use blue or green sticky notes, not yellow or pink (the camera's red channel saturates on those and the dot
+  can vanish). Draw a small cross at each note's centre.
+- At each prompt: put one new note down, take your hand fully out of view, press Enter; the laser aims at the
+  note. Measure from the dot's centre to the cross with a ruler and type the distance in cm (Enter relights
+  the dot; `x` = no dot).
+- Spread the 10 spots: 4 near the corners (about 10 cm in), 4 mid-edge, the centre, and where the box sits in
+  the shell game. Leave the old notes down.
+- It prints the table below (paste it into the log) and saves `data/trials/laser_spots_<time>.json`.
+
+| spot | x cm | y cm | camera cm | open-loop cm | ruler cm | ok (< 3 cm) |
+|---|---|---|---|---|---|---|
+| 1-10 | | | | | | |
+
+Gate: ruler median < 1.5 cm and max < 3 cm.
+
+### 3.3 Kill switch and the pre-demo laser check
+
+```bash
+$D python3 demo_check.py --only 4 8
+```
+
+- Check 4: fit median < 1.5 cm, and the aim at the tabletop's centre lands < 3 cm away.
+- Check 8: the laser turns on; press the kill switch, then Enter; answer `y` only if the dot went out. Release
+  the switch and run `--only 4` again to confirm the laser comes back.
+- Every demo_check step has a deadline: a wedged speaker or camera shows `FAIL ... timed out`, not a hang.
+
+### 3.4 Camera replug (once)
+
+`$D bash`, unplug and replug the Brio, then `ls /dev/v4l/by-id/` inside the container must list it again
+(dock.sh mounts /dev with a V4L2 cgroup rule). If the shell or tty misbehaves, run with
+`ASKROOM_DEV_BIND=0 scripts/dock.sh ...` (the old behaviour) and report it.
+
+Done when: fit median < 1.5 cm, centre < 3 cm, the 10-spot table meets its gate, the kill switch cuts the dot.
+Log: fit median/max and point count, centre error, `servo_limits` and `camera_latency_s`, the 10-spot table,
+kill switch pass/fail.
+
+## Demo config.local.yaml overrides
+
+Once the table is frozen (step 2.5), the rig runs judging with these in `~/askroom_rig/config.local.yaml`
+(on top of what is already there), then restart the app. Each line says what it depends on.
+
+```yaml
+detect:
+  model: models/askroom-yolo26s-brio.engine      # already live (main); the fine-tuned Brio detector
+proposals:
+  kind: yoloe                                    # already live (main)
+  yoloe: {model: models/yoloe-26s-seg-pf-reduced.engine}
+perception_guard:
+  voice_recalibrate: false                       # needs fix/perception: a spoken "recalibrate" cannot move the table frame mid-demo
+demo:
+  hold_notices: true                             # main: no reminders or morning report spoken unasked during judging
+actuator: pca9685                                # needs fix/laser-check and step 3.0 (servokit in the image)
+# servo_limits: / camera_latency_s:             # paste the block act.calibrate --rig printed (step 3.1)
+# tts: {output_device: "<name part>"}           # step 5.1: the speaker, not HDMI
+# listen: {mode: wake}                          # only if step 5.2 had more than 1 false trigger
+```
 
 ## 4. Real trials: 10 shell games and 10 place/hide
 
@@ -192,6 +328,7 @@ count; write down what went wrong.
 |---|---|---|
 | 1 | `free -m` available / clock right | |
 | 2 | camera_setup gain used; tracked area (cm) | |
+| 2b | Brio clips recorded (ids) | |
 | 3 | laser fit error cm / centre error cm / 10 ruler spots (cm each) / kill switch ok | |
 | 4 | shell games correct /10; place-hide correct /10; laser error median cm | |
 | 5 | hall noise false triggers (always / wake); echo test rows = 5? | |
