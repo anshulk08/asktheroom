@@ -169,14 +169,14 @@ table:
 servo_limits:
   pan: [600, 2400]
   tilt: [600, 2400]
-actuator: fake               # pca9685 | serial | bus | fake
+actuator: fake               # pca9685 | serial | turret | bus | fake
 pan_channel: 0
 tilt_channel: 1
 pca9685_address: 0x40
 serial_port: /dev/ttyUSB0
 serial_baud: 115200
 serial_timeout_s: 0.1
-camera_latency_s: 0.06       # measure on the rig with act.calibrate.measure_latency, then set
+camera_latency_s: 0.15       # safe default; python -m act.calibrate --rig measures it: put its value in config.local.yaml
 laser_channel: 15
 laser_timeout_s: 10
 laser_tol_cm: 2.0             # closed-loop aim stops within this (1 cm makes SG90-class servos hunt)
@@ -714,3 +714,43 @@ room_layout:
     side_table: {rect: [-90, -70, 65, 70], kind: surface}
     doorway: {rect: [190, -260, 100, 50], kind: door}
     counter: {rect: [320, -230, 70, 190], kind: surface}
+
+# Laser eye safety (main.Room; room: above has the zones, head_px and dwell). Before every aim, table or room,
+# and before every look within one, the perception thread looks for people on the full frame (YOLOE's person
+# and clothing classes); a person or recent hand box grown by person_margin_px touching the target or the
+# beam's path from room.head_px refuses it, as do head_px unset, a stale frame, or no detector able to look.
+# An object in someone's hand is never pointed at. The head only moves dark; the dot stays lit only on a
+# confirmed hit, at most max_on_s from the aim's first light; off at startup and after any failed aim.
+laser_room:
+  person_margin_px: 60
+  people_wait_s: 1.0          # YOLOE's person look on the perception thread; no answer in time: refused
+  max_on_s: 4.0               # counted from each aim's first light; blinks don't restart it
+  max_frame_age_s: 0.5        # an older camera frame (a stalled camera) proves nothing: refused
+  allow_hog: false            # HOG as the fallback person detector (it misses seated people)
+  allow_sweep: false          # 'carried off' edge sweeps run down the edge the person walked out by
+  color: red                  # the dot's colour: red | green (the detector looks for this channel's rise)
+  ignore_px: []               # [[x1, y1, x2, y2], ...] full-frame px the dot finder never looks in: the laser
+                              # module itself, if the camera sees it (rig: [[850, 1250, 1300, 1440]])
+
+# Stepper turret (actuator: turret; act/actuator.py TurretActuator, act/turret.py, firmware/turret).
+# An Arduino Uno drives two MKS SERVO42D closed-loop steppers; wiring and driver menu settings are in
+# firmware/README.md. The rest of act/ thinks in servo pulses, so the turret takes servo-equivalent
+# pulses: pulse = center_us + degrees * us_per_deg. With 10 us/deg the servo-tuned values keep their
+# scale (laser_anti_backlash_us 25 = 2.5 deg, room.deadband_us 8 = 0.8 deg), and servo_limits
+# [1050, 1950] means +/-45 deg. Keep servo_limits inside the firmware's own limits (+/-90 deg on
+# both axes, the mount's travel) and, for act.calibrate, covering just the table.
+# Opening the port resets the Uno: wherever the mount points then is 0,0 (center_us), so line it up
+# first; close() parks it back at 0,0. On the rig set the port in config.local.yaml
+# (Jetson: /dev/ttyACM0, the user needs the dialout group).
+turret:
+  port: /dev/ttyACM0
+  baud: 115200
+  center_us: 1500
+  us_per_deg: 10
+  move_timeout_s: 10          # one move must report DONE within this
+  laser_offset_m: [0, 0, 0]   # laser vs. where the axes cross, in the head's x right / y up / z forward
+  park_on_close: true
+  max_speed_deg_s: null       # null = the firmware default (120 deg/s at the axis)
+  tilt_max_deg: -10           # the beam never tilts above this (0 = level; the firmware stops at -10): keep it below
+                              # eye level, about -atan((mount height - 1.8 m) / room depth) or lower
+  accel_deg_s2: null          # null = the firmware default (600 deg/s^2)

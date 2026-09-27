@@ -17,7 +17,9 @@ This file then does what ultralytics does after a stock model (non_max_suppressi
 agnostic_nms, multi_label off, then scale_boxes and process_mask): score > conf, class-agnostic greedy
 NMS at iou, max_det, boxes back to frame px through the letterbox, and optionally box-sized masks.
 One addition: boxes over max_area_frac of the frame (the table, the whole scene) are dropped before
-NMS; they are never objects and would only cost NMS time.
+NMS; they are never objects and would only cost NMS time. YOLOEProposer.people() (the laser's safety
+gate) lifts that cap, since the nearest person fills the frame, and asks for per-class NMS
+(agnostic_nms=False), so a shirt box cannot suppress the person wearing it.
 
 ReducedYOLOE mimics the part of ultralytics' YOLO.predict() that YOLOEProposer reads (boxes.xyxy /
 conf / cls, masks.data, names), so the proposer's filtering (ignored classes, size, table outline,
@@ -90,10 +92,11 @@ def nms(xyxy: np.ndarray, scores: np.ndarray, iou: float, max_det: int) -> np.nd
 def postprocess(out: np.ndarray, protos: Optional[np.ndarray], orig_shape: Sequence[int], gain: float,
                 pad: Sequence[float], conf: float = 0.15, iou: float = 0.5, max_det: int = 100,
                 max_area_frac: float = 0.35, masks: bool = False, max_nms: int = 30000,
-                insz: int = 640) -> SimpleNamespace:
+                insz: int = 640, agnostic: bool = True) -> SimpleNamespace:
     """Reduced head output -> SimpleNamespace(xyxy (N, 4) float32 frame px, conf (N,), cls (N,) int,
     masks: list of box-sized bool arrays | None), most confident first. out: [1, 6 + nm, A] or
-    [6 + nm, A]; protos: [1, nm, mh, mw] or None; gain / pad from letterbox() to insz x insz."""
+    [6 + nm, A]; protos: [1, nm, mh, mw] or None; gain / pad from letterbox() to insz x insz.
+    agnostic=False: NMS within each class only (ultralytics' agnostic_nms=False)."""
     o = np.asarray(out, np.float32)
     o = o[0] if o.ndim == 3 else o
     fh, fw = int(orig_shape[0]), int(orig_shape[1])
@@ -109,7 +112,11 @@ def postprocess(out: np.ndarray, protos: Optional[np.ndarray], orig_shape: Seque
     area = (xyxy[:, 2] - xyxy[:, 0]) * (xyxy[:, 3] - xyxy[:, 1])
     ok = area <= max_area_frac * fh * fw
     xyxy, c = xyxy[ok], c[:, ok]
-    keep = nms(xyxy, c[4], iou, max_det)
+    if agnostic:
+        keep = nms(xyxy, c[4], iou, max_det)
+    else:                               # per class: shift each class's boxes clear of the others (float64:
+        span = float(np.ptp(xyxy)) + 1.0 if len(xyxy) else 0.0    # the offsets reach ~1e7 px)
+        keep = nms(xyxy.astype(np.float64) + c[5].round()[:, None].astype(np.float64) * span, c[4], iou, max_det)
     xyxy, c = xyxy[keep], c[:, keep]
     # ultralytics clips after scaling, i.e. after NMS in frame units; clipping before would change IoUs
     xyxy[:, [0, 2]] = np.clip(xyxy[:, [0, 2]], 0, fw)
@@ -221,9 +228,11 @@ class ReducedYOLOE:
         self.gpu_input = isinstance(runner, TrtRunner)
 
     def predict(self, img: np.ndarray, imgsz: Optional[int] = None, conf: float = 0.15, iou: float = 0.5,
-                max_det: int = 100, retina_masks: bool = False, **_ignored) -> list[SimpleNamespace]:
-        """Same meaning as ultralytics' predict arguments; agnostic_nms is always on and half / verbose
-        are ignored (an engine's precision is baked in)."""
+                max_det: int = 100, retina_masks: bool = False, agnostic_nms: bool = True,
+                max_area_frac: Optional[float] = None, **_ignored) -> list[SimpleNamespace]:
+        """Same meaning as ultralytics' predict arguments; half / verbose are ignored (an engine's
+        precision is baked in). max_area_frac (not an ultralytics argument) overrides the model's size
+        cap for this call; float('inf') keeps boxes of any size."""
         t0 = time.perf_counter()
         s = int(imgsz or self.imgsz)
         lb, gain, pad = letterbox(img, s)
@@ -235,7 +244,8 @@ class ReducedYOLOE:
         out, protos = self.runner(x, bool(retina_masks))
         t2 = time.perf_counter()
         r = postprocess(out, protos, img.shape[:2], gain, pad, conf=conf, iou=iou, max_det=max_det,
-                        max_area_frac=self.max_area_frac, masks=bool(retina_masks), insz=s)
+                        max_area_frac=self.max_area_frac if max_area_frac is None else max_area_frac,
+                        masks=bool(retina_masks), insz=s, agnostic=bool(agnostic_nms))
         t3 = time.perf_counter()
         masks = None
         if r.masks is not None:             # full-frame, like retina_masks=True; YOLOEProposer crops them

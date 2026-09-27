@@ -52,7 +52,8 @@ def room(w, obj, **kw):
     w.set_place(obj, room_place(obj, **kw))
     a = ask(w, obj)
     spoken_ok(a)
-    assert (a.point_at, a.action) == (None, None)   # room answers carry no laser action
+    seen_now = kw.get("fresh", True) and not kw.get("absent", False)
+    assert (a.point_at, a.action) == ((obj if seen_now else None), None)   # the laser only where it's seen now
     return a
 
 
@@ -237,3 +238,13 @@ def test_tentative_room_place_is_hedged_once(w):
     w.set_place("wallet", p2)
     a = ask(w, "wallet")
     assert "what I think is your wallet" in a.text and a.text.count("I think") == 1
+
+
+def test_a_room_object_seen_there_now_is_pointed_at_a_stale_one_is_not(w):
+    """The laser demo: 'where is X' for an object in a room zone aims at it only while it's seen there."""
+    room(w, "remote", fresh=True)
+    assert ask(w, "remote").point_at == "remote"
+    room(w, "remote", fresh=False)
+    assert ask(w, "remote").point_at is None
+    room(w, "remote", fresh=True, absent=True)
+    assert ask(w, "remote").point_at is None

@@ -602,7 +602,8 @@ PEOPLE = ['person', 'man', 'woman', 'child', 'boy', 'girl', 'patient', 'head', '
           'foot', 'toe', 'leg', 'knee']   # a box mostly inside one: occluded
 # What people wear is a person while worn: on the rig, feet up at the coffee table came as 'shoe', 'sock',
 # 'jeans'. A worn-item box touching a person box (grown by YOLOEConfig.worn_near_px) is treated as one; a
-# shoe alone on the table, away from people, is an object.
+# shoe alone on the table, away from people, is an object. The laser's safety gate (people()) counts every
+# worn box as a person.
 WORN = ['glove', 'shoe', 'footwear', 'leather shoe', 'running shoe', 'sneaker', 'boot', 'cowboy boot', 'sandal',
         'slipper', 'sock', 'air sock', 'jeans', 'pants', 'pant', 'sweat pant', 'shirt', 'polo shirt']
 PERSON_INSIDE = 0.6                     # share of a box inside a person box that flags it occluded
@@ -626,6 +627,8 @@ class YOLOEConfig:
     masks: bool = False                 # keep box-sized masks (seg checkpoints)
     ignore_classes: list = field(default_factory=lambda: list(DEFAULT_IGNORE))
     worn_near_px: int = 40              # a worn item (WORN) this close to a person box is part of them
+    people_conf: float = 0.15           # people() (laser safety gate) never needs more than this: a missed
+                                        # person is worse than a refused aim
 
     @classmethod
     def from_dict(cls, raw: Optional[dict]) -> 'YOLOEConfig':
@@ -662,6 +665,26 @@ class YOLOEProposer:
 
     def reset(self) -> None:
         pass
+
+    def people(self, img: np.ndarray) -> list[BoxPx]:
+        """Person boxes (people, hands, arms, and anything worn) in img px: the room laser's safety gate
+        (main.Room). Errs towards seeing someone, unlike propose(): a lower conf, boxes of any size (the
+        nearest person fills the frame), per-class NMS (a shirt box must not suppress its wearer), and
+        every worn item counts on its own (a leg or shirt may be all the model boxed). Same model, so
+        call it on the thread that runs propose()."""
+        c = self.cfg
+        conf = min(c.conf, c.people_conf)
+        kw = dict(imgsz=c.imgsz, conf=conf, iou=c.iou, agnostic_nms=False, max_det=c.max_det, verbose=False)
+        if c.half:
+            kw['half'] = True
+        if hasattr(self.model, 'max_area_frac'):    # the reduced engine's size cap (ultralytics has none and
+            kw['max_area_frac'] = float('inf')      # rejects unknown arguments)
+        r = self.model.predict(img, **kw)[0]
+        names = getattr(r, 'names', None) or getattr(self.model, 'names', {}) or {}
+        xyxy, score, cls = _np(r.boxes.xyxy), _np(r.boxes.conf), _np(r.boxes.cls)
+        label = [str(names.get(int(k), '')).lower() for k in cls]
+        return [tuple(int(round(float(v))) for v in b) for b, s, n in zip(xyxy, score, label)
+                if s >= conf and (n in PEOPLE or n in WORN)]
 
     def propose(self, img: Optional[np.ndarray], known: list[BoxPx], hands: list[BoxPx]) -> list[Proposal]:
         if img is None:

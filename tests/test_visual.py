@@ -737,7 +737,7 @@ def test_room_aims_at_target_cm(tmp_path):
         def __init__(self):
             self.aimed = []
 
-        def aim_object(self, name, pos):
+        def aim_object(self, name, pos, check=None):
             self.aimed.append((name, tuple(pos)))
             return 0.5
 
@@ -747,6 +747,8 @@ def test_room_aims_at_target_cm(tmp_path):
     events = EventLog(":memory:", str(tmp_path))
     laser = Laser()
     room = main.Room(CFG, demo_world(events), events, None, None, laser, lambda t, s: Answer(t))
+    room._table_full = lambda pos, r: ((0.0, 0.0), None)       # routing only: the safety gate is tested in test_main
+    room._unsafe = lambda uv, box=None: None
     assert room.aim(Answer("There.", action="point", target_cm=(12.5, 40.0))) == 0.5
     assert laser.aimed == [(None, (12.5, 40.0))]
     room.aim(Answer("Keys.", point_at="wallet", action="point"))
