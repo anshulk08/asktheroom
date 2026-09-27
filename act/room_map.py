@@ -303,7 +303,7 @@ def beam_blocked(target_px, box_px, blockers, head_px=None, margin_px: float = 2
     return False
 
 
-def densify_ranges(rm: "RoomMap", zones: list[str], target_px: float = 40.0) -> tuple:
+def densify_ranges(rm: "RoomMap", zones: list[str], target_px: float = 40.0, max_points: int = 120) -> tuple:
     """((pan lo, hi), (tilt lo, hi)) covering the seen dots inside these zones, grown by one sweep step, and
     the grid (nx, ny) that samples it about target_px apart: a second sweep there fills in the zones a coarse
     sweep only touched (the rig's side table got 1 dot of 91)."""
@@ -322,6 +322,9 @@ def densify_ranges(rm: "RoomMap", zones: list[str], target_px: float = 40.0) -> 
     k = max(1.0, st / target_px)                  # how much finer than the first sweep
     nx = int(np.clip(round((phi - plo) / (sp[0] / k)) + 1, 2, 30))
     ny = int(np.clip(round((thi - tlo) / (sp[1] / k)) + 1, 2, 30))
+    if nx * ny > max_points:                      # zones far apart make a wide range: thin it, ~2 min at most
+        f = math.sqrt(max_points / (nx * ny))     # (the rig's couch + side table asked for 20x22 = 440)
+        nx, ny = max(2, int(nx * f)), max(2, int(ny * f))
     return ((float(plo), float(phi)), (float(tlo), float(thi))), (nx, ny)
 
 

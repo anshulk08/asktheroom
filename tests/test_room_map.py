@@ -624,3 +624,14 @@ def test_world_laser_is_on_for_the_whole_aim_and_off_after_a_dark_one(room_main,
     room.room_head_px = None                                # refused before any blink: back to off
     room.aim(Answer("x", action=f"room:{t[0]:.0f},{t[1]:.0f}"))
     assert room.world.laser["on"] is False
+
+
+def test_densify_never_asks_for_more_than_max_points():
+    """Rig, 05:36: couch + side table asked for 20x22 = 440 points and the long run lost the Uno at 100."""
+    from act.room_map import densify_ranges
+    rig = RoomRig(b_cm=3.0, seed=6)
+    laser = rig.make_laser()
+    rm = sweep(laser, grid=(8, 6), n_pairs=1, refine=False)
+    rm.zones = {"all": [[0, 0], [rm.size_px[0], 0], [rm.size_px[0], rm.size_px[1]], [0, rm.size_px[1]]]}
+    _, (nx, ny) = densify_ranges(rm, ["all"], target_px=2.0, max_points=120)
+    assert nx * ny <= 120 and nx >= 2 and ny >= 2
