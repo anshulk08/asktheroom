@@ -35,8 +35,10 @@ python -m voice.tts --devices        # outputs: the same for tts.output_device
 ```
 
 Pick a **part of each name that only that device has**. The Brio, a USB mic and a USB speaker often all say
-"USB Audio"; use the product part instead ("PnP Sound", "Jabra", "UACDemo"). If several match, the log
-warns and names them all, and the first is used. Then in `config.local.yaml`:
+"USB Audio"; use the product part instead ("PnP Sound", "Jabra", "UACDemo"). At startup the app logs the mic
+it uses once (`microphone: 3: USB PnP Sound Device ...`; several matches: all of them and the one used). A
+name no device has is an ERROR in the log, the app falls back to the default mic (maybe the Brio across the
+room), and `python demo_check.py` fails its audio check. Then in `config.local.yaml`:
 
 ```yaml
 stt:
@@ -91,6 +93,7 @@ Restart the room app with voice on and the new `config.local.yaml` (the rig owne
 - "is it on the counter?" (right after) → the same wallet answer: follow-ups work for 2 minutes after a
   question.
 - "where's the couch?" said to someone else → nothing (a place, not a thing).
+- "can you put your phone away" said to someone else → nothing (and no laser).
 - "let's reset the room" → nothing. "ask the room, reset" → the reset answer. Overheard reset only counts
   when the wake phrase opens the sentence; the phone and the dashboard can always reset.
 
