@@ -69,7 +69,13 @@ Scripted handoff check any time (from a laptop, stdlib only):
 
 ```bash
 python3 scripts/room_trials.py --rig $RIG --object remote --zones couch side_table couch counter couch --out data/room/trials.json
+# then put the session on the dashboard scoreboard (room_trials overwrites --out and its records carry no
+# object name or time, so upload after every session, naming the object):
+curl -X POST -H 'content-type: application/json' --data @data/room/trials.json "$RIG/scoreboard/trials?object=remote"
 ```
+
+The dashboard shows "room handoffs today" and a per-object / per-zone table from these uploads (real trials
+only; this is the Devpost number too, `docs/DEVPOST.md`).
 
 ## 4. Mic and speaker bring-up
 
