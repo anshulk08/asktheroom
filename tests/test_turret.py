@@ -401,3 +401,7 @@ def test_the_rehome_endpoint_answers_only_this_machine():
     near = TestClient(app, client=("127.0.0.1", 5000))
     assert near.post("/laser/rehome", json={"step": "zero", "level_confirmed": True}).json() == {"ok": True}
     assert calls == [("zero", True)]
+    near.post("/laser/rehome", json={"step": "zero", "level_confirmed": "false"})      # a string is no confirmation
+    assert calls[-1] == ("zero", False)
+    r = near.post("/laser/rehome", json={"step": "release"}, headers={"X-Forwarded-For": "10.0.0.9"})
+    assert r.status_code == 403 and len(calls) == 2                                   # a tunnel posing as local

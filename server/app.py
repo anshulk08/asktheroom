@@ -436,10 +436,11 @@ def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = 
         no second opener. Only from this machine (an operator's ssh), never the phone or the dashboard."""
         if rehome_fn is None:
             raise HTTPException(404, "no laser here")
-        if request.client is None or request.client.host not in ("127.0.0.1", "::1", "localhost"):
+        forwarded = any(h in request.headers for h in ("x-forwarded-for", "x-forwarded-host", "forwarded"))
+        if forwarded or request.client is None or request.client.host not in ("127.0.0.1", "::1", "localhost"):
             raise HTTPException(403, "laser re-home only from the rig itself (ssh, then curl localhost)")
         b = body or {}
-        return await asyncio.to_thread(rehome_fn, str(b.get("step", "")), bool(b.get("level_confirmed", False)))
+        return await asyncio.to_thread(rehome_fn, str(b.get("step", "")), b.get("level_confirmed") is True)
 
     @app.get("/state")
     async def state_route():
