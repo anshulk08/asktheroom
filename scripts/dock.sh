@@ -8,7 +8,8 @@
 set -euo pipefail
 # The host's time zone is passed in so spoken times ("put there at 8:05 PM") are local.
 cd "$(dirname "$0")/.."
-IMAGE="${ASKROOM_IMAGE:-askroom:latest}"   # docker/Dockerfile: the Ultralytics image + app packages
+IMAGE="${ASKROOM_IMAGE:-askroom:latest}"   # docker/Dockerfile: the Ultralytics image + app packages; e.g.
+                                           # ASKROOM_IMAGE=askroom:demo to try a new build, latest to roll back
 devs=()
 # gpiochip: Blinka's board module (adafruit_servokit) imports Jetson.GPIO, which reads the GPIO chips.
 for d in /dev/video* /dev/i2c-7 /dev/gpiochip* /dev/snd /dev/input; do [ -e "$d" ] && devs+=(--device "$d"); done
