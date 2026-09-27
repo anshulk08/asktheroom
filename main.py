@@ -887,7 +887,8 @@ class Room:
         from server.app import create_app
         app = create_app(self.cfg, self.world, self.events, frames=self.frames,
                          ask_fn=self.ask_and_act, table=self.table, care=getattr(self, "care", None),
-                         voice_fn=getattr(self.tts, "set_voice", None))
+                         voice_fn=getattr(self.tts, "set_voice", None),
+                         listening_fn=lambda: bool(getattr(self.indicator, "lit", False)))
         self.record_answer = app.state.record_answer
         self.server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level="warning",
                                                     timeout_graceful_shutdown=2))
