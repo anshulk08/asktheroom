@@ -182,11 +182,9 @@ def test_a_decoy_already_on_the_couch_never_gets_the_remote_carried_to_the_side_
     assert decoy.confirmed and not decoy.changed and rig.asked == []
     thing = rig.remote_leaves()
     rig.put("remote", SIDE_SPOT)                    # carried to the side table
-    rig.round()                                     # the decoy is asked now (a handoff is possible)
-    rig.grok(REMOTE)                                # ... and Grok calls it a remote control
-    assert decoy.guess == REMOTE and rig.asked[-1] == [REMOTE]
-    assert found(rig.round()) == []                 # it never arrived: no handoff; the real one confirms
-    rig.grok(REMOTE)                                # Grok confirms the side table arrival
+    rig.round()                                     # hot: the arrival confirms on its first visit and is asked;
+    rig.grok(REMOTE)                                # the static decoy is never asked (P0-3). Grok confirms it
+    assert decoy.guess is None and rig.asked == [[REMOTE]]
     assert found(rig.round()) == [(EventType.FOUND, thing)]
     ent = rig.world.get(thing)
     assert (ent.status, ent.zone) == (Status.VISIBLE, "side_table")
@@ -289,9 +287,7 @@ def test_the_answer_names_the_side_table_and_never_the_couch_decoy(rig):
     thing = rig.remote_leaves()
     rig.put("remote", SIDE_SPOT)
     rig.round()
-    rig.grok(REMOTE)                                # the decoy, named
-    rig.round()
-    rig.grok(REMOTE)                                # the arrival, named
+    rig.grok(REMOTE)                                # the arrival, named; the static decoy is never asked (P0-3)
     assert found(rig.round()) == [(EventType.FOUND, thing)]
     text = rig.where()
     assert text.startswith("Your remote, I think, is on the side table."), text

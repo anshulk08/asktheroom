@@ -73,7 +73,8 @@ memory is turned on for the demo; if it doesn't, the camera goes back to zoom 16
 drawn at. (The existing `act/room_map --zone` needs a laser-sweep map first, so it is not used here.)
 `--show` saves the full frame with zones drawn, for checking.
 
-**Detection.** Every `room_every_n` (5) perception frames, one zone is processed, round-robin: its bounding box
+**Detection.** Every `room_every_n` (5) perception frames (`room_every_n_hot`, 1, while a handoff is open:
+`room_handoff_hints` non-empty, spec 0010 P0-3), one zone is processed, round-robin: its bounding box
 is cropped from the full frame at native resolution (resized down only if its long side exceeds 1280) and the
 already-loaded known-prop model runs on it, sharing the engine instance (no second load). `Detector.detect`
 is not used for this: it requires a table calibration and converts to table cm; the room pass calls the model
@@ -162,7 +163,10 @@ the entity's latest applied one is rejected. All world updates happen under the 
 
 **`RoomTracker`** (`core/room.py`) keeps short per-zone (M0) or per-tile (M1) tracks `r:N`. A track is
 **confirmed** after `confirm_visits` (2) consecutive valid visits with a match (IoU at least 0.3, or centre within
-0.5 box diagonals). Each track records `first_seen` (capture time). Confirmed tracks go to association.
+0.5 box diagonals); a track whose spot changed when it appeared (an arrival, `RoomTrack.changed`) confirms after
+`confirm_visits_arrival` (1) (spec 0010 P0-3). Each track records `first_seen` (capture time). Confirmed tracks
+go to association; a thing track's Grok name, once it lands, is decided at once with a one-track visit of its
+zone (`RoomNamer.on_named`), not on the zone's next visit.
 
 **`World.observe_room(name, obs, kind)`** is a new method; it does not wrap `observe_external()` (which writes
 `pos_cm`, clears the parent and sets confidence 1.0). It sets `zone`, status VISIBLE (acquire) or UNKNOWN
@@ -368,7 +372,8 @@ shows the zone string.
 
 - `config.yaml`, new section `room_memory:` at the end: `enabled` (false), `capture_size` ([1920, 1080]),
   `room_every_n` (5), `confirm_visits` (2), `handoff_s` (120), `table_fresh_s` (2), `room_prop_conf` (0.45),
-  `absent_visits` (3), `lum_lo` (25), `lum_hi` (235), `fresh_visits` (2), `fresh_s` (10), `ring_s` (1.0); from M1-M3
+  `absent_visits` (3), `lum_lo` (25), `lum_hi` (235), `fresh_visits` (2), `fresh_s` (10), `ring_s` (1.0),
+  `names_per_minute` (60), `room_every_n_hot` (1), `confirm_visits_arrival` (1) (spec 0010 P0-3); from M1-M3
   `tile_px` (640), `tile_overlap_px` (64), `tiles_per_frame` (1), `room_revisit_s` (3), `reid_room_thr` (measured),
   `birth_change_frac` (0.3), `bg_alpha` (0.02), `bg_stable_visits` (5). Pointing keys join the existing `room:`
   section: `min_depression_deg` (15), `aim_fresh_s` (1.0), `person_fresh_s` (0.5), `blocker_grow_px` (40),
