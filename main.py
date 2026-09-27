@@ -643,7 +643,8 @@ class Room:
 
         from server.app import create_app
         app = create_app(self.cfg, self.world, self.events, frames=self.frames,
-                         ask_fn=self.ask_and_act, table=self.table, care=getattr(self, "care", None))
+                         ask_fn=self.ask_and_act, table=self.table, care=getattr(self, "care", None),
+                         voice_fn=getattr(self.tts, "set_voice", None))
         self.record_answer = app.state.record_answer
         self.server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level="warning",
                                                     timeout_graceful_shutdown=2))
@@ -893,7 +894,7 @@ def build(cfg: dict, fake: bool = False, camera: int = 0, with_voice: bool = Tru
         visual.grok_check = checker
     cleanup += [x.stop for x in (narrator, visual, namer, checker) if x is not None]
     ask = voice.pipeline.make_ask(cfg, world, events, net=netmon, interpret=interpret, visual=visual)
-    tts = voice.tts.TTS(cfg, net=netmon)
+    tts = voice.tts.TTS(cfg, net=netmon).attach(world)     # /state: speaker connected, the phone's voice
     tts.warm()
     cleanup.append(tts.stop)
 

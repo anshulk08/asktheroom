@@ -103,6 +103,26 @@ A 414-byte state snapshot at MTU 185 is 3 chunks: `03 00 00 …179 B`, `03 01 00
   phone. The rig drops a voice question that nearly matches (same words after normalizing) a phone question
   from the last 3 s, so it is answered once. The phone shows only the answer whose `id` matches its question.
 
+## 5a. voice settings (write to question)
+
+```json
+{"voice": {"e": "grok", "v": "ara", "s": 1.1}}
+```
+
+The phone's helper voice settings, written to the **question** characteristic (a write without `q` is not a
+question). The rig's speaker then uses the same voice as the phone would.
+
+| Key | Meaning |
+|---|---|
+| `e` | engine, the app's `Speaker.Engine` raw value: `grok` (default), `rig` ("Same as the rig", ElevenLabs), `builtin` (the iPhone's own voice, which the rig can't make: it uses Piper) |
+| `v` | the Grok voice id (`eve` when empty) |
+| `s` | speed, 0.7 to 1.5 (clamped) |
+
+- Send it **on every connect** (after subscribing) and whenever the helper changes a voice setting. The rig keeps
+  the last one across restarts (`data/voice.json`); until it gets one it uses the app's default (Grok `eve`, 1.0).
+- No answer comes back. The bridge sends it to `POST /voice` (`{"engine", "grok_voice", "speed"}`).
+- Offline, or when the cloud voice fails before any audio, the rig speaks with Piper.
+
 ## 6. answer (notify)
 
 ```json
@@ -212,7 +232,7 @@ growing past that.
 ## 8. status (read + notify)
 
 ```json
-{"app": "up", "fps": 13.1, "online": true, "cal": true, "laser_cal": false, "gk": true}
+{"app": "up", "fps": 13.1, "online": true, "cal": true, "laser_cal": false, "gk": true, "spk": true}
 ```
 
 | Key | Type | Meaning |
@@ -222,11 +242,12 @@ growing past that.
 | `online` | bool | the rig has internet |
 | `cal` | bool | table calibrated: `table_cal.json` exists, or the world is being updated |
 | `laser_cal` | bool | `laser_cal.json` exists (false: answers are spoken, but the laser can't aim) |
+| `spk` | bool | the rig's speaker is connected (a Bluetooth or USB speaker is where its speech goes: `GET /state` `speaker.ok`). While true the phone **does not read answers aloud**, even with "Read answers aloud" on: the room hears the rig. False from older servers |
 | `gk` | bool | the Grok settle check can run: it is enabled (`GET /state` carries `grok_check`) and the rig is online. False from older servers. When true, a still frame of the table goes to Grok each time the table settles |
 
 - **Read** returns this JSON **unframed**. It is about 76 bytes, and always under 180.
 - **Notify** is framed (section 4). It is sent right after subscribing and then on change, at most 1 Hz,
-  except that an `app` change goes out at once. An fps change under 1.0 doesn't count; a `gk` change does.
+  except that an `app` change goes out at once. An fps change under 1.0 doesn't count; a `gk` or `spk` change does.
 
 ## 9. Timing budget
 

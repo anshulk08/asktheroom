@@ -515,3 +515,33 @@ def test_same_as_the_rig_picks_elevenlabs_and_the_iphone_voice_picks_piper(monke
     t.set_voice("builtin")
     t.speak("Two.")
     assert t.last_engine == "piper" and len(post.calls) == 1
+
+
+# -- is the rig's speaker connected (status 'spk': the phone stays quiet)
+
+def test_speaker_through_pulseaudio_is_a_bluetooth_or_usb_sink(monkeypatch):
+    monkeypatch.setenv("PULSE_SERVER", "unix:/run/user/1000/pulse/native")
+    cfg = dict(CFG, tts=dict(CFG["tts"], output_device="pulse"))
+    for sink, ok in (("bluez_sink.2C_41_A1_76_9C_F0.a2dp_sink", True),
+                     ("alsa_output.usb-Generic_USB2.0_Audio-00.analog-stereo", True),
+                     ("alsa_output.platform-sound.analog-stereo", False), (None, False)):
+        monkeypatch.setattr(tts, "pulse_default_sink", lambda s=sink: s)
+        assert TTS(cfg).speaker_status() == {"ok": ok, "name": sink or ""}, sink
+
+
+def test_speaker_on_a_named_alsa_device_is_there_when_plugged_in(monkeypatch):
+    monkeypatch.delenv("PULSE_SERVER", raising=False)
+    monkeypatch.setattr(tts, "output_devices", lambda: [{"name": "Jabra SPEAK 410: USB Audio (hw:3,0)", "index": 3}])
+    assert TTS(dict(CFG, tts=dict(CFG["tts"], output_device="jabra"))).speaker_status()["ok"] is True
+    assert TTS(dict(CFG, tts=dict(CFG["tts"], output_device="bose"))).speaker_status()["ok"] is False
+    assert TTS(dict(CFG, tts=dict(CFG["tts"], output_device=None))).speaker_status()["ok"] is False  # HDMI
+
+
+def test_state_carries_the_speaker_and_the_phones_voice(monkeypatch):
+    monkeypatch.setenv("PULSE_SERVER", "unix:/x")
+    monkeypatch.setattr(tts, "pulse_default_sink", lambda: "bluez_sink.b.a2dp_sink")
+    world = NS(state_json=lambda: {"entities": []})
+    t = TTS(dict(CFG, tts=dict(CFG["tts"], output_device="pulse"))).attach(world)
+    t.set_voice("grok", "rex", 1.0)
+    st = world.state_json()
+    assert st["speaker"]["ok"] is True and st["voice"] == {"engine": "grok", "grok_voice": "rex", "speed": 1.0}

@@ -66,6 +66,8 @@ GROK_DEFAULT_VOICE = "eve"  # the iPhone app's default (Speaker.swift Grok.defau
 GROK_SPEEDS = (0.7, 1.5)
 ENGINES = ("grok", "rig", "builtin")    # the app's Speaker.Engine raw values
 VOICE_PATH = "data/voice.json"          # the phone's voice settings (tts.voice_path overrides)
+SPEAKER_CHECK_S = 3.0                   # how long a speaker check is reused (GET /state polls often)
+EXTERNAL_SINK = re.compile(r"^bluez_sink\.|usb", re.I)   # a PulseAudio sink that is a speaker, not the Jetson's own outputs
 CHUNK_BYTES = 2048          # ~46 ms at 22.05 kHz int16
 PIPER_DIR = ROOT / "models" / "piper"
 MAX_SPOKEN_CHARS = 600      # longer text is cut at a sentence end: ~40 s of speech is already too long
@@ -164,6 +166,23 @@ def output_devices() -> list[dict]:
     """sounddevice devices that can play (max_output_channels > 0), each with its 'index'."""
     import sounddevice as sd
     return [dict(d, index=i) for i, d in enumerate(sd.query_devices()) if d.get("max_output_channels", 0) > 0]
+
+
+def pulse_default_sink(timeout: float = 2.0) -> Optional[str]:
+    """PulseAudio's default sink name (pactl, from pulseaudio-utils), or None without one."""
+    import subprocess
+    try:
+        r = subprocess.run(["pactl", "get-default-sink"], capture_output=True, text=True, timeout=timeout)
+        name = r.stdout.strip()
+        if r.returncode == 0 and name:
+            return name
+        r = subprocess.run(["pactl", "info"], capture_output=True, text=True, timeout=timeout)
+        for line in r.stdout.splitlines():
+            if line.startswith("Default Sink:"):
+                return line.split(":", 1)[1].strip() or None
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return None
 
 
 def resolve_output_device(spec) -> Optional[int]:
@@ -400,6 +419,45 @@ class TTS:
             self.voice = v
             v.save(self.voice_path)
         return v
+
+    def speaker_status(self) -> dict:
+        """{"ok", "name"}: whether speech goes to an external speaker now. Through PulseAudio
+        (output_device 'pulse'/'default' with PULSE_SERVER set, the askroom:audio image): its default
+        sink is a Bluetooth or USB one. A named ALSA device: it is plugged in. The phone stays quiet
+        while ok (mobile/PROTOCOL.md, status 'spk'). Cached SPEAKER_CHECK_S."""
+        now = time.monotonic()
+        cached = getattr(self, "_spk", None)
+        if cached is not None and now - cached[0] < SPEAKER_CHECK_S:
+            return cached[1]
+        spec = self.output_device
+        st = {"ok": False, "name": ""}
+        try:
+            via_pulse = str(spec or "").strip().lower() in ("pulse", "default", "") and bool(os.environ.get("PULSE_SERVER"))
+            if via_pulse:
+                sink = pulse_default_sink()
+                st = {"ok": bool(sink and EXTERNAL_SINK.search(sink)), "name": sink or ""}
+            elif spec is not None and str(spec).strip():
+                want = str(spec).strip().lower()
+                hits = [str(d.get("name", "")) for d in output_devices() if want in str(d.get("name", "")).lower()]
+                st = {"ok": bool(hits), "name": hits[0] if hits else ""}
+        except Exception as ex:
+            log.debug("speaker check failed: %s", ex)
+        self._spk = (now, st)
+        return st
+
+    def attach(self, world) -> "TTS":
+        """GET /state gains 'speaker' (speaker_status) and 'voice' (the phone's voice settings), as
+        core.grok_check.GrokCheck.attach adds its own entry."""
+        state = world.state_json
+
+        def state_json(*a, **kw):
+            st = state(*a, **kw)
+            st["speaker"] = self.speaker_status()
+            st["voice"] = asdict(self.voice)
+            return st
+
+        world.state_json = state_json
+        return self
 
     @staticmethod
     def _grok_key() -> Optional[str]:

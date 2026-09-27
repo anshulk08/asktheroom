@@ -283,7 +283,8 @@ def test_state_changed_detects_real_changes(mutate):
 
 def test_status_msg_and_changes():
     s = P.status_msg(True, {"fps": 12.34, "online": True}, True, False)
-    assert s == {"app": "up", "fps": 12.3, "online": True, "cal": True, "laser_cal": False, "gk": False}
+    assert s == {"app": "up", "fps": 12.3, "online": True, "cal": True, "laser_cal": False, "gk": False,
+                 "spk": False}
     assert len(P.dumps(s)) < 180
     down = P.status_msg(False, {"fps": 12.34, "online": True}, False, False)
     assert down["app"] == "down" and down["fps"] == 0.0 and down["online"] is False
@@ -445,6 +446,10 @@ class FakeHTTP:
             raise B.RoomDown("connection refused")
         if self.ask_exc:
             raise self.ask_exc
+        if path == "/voice":
+            self.voiced = getattr(self, "voiced", []) + [body]
+            return {"engine": body.get("engine") or "grok", "grok_voice": body.get("grok_voice") or "eve",
+                    "speed": body.get("speed") or 1.0}
         assert path == "/ask"
         self.asked.append(body)
         return dict(self.reply)
@@ -531,7 +536,7 @@ def test_status_notify_read_and_app_down(tmp_path):
     core.set_notifying("status", True)
     core.poll_once()
     assert phone.msgs["status"][-1] == {"app": "up", "fps": 13.1, "online": True, "cal": True, "laser_cal": False,
-                                        "gk": False}
+                                        "gk": False, "spk": False}
     assert json.loads(core.status_read()) == phone.msgs["status"][-1]
     assert len(core.status_read()) < 180
     n = len(phone.msgs["status"])
@@ -548,7 +553,7 @@ def test_status_notify_read_and_app_down(tmp_path):
     mono.t += 1.1
     core.poll_once()
     assert phone.msgs["status"][-1] == {"app": "up", "fps": 13.4, "online": True, "cal": True, "laser_cal": True,
-                                        "gk": False}
+                                        "gk": False, "spk": False}
 
 
 def test_cal_from_file_or_live_world(tmp_path):
@@ -843,3 +848,34 @@ def test_the_bridge_follows_a_recalibrated_table_size(tmp_path):
     tcal.write_text('{"H": [[1,0,0],[0,1,0],[0,0,1]]}')               # four-marker file: keeps the size
     os.utime(tcal, (2e9, 2e9))
     assert core.current_table_cm() == (95.0, 55.0)
+
+
+# -- the rig's speaker and the phone's voice (PROTOCOL.md 5a, status spk)
+
+def test_status_spk_is_the_rigs_speaker_connected():
+    on = P.status_msg(True, {"fps": 12.0, "online": True, "speaker": {"ok": True, "name": "bluez_sink.x"}}, True, True)
+    assert on["spk"] is True and len(P.dumps(on)) < 180
+    assert P.status_msg(True, {"speaker": {"ok": False}}, True, True)["spk"] is False
+    assert P.status_msg(True, {"fps": 12.0}, True, True)["spk"] is False                 # older server
+    assert P.status_msg(False, {"speaker": {"ok": True}}, True, True)["spk"] is False     # app down
+    assert P.status_changed(on, dict(on, spk=False))
+
+
+def test_parse_voice():
+    assert P.parse_voice(P.dumps({"voice": {"e": "grok", "v": "ara", "s": 1.1}})) == \
+        {"engine": "grok", "grok_voice": "ara", "speed": 1.1}
+    assert P.parse_voice(P.dumps({"voice": {}})) == {"engine": None, "grok_voice": None, "speed": None}
+    assert P.parse_voice(P.dumps({"id": 1, "q": "where are my keys?"})) is None
+    for raw in (b"not json", b"[1]", P.dumps({"voice": "eve"}), P.dumps({"voice": {"v": "x" * 300}})):
+        assert P.parse_voice(raw) is None
+
+
+def test_a_voice_write_is_applied_and_never_answered():
+    core, http, phone, mono = make()
+    core.set_notifying("answer", True)
+    before = len(phone.msgs["answer"])
+    core.on_question(P.dumps({"voice": {"e": "rig", "v": "", "s": 0.9}}))
+    for t in [t for t in B.threading.enumerate() if t.name == "voice"]:
+        t.join(2)
+    assert http.voiced == [{"engine": "rig", "grok_voice": "", "speed": 0.9}]
+    assert core.asks.empty() and len(phone.msgs["answer"]) == before and http.asked == []
