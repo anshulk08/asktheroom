@@ -500,3 +500,21 @@ def test_a_stopped_sweep_keeps_its_points_and_resumes_from_them(tmp_path):
     laser.find_dot_px = lambda *a, **k: looks.append(1) or real(*a, **k)
     full = sweep(laser, grid=(6, 4), n_pairs=1, refine=False, done=done)
     assert len(full.pulses) == 24 and len(looks) == 24 - 15             # only the 9 new points were looked at
+
+
+def test_a_sweep_whose_dot_does_not_follow_the_moves_aborts_dark(monkeypatch):
+    """Stepper battery off: the head stays put (perhaps level) while the firmware believes the commanded
+    tilt; the dot sits still in the image, so the sweep stops dark after a few points."""
+    rig = RoomRig(b_cm=3.0, seed=6)
+    laser = rig.make_laser()
+    monkeypatch.setattr(laser, "find_dot_px", lambda *a, **k: (320.0, 240.0))
+    with pytest.raises(SweepAborted, match="motors"):
+        sweep(laser, grid=(6, 4), n_pairs=1, refine=False)
+    assert rig.act.laser_on is False
+
+
+def test_aim_px_stops_dark_when_a_correction_does_not_move_the_dot(mapped, monkeypatch):
+    rig, laser, rm = mapped
+    monkeypatch.setattr(laser, "find_dot_px", lambda *a, **k: (100.0, 100.0))      # never moves
+    r = laser.aim_px(center(rig.box_px("table")), room_map=rm, tol_px=0.01)
+    assert r.reason == "stalled" and not r.on_target and rig.act.laser_on is False

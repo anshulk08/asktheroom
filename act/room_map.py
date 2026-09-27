@@ -35,6 +35,10 @@ import numpy as np
 log = logging.getLogger(__name__)
 
 
+STALL_CMD_US = 100.0    # commanded moves this far apart (10 deg on the turret) ...
+STALL_PX = 15.0         # ... whose dots all lie this close together: the head isn't moving
+
+
 class SweepAborted(RuntimeError):
     """stop() returned True mid-sweep (a person came into view)."""
 
@@ -179,6 +183,17 @@ def sweep(laser, grid: tuple[int, int] = (20, 15), n_pairs: int = 2, refine: boo
     pts, seen = [], []
     size = None
 
+    moved: list = []                             # (pulses, dot px) of seen dots, for the stall check
+
+    def stalled() -> bool:
+        """The dot doesn't follow the commands: the motors are unpowered or stalled, so the head points
+        wherever it stood (perhaps level) while the firmware's tilt cap believes the commanded pose."""
+        if len(moved) < 3:
+            return False
+        P, X = np.array([m[0] for m in moved], float), np.array([m[1] for m in moved], float)
+        spread = lambda A: float(np.max(np.linalg.norm(A[:, None] - A[None], axis=2)))   # noqa: E731
+        return spread(P) >= STALL_CMD_US and spread(X) < STALL_PX
+
     def partial() -> "RoomMap":
         return RoomMap(pts[:len(seen)], [(math.nan, math.nan) if d is None else d for d in seen], step, size or (0, 0),
                        t=time.time(), grid=(gx, gy))
@@ -197,6 +212,10 @@ def sweep(laser, grid: tuple[int, int] = (20, 15), n_pairs: int = 2, refine: boo
         f = laser.last_frames[1]
         if f is not None and f.img is not None:
             size = (f.img.shape[1], f.img.shape[0])
+        if d is not None:
+            moved.append(((p, t), d))
+            if stalled():
+                raise SweepAborted("the dot doesn't follow the moves: motors unpowered or stalled")
         return d
 
     try:

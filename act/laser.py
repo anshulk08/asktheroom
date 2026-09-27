@@ -638,6 +638,9 @@ class Laser:
                 if prev_dot is not None:
                     du, ds = cmd - prev_cmd, dot - prev_dot
                     pred = J @ du
+                    if np.linalg.norm(du) >= 30.0 and np.linalg.norm(ds) < 2.0:
+                        reason = "stalled"                  # a 3 deg correction didn't move the dot: the
+                        break                               # motors aren't moving the head (unpowered?)
                     if np.linalg.norm(ds - pred) > self.jump_px + 1.5 * np.linalg.norm(pred):
                         jumped = True                   # discontinuity: landed on something nearer (a
                         reason = "jumped"               # person?): stop at once, dark
