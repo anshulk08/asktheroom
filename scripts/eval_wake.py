@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core.config import load_config  # noqa: E402
 from voice.stt import filler_only  # noqa: E402
-from voice.understand import IGNORE, Understander, bare_wake, has_wake_word  # noqa: E402
+from voice.understand import IGNORE, Understander, bare_wake, has_wake_word, misheard_greeting  # noqa: E402
 
 EVAL = Path(__file__).resolve().parent.parent / "tests" / "wake_eval.json"
 WANT = {"false": "-", "genuine": "answered", "wake": "woke"}
@@ -42,18 +42,19 @@ def replay(cfg: dict, sessions: list[dict]) -> list[dict]:
     out = []
     for s in sessions:
         u = Understander(cfg)                   # a fresh rig per log file, as it was restarted
-        woke = False
+        woke, strict = False, True
         for e in s["lines"]:
             text = "" if filler_only(e["text"]) else e["text"]
             ack = False
-            if woke and text and (bare_wake(text, cfg) or u.fragment(text)):   # said again: main.Room._asked listens again (twice at most)
-                got = "woke"
-            elif woke:                          # main.Room._asked(after_wake=True)
-                woke, got = False, "answered" if text and u.after_wake(text) else "-"
+            if woke and text and bare_wake(text, cfg):   # said again: main.Room._asked listens again (twice at most)
+                got, strict = "woke", misheard_greeting(text, cfg)
+            elif woke:                          # main.Room._asked(after_wake=True, strict=...)
+                woke, got = False, "answered" if u.after_wake_drop(e["text"], strict=strict) is None else "-"
             elif not text:
                 got = "-"
             elif bare_wake(text, cfg) or u.fragment(text):   # main.Room._bare_wake
                 woke, got = True, "woke"
+                strict = misheard_greeting(text, cfg) or not bare_wake(text, cfg)   # main.Room._wake_strict
             elif u.screen(text) and u(text, overheard=True).kind != IGNORE:
                 got, ack = "answered", has_wake_word(text, cfg)
             else:
@@ -64,7 +65,8 @@ def replay(cfg: dict, sessions: list[dict]) -> list[dict]:
 
 def score(lines: list[dict]) -> dict[str, tuple[int, int]]:
     """label -> (lines that went the right way, lines with that label)."""
-    return {k: (sum(1 for e in lines if e.get("label") == k and (e["got"] == want if k != "false" else e["got"] != "answered")),
+    right = lambda e, k, want: e["got"] != "answered" if k == "false" else e["got"] == want   # noqa: E731
+    return {k: (sum(1 for e in lines if e.get("label") == k and right(e, k, want)),
                 sum(1 for e in lines if e.get("label") == k)) for k, want in WANT.items()}
 
 

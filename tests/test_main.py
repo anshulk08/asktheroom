@@ -1015,14 +1015,14 @@ def test_overheard_transcripts_are_logged_only_with_the_debug_switch(tmp_path, c
 
 # -- the bare wake word (review): it opens the mic like a click, but chatter still doesn't get answered
 
-def test_chatter_after_a_bare_wake_word_is_not_answered(tmp_path, cal_path, monkeypatch):
-    """A lone 'Room.' in hall chatter (or a mishearing) opened the mic, and the next sentence skipped every
-    chatter check: 'we built this in twenty hours' was answered as a question, and silence got 'Sorry, I
-    didn't catch that.'"""
+def test_chatter_after_a_misheard_greeting_is_not_answered(tmp_path, cal_path, monkeypatch):
+    """A misheard greeting ("Hey, bro!" is common chatter) opens the mic, but the next sentence still needs
+    to be a question or name a thing: 'we built this in twenty hours' was answered as a question, and
+    silence got 'Sorry, I didn't catch that.'"""
     posted = []
     monkeypatch.setattr(main.requests, "post", lambda url, json, timeout, headers=None: posted.append(json))
     for follow in ["we built this in like twenty hours", "where are you guys from", "let's reset after this", ""]:
-        stt = FakeSTT(follow, overheard=["Room."])
+        stt = FakeSTT(follow, overheard=["Hey, bro!"])
         room, _ = make_room(tmp_path, cal_path, stt=stt, clicker=FakeClicker())
         room.webhook_url = "http://n8n/webhook/ask-the-room"
         resets = []
@@ -1132,10 +1132,39 @@ def test_the_wake_word_opening_a_fragment_listens_for_the_question(tmp_path, cal
     assert len(room.tts.said) == 1 and "wallet" in room.tts.said[0].lower() and stt.listens == []
 
 
-def test_a_fragment_after_a_bare_wake_word_listens_again(tmp_path, cal_path):
-    stt = ListensSTT(["Room, the guy.", "where is my wallet"], overheard=["Room!"])
+@pytest.mark.parametrize("wake", ["Room!", "Hey room", "Okay, room.", "Heyroom.", "Ask the room."])
+@pytest.mark.parametrize("follow", ["can you see my wallet?", "the wallet thing", "Room, the guy.",
+                                    "we built this in like twenty hours", "What car is my belt?"])
+def test_anything_said_after_the_real_wake_word_is_answered(tmp_path, cal_path, caplog, wake, follow):
+    """Rig, 01:42 Sun 27 Sep: "Hey Room" -> chime -> a real question, and no answer: the strict check dropped
+    three questions in a row. The user called the rig and heard the chime, so what they say next is answered."""
+    stt = ListensSTT([follow], overheard=[wake])
     room = wake_room(tmp_path, cal_path, stt)
-    t = always_on(room)
-    assert wait_for(lambda: room.tts.said)
-    stop_voice(room, t)
-    assert "wallet" in room.tts.said[0].lower() and stt.listens == []
+    with caplog.at_level(logging.INFO, logger="askroom.main"):
+        t = always_on(room)
+        assert wait_for(lambda: room.tts.said)
+        stop_voice(room, t)
+    assert stt.listens == [] and not any("dropped" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("wake, follow, reason", [
+    ("Room!", "Thank you.", "hallucination"), ("Room!", "you", "hallucination"),
+    ("Room!", "reset everything", "reset or recalibrate without the wake word"),
+    ("Hey, bro!", "we built this in like twenty hours", "strict gate: no question or thing"),
+    ("Hey Drew!", "are you guys ready?", "strict gate: said to people"),
+    ("Goodroom.", "No, no.", "strict gate: no question or thing"),
+    ("Room that person.", "Really?", "strict gate: no question or thing")])
+def test_a_dropped_follow_up_logs_why_never_what(tmp_path, cal_path, caplog, wake, follow, reason):
+    stt = ListensSTT([follow], overheard=[wake])
+    room = wake_room(tmp_path, cal_path, stt)
+    resets = []
+    room.world.reset = lambda: resets.append(1)
+    with caplog.at_level(logging.INFO, logger="askroom.main"):
+        t = always_on(room)
+        assert wait_for(lambda: not stt.listens)
+        time.sleep(0.2)
+        stop_voice(room, t)
+    msgs = [r.getMessage() for r in caplog.records]
+    assert room.tts.said == [] and resets == []
+    assert f"after-wake follow-up dropped: {reason}" in msgs
+    assert not any(follow.lower().strip("?.!") in m.lower() for m in msgs if follow not in ("you",)), msgs
