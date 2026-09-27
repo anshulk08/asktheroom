@@ -488,3 +488,18 @@ def test_a_second_unusable_reply_is_final(scene, world):
 
 
 REMOTE_REPLY = {"name": "remote control", "also": ["remote"], "confidence": 0.7}
+
+
+@pytest.mark.parametrize("reply", [{"object": False, "name": "", "also": [], "confidence": 0.0},
+                                   {"object": True, "name": "left hand", "also": [], "confidence": 0.9}])
+def test_no_object_is_never_asked_again(scene, world, reply):
+    """Only an unsure reply gets the rename's second look: a hand is not asked about twice."""
+    clock = Clock()
+    namer, grok, _ = make(world, reply, REMOTE_REPLY, clock=clock)
+    put(scene, world, "a", (40, 30))
+    namer.step()
+    for _ in range(3):
+        clock.t += 21
+        scene.run(world, 0.5)
+        namer.step()
+    assert len(grok.calls) == 1 and namer.guess("thing:1") is None

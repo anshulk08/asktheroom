@@ -23,6 +23,10 @@ Variants (each item goes to Grok once per variant; replies are cached by prompt 
   new         core.auto_name as it is: the native close-up (the table view shrunk back to its native
               ~817 px width, as TableView.full_at gives it at 1440p) plus the marked context view
   new-noctx   new without the context view
+  new-retry   an experiment, not the app: new, and a reply that is an object but no usable name
+              (core.auto_name.unsure) asked once more with a view of RETRY_GROW x the box (at least
+              RETRY_MIN_PX); table items only (a saved room crop is all the context there is). Sun 27 Sep,
+              3 runs: +0.3 right names, +5 wrong, +2.7 no-objects named, so AutoNamer does not do it
 A room item's close-up is the inside of its red box; its context view is the saved crop itself.
 
 Scoring: a real object is right when the kept name fits a label's accepted name (core.auto_name
@@ -50,7 +54,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core.auto_name import (GENERIC, MAX_WORDS, NAME_SCHEMA, NAME_SYSTEM, AutoNameConfig,  # noqa: E402
-                            AutoNamer, _jpeg, judge, match_score)
+                            _jpeg, judge, match_score, unsure)
 from core.crops import close_up, marked_view  # noqa: E402
 from core.narration import Reply, _parse_json  # noqa: E402
 from core.things import norm_name  # noqa: E402
@@ -58,7 +62,8 @@ from core.things import norm_name  # noqa: E402
 LABELS = Path(__file__).with_name("naming_labels.json")
 VIEW_W = 1280                     # table-view snapshot width
 STORE_PX = 128                    # the crop store's size_px (config.yaml proposals.crops)
-VARIANTS = ("baseline", "old-native", "new-128", "new", "new-noctx")
+RETRY_GROW, RETRY_MIN_PX = 6.0, 480
+VARIANTS = ("baseline", "old-native", "new-128", "new", "new-noctx", "new-retry")
 
 # The Sat 26 Sep prompt, schema and rules (core/auto_name.py before WS3), kept here as the baseline.
 OLD_SYSTEM = """You name one object from an overhead close-up of a tabletop (the camera looks straight down).
@@ -129,7 +134,8 @@ def _red_box(img: np.ndarray) -> Optional[tuple[int, int, int, int]]:
     return (x1, y1, x2, y2) if x2 - x1 >= 4 and y2 - y1 >= 4 else None
 
 
-def views(item: dict, root: Path, native: bool, context: bool, margin: float = 0.15, min_side: int = 240):
+def views(item: dict, root: Path, native: bool, context: bool, margin: float = 0.15, min_side: int = 240,
+          grow: float = 3.0):
     """(close-up, context view or None) for an item, as the given namer would have cut it."""
     img = cv2.imread(str(root / item["src"]))
     if img is None:
@@ -145,7 +151,7 @@ def views(item: dict, root: Path, native: bool, context: bool, margin: float = 0
         s = item["native_w"] / VIEW_W
         img = cv2.resize(img, (item["native_w"], round(img.shape[0] * s)), interpolation=cv2.INTER_AREA)
         box = [v * s for v in box]
-        return close_up(img, box, margin), (marked_view(img, box, min_side) if context else None)
+        return close_up(img, box, margin), (marked_view(img, box, min_side, grow) if context else None)
     crop = _shrink(close_up(img, box, margin), STORE_PX)          # core.crops.CropStore._cut
     return crop, (marked_view(img, box, min_side) if context else None)
 
@@ -161,8 +167,16 @@ def fits(name: Optional[str], accept: list) -> bool:
                               or match_score(name, {"name": a}) >= 2 for a in accept)
 
 
-def ask(variant: str, item: dict, root: Path, provider: CachedProvider, system: str = NAME_SYSTEM) -> dict:
-    """Grok's raw reply for one item under one variant: {name, object, confidence, raw}."""
+def ask(variant: str, item: dict, root: Path, provider: CachedProvider, system: str = NAME_SYSTEM,
+        min_conf: float = 0.65) -> dict:
+    """Grok's raw reply for one item under one variant: {"raw": parsed reply} (new-retry: the reply that
+    counts, and "first" when it asked twice)."""
+    if variant == "new-retry":
+        first = ask("new", item, root, provider, system)
+        if item["kind"] != "table" or not unsure(first["raw"], min_conf):
+            return first
+        img, ctx = views(item, root, True, True, min_side=RETRY_MIN_PX, grow=RETRY_GROW)
+        return {"raw": _ask_new(img, ctx, provider, system), "first": first["raw"]}
     native = variant in ("old-native", "new", "new-noctx")
     context = variant in ("new", "new-128")
     img, ctx = views(item, root, native, context)
@@ -171,15 +185,18 @@ def ask(variant: str, item: dict, root: Path, provider: CachedProvider, system: 
                  ("text", "What is it called?")]
         d = _parse_json(provider.narrate(OLD_SYSTEM, parts, OLD_SCHEMA).text)
     else:
-        namer = AutoNamer({}, world=None, provider=provider, online=lambda: True, start=False,
-                          c=AutoNameConfig(enabled=True, min_confidence=0.0))
-        jq = namer.c.jpeg_quality
-        parts = [("text", "Close-up of the object:"), ("image", _jpeg(img, namer.c.crop_px, jq))]
-        if ctx is not None:
-            parts += [("text", "The same spot, wider; the object is in the red box:"),
-                      ("image", _jpeg(ctx, namer.c.context_px, jq))]
-        d = _parse_json(provider.narrate(system, parts + [("text", "What is it called?")], NAME_SCHEMA).text)
+        d = _ask_new(img, ctx, provider, system)
     return {"raw": d}
+
+
+def _ask_new(img, ctx, provider, system: str) -> dict:
+    """The parsed reply to AutoNamer's request for (img, ctx), with system as its prompt."""
+    c = AutoNameConfig()
+    parts = [("text", "Close-up of the object:"), ("image", _jpeg(img, c.crop_px, c.jpeg_quality))]
+    if ctx is not None:
+        parts += [("text", "The same spot, wider; the object is in the red box:"),
+                  ("image", _jpeg(ctx, c.context_px, c.jpeg_quality))]
+    return _parse_json(provider.narrate(system, parts + [("text", "What is it called?")], NAME_SCHEMA).text)
 
 
 def kept(variant: str, raw: dict, min_conf: float) -> Optional[dict]:
@@ -257,7 +274,7 @@ def main(argv=None) -> int:
         def one(it, var=var):
             for attempt in range(3):
                 try:
-                    return it["id"], ask(var, it, root, provider, system)
+                    return it["id"], ask(var, it, root, provider, system, min_conf)
                 except FileNotFoundError:
                     raise
                 except Exception as e:                    # the key is never printed, only the error class

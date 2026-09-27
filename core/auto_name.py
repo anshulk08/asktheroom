@@ -115,7 +115,7 @@ class AutoNameConfig:
     context_px: int = 384          # the context view's long side as sent
     context_min_px: int = 240      # the context patch is at least this many source px (and 3x the box)
     max_pending: int = 32          # queued close-ups at most (the oldest go first)
-    rename_after_s: float = 20.0   # a thing whose reply was no usable name gets a fresh close-up this much later ...
+    rename_after_s: float = 20.0   # a thing Grok was unsure of gets a fresh close-up this much later ...
     rename_max: int = 1            # ... at most this many times (0: never), while it is visible on the table
 
     @classmethod
@@ -234,6 +234,18 @@ def judge(d: dict, min_confidence: float) -> Optional[dict]:
         if a and a != name and a not in also and not med_claim(a) and not not_object(a):
             also.append(a)
     return {"name": name, "also": also[:MAX_ALSO], "confidence": round(conf, 3)}
+
+
+def unsure(d: dict, min_confidence: float) -> bool:
+    """A reply worth a second look: no usable name (judge), yet not "no object" and not a name for one (a
+    hand is not asked about twice). Eval (eval/naming.py): 42 of 51 real things with no name were unsure
+    (0.6) and 8 were called no object. Asking again does not name more of them right: the same view asked
+    again gave +2 right names for +3 wrong ones, a view with twice the surroundings +0.3 for +5 (3 runs,
+    Sun 27 Sep), so the second look is only the rename's fresh close-up, once the hand is off it."""
+    if judge(d, min_confidence) is not None or d.get("object") is False:
+        return False
+    name = clean_name(d.get("name"))
+    return name is None or not not_object(name)
 
 
 # ---------------------------------------------------------------- the namer
@@ -414,7 +426,7 @@ class AutoNamer:
         this frame cut at its box. The context view is the same frame's patch around the box with ent in a
         red box (off with context: false, and never for a crop-store view, whose frame is gone)."""
         from core.crops import close_up, marked_view, shrink
-        views = self._views(ent, dets, frame, close_up, marked_view)
+        views = self._views(ent, dets, frame, close_up, lambda img, box: marked_view(img, box, self.c.context_min_px))
         return None if views is None else (shrink(views[0], self.c.crop_px), shrink(views[1], self.c.context_px))
 
     def _views(self, ent, dets, frame, close_up, marked_view):
@@ -425,7 +437,7 @@ class AutoNamer:
             fbox = _to_full(box, self.frames.rect, self.frames.out_size)
             crop = close_up(full, fbox, self.c.margin)
             if crop is not None:
-                return crop, (marked_view(full, fbox, self.c.context_min_px) if self.c.context else None)
+                return crop, (marked_view(full, fbox) if self.c.context else None)
         store = _crop_store()
         if store is not None:
             try:
@@ -440,7 +452,7 @@ class AutoNamer:
         crop = close_up(img, box, self.c.margin)
         if crop is None:
             return None
-        return crop, (marked_view(img, box, self.c.context_min_px) if self.c.context else None)
+        return crop, (marked_view(img, box) if self.c.context else None)
 
     @staticmethod
     def _box(ent, dets):
@@ -501,7 +513,8 @@ class AutoNamer:
             self._calls.append(now)
         job.attempts += 1
         try:
-            g = self._ask(job.img, job.ctx)
+            d = self._reply(job.img, job.ctx)
+            g = judge(d, self.c.min_confidence)
         except Exception as ex:
             log.info("naming %s failed (attempt %d): %s", job.name, job.attempts, ex)
             with self._lock:
@@ -519,17 +532,24 @@ class AutoNamer:
                 self._guesses[job.name] = g
                 self._unnamed.pop(job.name, None)
                 log.info("%s looks like a %s (%.2f)", job.name, g["name"], g["confidence"])
-            elif g is None:
+            elif g is None and unsure(d, self.c.min_confidence):
                 n = self._unnamed.get(job.name, [0.0, 0])[1]
                 self._unnamed[job.name] = [now, n]
                 log.info("naming %s: no usable name (low confidence or 'object')%s", job.name,
                          "; a fresh close-up later" if n < self.c.rename_max else "")
+            elif g is None:
+                self._unnamed.pop(job.name, None)
+                log.info("naming %s: not an object (%s)", job.name, d.get("name") or "no name")
         return True
 
     def _ask(self, img: np.ndarray, ctx: Optional[np.ndarray] = None) -> Optional[dict]:
         """Grok's guess for a close-up (and the context view, when there is one), or None: no object, a
         name that names nothing or no object (clean_name, NOT_OBJECTS), a medical claim, or under
         min_confidence."""
+        return judge(self._reply(img, ctx), self.c.min_confidence)
+
+    def _reply(self, img: np.ndarray, ctx: Optional[np.ndarray] = None) -> dict:
+        """Grok's parsed reply for a close-up and its context view."""
         from core.narration import _parse_json
         q = self.c.jpeg_quality
         parts = [("text", "Close-up of the object:"), ("image", _jpeg(img, self.c.crop_px, q))]
@@ -537,7 +557,7 @@ class AutoNamer:
             parts += [("text", "The same spot, wider; the object is in the red box:"),
                       ("image", _jpeg(ctx, self.c.context_px, q))]
         reply = self.provider.narrate(NAME_SYSTEM, parts + [("text", "What is it called?")], NAME_SCHEMA)
-        return judge(_parse_json(reply.text), self.c.min_confidence)
+        return _parse_json(reply.text)
 
     def _run(self) -> None:
         while not self._stop.is_set():
