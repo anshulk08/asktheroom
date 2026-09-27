@@ -260,7 +260,9 @@ def test_the_pipeline_passes_the_describer_only_online(log):
 
 @pytest.mark.parametrize("said,out", [("on the wooden table", None), ("on the table", None),
                                       ("on the wooden table, next to the mug", "next to the mug"),
-                                      ("at the brown coffee table beside the notebook", "beside the notebook")])
+                                      ("at the brown coffee table beside the notebook", "beside the notebook"),
+                                      ("middle of the wooden table", "in the middle"),        # rig 05:50
+                                      ("near the edge of the table, by the mug", "at the edge, by the mug")])
 def test_describe_where_drops_the_place_said_again(log, said, out):
     """Rig 27 Sep 05:44: 'Your pill bottle, I think, is on the table, on the wooden table.'"""
     q, _ = describer(log, json.dumps({"where": said, "confidence": 0.9}))
