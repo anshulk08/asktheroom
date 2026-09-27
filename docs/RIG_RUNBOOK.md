@@ -197,3 +197,18 @@ count; write down what went wrong.
 | 5 | hall noise false triggers (always / wake); echo test rows = 5? | |
 | 6 | offline games correct /3 | |
 | 7 | demo_check all green?; clean games in a row | |
+
+## Restore after the demo
+
+What step 1 stopped on Sat 26 Sep, and how to bring it back (only when its owner wants it back):
+
+```bash
+# the room app (room mode, no voice), launched from its own scratch copy; holds the Brio and ~2.8 GB
+cd ~/askroom_room && nohup scripts/dock.sh python3 -u main.py \
+    --camera /dev/v4l/by-id/usb-046d_Logitech_BRIO_3675F8D2-video-index0 --no-voice --port 8080 \
+    > data/room/app.log 2>&1 < /dev/null &
+
+# baby-tau (not ours: ollama, whisper, piper, python); stopped with `docker compose stop`, nothing removed,
+# restart policy unless-stopped left as it was
+cd ~/git/autonomous-intelligence/baby-tau && docker compose start
+```
