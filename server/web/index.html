@@ -24,6 +24,7 @@
       <li id="st-lat" class="st"><span class="st-k">Last answer</span> <span class="st-v">&ndash;</span></li>
       <li id="st-laser" class="st st-laser" data-on="false"><span class="beam" aria-hidden="true"></span><span class="st-v">Laser off</span></li>
       <li id="st-memory" class="st" hidden><span class="st-k">Memory</span> <span class="st-v">&ndash;</span></li>
+      <li id="st-score" class="st" hidden><span class="st-k">Room handoffs today</span> <span class="st-v">&ndash;</span></li>
     </ul>
   </header>
 
@@ -79,6 +80,14 @@
       <blockquote id="answer-text">Answers show up here, and the laser points at the spot.</blockquote>
       <figcaption id="answer-meta"></figcaption>
     </figure>
+    <details id="score" class="score" open hidden>
+      <summary id="score-sum">Room trials today</summary>
+      <p class="score-note">Real runs of <code>scripts/room_trials.py</code> on this rig, uploaded from the laptop. Time is from &ldquo;carry it&rdquo; to the rig seeing it there.</p>
+      <table class="score-table">
+        <thead><tr><th scope="col"></th><th scope="col">Handoffs</th><th scope="col">Returns</th><th scope="col">Median</th></tr></thead>
+        <tbody id="score-rows"></tbody>
+      </table>
+    </details>
     <div id="asked-wrap" class="asked-wrap" hidden>
       <h3>Asked earlier</h3>
       <ol id="asked" class="asked"></ol>

@@ -363,6 +363,17 @@ body {
 .answer.pending blockquote { color: var(--ink-3); font-weight: 500; }
 .answer.error blockquote { color: var(--held); }
 
+/* room trial scoreboard (GET /scoreboard) */
+.score { font-size: var(--t-sm); border-top: 1px solid var(--rule); padding-top: 6px; }
+.score summary { cursor: pointer; font-weight: 600; color: var(--ink); }
+.score-note { margin: 6px 0; color: var(--ink-3); }
+.score-note code { font-size: 0.95em; }
+.score-table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.score-table th, .score-table td { padding: 4px 6px 4px 0; text-align: right; border-top: 1px solid var(--rule); }
+.score-table th[scope="row"], .score-table thead th:first-child { text-align: left; font-weight: 400; }
+.score-table thead th { color: var(--ink-3); font-weight: 600; border-top: 0; }
+.score-all th, .score-all td { font-weight: 600; }
+
 .asked-wrap h3 { margin: 6px 0 4px; font-size: var(--t-sm); font-weight: 600; color: var(--ink-3); }
 .asked { list-style: none; margin: 0; padding: 0; }
 .asked li { display: flex; flex-direction: column; padding: 6px 0; border-top: 1px solid var(--rule); font-size: var(--t-sm); }

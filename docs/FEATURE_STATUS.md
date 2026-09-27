@@ -89,7 +89,7 @@ Test suite at time of writing (Sat 26 Sep, branch `integration`: overnight + thi
 | — | Synthetic trials (`eval.synth`) | validated | `tests/test_synth.py`. The synthetic score is a regression check, never a claim of real accuracy |
 | — | Guided-clip replay and scorer (`eval.score_clip`): replays a recorded clip through `Room.perceive` and the ask pipeline (answers clocked on clip time), maps props to entities by position (an unrelated object the detector merely found again in place is no placement; undeclared configured objects are never guessed for a prop), PASS/FAIL per metric | implemented | `tests/test_score_clip.py` (synthetic clips, stub detector); runs end to end on all five `data/clips` on the Jetson with the TensorRT detector |
 | 0004 | Real-trial accuracy numbers | planned | No real trials recorded yet (F5) |
-| 0004 | Live scoreboard on the dashboard | planned | Spec 0004 |
+| 0004 | Live scoreboard on the dashboard | partly implemented: room handoffs only (spec 0010 P2-2) | Spec 0004. Room handoff scoreboard: `GET /scoreboard` (today / yesterday / all / a date) counts real `scripts/room_trials.py` runs, handoffs and table returns passed of tried, per object and zone, and the median handoff time of passes; the laptop uploads each results file with `POST /scoreboard/trials?object=NAME` (the records name neither object nor time), stored in `scoreboard.trials_dir`. The dashboard shows "Room handoffs today N/N" in the status bar and a per-object / per-zone table, hidden until a run is recorded (`server/scoreboard.py`, `server/web/`). `tests/test_scoreboard.py`; not yet run on the rig. The table trial scoreboard of spec 0004 is still planned |
 
 ## Detection-side Grok
 

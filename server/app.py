@@ -16,6 +16,10 @@ With care=voice.care.Care (reminders, reports; see voice/care.py), additively:
   POST /notices/{id}/ack acknowledge a notice (the phone app's button)
   GET  /report?date=YYYY-MM-DD&format=markdown|text|json   the caregiver summary for a day
 
+Room handoff scoreboard (server/scoreboard.py: real scripts/room_trials.py results only):
+  GET  /scoreboard?date=today|yesterday|all|YYYY-MM-DD      handoffs / returns passed of tried, per object and zone
+  POST /scoreboard/trials?object=NAME   body: a room_trials.py results list; stored in scoreboard.trials_dir
+
 Run the dev version with fake data:  python -m server.app --fake
 """
 from __future__ import annotations
@@ -42,7 +46,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from core.types import Answer, Event, Status
-from server import overlay
+from server import overlay, scoreboard
 
 log = logging.getLogger("askroom.server")
 
@@ -54,6 +58,7 @@ ASK_SOURCES = {"dashboard", "phone"}       # /ask sources a client may name; bot
 SMS_TIMEOUT_S = 10.0          # Twilio gives a webhook 15 s
 INITIAL_EVENTS = 200          # events sent on a fresh WS connection
 EMPTY_TWIML = '<?xml version="1.0" encoding="UTF-8"?><Response></Response>'
+SCORE_MAX_BYTES = 256 * 1024  # a room_trials.py results file is a few KB
 AskFn = Callable[[str, str], Answer]
 
 
@@ -461,6 +466,31 @@ def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = 
                 return JSONResponse(out)
             return Response(out, media_type="text/markdown; charset=utf-8" if fmt == "markdown"
                             else "text/plain; charset=utf-8")
+
+    # -- room handoff scoreboard (server/scoreboard.py): real trial results, uploaded from the laptop
+    score_dir = scoreboard.trials_dir(cfg)
+
+    @app.get("/scoreboard")
+    async def scoreboard_route(date: Optional[str] = None):
+        try:
+            runs = await asyncio.to_thread(scoreboard.load_runs, score_dir)
+            return scoreboard.summarize(runs, date)
+        except ValueError:
+            raise HTTPException(400, "date must be today, yesterday, all or YYYY-MM-DD")
+
+    @app.post("/scoreboard/trials")
+    async def scoreboard_upload(request: Request, object: str = ""):
+        body = await request.body()
+        if len(body) > SCORE_MAX_BYTES:
+            raise HTTPException(413, "results file too large")
+        try:
+            records = json.loads(body or b"null")
+            path = await asyncio.to_thread(scoreboard.save_upload, score_dir, object, records)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        log.info("scoreboard: %d room trial runs for %r saved to %s", len(records), object, path)
+        runs = await asyncio.to_thread(scoreboard.load_runs, score_dir)
+        return {"ok": True, "saved": path.name, "runs": len(records), "today": scoreboard.summarize(runs)}
 
     app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
     return app

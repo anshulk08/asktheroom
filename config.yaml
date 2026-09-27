@@ -565,3 +565,10 @@ unknown_cover:
   settle_s: 0.5               # the covered band unchanged over this long: a cover at rest, not a moving arm
   adopt_s: 1.0                # the band must look the same this long before it is remembered
   wait_max_s: 2.0             # longest wait on an unclear or settling band before the other rules decide
+
+# Room handoff scoreboard on the dashboard (server/scoreboard.py, spec 0010 P2-2). Real trial results only:
+# scripts/room_trials.py writes them on the laptop; upload each file with
+#   curl -X POST -H 'content-type: application/json' --data @data/room/trials.json 'http://<rig>:8080/scoreboard/trials?object=remote'
+# GET /scoreboard?date=today|yesterday|all|YYYY-MM-DD returns the counts; the dashboard shows today's.
+scoreboard:
+  trials_dir: data/room       # uploaded results files (and any room_trials.py file copied here)
