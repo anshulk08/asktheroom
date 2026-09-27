@@ -256,3 +256,12 @@ def test_the_pipeline_passes_the_describer_only_online(log):
     assert ask("where are my batteries").text.endswith("next to the TV remote.") and v.calls == 1
     Net.online = False
     assert ask("where are my batteries").text.endswith("in the middle.") and v.calls == 1
+
+
+@pytest.mark.parametrize("said,out", [("on the wooden table", None), ("on the table", None),
+                                      ("on the wooden table, next to the mug", "next to the mug"),
+                                      ("at the brown coffee table beside the notebook", "beside the notebook")])
+def test_describe_where_drops_the_place_said_again(log, said, out):
+    """Rig 27 Sep 05:44: 'Your pill bottle, I think, is on the table, on the wooden table.'"""
+    q, _ = describer(log, json.dumps({"where": said, "confidence": 0.9}))
+    assert q.describe_where("thing:1") == out

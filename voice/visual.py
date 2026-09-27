@@ -656,7 +656,10 @@ class VisualQA:
             return None
         where = _spoken(str(d.get("where") or "")).strip().rstrip(".")
         where = re.sub(r"^(?:it(?:'s| is)|they(?:'re| are))\s+", "", where, flags=re.I)
-        where = re.sub(rf"^on {re.escape(on)},?\s*", "", where, flags=re.I)
+        # the place again, however worded ('on the wooden table', 'on the gray couch'): rig 27 Sep 05:44 said
+        # "Your pill bottle, I think, is on the table, on the wooden table."
+        head = re.escape(on.split()[-1])
+        where = re.sub(rf"^(?:on|at|in)\s+(?:the\s+|a\s+)?(?:[\w-]+\s+){{0,2}}{head}\b,?\s*", "", where, flags=re.I)
         if (not where or _conf(d) < self.c.abstain_below or SIDE_WORDS.search(where.lower())
                 or len(where.split()) > 12 or where == PILLS_SAFE.rstrip(".")):
             return None
