@@ -471,7 +471,9 @@ class Room:
                     self._asked(time.monotonic())
             return
         if self.stt is not None:
-            self.stt.log_text = False           # overheard chatter stays out of the logs
+            # Overheard chatter stays out of the logs (privacy, README). listen.log_overheard: true keeps
+            # every transcript in the log while tuning the wake word on a rig; never for a deployment.
+            self.stt.log_text = bool((self.cfg.get("listen") or {}).get("log_overheard", False))
         ignored = 0
         while not self.stop_ev.is_set():
             if self.clicker is not None and self.clicker.pressed():

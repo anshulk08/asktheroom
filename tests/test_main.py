@@ -673,3 +673,13 @@ def test_the_wake_word_alone_makes_the_rig_listen_for_the_question(tmp_path, cal
     assert all("wallet" in s.lower() for s in room.tts.said[:2])
     assert room._bare_wake("Room!") and room._bare_wake("hey room, um") and not room._bare_wake("room where is it")
     stop_voice(room, t)
+
+
+def test_overheard_transcripts_are_logged_only_with_the_debug_switch(tmp_path, cal_path):
+    stt = FakeSTT("", overheard=["we built this last night"])
+    room, _ = make_room(tmp_path, cal_path, stt=stt, clicker=FakeClicker())
+    room.cfg = dict(room.cfg, listen=dict(room.cfg.get("listen") or {}, log_overheard=True))
+    t = always_on(room)
+    assert wait_for(lambda: not stt.overheard)
+    assert stt.log_text is True
+    stop_voice(room, t)
