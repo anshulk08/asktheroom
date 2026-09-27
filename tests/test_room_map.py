@@ -606,3 +606,21 @@ def test_aims_that_never_see_their_dot_count_toward_the_lock_and_the_lock_stops_
     assert room.aim(Answer("x", point_at="wallet")) is None
     assert room.aim(Answer("x", point_at="phone", action="sweep:left")) is None
     assert len(rig.act.calls) == n
+
+
+def test_world_laser_is_on_for_the_whole_aim_and_off_after_a_dark_one(room_main, monkeypatch):
+    """core/world.py holds pixel verdicts while world.laser['on']: it must be true from the first blink."""
+    from act.laser import PxAim
+    room, rig, Answer = room_main
+    seen = []
+    t = center(rig.box_px("table"))
+
+    def aim(*a, **k):
+        seen.append(room.world.laser.get("on"))
+        return PxAim(float("inf"), False, False, 3, None, "not_seen", None)
+    monkeypatch.setattr(room.laser, "aim_px", aim)
+    room.aim(Answer("x", action=f"room:{t[0]:.0f},{t[1]:.0f}"))
+    assert seen == [True] and room.world.laser["on"] is False
+    room.room_head_px = None                                # refused before any blink: back to off
+    room.aim(Answer("x", action=f"room:{t[0]:.0f},{t[1]:.0f}"))
+    assert room.world.laser["on"] is False

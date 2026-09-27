@@ -336,60 +336,72 @@ class Room:
             log.info("laser refused: %s", self.laser_locked)
             return None
         with self._aim_lock:
+            # world.laser['on'] from the first blink on: the world holds pixel verdicts while the dot is lit
+            # (core/world.py LASER_SETTLE_S), and an aim blinks it for up to max_on_s before it returns
+            aiming = {**OFF, "on": True, "aiming": True}     # a target only once the dot is confirmed on it
+            self.world.laser = aiming
             try:
-                if action.startswith("sweep:"):
-                    if not self.allow_sweep:        # it runs down the edge the person just walked out by
-                        log.info("edge sweep refused: laser_room.allow_sweep is off")
-                        return None
-                    self.laser.sweep_edge(action.split(":", 1)[1])
-                elif action.startswith("room:"):
-                    if not self._aim_room(action):
-                        return None
-                    self.world.laser = dict(self.laser.state)
-                    self._schedule_off(min(self.laser_timeout_s, self.room_dwell_s))
+                return self._aim_locked(ans, action)
+            finally:
+                if self.world.laser is aiming:        # refused, failed or dark: nothing is lit now
+                    self.world.laser = dict(OFF)
+
+    def _aim_locked(self, ans: Answer, action: str) -> Optional[float]:
+        err = None
+        try:
+            if action.startswith("sweep:"):
+                if not self.allow_sweep:        # it runs down the edge the person just walked out by
+                    log.info("edge sweep refused: laser_room.allow_sweep is off")
                     return None
-                elif ans.point_at is not None and (target := self._room_target(ans.point_at)) is not None:
-                    if not self._aim_room_px(*target, name=ans.point_at):
-                        return None
-                    self.world.laser = dict(self.laser.state)
-                    self._schedule_off(min(self.laser_timeout_s, self.room_dwell_s))
+                self.laser.sweep_edge(action.split(":", 1)[1])
+            elif action.startswith("room:"):
+                if not self._aim_room(action):
                     return None
+                self.world.laser = dict(self.laser.state)
+                self._schedule_off(min(self.laser_timeout_s, self.room_dwell_s))
+                return None
+            elif ans.point_at is not None and (target := self._room_target(ans.point_at)) is not None:
+                if not self._aim_room_px(*target, name=ans.point_at):
+                    return None
+                self.world.laser = dict(self.laser.state)
+                self._schedule_off(min(self.laser_timeout_s, self.room_dwell_s))
+                return None
+            else:
+                if ans.point_at is None and ans.target_cm is not None:   # visual Q&A: a raw table spot
+                    pos, chain = tuple(ans.target_cm), ["table"]
                 else:
-                    if ans.point_at is None and ans.target_cm is not None:   # visual Q&A: a raw table spot
-                        pos, chain = tuple(ans.target_cm), ["table"]
-                    else:
-                        pos, chain = self.world.resolve(ans.point_at)
-                    if pos is None:
-                        log.info("no position for %s; not aiming", ans.point_at)
-                        return None
-                    if self._held(ans.point_at, chain):
-                        log.info("laser refused: %s is in someone's hand", ans.point_at)
-                        return None
-                    r_cm = 7.0 if action == "circle" else 4.0
-                    uv, box = self._table_full(pos, r_cm)
-                    why = self._unsafe(uv, box)
-                    if why is not None:
-                        log.info("table aim refused: %s", why)
-                        return None
-                    if action == "circle":
-                        self.laser.circle(pos)
-                        self.laser.state["target"] = ans.point_at
-                    else:
-                        err = self.laser.aim_object(ans.point_at, pos, check=lambda: self._unsafe(uv, box))
-                        la = getattr(self.laser, "last_aim", None) or {}
-                        self._note_drift(la.get("first_err_cm"), la.get("reason"), self.drift_cm)
-                    log.info("laser -> %s at (%.1f, %.1f) via %s%s", ans.point_at, pos[0], pos[1],
-                             ">".join(chain), f", err {err:.1f} cm" if err is not None else "")
-            except (RuntimeError, ValueError) as ex:
-                log.warning("laser not aimed: %s", ex)
-                self._safe_off()
-                return None
-            except Exception:
-                log.exception("laser failed")
-                self._safe_off()
-                return None
-            self.world.laser = dict(self.laser.state)
-            self._schedule_off()
+                    pos, chain = self.world.resolve(ans.point_at)
+                if pos is None:
+                    log.info("no position for %s; not aiming", ans.point_at)
+                    return None
+                if self._held(ans.point_at, chain):
+                    log.info("laser refused: %s is in someone's hand", ans.point_at)
+                    return None
+                r_cm = 7.0 if action == "circle" else 4.0
+                uv, box = self._table_full(pos, r_cm)
+                why = self._unsafe(uv, box)
+                if why is not None:
+                    log.info("table aim refused: %s", why)
+                    return None
+                if action == "circle":
+                    self.laser.circle(pos)
+                    self.laser.state["target"] = ans.point_at
+                else:
+                    err = self.laser.aim_object(ans.point_at, pos, check=lambda: self._unsafe(uv, box))
+                    la = getattr(self.laser, "last_aim", None) or {}
+                    self._note_drift(la.get("first_err_cm"), la.get("reason"), self.drift_cm)
+                log.info("laser -> %s at (%.1f, %.1f) via %s%s", ans.point_at, pos[0], pos[1],
+                         ">".join(chain), f", err {err:.1f} cm" if err is not None else "")
+        except (RuntimeError, ValueError) as ex:
+            log.warning("laser not aimed: %s", ex)
+            self._safe_off()
+            return None
+        except Exception:
+            log.exception("laser failed")
+            self._safe_off()
+            return None
+        self.world.laser = dict(self.laser.state)
+        self._schedule_off()
         return err
 
     def _aim_room(self, action: str) -> bool:
