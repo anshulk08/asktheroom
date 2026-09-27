@@ -14,8 +14,10 @@
 
   const $ = (id) => document.getElementById(id);
   const params = new URLSearchParams(location.search);
-  const FPS = Math.min(10, Math.max(0.5, parseFloat(params.get("fps")) || 3));
-  const FRAME_W = Math.min(2560, Math.max(640, parseInt(params.get("w"), 10) || 1600));
+  // Defaults that keep the rig's perception at >= 4.5 fps (WS7 measures): 2 frames a second, 1280 px wide.
+  const FPS = Math.min(10, Math.max(0.5, parseFloat(params.get("fps")) || 2));
+  const FRAME_W = Math.min(2560, Math.max(640, parseInt(params.get("w"), 10) || 1280));
+  const BOXES_EVERY_MS = 1000;                // table boxes move slowly: at most once a second
   const FONT = '"Atkinson Next", system-ui, sans-serif';
   const COL = {
     visible: "#9ff0b4", hidden: "#8ec5ff", carried: "#ffc24d", last_seen: "#b3c0ba", found: "#fff17a",
@@ -83,7 +85,11 @@
     names = m;
   }
 
-  const nice = (n) => names.get(n) || stripThe(String(n || "").replace(/^hand:\d+$/, "a hand").replace(/_/g, " "));
+  const nice = (n) => names.get(n) ||
+    stripThe(String(n || "").replace(/^thing:\d+$/, "something new").replace(/^hand:\d+$/, "a hand").replace(/_/g, " "));
+  // No internal id ever reaches the screen: 'thing:12' in any text (an answer, a caption, Grok's reply)
+  // becomes the thing's name, else "something new".
+  const clean = (text) => String(text == null ? "" : text).replace(/thing:\d+/g, (m) => names.get(m) || "something new");
 
   // One drawable object per named or registered entity: its state, box (image px), place and times.
   function buildObjects(state) {
@@ -99,7 +105,7 @@
       const r = e.registry;
       if (r && r.state && r.state !== "unknown") {      // WS8's registry (permanence.mode: registry)
         o.state = r.state;
-        o.name = r.display ? r.display.replace(/_/g, " ") : o.name;
+        o.name = r.display ? clean(r.display.replace(/_/g, " ")) : o.name;
         o.zone = r.place || r.zone || o.zone;
         o.say = r.say;
         o.tentative = !!r.tentative;
@@ -336,11 +342,14 @@
       frameTimer = setTimeout(pollFrame, 1500);
     };
     img.src = S.meta.image + sep + (S.meta.full ? "w=" + FRAME_W + "&" : "") + "_=" + Date.now();
-    getJSON("/demo/boxes").then((b) => {
-      // boxes come in the full image's px; the polled frame may be smaller: drawCam scales by image_size
-      S.boxes = b.boxes || {};
-      refresh();
-    }).catch(() => {});
+    if (Date.now() - (S.boxesAt || 0) >= BOXES_EVERY_MS) {
+      S.boxesAt = Date.now();
+      getJSON("/demo/boxes").then((b) => {
+        // boxes come in the full image's px; the polled frame may be smaller: drawView scales by image_size
+        S.boxes = b.boxes || {};
+        refresh();
+      }).catch(() => {});
+    }
   }
 
   // ------------------------------------------------------------------ map
@@ -527,7 +536,7 @@
       const l = S.lastAnswer;
       a = [{ seq: l.t, t: l.t, q: l.question, text: l.text, point_at: l.point_at, evidence: l.evidence }];
     }
-    return a.filter((x) => x.q && x.text).slice(-3).reverse();
+    return a.filter((x) => x.q && x.text).slice(-2).reverse();
   }
 
   function evidenceOf(a) {
@@ -596,7 +605,7 @@
     tag.className = "tag";
     tag.textContent = "Evidence";
     const text = document.createElement("span");
-    text.textContent = caption(ev);
+    text.textContent = clean(caption(ev));
     cap.append(tag, text);
     if (ev.t) {
       const when = document.createElement("span");
@@ -620,19 +629,65 @@
       if (i > 0) li.className = "old";
       const q = document.createElement("div");
       q.className = "q";
-      q.textContent = x.q;
+      q.textContent = clean(x.q);
       const when = document.createElement("span");
       when.className = "when";
       when.textContent = x.t ? clockText(x.t, false) : "";
       q.appendChild(when);
       const ans = document.createElement("div");
       ans.className = "a";
-      ans.textContent = x.text;
+      ans.textContent = clean(x.text);
       li.append(q, ans);
       const ev = i === 0 ? evidenceOf(x) : null;
       if (ev && ev.snapshot_url) li.appendChild(card(ev));
       list.appendChild(li);
     });
+  }
+
+  // ------------------------------------------------------------------ Grok's eyes
+
+  // The newest Grok call that looked at something (core/grok_trace.py via GET /grok/trace): the images
+  // actually sent, the request's text (a hint list, a question) and the raw reply, model and latency.
+  const LOOKS = new Set(["naming", "verify", "pick", "look", "look_room", "recall", "recall_room", "check", "refind", "confirm"]);
+  const PURPOSE = { naming: "naming a new object", verify: "is it one of these?", pick: "finding an object",
+    look: "looking at the table", look_room: "looking at the room", recall: "remembering the table",
+    recall_room: "remembering the room", check: "checking the tracker", refind: "re-finding an object",
+    confirm: "same object?" };
+  let eyesId = null;
+
+  function replyText(c) {
+    const raw = String(c.reply || "").trim();
+    try {
+      const d = JSON.parse(raw.replace(/^```(?:json)?\s*|```$/g, ""));
+      const keep = {};
+      for (const k of ["object", "name", "match", "answer", "seen", "mark", "same", "confidence", "also"]) if (k in d) keep[k] = d[k];
+      return JSON.stringify(Object.keys(keep).length ? keep : d).replace(/,"/g, ', "').replace(/":/g, '": ');
+    } catch (e) {
+      return raw || (c.error ? "error: " + c.error : "");
+    }
+  }
+
+  async function pollEyes() {
+    let calls;
+    try { calls = await getJSON("/grok/trace?limit=10"); } catch (e) { return; }
+    const c = (calls || []).find((x) => LOOKS.has(x.purpose) && x.images && x.images.length);
+    if (!c || c.id === eyesId) return;
+    eyesId = c.id;
+    $("eyes").hidden = false;
+    document.querySelector(".talk").classList.add("has-eyes");
+    $("eyes-meta").textContent = (PURPOSE[c.purpose] || c.purpose) + " · " + (c.model || "grok") + " · " +
+      (c.ms / 1000).toFixed(1) + " s · " + clockText(c.t, true);
+    const imgs = $("eyes-imgs");
+    imgs.textContent = "";
+    for (const key of c.images.slice(0, 2)) {
+      const im = document.createElement("img");
+      im.alt = "";
+      im.src = "/grok/img/" + key;
+      im.addEventListener("error", () => im.remove());
+      imgs.appendChild(im);
+    }
+    $("eyes-req").textContent = clean(c.request);
+    $("eyes-reply").textContent = clean(replyText(c));
   }
 
   // ------------------------------------------------------------------ live state
@@ -721,6 +776,7 @@
 
   setInterval(tickClock, 250);
   setInterval(loadLayout, 30000);
+  setInterval(pollEyes, 1500);
   setInterval(() => { if (S.state) renderAnswers(); }, 20000);   // "min ago" and fallbacks stay current
   const fontReady = document.fonts && document.fonts.load
     ? Promise.race([document.fonts.load('700 22px "Atkinson Next"'), new Promise((r) => setTimeout(r, 1500))])

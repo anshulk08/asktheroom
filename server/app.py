@@ -29,6 +29,8 @@ Demo view (WS9, the filmed page; everything is drawn in the browser, the rig onl
   GET  /room_layout      the room map (config room_layout:, camera table axes) turned to the user's seat:
                          {"v": 1, "size", "front", "table": {"rect", "origin"}, "zones": [{id, say, rect, kind}],
                          "you"}; a table point's map position is View.m . pos_cm + table.origin (the phone too)
+  GET  /grok/trace?limit=N   the last Grok calls, newest first (core/grok_trace.py): {id, t, purpose, model,
+                         ms, ok, request, reply, tools, images: [key]}; GET /grok/img/{key} one thumbnail sent
   /full.jpg?raw=1&w=N    the full frame shrunk to N px wide before encoding (less CPU and Wi-Fi than 2560 px)
 /state and /ws also carry "listening": true while the rig listens for a question after the wake word (main.py).
 
@@ -591,7 +593,7 @@ def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = 
     @app.get("/demo/boxes")
     async def demo_boxes():
         def boxes() -> dict:
-            m = demo_geometry(cfg, frames, table).get("cm_to_img")
+            m = demo_geometry(cfg, frames, table, zones=False).get("cm_to_img")
             out = {}
             if m is not None:
                 M = np.asarray(m, float)
@@ -618,6 +620,19 @@ def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = 
                             "snapshot_url": url}
             return {}
         return JSONResponse(await asyncio.to_thread(find), headers={"Cache-Control": "no-store"})
+
+    @app.get("/grok/trace")
+    def grok_trace_route(limit: int = 10):
+        from core import grok_trace
+        return JSONResponse(grok_trace.calls(min(max(1, limit), grok_trace.KEEP)), headers={"Cache-Control": "no-store"})
+
+    @app.get("/grok/img/{key}")
+    def grok_img(key: str):
+        from core import grok_trace
+        jpg = grok_trace.image(key) if re.fullmatch(r"\d+-\d+", key) else None
+        if jpg is None:
+            raise HTTPException(404, "no such image")
+        return Response(jpg, media_type="image/jpeg", headers={"Cache-Control": "max-age=3600"})
 
     @app.get("/room_layout")
     async def room_layout_route():
@@ -650,7 +665,7 @@ def _zones(cfg: dict) -> list:
         return []
 
 
-def demo_geometry(cfg: dict, frames, table) -> dict:
+def demo_geometry(cfg: dict, frames, table, zones: bool = True) -> dict:
     """/demo/meta: the image the demo polls (the full frame when room memory runs, else the table view) and
     the homography from table cm to its px: the table's cm -> table-view px (Hinv), then the table view's
     place in the full frame (TableView.rect / out_size)."""
@@ -671,7 +686,7 @@ def demo_geometry(cfg: dict, frames, table) -> dict:
            "cm_to_img": M.tolist() if M is not None else None,
            "table_view_rect": [float(v) for v in rect] if rect is not None else None,
            "table_size_cm": list((cfg.get("table") or {}).get("size_cm") or []),
-           "zones": _zones(cfg) if full else []}
+           "zones": _zones(cfg) if full and zones else []}
     try:
         out["view"] = View.from_cfg(cfg).to_json()
     except Exception:

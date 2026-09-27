@@ -94,7 +94,8 @@ h2 {
   border-radius: 6px;
   padding: 8px 14px;
 }
-.live { font-size: 24px; font-weight: 800; letter-spacing: 0.04em; display: flex; align-items: center; gap: 10px; }
+.live { font-size: 23px; font-weight: 800; letter-spacing: 0.02em; display: flex; align-items: center; gap: 10px; }
+.live .sub { display: block; font-size: 15px; font-weight: 600; color: var(--ink-2); letter-spacing: 0.02em; }
 .live .sep { color: var(--ink-3); }
 .rec {
   width: 16px; height: 16px; border-radius: 50%;
@@ -161,7 +162,7 @@ h2 {
 .link { font-size: 14px; color: var(--ink-3); }
 .link[data-state="lost"] { color: var(--laser); }
 
-.answers { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+.answers { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; min-height: 0; overflow: hidden; }
 .answers li { border-top: 1px solid var(--rule); padding-top: 10px; }
 .answers li:first-child { border-top: 0; padding-top: 0; }
 .q { color: var(--ink-2); font-size: 19px; }
@@ -177,14 +178,26 @@ h2 {
   background: rgba(0, 0, 0, 0.25); border: 1px solid var(--rule); border-radius: 6px; padding: 8px;
 }
 .shot { position: relative; flex: 0 0 auto; line-height: 0; }
-.shot img { height: 168px; width: auto; max-width: 340px; object-fit: contain; border-radius: 4px; background: #000; }
+.shot img { height: 150px; width: auto; max-width: 340px; object-fit: contain; border-radius: 4px; background: #000; }
 .shot canvas { position: absolute; left: 0; top: 0; pointer-events: none; }
 .shot .inset { position: absolute; right: 6px; bottom: 6px; height: 64px; border: 2px solid var(--found); border-radius: 3px; }
 .cap { display: flex; flex-direction: column; justify-content: center; gap: 4px; font-size: 19px; }
 .cap .tag { font-size: 14px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; color: var(--found); }
 .cap .time { color: var(--ink-2); font-size: 17px; }
 .answers li.old .card { display: none; }
+.talk.has-eyes .answers li.old { display: none; }          /* Grok's eyes takes the older answer's room */
 
+.eyes { margin-top: auto; border-top: 2px solid var(--rule); padding-top: 8px; }
+.eyes-head { display: flex; align-items: baseline; gap: 12px; }
+.eyes-title { font-size: 17px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; color: var(--found); }
+.eyes-meta { font-size: 16px; color: var(--ink-2); }
+.eyes-body { display: flex; gap: 12px; margin-top: 6px; align-items: flex-start; }
+.eyes-imgs { display: flex; gap: 8px; flex: 0 0 auto; }
+.eyes-imgs img { height: 132px; width: auto; max-width: 240px; object-fit: contain; border-radius: 4px; background: #000; border: 1px solid var(--rule); }
+.eyes-text { min-width: 0; font-size: 17px; }
+.eyes-req { color: var(--ink-3); font-size: 15px; max-height: 3.9em; overflow: hidden; }
+.eyes-reply { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 16px; color: var(--ink); margin-top: 4px;
+  white-space: pre-wrap; word-break: break-word; max-height: 6.2em; overflow: hidden; }
 .empty { color: var(--ink-3); font-size: 21px; margin: auto 0; text-align: center; }
 
 @keyframes blink { 50% { opacity: 0.15; } }
