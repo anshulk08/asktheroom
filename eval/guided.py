@@ -4,8 +4,21 @@ annotates video afterwards. eval/score_clip.py replays and scores a clip.
 
     python -m eval.guided --list
     python -m eval.guided still --id still_1        # setup first (it is printed); then the clip runs
+    ASKROOM_RIG_DIR=askroom_room python -m eval.guided room_still --id room_still_1     # the room demo rig
 
-Physical props get fixed ids for every clip: A wallet, B keys, C phone, BOX box, NB notebook.
+Physical props get fixed ids for every clip: A wallet, B keys, C phone, BOX box, NB notebook (room demo
+clips add PB, the pill bottle).
+
+Room-demo clips (room_*, spec 0010) record the full corner-camera frame at the app's capture size (the
+rig's config.local.yaml: room_memory on, 2560x1440; eval/raw_record.py) with the camera settings the app
+left (no camera_setup.sh), and are scored for identity by eval/scorecard.py. They put each prop down with
+a cue first (a place step), so the scorer knows which identity is which prop without annotation. Each
+step's `seg` (still: nobody near the table; people: someone moving, sitting or reaching) splits the clip
+for the phantom-birth rates; carry_to steps name the room zone (room_zones.json key) the prop goes to.
+
+The recorder needs the camera, so the live app must be stopped first (the rig owner does that:
+scripts/room_app.sh stop). This driver never stops it: it refuses while any container runs main.py
+(--stop-app restores the old behaviour of stopping askroom:latest containers, for the table rig).
 Timing: each step's t is when its cue was spoken (Mac time, converted to the Jetson's clock with a
 measured offset) minus the first frame's time. Commands, questions and checkpoints are scheduled
 relative to the first cue. A cue takes a second or two to say and a few seconds to act on: the scorer
@@ -28,6 +41,7 @@ from pathlib import Path
 
 import os
 JETSON = os.environ.get("ASKROOM_JETSON", "guru@10.90.84.178")            # Wi-Fi; guru@192.168.55.1 over USB
+RIG_DIR = os.environ.get("ASKROOM_RIG_DIR", "askroom")      # the checkout on the Jetson: askroom_room for the room demo
 DEVICE = os.environ.get("ASKROOM_CAMERA", "/dev/v4l/by-id/usb-046d_Logitech_BRIO_3675F8D2-video-index0")
 PROPS = {"A": "wallet", "B": "small object", "C": "phone", "NB": "notebook", "BOX": "box"}   # B: keys or any small solid object; BOX: any open container
 ALL_ON_TABLE = {p: {"state": "on_table"} for p in PROPS}
@@ -109,6 +123,144 @@ CLIPS = {
 }
 
 
+# ---------------------------------------------------------------- room demo clips (spec 0010)
+
+DEMO = {"A": "wallet", "B": "keys", "C": "phone", "BOX": "box", "NB": "notebook", "PB": "pill bottle"}
+STILL, PEOPLE = "still", "people"
+PLACE_EVERY = 6.0           # s between place cues: ~2 s to say, ~3 s to put it down and pull the hand back
+
+
+def _place_in(props: list, t0: float = 3.0) -> list:
+    """Cues that put each prop down one by one (binds each identity to its prop), then hands away."""
+    steps = [{"at": 0, "say": "Recording. Hands away.", "event": "hands_out", "seg": STILL}]
+    for i, p in enumerate(props):
+        steps.append({"at": t0 + i * PLACE_EVERY, "say": f"Put the {DEMO[p]} on the table, then hands away.",
+                      "event": "place", "obj": p, "seg": PEOPLE})
+    return steps
+
+
+def _end_of(steps: list) -> float:
+    return steps[-1]["at"] + PLACE_EVERY
+
+
+def _on(*props) -> dict:
+    return {p: {"state": "on_table"} for p in props}
+
+
+def _room_still() -> dict:
+    props = ["A", "B", "C", "BOX", "NB", "PB"]
+    steps = _place_in(props)
+    t = _end_of(steps)
+    steps.append({"at": t, "say": "Hands away. Nobody touch the table or walk past it for a minute.",
+                  "event": "hands_out", "seg": STILL})
+    return {"room": True, "props": {p: DEMO[p] for p in props}, "seconds": int(t + 64),
+            "setup": "Empty coffee table. Hold the wallet, keys, phone, box, notebook and pill bottle, off the "
+                     "table. Put each down when told, spread out, a hand-width apart.",
+            "steps": steps, "checkpoints": [{"at": t + 30, "expect": _on(*props)}, {"at": t + 60, "expect": _on(*props)}]}
+
+
+def _room_clutter() -> dict:
+    props = ["A", "B", "C", "BOX", "NB", "PB"]
+    steps = _place_in(props)
+    t = _end_of(steps)
+    steps.append({"at": t, "say": "Hands away. Nobody touch the table or walk past it for a minute.",
+                  "event": "hands_out", "seg": STILL})
+    return {"room": True, "props": {p: DEMO[p] for p in props}, "seconds": int(t + 64),
+            "scene": "an open laptop and a pile of cables on the table from the start",
+            "scene_objects": ["laptop", "cable pile"],
+            "setup": "An open laptop and a loose pile of cables (chargers, a USB cable) on the coffee table. Hold "
+                     "the six props, off the table. Put each down when told, among the clutter, not touching it.",
+            "steps": steps, "checkpoints": [{"at": t + 30, "expect": _on(*props)}, {"at": t + 60, "expect": _on(*props)}]}
+
+
+def _room_couch() -> dict:
+    props = ["A", "B", "C", "BOX", "NB", "PB"]
+    steps = _place_in(props)
+    t = _end_of(steps)
+    steps += [
+        {"at": t, "say": "Sit down on the couch now, one or two of you.", "event": "sit", "seg": PEOPLE},
+        {"at": t + 8, "say": "Put your feet up on the edge of the table, near the props but not touching them.",
+         "event": "feet_up", "seg": PEOPLE},
+        {"at": t + 28, "say": "Lean forward and rest your hands near the table edge. Don't touch the props.",
+         "event": "hands_near", "seg": PEOPLE},
+        {"at": t + 43, "say": "Feet down, sit back, and keep still.", "event": "sit", "seg": PEOPLE},
+        {"at": t + 58, "say": "Stand up and walk past the table, without touching it.", "event": "walk",
+         "seg": PEOPLE},
+        {"at": t + 68, "say": "Everyone away from the table. Keep still.", "event": "hands_out", "seg": STILL}]
+    return {"room": True, "props": {p: DEMO[p] for p in props}, "seconds": int(t + 90),
+            "setup": "Empty coffee table, couch free. Hold the six props. Put each down when told, spread out, "
+                     "a little in from the edge the couch faces. Then sit on the couch when told, in socks or "
+                     "shoes, jeans are good (feet at the table edge are what goes wrong).",
+            "steps": steps, "checkpoints": [{"at": t + 66, "expect": _on(*props)},
+                                            {"at": t + 88, "expect": _on(*props)}]}
+
+
+def _room_carry() -> dict:
+    steps = [{"at": 0, "say": "Recording. Hands away.", "event": "hands_out", "seg": STILL},
+             {"at": 3, "say": "Put the wallet on the table, then hands away.", "event": "place", "obj": "A",
+              "seg": PEOPLE}]
+    t = 12.0
+    for zone, say in (("couch", "the couch"), ("side_table", "the side table"), ("counter", "the kitchen counter")):
+        steps += [{"at": t, "say": f"Pick up the wallet, carry it to {say}, put it down there where the camera "
+                                   "can see it, and step away.", "event": "carry_to", "obj": "A", "zone": zone,
+                   "seg": PEOPLE},
+                  {"at": t + 25, "say": "Bring the wallet back to the table, put it down, then hands away.",
+                   "event": "putdown", "obj": "A", "seg": PEOPLE}]
+        t += 37
+    steps.append({"at": t, "say": "Hands away. Nobody touch anything.", "event": "hands_out", "seg": STILL})
+    return {"room": True, "props": {"A": "wallet", "C": "phone", "NB": "notebook", "BOX": "box"},
+            "seconds": int(t + 15),
+            "setup": "Phone, notebook and box on the coffee table, apart. Couch, side table and kitchen counter "
+                     "clear enough to see a wallet on them. Hold the wallet, off the table.",
+            "steps": steps,
+            "checkpoints": [{"at": s["at"] + 10, "expect": _on("A")} for s in steps if s["event"] == "putdown"]}
+
+
+def _room_move() -> dict:
+    steps = _place_in(["A", "C", "NB"])
+    t = _end_of(steps)
+    steps += [
+        {"at": t, "say": "Hands away.", "event": "hands_out", "seg": STILL},
+        {"at": t + 8, "say": "Pick up the phone and hold it up above the table.", "event": "pickup", "obj": "C",
+         "seg": PEOPLE},
+        {"at": t + 13, "say": "Put it down on the other side of the table, then hands away.", "event": "putdown",
+         "obj": "C", "seg": PEOPLE},
+        {"at": t + 25, "say": "Pick up the wallet and hold it up.", "event": "pickup", "obj": "A", "seg": PEOPLE},
+        {"at": t + 30, "say": "Put it down somewhere else on the table, then hands away.", "event": "putdown",
+         "obj": "A", "seg": PEOPLE},
+        {"at": t + 42, "say": "Slide the notebook to a new spot, then hands away.", "event": "move", "obj": "NB",
+         "seg": PEOPLE},
+        {"at": t + 54, "say": "Hands away. Keep still.", "event": "hands_out", "seg": STILL}]
+    return {"room": True, "props": {"A": "wallet", "C": "phone", "NB": "notebook", "BOX": "box", "PB": "pill bottle"},
+            "seconds": int(t + 75),
+            "setup": "Box and pill bottle on the coffee table (they stay put). Hold the wallet, the phone and the "
+                     "notebook; put each down when told.",
+            "steps": steps,
+            "checkpoints": [{"at": t + 6, "expect": _on("A", "C", "NB")}, {"at": t + 23, "expect": _on("C")},
+                            {"at": t + 72, "expect": _on("A", "C", "NB")}]}
+
+
+def _room_remove() -> dict:
+    props = ["A", "B", "C", "PB", "NB", "BOX"]
+    steps = _place_in(props)
+    t = _end_of(steps)
+    steps.append({"at": t, "say": "Hands away.", "event": "hands_out", "seg": STILL})
+    for i, p in enumerate(props):
+        steps.append({"at": t + 10 + 9 * i, "say": f"Take the {DEMO[p]} off the table and put it away, out of "
+                                                   "sight.", "event": "remove", "obj": p, "seg": PEOPLE})
+    end = t + 10 + 9 * len(props)
+    steps.append({"at": end, "say": "Hands away. Nobody near the table.", "event": "hands_out", "seg": STILL})
+    return {"room": True, "props": {p: DEMO[p] for p in props}, "seconds": int(end + 20),
+            "setup": "Empty coffee table. Hold the six props. Put each down when told, then take each away when "
+                     "told (a pocket, a bag, behind your back, off camera).",
+            "steps": steps, "checkpoints": [{"at": t + 8, "expect": _on(*props)}]}
+
+
+ROOM_CLIPS = {"room_still": _room_still(), "room_clutter": _room_clutter(), "room_couch": _room_couch(),
+              "room_carry": _room_carry(), "room_move": _room_move(), "room_remove": _room_remove()}
+CLIPS.update(ROOM_CLIPS)
+
+
 def truth_from(clip: dict, cue_mac: list[float], first_frame_wall: float, clock_offset_s: float) -> dict:
     """Ground truth in seconds since the first frame. cue_mac: Mac wall time each step's cue started;
     clock_offset_s: Jetson clock minus Mac clock; first_frame_wall: Jetson wall time of frame 0."""
@@ -121,8 +273,12 @@ def truth_from(clip: dict, cue_mac: list[float], first_frame_wall: float, clock_
         s.setdefault("parent", None)
     rel = lambda items: [dict({k: v for k, v in i.items() if k != "at"}, t=round(zero + i["at"], 3))  # noqa: E731
                          for i in items]
-    return {"props": dict(clip["props"]), "steps": steps, "commands": rel(clip.get("commands", [])),
-            "questions": rel(clip.get("questions", [])), "checkpoints": rel(clip.get("checkpoints", []))}
+    out = {"props": dict(clip["props"]), "steps": steps, "commands": rel(clip.get("commands", [])),
+           "questions": rel(clip.get("questions", [])), "checkpoints": rel(clip.get("checkpoints", []))}
+    for k in ("scene", "scene_objects"):
+        if clip.get(k):
+            out[k] = clip[k]
+    return out
 
 
 # ---------------------------------------------------------------- driving the rig
@@ -157,23 +313,42 @@ def say(text: str) -> subprocess.Popen:
     return subprocess.Popen(["say", "-r", "185", text])
 
 
-def run_clip(name: str, clip_id: str, exposure: int = 333, gain: int = 96, setup: bool = True) -> Path:
+APP_RUNNING = ("docker ps --no-trunc --format '{{.Names}}\\t{{.Image}}\\t{{.Command}}' "
+               "| awk -F'\\t' '$3 ~ /(main|demo_check)\\.py/'")
+
+
+def app_running() -> str:
+    """Containers on the Jetson running the app (main.py / demo_check.py): 'name<TAB>image<TAB>command' lines."""
+    return ssh(APP_RUNNING).strip()
+
+
+def run_clip(name: str, clip_id: str, exposure: int = 333, gain: int = 96, setup: bool = True,
+             stop_app: bool = False) -> Path:
     clip = CLIPS[name]
     git = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
-    cam = f"cd ~/askroom && scripts/camera_setup.sh {exposure} {DEVICE} {gain} >/dev/null" if setup else "true"
-    ssh("C=$(docker ps -q --filter ancestor=askroom:latest); [ -n \"$C\" ] && docker stop $C >/dev/null; " + cam,
-        timeout=90)
+    rig = f"~/{RIG_DIR}"
+    if stop_app:                                          # the table rig's old flow: stop askroom:latest
+        ssh("C=$(docker ps -q --filter ancestor=askroom:latest); [ -n \"$C\" ] && docker stop $C >/dev/null",
+            timeout=90)
+    running = app_running()
+    if running:
+        raise RuntimeError("the app is running on the Jetson and holds the camera; its owner stops it first "
+                           f"(cd {rig} && scripts/room_app.sh stop):\n{running}")
+    if setup:
+        ssh(f"cd {rig} && scripts/camera_setup.sh {exposure} {DEVICE} {gain} >/dev/null", timeout=90)
     offset = clock_offset()
     controls = camera_controls()
     out = f"data/clips/{clip_id}"
-    ssh(f"rm -rf ~/askroom/{out}; mkdir -p ~/askroom/{out}")    # ours, so truth.json can be added after
-    rec = subprocess.Popen(["ssh", JETSON, "cd ~/askroom && scripts/dock.sh python3 -m eval.raw_record "
+    ssh(f"rm -rf {rig}/{out}; mkdir -p {rig}/{out}")    # ours, so truth.json can be added after
+    image = os.environ.get("ASKROOM_IMAGE")
+    env = f"ASKROOM_IMAGE={shlex.quote(image)} " if image else ""
+    rec = subprocess.Popen(["ssh", JETSON, f"cd {rig} && {env}scripts/dock.sh python3 -m eval.raw_record "
                             f"--out {out} --device {DEVICE} --seconds {clip['seconds']} "
                             f"--controls {shlex.quote(json.dumps(controls))} --git {git} --clock-offset {offset:.6f}"],
                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
     say("Get ready.").wait()
     for _ in range(120):                                  # the container starts, the camera settles
-        if ssh(f"test -f ~/askroom/{out}/READY && echo y").strip() == "y":
+        if ssh(f"test -f {rig}/{out}/READY && echo y").strip() == "y":
             break
         time.sleep(0.5)
     else:
@@ -189,15 +364,18 @@ def run_clip(name: str, clip_id: str, exposure: int = 333, gain: int = 96, setup
         print(f"  {cues[-1] - t_zero:5.1f} s  {s['say']}", flush=True)
     rec.wait(timeout=clip["seconds"] + 60)
     say("Done.")
-    frames = json.loads(ssh(f"cat ~/askroom/{out}/frames.json"))
+    frames = json.loads(ssh(f"cat {rig}/{out}/frames.json"))
     truth = truth_from(clip, cues, frames["wall"][0], offset)
-    subprocess.run(["ssh", JETSON, f"cat > ~/askroom/{out}/truth.json"], input=json.dumps(truth, indent=1),
+    subprocess.run(["ssh", JETSON, f"cat > {rig}/{out}/truth.json"], input=json.dumps(truth, indent=1),
                    text=True, check=True)
     local = Path("data/clips") / clip_id
     local.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["rsync", "-a", f"{JETSON}:askroom/{out}/", str(local) + "/"], check=True)
+    subprocess.run(["rsync", "-a", f"{JETSON}:{RIG_DIR}/{out}/", str(local) + "/"], check=True)
     n, dur = len(frames["wall"]), frames["t"][-1]
-    print(f"{clip_id}: {n} frames, {dur:.1f} s ({(n - 1) / max(dur, 1e-6):.1f} fps), clock offset {offset:+.3f} s -> {local}")
+    rec_meta = (json.loads((local / "meta.json").read_text()).get("record") or {}) if (local / "meta.json").exists() else {}
+    size = "x".join(str(v) for v in rec_meta.get("size_px") or []) or "?"
+    print(f"{clip_id}: {n} frames at {size}, {dur:.1f} s ({(n - 1) / max(dur, 1e-6):.1f} fps, "
+          f"{rec_meta.get('dropped', 0)} dropped by the writer), clock offset {offset:+.3f} s -> {local}")
     return local
 
 
@@ -207,13 +385,21 @@ def main(argv=None) -> int:
     ap.add_argument("--id")
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--gain", type=int, default=96)
-    ap.add_argument("--no-setup", action="store_true", help="keep the camera's current settings (a tuned camera)")
+    ap.add_argument("--no-setup", action="store_true", help="keep the camera's current settings (a tuned camera; "
+                                                           "always so for room_* clips)")
+    ap.add_argument("--stop-app", action="store_true",
+                    help="stop askroom:latest containers first (the table rig's old flow; never the room app)")
     a = ap.parse_args(argv)
     if a.list or not a.clip:
         for k, c in CLIPS.items():
             print(f"{k:18s} {c['seconds']:3d} s  setup: {c['setup']}")
         return 0
-    run_clip(a.clip, a.id or f"{a.clip}_{time.strftime('%H%M%S')}", gain=a.gain, setup=not a.no_setup)
+    clip = CLIPS[a.clip]
+    print(f"setup: {clip['setup']}")
+    if _sys.stdin.isatty():
+        input("Set the scene up as above, then press Enter to record (Ctrl-C cancels). ")
+    run_clip(a.clip, a.id or f"{a.clip}_{time.strftime('%H%M%S')}", gain=a.gain,
+             setup=not (a.no_setup or clip.get("room")), stop_app=a.stop_app)
     return 0
 
 

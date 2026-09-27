@@ -4,7 +4,7 @@ from eval.guided import CLIPS, truth_from
 
 def test_every_clip_is_well_formed():
     events = {"hands_out", "hand_in", "wave", "rest_arm", "place", "pickup", "putdown", "put_inside", "cover",
-              "uncover", "move", "exit_edge", None}
+              "uncover", "move", "exit_edge", "carry_to", "remove", "sit", "feet_up", "hands_near", "walk", None}
     for name, c in CLIPS.items():
         assert c["props"] and c["setup"] and c["steps"], name
         ts = [s["at"] for s in c["steps"]]
