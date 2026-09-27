@@ -29,7 +29,6 @@ class Presence(deque):
         gap = None if self._last is None else t - self._last
         if gap is not None and gap < -self.n * self.unit:      # the clock went back (a new clip): start over
             self.clear()
-            self._w.clear()
             gap = None
         self._last = t
         if gap is None or gap < 0 or gap > self.n * self.unit:
@@ -44,6 +43,12 @@ class Presence(deque):
         while len(self) > 1 and total - self._w[0] >= self.n - 1e-9:
             total -= self._w.popleft()
             self.popleft()
+
+    def clear(self) -> None:
+        """Forget every update (a debounce restart, e.g. core/room_world.py), weights included."""
+        super().clear()
+        self._w.clear()
+        self._last = None
 
     def hits(self) -> float:
         """Detections in the window, in updates of the reference rate (the plain count without hz)."""

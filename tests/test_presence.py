@@ -51,6 +51,17 @@ def test_bits_seeded_from_a_candidate_count_one_each():
     assert p.hits() == 6
 
 
+def test_clear_forgets_the_weights_too():
+    """A debounce restart (core/room_world.py clears an entity's bits) must not leave stale weights."""
+    p = Presence(n=10, hz=15)
+    for i in range(20):
+        p.push(i / 15, False)
+    p.clear()
+    for i in range(6):
+        p.push(5 + i / 15, True)
+    assert list(p) == [True] * 6 and p.hits() == 6
+
+
 def test_a_clock_that_goes_back_starts_the_window_over():
     p = Presence(n=10, hz=15)
     for i in range(20):
