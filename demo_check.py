@@ -802,14 +802,17 @@ def asound_cards(root: str = "/proc/asound") -> list[dict]:
     return cards
 
 
-def _check_devices_alsa(rig: Rig, root: str) -> Result:
+AUDIO_DEVICES = (("input", "stt", "input_device"), ("output", "tts", "output_device"))
+
+
+def _check_devices_alsa(rig: Rig, root: str, which=AUDIO_DEVICES) -> Result:
     """--live: the app holds the mic and speaker, and PortAudio hides a busy device, so look in ALSA's card
     list instead. A card in use counts as present (the app has it)."""
     cards = asound_cards(root)
     if not cards:
         return None, f"no {root}/cards (not Linux?): devices not checked"
     parts, problems = [], []
-    for kind, section, key in (("input", "stt", "input_device"), ("output", "tts", "output_device")):
+    for kind, section, key in which:
         spec = (rig.cfg.get(section) or {}).get(key)
         label = "mic" if kind == "input" else "speaker"
         d = "c" if kind == "input" else "p"
@@ -832,20 +835,104 @@ def _check_devices_alsa(rig: Rig, root: str) -> Result:
     return not problems, "; ".join(parts + problems)
 
 
-def check_devices(rig: Rig, query: Optional[Callable[[], list]] = None, asound: str = "/proc/asound") -> Result:
+PULSE_WORDS = ("pulse", "default")
+
+
+def default_pactl() -> Optional[Callable[[list], "subprocess.CompletedProcess"]]:
+    if shutil.which("pactl") is None:
+        return None
+    return lambda args: subprocess.run(["pactl", *args], capture_output=True, text=True, timeout=5)
+
+
+def _pulse_device(rig: Rig, kind: str, spec, pactl) -> Optional[tuple[Optional[bool], str]]:
+    """The device through PulseAudio (a Bluetooth speaker lives there, not in ALSA; scripts/dock.sh passes
+    the host socket as PULSE_SERVER). Generic specs (null, 'pulse', 'default') check the default sink or
+    source, which must match room_check.pulse_sink / pulse_source when set (e.g. 'bluez'). A named spec
+    returns None when PulseAudio has nothing by that name, so the ALSA lookup gets its turn."""
+    label = "mic" if kind == "input" else "speaker"
+    generic = spec is None or str(spec).strip().lower() in ("",) + PULSE_WORDS
+    shown = "default" if spec is None or not str(spec).strip() else str(spec)
+    if pactl is None:
+        if not generic:
+            return None
+        return None, f"{label} via PulseAudio ({shown}): not checked (no pactl here), check it by ear"
+    what = "sinks" if kind == "output" else "sources"
+    try:
+        r = pactl(["list", "short", what])
+        err = (r.stderr or "").strip()[:80]
+    except Exception as e:                                  # noqa: BLE001 - timeout, missing binary
+        r, err = None, type(e).__name__
+    if r is None or r.returncode != 0:
+        if not generic:
+            return None
+        return False, (f"{label} via PulseAudio: pactl failed ({err}): is the host's PulseAudio running and "
+                       f"PULSE_SERVER right ({os.environ.get('PULSE_SERVER', 'unset')})?")
+    rows = [ln.split("\t") for ln in r.stdout.splitlines() if ln.strip()]
+    names = [(f[1], f[-1]) for f in rows if len(f) >= 2 and not f[1].endswith(".monitor")]
+    if not generic:
+        hit = [(n, st) for n, st in names if str(spec).strip().lower() in n.lower()]
+        return (True, f"{label} via PulseAudio: {hit[0][0]} ({hit[0][1]})") if hit else None
+    if not names:
+        return False, (f"no PulseAudio {what[:-1]}: "
+                       + ("is the Bluetooth speaker connected?" if kind == "output" else "is the mic connected?"))
+    default = None
+    try:
+        info = pactl(["info"])
+        key = "Default Sink:" if kind == "output" else "Default Source:"
+        default = next((ln.split(":", 1)[1].strip() for ln in info.stdout.splitlines() if ln.startswith(key)), None)
+    except Exception:                                       # noqa: BLE001
+        pass
+    name, state = next(((n, st) for n, st in names if n == default), names[0])
+    want = str(_rc(rig).get("pulse_sink" if kind == "output" else "pulse_source") or "").strip()
+    if want and want.lower() not in name.lower():
+        return False, (f"{label} via PulseAudio is {name}, not like {want!r}: "
+                       + ("reconnect the Bluetooth speaker (bluetoothctl connect <MAC>)" if kind == "output"
+                          else "select the right mic (pactl set-default-source ...)"))
+    return True, f"{label} via PulseAudio: {name} ({state})"
+
+
+def check_devices(rig: Rig, query: Optional[Callable[[], list]] = None, asound: str = "/proc/asound",
+                  pactl="auto") -> Result:
     """The mic and speaker named in config are plugged in. Null means the default device, which on the
-    rig is the Brio's mic in the corner and HDMI (no speaker), so both must be named. --live reads ALSA's
-    card list, since the running app has the devices open."""
-    if rig.live and query is None and not rig.fake:
-        return _check_devices_alsa(rig, asound)
+    rig is the Brio's mic in the corner and HDMI (no speaker), so both must be named, unless PulseAudio
+    carries the audio (PULSE_SERVER set: the askroom:audio image and a Bluetooth speaker): then null,
+    'pulse' and 'default' mean PulseAudio's default, checked with pactl, and a name pactl knows (a bluez
+    sink) is found there. The rest: --live reads ALSA's card list, since the running app has the devices
+    open; otherwise PortAudio's list."""
+    if rig.fake and query is None:
+        return None, "skipped: no audio devices in --fake"
+    pactl = default_pactl() if pactl == "auto" else pactl
+    pulse_env = bool(os.environ.get("PULSE_SERVER"))
+    parts, problems, skipped, rest = [], [], [], []
+    for kind, section, key in AUDIO_DEVICES:
+        spec = (rig.cfg.get(section) or {}).get(key)
+        word = "" if spec is None else str(spec).strip().lower()
+        if word in PULSE_WORDS or (pulse_env and not word.isdigit()):
+            got = _pulse_device(rig, kind, spec, pactl)
+            if got is not None:
+                ok, text = got
+                (parts if ok else skipped if ok is None else problems).append(text)
+                continue
+        rest.append((kind, section, key))
+    if rest:
+        ok, text = _check_devices_rest(rig, rest, query, asound)
+        if text:
+            (parts if ok else skipped if ok is None else problems).append(text)
+    msg = "; ".join(parts + skipped + problems)
+    if problems:
+        return False, msg
+    return (True if parts else None), msg
+
+
+def _check_devices_rest(rig: Rig, which, query, asound) -> Result:
+    if rig.live and query is None:
+        return _check_devices_alsa(rig, asound, which)
     if query is None:
-        if rig.fake:
-            return None, "skipped: no audio devices in --fake"
         import sounddevice as sd
         query = lambda: list(sd.query_devices())            # noqa: E731
     devices = query()
     parts, problems = [], []
-    for kind, section, key in (("input", "stt", "input_device"), ("output", "tts", "output_device")):
+    for kind, section, key in which:
         spec = (rig.cfg.get(section) or {}).get(key)
         label = "mic" if kind == "input" else "speaker"
         if spec is None or (isinstance(spec, str) and not spec.strip()):

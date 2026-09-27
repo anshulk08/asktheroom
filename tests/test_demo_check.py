@@ -9,6 +9,12 @@ from core.config import load_config
 CFG = load_config()
 
 
+@pytest.fixture(autouse=True)
+def _no_pulse(monkeypatch):
+    """The askroom:audio container sets PULSE_SERVER; tests that want PulseAudio set it themselves."""
+    monkeypatch.delenv("PULSE_SERVER", raising=False)
+
+
 class Answers:
     """Scripted replies for Rig.ask."""
 
@@ -567,3 +573,103 @@ def test_a_hung_mic_alone_times_out_check_5(monkeypatch, capsys):
     assert time.monotonic() - t0 < 5.0
     out = capsys.readouterr().out
     assert "[FAIL] 5 audio" in out and "timed out after 1 s" in out, out
+
+
+# ---------------------------------------------------------------- PulseAudio (askroom:audio, Bluetooth speaker)
+
+class FakePactl:
+    """pactl list short sinks|sources and pactl info, as the host's PulseAudio would answer."""
+
+    def __init__(self, sinks, sources=(), default_sink=None, default_source=None, fail=False):
+        self.sinks, self.sources, self.fail = sinks, sources, fail
+        self.info = f"Server Name: pulseaudio\nDefault Sink: {default_sink}\nDefault Source: {default_source}\n"
+        self.calls = []
+
+    def __call__(self, args):
+        import subprocess
+        self.calls.append(args)
+        if self.fail:
+            return subprocess.CompletedProcess(args, 1, "", "Connection failure: Connection refused")
+        if args == ["info"]:
+            return subprocess.CompletedProcess(args, 0, self.info, "")
+        rows = self.sinks if args[-1] == "sinks" else self.sources
+        out = "".join(f"{i}\t{n}\tmodule-x.c\ts16le 2ch 44100Hz\t{st}\n" for i, (n, st) in enumerate(rows))
+        return subprocess.CompletedProcess(args, 0, out, "")
+
+
+BT = "bluez_sink.00_42_79_AA_BB_CC.a2dp_sink"
+HDMI = "alsa_output.platform-3510000.hda.hdmi-stereo"
+USB_MIC = "alsa_input.usb-Jabra_SPEAK_410-00.mono-fallback"
+
+
+def pulse_rig(tmp_path, mic="jabra", spk=None, **room_check):
+    asound_tree(tmp_path)
+    rig = dc.Rig(dict(CFG, stt={"input_device": mic}, tts={"output_device": spk},
+                      room_check=dict(CFG.get("room_check") or {}, **room_check)), manual=False)
+    rig.live = True
+    return rig
+
+
+@pytest.mark.parametrize("spk", [None, "pulse", "default"])
+def test_bluetooth_speaker_behind_pulseaudio_passes(tmp_path, monkeypatch, spk):
+    """Not an ALSA card: check 14 used to fail it. With PULSE_SERVER (scripts/dock.sh) the default sink is
+    checked with pactl; the mic, a USB card, is still found in ALSA."""
+    monkeypatch.setenv("PULSE_SERVER", "unix:/run/user/1000/pulse/native")
+    rig = pulse_rig(tmp_path, spk=spk, pulse_sink="bluez")
+    try:
+        pactl = FakePactl([(HDMI, "SUSPENDED"), (BT, "RUNNING")], default_sink=BT)
+        ok, msg = dc.check_devices(rig, asound=str(tmp_path), pactl=pactl)
+        assert ok is True and f"speaker via PulseAudio: {BT} (RUNNING)" in msg and "mic card 2 Jabra" in msg, msg
+    finally:
+        rig.close()
+
+
+def test_pulse_default_sink_that_is_not_the_bluetooth_speaker_fails(tmp_path, monkeypatch):
+    monkeypatch.setenv("PULSE_SERVER", "unix:/run/user/1000/pulse/native")
+    rig = pulse_rig(tmp_path, spk="pulse", pulse_sink="bluez")
+    try:
+        ok, msg = dc.check_devices(rig, asound=str(tmp_path), pactl=FakePactl([(HDMI, "IDLE")], default_sink=HDMI))
+        assert ok is False and "not like 'bluez'" in msg and "bluetoothctl connect" in msg, msg
+        ok, msg = dc.check_devices(rig, asound=str(tmp_path), pactl=FakePactl([]))
+        assert ok is False and "no PulseAudio sink" in msg and "Bluetooth speaker connected" in msg
+        ok, msg = dc.check_devices(rig, asound=str(tmp_path), pactl=FakePactl([], fail=True))
+        assert ok is False and "pactl failed" in msg and "PULSE_SERVER right (unix:" in msg
+    finally:
+        rig.close()
+
+
+def test_pulse_without_pactl_is_skipped_to_check_by_ear(tmp_path, monkeypatch):
+    monkeypatch.setenv("PULSE_SERVER", "unix:/run/user/1000/pulse/native")
+    rig = pulse_rig(tmp_path, spk="pulse")
+    try:
+        ok, msg = dc.check_devices(rig, asound=str(tmp_path), pactl=None)
+        assert ok is True and "not checked (no pactl here), check it by ear" in msg and "mic card 2" in msg
+        rig.cfg["stt"] = {"input_device": "pulse"}
+        ok, msg = dc.check_devices(rig, asound=str(tmp_path), pactl=None)
+        assert ok is None and msg.count("check it by ear") == 2                 # nothing checked: SKIP
+    finally:
+        rig.close()
+
+
+def test_pulse_mic_and_a_named_bluetooth_sink(tmp_path, monkeypatch):
+    monkeypatch.setenv("PULSE_SERVER", "unix:/run/user/1000/pulse/native")
+    rig = pulse_rig(tmp_path, mic="pulse", spk="bluez")
+    try:
+        pactl = FakePactl([(BT, "IDLE")], sources=[(BT.replace("sink", "sink") + ".monitor", "IDLE"), (USB_MIC, "RUNNING")],
+                          default_sink=BT, default_source=USB_MIC)
+        ok, msg = dc.check_devices(rig, asound=str(tmp_path), pactl=pactl)
+        assert ok is True and f"mic via PulseAudio: {USB_MIC} (RUNNING)" in msg and f"speaker via PulseAudio: {BT}" in msg
+    finally:
+        rig.close()
+
+
+def test_without_pulse_server_a_null_speaker_still_fails(tmp_path, monkeypatch):
+    """askroom:latest (no PulseAudio): null is the silent HDMI default, as before."""
+    monkeypatch.delenv("PULSE_SERVER", raising=False)
+    rig = pulse_rig(tmp_path, spk=None)
+    try:
+        pactl = FakePactl([(BT, "RUNNING")], default_sink=BT)
+        ok, msg = dc.check_devices(rig, asound=str(tmp_path), pactl=pactl)
+        assert ok is False and "HDMI, silent" in msg and not pactl.calls
+    finally:
+        rig.close()

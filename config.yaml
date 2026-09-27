@@ -605,6 +605,8 @@ room_check:
   min_ram_mb: 1024            # MemAvailable with the app running (Jetson: 8 GB shared with the GPU)
   max_frame_age_s: 5          # /state's last perception update must be this fresh
   grok_timeout_s: 10          # GET /models on api.x.ai (no tokens) must answer within this
+  pulse_sink: ""              # with PulseAudio (PULSE_SERVER): the default sink must contain this, e.g. "bluez"
+  pulse_source: ""            # ... and the default source this ("" = any)
 
 # Perception health (main.py Room). The live loop finishing no step for stale_s (camera or detector stuck):
 # answers about where things are start "My camera view is not updating right now." and /state has perception.stale.
