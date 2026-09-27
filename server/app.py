@@ -80,7 +80,9 @@ log = logging.getLogger("askroom.server")
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 BOUNDARY = "askroomframe"
-SNAP_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.(jpg|jpeg|png)$")
+# ':' is allowed: EventLog names a thing's snapshots '<ms>_thing:5210_APPEARED.jpg'. Never '/' or '\\', and no
+# leading '.'; the route also refuses '..' and anything that resolves outside the snapshot dir.
+SNAP_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*\.(jpg|jpeg|png)$")
 ASK_TIMEOUT_S = 10.0          # dashboard: ask_fn has its own 4 s LLM timeout; this is a backstop (main.ANSWER_LATE_S)
 ASK_SOURCES = {"dashboard", "phone"}       # /ask sources a client may name; both are spoken and aimed
 SMS_TIMEOUT_S = 10.0          # Twilio gives a webhook 15 s
