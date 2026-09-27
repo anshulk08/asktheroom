@@ -225,6 +225,10 @@ tts:
   elevenlabs_model: eleven_flash_v2_5
   piper_voice: en_US-lessac-medium
   output_device: null         # sounddevice index or part of the name (python -m voice.tts --devices); null = default (HDMI in the container)
+  keepalive_s: 480            # after this long with nothing played, a near-inaudible puff of noise between voice turns
+                              # keeps a Bluetooth speaker from switching itself off (~20 min on the Bose); 0 = off
+  keepalive_dbfs: -50         # its level (RMS); raise toward -45 if the speaker still sleeps
+  keepalive_ms: 300
 
 net:
   check_host: https://api.x.ai
