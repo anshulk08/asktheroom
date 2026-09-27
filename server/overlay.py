@@ -35,7 +35,7 @@ DIM_BGR = (170, 181, 157)
 
 
 def _label(e: dict, labels: Optional[dict] = None) -> str:
-    """'keys: inside box'; things by their taught name or 'unnamed object 7' (core/labels.py)."""
+    """'keys: inside box'; things by their taught name, else 'mug?' or 'something new' (core/labels.py)."""
     labels = labels or {}
     st = e.get("status", "UNKNOWN")
     parent = e.get("parent")

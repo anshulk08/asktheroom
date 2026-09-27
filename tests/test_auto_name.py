@@ -332,7 +332,7 @@ def test_config_off_by_default_and_from_config():
 def test_labels_and_phone_carry_the_guess():
     st = {"entities": [{"name": "thing:3", "label": None, "guess": {"name": "deodorant stick"}},
                        {"name": "thing:4", "label": "charger", "guess": {"name": "cable"}}]}
-    assert thing_labels(st) == {"thing:3": "unnamed object 3 (deodorant stick?)", "thing:4": "charger"}
+    assert thing_labels(st) == {"thing:3": "deodorant stick?", "thing:4": "charger"}
     e = P.compact_entity({"name": "thing:3", "kind": "target", "status": "VISIBLE",
                           "guess": {"name": "deodorant stick", "also": [], "confidence": 0.9}})
     assert e["g"] == "deodorant stick"
