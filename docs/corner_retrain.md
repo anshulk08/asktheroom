@@ -1,12 +1,15 @@
 # Corner-view detector retrain: the 10:15 PM checklist (spec 0010 P1-1)
 
 Goal: the prop detector recognises **notebook, box, keys and hands** on the coffee table **as the room build
-sees it** (Brio high in the corner, zoom 100, 1920x1080, table view = `table_view_rect` cut to 1280x720), so
+sees it** (Brio high in the corner, zoom 100, at `room_memory.capture_size`: 2560x1440 on the rig since
+capture-decode, 1920x1080 before; table view = `table_view_rect` cut to 1280x720), so
 the table's hide rules (keys under the notebook, notebook into the box) work in the room demo.
 Midnight go/no-go: notebook, box and keys at confidence ≥ 0.6 in ≥ 80% of the demo layout's frames.
 
-Code: branch `room/detector` (off `room-memory-m0`). New here: `capture.py --room VIEW` (captures exactly
-what the room build's detector sees) and `--scene`, `merge_sets.py`, `conf_sweep --images … --require`.
+Code: `room-memory-m0` / `room/integration` (both carry `room/detector` and Anshul's corner switches).
+`capture.py` opens the camera as the detector sees it (with room memory on, the table view; `--room VIEW` names
+a view explicitly, the table or a zone's crop), plus `--scene`, `merge_sets.py`, `conf_sweep --images … --require`,
+and Anshul's `synthesize.py --max-rot` and `train.py --flipud` for a corner camera (scripts/finetune/README.md).
 Mac tools are ready: `~/asktheroom/train-venv` (ultralytics 8.4.163, torch 2.14, MPS), the COCO start
 weights `~/asktheroom/ft/yolo26s.pt`, the EgoHands frames `~/asktheroom/ft/hands_public` (pubhand, class 8 = hand).
 
@@ -15,9 +18,9 @@ then **the Jetson** once more for the engine (G), with asktheroom-60's lock.
 
 ## A. Before the slot (5 min, no camera)
 
-1. A scratch copy of `room/detector` on the Jetson, next to the live build, never in `~/askroom`:
-   `~/askroom_ft` (git archive of `room/detector`), with `~/askroom_room`'s `config.local.yaml` and
-   `room_zones.json` copied in (they carry `room_memory.enabled`, `table_view_rect`, the zones).
+1. The code on the Jetson: `~/askroom_room` once it runs a build with this commit (it has `config.local.yaml`
+   and `room_zones.json`: `room_memory.enabled`, `capture_size`, `table_view_rect`, the zones), or a scratch
+   copy `~/askroom_ft` of the same commit with those two files copied in. Never `~/askroom`.
 2. Props on hand: keys, notebook, box (the demo ones), remote, wallet, phone, glasses case, pill bottle;
    4 distractors, one word each, none of our classes: `mug charger airpods deodorant` (or similar).
 3. Lamp on, the room lit as for the demo. Nobody walking behind the coffee table during captures.
@@ -25,18 +28,19 @@ then **the Jetson** once more for the engine (G), with asktheroom-60's lock.
 ## B. Capture (the 10:15–11:00 slot; ~30 min of it)
 
 The room app holds the camera, so it is stopped for the capture (Anshul's call; it's his slot):
-`docker stop upbeat_curie`. The Brio stays at zoom 100 (don't run `camera_setup.sh` with other values).
-All from `~/askroom_ft` on the Jetson host, `CAM=/dev/v4l/by-id/usb-046d_Logitech_BRIO_3675F8D2-video-index0`:
+`docker ps --filter ancestor=askroom:latest --format '{{.ID}} {{.Command}}' | grep main.py | cut -d' ' -f1 | xargs -r docker stop`.
+All from that checkout on the Jetson host, `CAM=/dev/v4l/by-id/usb-046d_Logitech_BRIO_3675F8D2-video-index0`:
 
 ```
 PY=~/askroom/.venv/bin/python          # the host venv (cv2 + numpy + yaml); only its python is used
 
 # B1. Table view, shell-game props: 8 poses each + 60 s of hands (~12 min)
-$PY scripts/finetune/capture.py --room table --device $CAM --data data/ft-corner-table \
+ROI=20,30,1250,660                     # the coffee-table top in table-view px (Anshul's; check qa_capture.jpg)
+$PY scripts/finetune/capture.py --room table --device $CAM --data data/ft-corner-table --roi $ROI \
     --only keys notebook box hand --poses 8 --hand-seconds 60
 
 # B2. Table view, the other props (4 poses) + distractors (3 poses) (~12 min)
-$PY scripts/finetune/capture.py --room table --device $CAM --data data/ft-corner-table \
+$PY scripts/finetune/capture.py --room table --device $CAM --data data/ft-corner-table --roi $ROI \
     --only remote wallet phone glasses pill_bottle mug charger airpods deodorant \
     --distractors mug charger airpods deodorant --poses 4 --distractor-poses 3
 
@@ -50,12 +54,14 @@ $PY scripts/finetune/capture.py --room table --device $CAM --data data/ft-corner
   The notebook: closed, open, and at an angle. Keys: flat, bunched, near the edge.
 - B1's hands: one hand, then both, slowly over the empty table from every side, open, fist, pointing,
   touching the table; sleeves as the judges will wear them.
-- If people or the floor show changes, add `--roi x1,y1,x2,y2` (the tabletop, table-view px of the 1280x720 frame).
+- `--roi` keeps the floor strip above the table (chair legs, the person placing) out of the change mask; if
+  `qa_capture.jpg` shows the table top cut off, widen it. The table is dark wood: lamp on, and don't lay a black
+  prop on the darkest grain. Leave the camera controls as the demo runs them (no `camera_setup.sh`).
 - Look at `data/ft-corner-table/qa_capture.jpg`: every box on its object, the empty table and the
   distractors unboxed. Redo one object with `--only <name>` (same command as its pass).
 - B4 (only if 10+ min remain; optional): one zone, for later, not for tonight's go/no-go:
   `--room couch --data data/ft-corner-couch --only remote wallet glasses pill_bottle --poses 3 --no-hands`.
-- Restart the room app: `docker start upbeat_curie`.
+- Restart the room app as it was started (the runbook's run command).
 
 Expected: ~24 + 20 + 12 real labelled frames, 4 empty-table negatives, ~100-150 hand frames, ~200 scene frames.
 
@@ -69,7 +75,7 @@ Expected: ~24 + 20 + 12 real labelled frames, 4 empty-table negatives, ~100-150 
 From a checkout of `room/detector` (e.g. `~/asktheroom/wt-room-det`), `T=~/asktheroom/train-venv/bin/python`:
 
 ```
-$T scripts/finetune/synthesize.py --data ~/asktheroom/ft/corner-table --n 600      # pastes on this view's backgrounds; check qa_synth.jpg
+$T scripts/finetune/synthesize.py --data ~/asktheroom/ft/corner-table --n 600 --max-rot 25   # corner view: nothing upside down; check qa_synth.jpg
 $T scripts/finetune/merge_sets.py --out ~/asktheroom/ft/corner-all \
     table=$HOME/asktheroom/ft/corner-table pubhand=$HOME/asktheroom/ft/hands_public
 ```
@@ -78,7 +84,7 @@ $T scripts/finetune/merge_sets.py --out ~/asktheroom/ft/corner-all \
 
 ```
 PYTORCH_ENABLE_MPS_FALLBACK=1 $T scripts/finetune/train.py --data ~/asktheroom/ft/corner-all \
-    --model ~/asktheroom/ft/yolo26s.pt --device mps --batch 8 --epochs 30 --val-trials cap3 \
+    --model ~/asktheroom/ft/yolo26s.pt --device mps --batch 8 --epochs 30 --val-trials cap3 --flipud 0 \
     --name askroom-yolo26s-corner
 ```
 
@@ -110,9 +116,11 @@ scp $B guru@10.90.84.178:askroom_room/models/askroom-yolo26s-corner.pt
 cd ~/askroom_room && scripts/dock.sh yolo export model=models/askroom-yolo26s-corner.pt format=engine half=True imgsz=640
 ```
 Then in `~/askroom_room/config.local.yaml`: `detect: {model: models/askroom-yolo26s-corner.engine}` and the
-per-class `conf_threshold` from F (drop the old `wallet: 0.6` / `phone: 0.6` unless F shows the need).
-Keep `room_memory.room_prop_conf` as the rig has it: the prop labels stay **off in the zones** (YOLOE + Grok
-does the room); the new model's labels are for the **table view**. Restart the app; its log's
+per-class `conf_threshold` from F, replacing the 0.99s that turn the old model's labels off on the rig (the World
+now applies each object's own cut too, so the per-class values are what the tracker uses). Zones read labels by
+`room_memory.room_prop_conf` (0.45 in config.yaml), not by `conf_threshold`: to keep the prop labels **off in the
+zones** (YOLOE + Grok does the room), set `room_memory: {room_prop_conf: 0.99}` there unless the rig already
+does. The new model's labels are for the **table view**. Restart the app; its log's
 `detector weights …` line must list the 9 classes with no "has no class for" warning, and `/state`
 carries it (`state.perception.model`). Then the shell game on the coffee table, 3/3 (spec 0010 P1-1).
 
