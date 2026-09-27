@@ -118,6 +118,7 @@ class ZoneVisit:
     missed: list[RoomTrack] = field(default_factory=list)      # confirmed tracks with a valid miss (misses already +1)
     dropped: list[RoomTrack] = field(default_factory=list)     # removed this visit (after `missed` handling)
     crop: Optional[np.ndarray] = None                          # the zone crop (BGR), for event snapshots
+    full: Optional[np.ndarray] = None                          # the whole camera frame, for answer evidence
 
 
 @dataclass

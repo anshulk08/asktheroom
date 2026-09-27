@@ -64,6 +64,7 @@ sentences. The table prompts keep answers to the table; people are only ever "so
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
 from collections import deque
@@ -185,6 +186,7 @@ Rules:
 - Never state or imply that medication was taken, swallowed, skipped or missed.
 - Answer about the table and what is on it. Don't describe people beyond "someone"; never guess who they are.
 - confidence: 0 to 1.
+- pictures: the numbers of the frames your answer rests on (at most 3; empty if none shows it).
 Reply with the JSON object only."""
 
 ROOM_RECALL_SYSTEM = """You answer spoken questions about what the room looked like earlier. You get pictures of the whole room that one camera, mounted high in a corner and looking down across the room at an angle, saved at the listed times (near the camera things look big; across the room, small), what an object tracker believed at each picture, and the tracker's events and activity notes for that time. A name ending in "?" is a guess ("mug?": say "what looks like a mug"); "something new" is a thing nobody has named (describe it by what you see). Never say "unnamed" or a number in brackets. The text names the areas of the room the rig knows and where each one is in the pictures.
@@ -197,11 +199,13 @@ Rules:
 - Don't describe people beyond "someone"; never guess who they are.
 - Never state or imply that medication was taken, swallowed, skipped or missed.
 - confidence: 0 to 1.
+- pictures: the numbers of the pictures your answer rests on (at most 3; empty if none shows it).
 Reply with the JSON object only."""
 
-RECALL_SCHEMA = {                  # seen first, as ROOM_SCHEMA
-    "type": "object", "additionalProperties": False, "required": ["seen", "answer", "confidence"],
-    "properties": {"seen": {"type": "string"}, "answer": {"type": "string"}, "confidence": {"type": "number"}},
+RECALL_SCHEMA = {                  # seen first, as ROOM_SCHEMA; pictures: which ones the answer rests on (evidence)
+    "type": "object", "additionalProperties": False, "required": ["seen", "answer", "confidence", "pictures"],
+    "properties": {"seen": {"type": "string"}, "answer": {"type": "string"}, "confidence": {"type": "number"},
+                   "pictures": {"type": "array", "items": {"type": "integer"}}},
 }
 
 
@@ -718,7 +722,23 @@ class VisualQA:
         text = _spoken(_unmark(str(d.get("answer") or "")))
         if not text or _conf(d) < self.c.abstain_below:
             return Answer(ABSTAIN)
-        return Answer(text)
+        return Answer(text, evidence=self._look_evidence(img, f.wall))
+
+    def _look_evidence(self, jpg: bytes, wall: float) -> list:
+        """The whole-room frame a look sent, saved in the snapshot dir as <ms>_look.jpg (pruned by age with
+        the event snapshots), as the answer's evidence."""
+        from core import evidence
+        snap = getattr(self.events, "snap_dir", None)
+        if not snap:
+            return []
+        path = os.path.join(snap, f"{int(wall * 1000)}_look.jpg")
+        try:
+            with open(path, "wb") as fh:
+                fh.write(jpg)
+        except OSError:
+            log.warning("room look: could not save its frame for evidence", exc_info=True)
+            return []
+        return evidence.trim([evidence.item("look", path, wall, f"What the camera saw at {_clock(wall)}", snap)])
 
     def _zone_text(self, img: Optional[np.ndarray]) -> str:
         """The zones' spoken names, each with where it is in an image of the whole view (img None: in the
@@ -1011,12 +1031,13 @@ class VisualQA:
         from voice.intents import _without_wake_word, normalize
         named = self._named_zones(_without_wake_word(normalize(question), self.cfg)) if view == "room" else []
         say = dict(self.room_zones or [])
-        n = 0
+        n, sent = 0, []
         for r in rows:
             img = cv2.imread(r.path)
             if img is None:
                 continue
             n += 1
+            sent.append(r)
             parts += [("text", f"{'Picture' if view == 'room' else 'Frame'} {n} at {_clock(r.t)}"
                                f"{', a hand in view' if r.hands else ''}; tracker: {digest_text(r.digest)}."),
                       ("image", _jpeg(img, self.c.look_px if view == "room" else self.c.recall_px)[0])]
@@ -1038,7 +1059,17 @@ class VisualQA:
         text = _spoken(str(d.get("answer") or ""))
         if not text or _conf(d) < self.c.abstain_below:
             return Answer("I can't tell from the pictures I saved.")
-        return Answer(text)
+        return Answer(text, evidence=self._recall_evidence(d.get("pictures"), sent))
+
+    def _recall_evidence(self, cited, sent: list) -> list:
+        """The saved frames Grok says its answer rests on (reply 'pictures': 1-based numbers), newest first."""
+        from core import evidence
+        snap = getattr(self.events, "snap_dir", None)
+        nums = [int(i) for i in (cited if isinstance(cited, list) else [])
+                if isinstance(i, (int, float)) and not isinstance(i, bool) and 1 <= int(i) <= len(sent)]
+        rows = sorted({sent[i - 1].id: sent[i - 1] for i in nums}.values(), key=lambda r: -r.t)
+        return evidence.trim(evidence.item("recall", r.path, r.t, f"Saved picture, {_clock(r.t)}", snap)
+                             for r in rows)
 
     def _context(self, t0: float, t1: float) -> str:
         """Narrations and world events in the window, as text for the recall prompt."""

@@ -377,7 +377,7 @@ def test_equal_guesses_prefer_the_visible_one_else_both_places_are_said(scene, w
     assert a.point_at == "thing:2"                      # the most recently seen of the two
     hide_under_notebook(scene, world, "m1", (40, 30))
     a = ask(world, "where is my mug")
-    assert (a.point_at, a.text) == ("thing:2", "Your mug, I think, is on the table."), a.text
+    assert (a.point_at, a.text) == ("thing:2", "Your mug, I think, is on the table. It showed up there just now."), a.text
     scene.remove("m2")                                  # the other one is lost from view
     scene.run(world, 3.0)
     assert world.get("thing:2").status in (Status.UNKNOWN, Status.UNDER)

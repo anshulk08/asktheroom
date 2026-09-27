@@ -579,6 +579,7 @@ class RoomMemory:
 
         visit = self.tracker.visit(zone.name, zone.say, obs, hands, changes, full.t, full.wall, full.idx,
                                    lum=lum, crop=crop.copy())
+        visit.full = full.img                  # an arrival's whole-view snapshot (EventLog copies it when used)
         if self.namer is not None:
             for tr in visit.confirmed:
                 # While a handoff is open only arrivals (their spot changed) are sent: static clutter never

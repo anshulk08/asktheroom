@@ -71,11 +71,11 @@ class NoPlace:
 # ---------- templates, one per row ----------
 
 def test_direct_fresh_arrival_observed_plural(w):
-    assert room(w, "keys").text == "Your keys are on the bookshelf. They appeared there 3 minutes ago."
+    assert room(w, "keys").text == f"Your keys are on the bookshelf. They appeared there at {clock(NOW - 180)}."
 
 
 def test_direct_fresh_arrival_observed_singular(w):
-    assert room(w, "wallet").text == "Your wallet is on the bookshelf. It appeared there 3 minutes ago."
+    assert room(w, "wallet").text == f"Your wallet is on the bookshelf. It appeared there at {clock(NOW - 180)}."
 
 
 def test_direct_fresh_arrival_not_observed(w):
@@ -111,7 +111,7 @@ def test_via_container_not_fresh(w):
 
 
 def test_prop_uses_the(w):
-    assert room(w, "box", say="the couch").text == "The box is on the couch. It appeared there 3 minutes ago."
+    assert room(w, "box", say="the couch").text == f"The box is on the couch. It appeared there at {clock(NOW - 180)}."
     t = NOW - 900
     assert room(w, "box", fresh=False, last_seen=t).text == f"I last saw the box on the bookshelf at {clock(t)}."
 
@@ -125,7 +125,7 @@ def test_missing_times_still_speak(w):
 
 def test_pill_bottle_room_wording(w):
     a = room(w, "pill_bottle")
-    assert a.text == "Your pill bottle is on the bookshelf. It appeared there 3 minutes ago."
+    assert a.text == f"Your pill bottle is on the bookshelf. It appeared there at {clock(NOW - 180)}."
     for kw in (dict(observed=False), dict(fresh=False), dict(fresh=False, absent=True),
                dict(via="box"), dict(via="box", fresh=False)):
         room(w, "pill_bottle", **kw)                         # spoken_ok checks no took / taken
@@ -151,7 +151,7 @@ def test_conflict_tail_on_table_answer(w):
 
 def test_conflict_tail_on_room_answer(w):
     a = room(w, "keys", conflicts=[conflict("keys", "the couch")])
-    assert a.text == "Your keys are on the bookshelf. They appeared there 3 minutes ago. " \
+    assert a.text == f"Your keys are on the bookshelf. They appeared there at {clock(NOW - 180)}. " \
                      "I also see keys on the couch."
 
 
@@ -202,7 +202,7 @@ def test_place_error_falls_back_to_table(w):
 def test_room_place_for_never_seen_on_table():
     fw = FakeWorld([Entity("keys", "target", Status.UNKNOWN, confidence=0.0)])
     fw.set_place("keys", room_place("keys"))
-    assert ask(fw, "keys").text == "Your keys are on the bookshelf. They appeared there 3 minutes ago."
+    assert ask(fw, "keys").text == f"Your keys are on the bookshelf. They appeared there at {clock(NOW - 180)}."
 
 
 def test_absent_room_object_gets_no_look_alike_sentence(w):

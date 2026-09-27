@@ -8,8 +8,9 @@ create_app(cfg, world, events, frames=None, ask_fn=None, table=None, care=None) 
                          ?raw=1 the camera frame as captured, nothing drawn (full.jpg at capture size)
   WS   /ws             WorldState JSON at server.push_hz plus new events since the last push
   GET  /events?since=t   events with wall >= t (oldest first), each with a snapshot_url
-  GET  /snapshots/{name} one event snapshot jpg (snapshot dir only)
-  POST /ask              {"text", "source"?: "dashboard" | "phone"} -> {"text", "point_at", "action", "latency_ms"}
+  GET  /snapshots/{name} one event snapshot jpg (snapshot dir only), or archive/YYYYMMDD-HH/<ms>.jpg
+  POST /ask              {"text", "source"?: "dashboard" | "phone"} -> {"text", "point_at", "action", "latency_ms",
+                         "evidence"} (evidence: the proof pictures, core/evidence.py; also in last_answer/answers)
   POST /voice            {"engine"?: "grok" | "rig" | "builtin", "grok_voice"?, "speed"?} the phone app's
                          voice for the rig's speaker (BLE bridge) -> the stored {"engine", "grok_voice", "speed"}
   POST /orientation      {"front": "bottom" | "right" | "top" | "left" | null} the user's seat, the camera-frame side of
@@ -72,6 +73,7 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from core.evidence import SNAP_REL_RE
 from core.types import Answer, Event, Status
 from core.viewframe import View, apply_saved, set_front
 from server import overlay, scoreboard
@@ -211,7 +213,7 @@ def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = 
             app.state.answer_seq += 1
             app.state.answers.append({"seq": app.state.answer_seq, "t": time.time(), "src": source,
                                       "q": question, "text": ans.text, "point_at": ans.point_at,
-                                      "action": ans.action})
+                                      "action": ans.action, "evidence": list(getattr(ans, "evidence", None) or [])})
 
     app.state.record_answer = record_answer
     placeholder_img = overlay.placeholder()
@@ -427,10 +429,11 @@ def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = 
 
     @app.get("/snapshots/{name:path}")
     def snapshot(name: str):
-        if not SNAP_NAME_RE.match(name) or ".." in name:
+        # an event snapshot, or an archive frame (archive/YYYYMMDD-HH/<ms>.jpg) that answer evidence cites
+        if not SNAP_REL_RE.match(name) or ".." in name:
             raise HTTPException(400, "bad snapshot name")
         p = (snap_root / name).resolve()
-        if p.parent != snap_root or not p.is_file():
+        if snap_root not in p.parents or not p.is_file():
             raise HTTPException(404, "no such snapshot")
         return FileResponse(p, media_type="image/jpeg", headers={"Cache-Control": "max-age=86400"})
 
@@ -447,7 +450,7 @@ def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = 
         ms = int((time.perf_counter() - t0) * 1000)
         app.state.last_answer = {"question": text, "text": ans.text, "point_at": ans.point_at,
                                  "action": ans.action, "latency_ms": ms, "source": source,
-                                 "t": time.time()}
+                                 "t": time.time(), "evidence": list(ans.evidence or [])}
         record_answer(text, ans, source)
         return ans, ms
 
@@ -463,7 +466,7 @@ def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = 
         source = body.get("source") if body.get("source") in ASK_SOURCES else "dashboard"
         ans, ms = await run_ask(text[:500], source, ASK_TIMEOUT_S)
         return JSONResponse({"text": ans.text, "point_at": ans.point_at, "action": ans.action,
-                             "latency_ms": ms})
+                             "latency_ms": ms, "evidence": list(ans.evidence or [])})
 
     # -- sms (Twilio)
     def _public_urls(request: Request) -> list[str]:

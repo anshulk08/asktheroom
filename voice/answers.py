@@ -11,15 +11,19 @@ TEACH itself is answered by voice/teach.py.
 """
 from __future__ import annotations
 
+import logging
 import re
 import time
 from datetime import datetime
 from typing import Optional
 
+from core import evidence
 from core.config import display_name, load_config
 from core.types import Answer, Entity, Event, Intent, Point, Status
 from core.viewframe import View
 from voice.intents import AWAY, normalize, parse
+
+log = logging.getLogger(__name__)
 
 __all__ = ["Answer", "answer", "ago", "clock", "area"]
 
@@ -119,6 +123,11 @@ def clock(wall: float) -> str:
     lt = time.localtime(wall)
     h = lt.tm_hour % 12 or 12
     return f"{h}:{lt.tm_min:02d} {'AM' if lt.tm_hour < 12 else 'PM'}"
+
+
+def _when(wall: float, now: float) -> str:
+    """When something happened, for a WHERE answer: 'just now', else 'at 1:42 PM'."""
+    return "just now" if now - wall < 60 else f"at {clock(wall)}"
 
 
 def area(pos: Optional[Point], cfg: dict) -> str:
@@ -223,7 +232,7 @@ def _where(obj: str, world, events, cfg: dict, now: float) -> Answer:
     if place is not None and place.kind == "room":
         ans = _tentative(_where_room(obj, place, cfg, now, world), place, cfg, obj)
     else:
-        ans = _where_table(obj, world, events, cfg, now)
+        ans = _placed_when(_where_table(obj, world, events, cfg, now), obj, world, events, cfg, now)
     if place is not None and place.conflicts:
         ans = Answer(f"{ans.text} {_conflict_tail(place.conflicts[0], cfg)}", ans.point_at, ans.action)
     return ans
@@ -250,11 +259,28 @@ def _where_room(obj: str, place, cfg: dict, now: float, world=None) -> Answer:
     if not place.fresh:
         return Answer(f"I last saw {Y.lower()} {n} on {say}{at}.")
     text = f"{Y} {n} {be} on {say}."
-    if place.arrival_observed:
-        text += f" {It} appeared there {ago(arrived, now)}."
+    if place.arrival_observed and arrived is not None:
+        text += f" {It} appeared there {_when(arrived, now)}."
     elif arrived is not None or last is not None:
         text += f" I've seen {it} there since {clock(arrived if arrived is not None else last)}."
     return Answer(text)
+
+
+def _placed_when(ans: Answer, obj: str, world, events, cfg: dict, now: float) -> Answer:
+    """A table object in view: when it got where it is ('Your keys are on the table. They were put there
+    at 1:42 PM.'), from its latest put-down or first sighting. Passive: the camera saw a hand, not whose."""
+    try:
+        e = world.get(obj)
+        if e.status != Status.VISIBLE or events is None:
+            return ans
+        ev = events.last_of_type(obj, ["PUT_BACK", "MOVED", "TAKEN_OUT", "APPEARED", "FOUND", "CORRECTED"])
+    except Exception:
+        return ans
+    if ev is None:
+        return ans
+    pk = _pk(cfg, obj)
+    how = f"{_be(pk, True)} put there" if ev.type in ("PUT_BACK", "MOVED", "TAKEN_OUT") else "showed up there"
+    return Answer(f"{ans.text} {_It(pk)} {how} {_when(ev.wall, now)}.", ans.point_at, ans.action)
 
 
 def _tentative(ans: Answer, place, cfg: dict, obj: str) -> Answer:
@@ -435,6 +461,7 @@ def _changes(events, cfg: dict, now: float, since: Optional[float]) -> Answer:
         return Answer(f"Nothing I can name has changed {when}.")
     order = sorted(said, key=lambda o: (not _named_thing(cfg, o), -said[o][1][-1].wall))
     sents: list[str] = []
+    proof: list = []
     for o in order[:3] if len(order) <= 3 else order[:2]:
         subj, g = said[o]
         pair = g if len(g) == 1 else [g[0], g[-1]]
@@ -445,6 +472,12 @@ def _changes(events, cfg: dict, now: float, since: Optional[float]) -> Answer:
         s = f"{subj[:1].upper()}{subj[1:]} {_be(_pk(cfg, o), True)} {ph}."
         if s not in sents:              # two look-alikes put down together read the same
             sents.append(s)
+            if len(proof) < 2:
+                ev = next((e for e in reversed(g) if e.snapshot), None)
+                if ev is not None:
+                    proof.append(evidence.from_event(
+                        ev, getattr(events, "snap_dir", None),
+                        f"{subj[:1].upper()}{subj[1:]} {_event_phrase(ev, cfg)}, {clock(ev.wall)}", kind="change"))
     if len(order) > 3:
         # A busy room changes hundreds of things: name a few, then 'a few other things' (a spoken list
         # of every one ran to 21,000 characters on the rig and took the app down with it)
@@ -458,7 +491,7 @@ def _changes(events, cfg: dict, now: float, since: Optional[float]) -> Answer:
             names.append("a few other things" if rest > 1 else "something else")
         lst = names[0] if len(names) == 1 else ", ".join(names[:-1]) + f" and {names[-1]}"
         sents.append(f"{lst[:1].upper()}{lst[1:]} also changed.")
-    return Answer(" ".join(sents))
+    return Answer(" ".join(sents), evidence=evidence.trim(proof))
 
 
 def answer(intent: Intent, world, events, cfg: Optional[dict] = None,
@@ -500,16 +533,71 @@ def answer(intent: Intent, world, events, cfg: Optional[dict] = None,
         if spoken and spoken != obj and spoken in (getattr(world.get(obj), "aliases", None) or []):
             cfg = {**cfg, "display_names": {**(cfg.get("display_names") or {}), obj: spoken}}   # 'brown wallet'
         if guessed:
-            return _guessed_answer(k, intent, guessed, world, events, cfg, now)
-        if k == "WHERE":
-            return _maybe_back(obj, _where(obj, world, events, cfg, now), world, cfg)
-        if k == "HISTORY":
-            return _plus_narration(_history(obj, world, cfg, now), obj, world, events, cfg, now)
-        return _plus_narration(_handled(obj, world, events, cfg, now), obj, world, events, cfg, now)
+            ans = _guessed_answer(k, intent, guessed, world, events, cfg, now)
+            obj = guessed[0]
+        elif k == "WHERE":
+            ans = _maybe_back(obj, _where(obj, world, events, cfg, now), world, cfg)
+        elif k == "HISTORY":
+            ans = _plus_narration(_history(obj, world, cfg, now), obj, world, events, cfg, now)
+        else:
+            ans = _plus_narration(_handled(obj, world, events, cfg, now), obj, world, events, cfg, now)
+        return _with_proof(ans, k, obj, world, events, cfg, now)
     return Answer("I can tell you where things are, what happened to them, or what changed.")
 
 
 # ---------- open world ----------
+
+def _with_proof(ans: Answer, k: str, obj: str, world, events, cfg: dict, now: float) -> Answer:
+    """ans with its evidence (core/evidence.py): the moment behind the answer. Never costs the answer."""
+    try:
+        ans.evidence = evidence.trim(_proof(k, obj, world, events, cfg, now))
+    except Exception:
+        log.exception("answer evidence failed")
+    return ans
+
+
+def _proof(k: str, obj: str, world, events, cfg: dict, now: float) -> list:
+    """WHERE: the event that put the object where it is (a room arrival: the whole view with the zone
+    close-up); HISTORY: the events spoken; HANDLED: the pick-up and the put-down spoken."""
+    snap = getattr(events, "snap_dir", None)
+    if events is None or not snap:
+        return []
+    n, Y = _dn(cfg, obj), _your(cfg, obj)
+    if k == "WHERE":
+        try:
+            place = world.place(obj, now) if hasattr(world, "place") else None
+        except Exception:
+            place = None
+        if place is not None and place.kind == "room":
+            ev = evidence.with_snapshot(events, obj, ["FOUND"])
+            if ev is None:
+                return []
+            rc = cfg.get("room_memory") or {}
+            return [evidence.from_event(ev, snap, f"{Y} {n}, on {place.say} at {clock(ev.wall)}",
+                                        box=place.box_px, box_space=tuple(rc.get("capture_size") or (1920, 1080)))]
+        e = world.get(obj)
+        ev = evidence.with_snapshot(events, obj, evidence.BY_STATUS.get(e.status.value)) or \
+            evidence.with_snapshot(events, obj)
+        if ev is None:
+            return []
+        latest = (events.last(obj, 1) or [None])[0]
+        box = (world.box_px(obj) if e.status == Status.VISIBLE and hasattr(world, "box_px") and latest is not None
+               and latest.wall == ev.wall else None)          # the box now is the box then: nothing happened since
+        return [evidence.from_event(ev, snap, f"{Y} {n}, {_event_phrase(ev, cfg)} at {clock(ev.wall)}", box=box)]
+    if k == "HISTORY":
+        return [evidence.from_event(ev, snap, f"{Y} {n}, {_event_phrase(ev, cfg)} at {clock(ev.wall)}")
+                for ev in world.history(obj, 3) if ev.snapshot][:2]
+    evs = list(reversed(events.last(obj, 50)))
+    picks = [i for i, ev in enumerate(evs) if ev.type == "PICKED_UP"]
+    if picks:
+        pick = evs[picks[-1]]
+        down = next((d for d in evs[picks[-1] + 1:] if d.type in PUT_DOWN), None)
+        shown = [ev for ev in (down, pick) if ev is not None]
+    else:
+        shown = [ev for ev in reversed(evs) if ev.type == "MOVED"][:1]
+    return [evidence.from_event(ev, snap, f"{Y} {n}, {_event_phrase(ev, cfg)} at {clock(ev.wall)}")
+            for ev in shown if ev.snapshot]
+
 
 def _target(intent: Intent, world, cfg: dict) -> Optional[str]:
     """Entity the question is about. A taught alias in the words wins ('where is my phone charger'

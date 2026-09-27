@@ -185,6 +185,11 @@ class World(ThingRules, RoomRules):
                     'merged': {n: e.merged_into for n, e in self.entities.items() if e.merged_into},
                     'room': self.room_json()}
 
+    def box_px(self, name: str) -> tuple | None:
+        """The last detected box of name in the table view's px (what its event snapshots show), or None."""
+        with self.lock:
+            return self._box_px.get(name)
+
     def history(self, name: str, n: int = 3) -> list[Event]:
         """Latest n events for name, newest first."""
         with self.lock:
@@ -856,15 +861,19 @@ class World(ThingRules, RoomRules):
 
     # ----- events -------------------------------------------------------------------------------
 
-    def _emit(self, name: str, etype: EventType, t=None, wall=None, img=None, **fields) -> Event:
+    def _emit(self, name: str, etype: EventType, t=None, wall=None, img=None, context=None, **fields) -> Event:
         """t / wall / img: a room event's capture time and zone crop (its snapshot, never the last table
-        frame); by default this update's time and frame."""
+        frame); by default this update's time and frame. context: the whole camera view, saved beside the
+        snapshot for answer evidence (a room arrival)."""
         frame = self._frame if t is None else (Frame(t, wall, img, -1) if img is not None else None)
         ev = Event(t=self._now if t is None else t, wall=self._wall if wall is None else wall, obj=name,
                    type=etype, confidence=self.entities[name].confidence, **fields)
         self._room_departure(ev)
         if self.events is not None:
-            self.events.add(ev, frame)
+            if context is not None:
+                self.events.add(ev, frame, context=context)
+            else:
+                self.events.add(ev, frame)
         else:
             self._history.append(ev)
         return ev

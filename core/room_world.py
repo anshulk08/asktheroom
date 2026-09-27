@@ -415,7 +415,8 @@ class RoomRules:
         self._present[name] = False
         self._confirmed.add(name)
         trk.role, trk.entity = 'assoc', name
-        return [self._emit(name, EventType.FOUND, t=visit.t, wall=visit.wall, img=visit.crop)]
+        return [self._emit(name, EventType.FOUND, t=visit.t, wall=visit.wall, img=visit.crop,
+                           context=getattr(visit, "full", None))]
 
     def _room_refresh(self, name: str, st: RoomState, trk: RoomTrack) -> None:
         """Its own track matched again. An observation older than the one last applied is ignored."""

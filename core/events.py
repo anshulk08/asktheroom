@@ -32,6 +32,7 @@ CREATE INDEX IF NOT EXISTS events_wall ON events(wall);
 CREATE INDEX IF NOT EXISTS events_obj_wall ON events(obj, wall);
 """
 
+CONTEXT_PX = 1280        # long side of a room arrival's whole-view snapshot (add(context=...))
 _COLS = 't, wall, obj, type, from_x, from_y, to_x, to_y, parent, edge, confidence, snapshot'
 
 
@@ -96,7 +97,11 @@ class EventLog:
             try:
                 if item is None:
                     return
-                path, img = item
+                path, img, max_px = item if len(item) == 3 else (*item, None)
+                h, w = img.shape[:2]
+                if max_px and max(h, w) > max_px:
+                    s = max_px / max(h, w)
+                    img = cv2.resize(img, (round(w * s), round(h * s)), interpolation=cv2.INTER_AREA)
                 if not cv2.imwrite(path, img):
                     log.warning('snapshot write failed: %s', path)
             except Exception:
@@ -134,11 +139,13 @@ class EventLog:
         thread under WAL, so they need no lock."""
         return self._mem_lock if self._mem is not None else contextlib.nullcontext()
 
-    def add(self, ev: Event, frame: Frame | None = None) -> None:
+    def add(self, ev: Event, frame: Frame | None = None, context=None) -> None:
         """Log ev (world thread). JPEG encoding happens on the writer thread, never here.
 
         With an image, the snapshot path is decided now, stored in the row and also set on
-        ev.snapshot so the caller can pass the event on with its path.
+        ev.snapshot so the caller can pass the event on with its path. context (an image: a room
+        arrival's whole camera view) is saved beside it as <snapshot stem>_room.jpg, <= CONTEXT_PX wide,
+        for answer evidence (core/evidence.py); pruned with the other JPEGs by age.
         """
         if frame is not None and frame.img is not None:
             ev.snapshot = os.path.join(
@@ -146,6 +153,8 @@ class EventLog:
             # Copy (~1 ms at 720p) so a capture loop that reuses its buffer cannot change the
             # pixels before the writer encodes them.
             self._snapq.put((ev.snapshot, frame.img.copy()))
+            if context is not None:
+                self._snapq.put((ev.snapshot[:-4] + '_room.jpg', context.copy(), CONTEXT_PX))
         fx, fy = ev.from_cm if ev.from_cm is not None else (None, None)
         tx, ty = ev.to_cm if ev.to_cm is not None else (None, None)
         # Commit every add. With WAL + synchronous=NORMAL a commit is an append to the -wal file

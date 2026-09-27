@@ -131,6 +131,9 @@ class Answer:
     point_at: Optional[str] = None       # entity name for the laser
     action: Optional[str] = None         # 'point' | 'sweep:left' | 'circle' | None
     target_cm: Optional[Point] = None    # a raw table position to point at when no entity fits (visual Q&A)
+    # the proof pictures behind the answer (core/evidence.py): [{kind, snapshot_url, t, caption, box, ...}];
+    # not part of equality, so an answer is the same answer with or without its pictures
+    evidence: list = field(default_factory=list, compare=False)
 
 
 def entity_json(e: Entity, resolved_cm: Optional[Point]) -> dict:

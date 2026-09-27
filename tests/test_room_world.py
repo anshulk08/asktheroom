@@ -175,6 +175,27 @@ def test_room_found_event_carries_the_visit_time_and_crop(scene, cfg):
     assert isinstance(frame, Frame) and frame.img is crop and frame.t == t
 
 
+def test_a_room_arrival_saves_the_whole_camera_view_for_answer_evidence(scene, cfg, tmp_path):
+    from core.events import EventLog
+    log = EventLog(':memory:', str(tmp_path / 'snaps'))
+    world = World(cfg, events=log)
+    depart(scene, world)
+    trk = appear(scene, world, 'r:1')
+    scene.run(world, 0.5)
+    trk.last_seen = trk.last_wall = scene.t
+    trk.hits, trk.confirmed = 2, True
+    full = np.full((1440, 2560, 3), 50, np.uint8)
+    visit = ZoneVisit('bookshelf', 'the bookshelf', scene.t, scene.t, 7, confirmed=[trk],
+                      crop=np.zeros((40, 60, 3), np.uint8))
+    visit.full = full
+    (ev,) = world.room_update(visit)
+    log.flush()
+    import cv2
+    assert ev.type == EventType.FOUND and cv2.imread(ev.snapshot).shape[:2] == (40, 60)   # the zone crop
+    assert cv2.imread(ev.snapshot[:-4] + '_room.jpg').shape[:2] == (720, 1280)          # and the whole view
+    log.close()
+
+
 def test_room_event_without_a_crop_has_no_table_snapshot(scene, cfg):
     log = FakeLog()
     world = World(cfg, events=log)
