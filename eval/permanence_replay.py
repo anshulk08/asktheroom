@@ -91,11 +91,12 @@ class TableCm:
             return
         from core.config import load_config
         from core.table import Table
+        cfg = meta.get("config") or load_config()        # the recording's table settings (tag mode, size)
         f = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
         json.dump(cal, f)
         f.close()
         try:
-            t = Table(load_config(), cal_path=f.name)
+            t = Table(cfg, cal_path=f.name)
             self.table = t if getattr(t, "ok", False) else None
         except Exception:
             self.table = None
