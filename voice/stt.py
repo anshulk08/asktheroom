@@ -143,7 +143,8 @@ def find_input_device(spec) -> tuple[Optional[int], str, list]:
     """stt.input_device -> (sounddevice index or None for the default mic, what it is, the matches). Like
     tts.output_device: an int (or digits) is the index; any other string, the first input device whose name
     contains it, case insensitive (sounddevice itself refuses a name several devices share: the Brio, a USB
-    mic and a USB speaker are all "USB Audio"). The status is default | index | match | ambiguous | missing;
+    mic and a USB speaker are all "USB Audio"). A device whose whole name is the string wins over those that
+    only contain it ("default" is not "sysdefault"). The status is default | index | match | ambiguous | missing;
     missing means a name was set and no input device has it."""
     if spec is None or (isinstance(spec, str) and not spec.strip()):
         return None, "default", []
@@ -153,6 +154,9 @@ def find_input_device(spec) -> tuple[Optional[int], str, list]:
     hits = [d for d in input_devices() if want in str(d.get("name", "")).lower()]
     if not hits:
         return None, "missing", []
+    exact = [d for d in hits if str(d.get("name", "")).strip().lower() == want]
+    if exact:                   # "default" / "pulse" (ALSA plugins through the host PulseAudio) are whole names;
+        return int(exact[0]["index"]), "match", exact    # "default" is also inside "sysdefault", listed first
     return int(hits[0]["index"]), ("ambiguous" if len(hits) > 1 else "match"), hits
 
 
