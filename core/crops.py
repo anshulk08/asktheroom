@@ -87,6 +87,16 @@ def close_up(img: np.ndarray, box, margin: float = 0.15) -> Optional[np.ndarray]
     return None if c is None else img[c[1]:c[3], c[0]:c[2]].copy()
 
 
+def shrink(img: Optional[np.ndarray], long_side: int) -> Optional[np.ndarray]:
+    """img with its long side at most long_side (INTER_AREA), never enlarged; a queued close-up is kept at the
+    size it is sent at, not at native resolution (a 3x context patch of a laptop at 1440p is ~4 MB)."""
+    if img is None:
+        return None
+    s = long_side / max(img.shape[:2])
+    return img if s >= 1 else cv2.resize(img, (max(1, round(img.shape[1] * s)), max(1, round(img.shape[0] * s))),
+                                         interpolation=cv2.INTER_AREA)
+
+
 def marked_view(img: np.ndarray, box, min_side: int = 240, grow: float = 3.0) -> Optional[np.ndarray]:
     """The object at box (img px) in a red box inside a square patch around it, grow x its long side and at
     least min_side px, clipped to the image, at img's resolution: the context Grok needs to tell a small or

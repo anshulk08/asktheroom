@@ -396,7 +396,11 @@ class AutoNamer:
         enlargement of an 817 px wide region at 1440p); else the crop store's confirmed view of ent, else
         this frame cut at its box. The context view is the same frame's patch around the box with ent in a
         red box (off with context: false, and never for a crop-store view, whose frame is gone)."""
-        from core.crops import close_up, marked_view
+        from core.crops import close_up, marked_view, shrink
+        views = self._views(ent, dets, frame, close_up, marked_view)
+        return None if views is None else (shrink(views[0], self.c.crop_px), shrink(views[1], self.c.context_px))
+
+    def _views(self, ent, dets, frame, close_up, marked_view):
         img = getattr(frame, "img", None)
         box = self._box(ent, dets) if img is not None else None
         full = self._full(frame) if box is not None else None

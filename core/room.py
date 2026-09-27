@@ -47,6 +47,7 @@ import cv2
 import numpy as np
 
 from core import geom
+from core.crops import shrink
 from core.room_types import RoomConfig, RoomObservation, RoomTrack, ZoneVisit
 from core.room_zones import Zone, Zones, view_version
 from core.types import BoxPx, Event, Frame
@@ -59,6 +60,7 @@ DEDUPE_IOU = 0.5            # two boxes of one class this overlapped in one crop
 THING = "thing"             # cls of an unnamed object (a YOLOE proposal); never matches a prop's track
 PROP_IOU = 0.5              # a proposal this overlapped with a prop observation is that prop
 MARK_MIN_SIDE = 240         # px: the context patch around a boxed object for "is it one of these?"
+CTX_PX = 384                # a queued open-naming context view is kept at most this long (its send size)
 NAME_MARGIN = 0.5           # a thing's close-up for Grok: its box grown by this per side (small, far objects
                             # need the surroundings to be recognisable: rig run Sat 26 Sep)
 ERR_LOG_S = 10.0            # a failing proposer is logged at most this often
@@ -589,7 +591,7 @@ class RoomMemory:
                            else _close_up(visit.crop, tr.box_px, x1, y1))
                     if img is not None:
                         tr.name_asked = True
-                        ctx = None if verify else _marked_close_up(visit.crop, tr.box_px, x1, y1)
+                        ctx = None if verify else shrink(_marked_close_up(visit.crop, tr.box_px, x1, y1), CTX_PX)
                         self.namer.submit(tr, img, hints, ctx=ctx)
         return visit
 

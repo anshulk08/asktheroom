@@ -323,6 +323,23 @@ def test_the_close_up_is_cut_from_the_full_frame_at_native_resolution(scene, wor
     assert [k for k, _ in grok.calls[0][1]].count("image") == 2
 
 
+def test_queued_views_are_kept_at_their_send_size(scene, world):
+    """A big thing's native close-up and 3x context patch are shrunk when queued (Jetson memory)."""
+    class Huge(FullFrames):
+        rect = (0, 0, 12800, 7200)                         # a 10x full frame: every view is over 384 px
+
+        def full_at(self, t):
+            import cv2
+            f = self.last
+            return Frame(t=f.t, wall=f.wall, img=cv2.resize(f.img, (12800, 7200), interpolation=cv2.INTER_NEAREST),
+                         idx=f.idx)
+
+    namer, _ = with_full(world, Huge())
+    put(scene, world, "deo", (40, 30))
+    job = namer._jobs[0]
+    assert max(job.img.shape[:2]) == 384 and max(job.ctx.shape[:2]) == 384
+
+
 def test_a_full_frame_from_another_moment_is_not_used(scene, world):
     namer, _ = with_full(world, FullFrames(same_idx=False))
     put(scene, world, "deo", (40, 30))
