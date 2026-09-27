@@ -62,6 +62,7 @@ STARTUP_S = 3.0     # configured objects first seen this soon after the first ba
 ARTICLES = {'my', 'the', 'a', 'an', 'your', 'our', 'this', 'that', 'his', 'her', 'their'}
 NEG = float('-inf')
 SAME_SIZE = 2.0     # 'a like size' for the same-spot birth veto: areas within this factor
+FORGOTTEN_MAX = 1000  # forgotten things still brought back when seen again at their spot (rule (b))
 REST_IOU = 0.5      # a proposal this much over the box a partly hidden thing rests in: the whole of it
 CROSS_UV = 1.0      # a hand in and out of a thing container on opposite sides of its middle, this far
                     # apart (in half-widths): it crossed the thing carrying something past, not into it
@@ -269,6 +270,7 @@ class ThingRules:
         self._unsure_until: dict[str, float] = {}       # thing -> no exemplar learning before this
         self._learn_t: dict[str, float] = {}
         self._forget_t = NEG                            # last housekeeping pass (_forget_lost)
+        self._forgotten: dict[str, None] = {}           # forgotten lost things, oldest first (FORGOTTEN_MAX)
         self._clean: dict[str, Detection] = {}          # this batch's unambiguous associations
         self._trail: dict[str, deque] = {}              # hand -> recent (t, box_cm)
         self._batch_boxes: list[tuple] = []             # this batch's object / proposal / hand boxes
@@ -514,7 +516,9 @@ class ThingRules:
                 self._unsure_until[n] = self._now + tc.ambiguous_s
 
     def _match_visible(self, props, seen) -> list[Detection]:
-        """Rule (b), in view: each visible thing takes its nearest proposal within gate_cm."""
+        """Rule (b), in view: each visible thing takes its nearest proposal within gate_cm. An occluded one
+        (a part of a bigger proposal, or inside a person) counts same_spot_cm farther: a thing that took a
+        part of itself while its whole box flickered kept it, and the whole box was born again."""
         tc = self._tcfg
         names = [n for n in self._visible_things() if n not in seen]
         pairs = []
@@ -523,7 +527,7 @@ class ThingRules:
                 ent = self.entities[n]
                 dd = geom.dist(d.center_cm, ent.pos_cm)
                 if dd <= tc.gate_cm and self._size_fits(n, d.box_cm):
-                    pairs.append((dd, i, n))
+                    pairs.append((dd + (tc.same_spot_cm if d.occluded else 0.0), i, n))
         taken = self._greedy(pairs, props, seen)
         self._resolve_splits(taken, props, seen)
         return [d for i, d in enumerate(props) if i not in taken]
@@ -716,9 +720,19 @@ class ThingRules:
                 and self.entities[n].pos_cm is not None
                 and geom.dist(d.center_cm, self.entities[n].pos_cm) <= tc.same_spot_cm
                 and self._size_fits(n, d.box_cm)]
+        if not spot:       # one forgotten (_forget_lost) is still itself when seen again at its spot
+            spot = [n for n in self._forgotten if self.entities[n].pre_pickup_pos is None
+                    and self.entities[n].pos_cm is not None
+                    and geom.dist(d.center_cm, self.entities[n].pos_cm) <= tc.same_spot_cm
+                    and self._size_fits(n, d.box_cm)]
         if spot:           # several lost there (duplicates of one object): the nearest, then the latest
-            return min(spot, key=lambda n: (geom.dist(d.center_cm, self.entities[n].pos_cm),
-                                            -(self.entities[n].last_seen or NEG))), []
+            back = min(spot, key=lambda n: (geom.dist(d.center_cm, self.entities[n].pos_cm),
+                                            -(self.entities[n].last_seen or NEG)))
+            if back in self._forgotten:
+                del self._forgotten[back]
+                self.entities[back].merged_into = None
+                self._things = sorted(self._things + [back], key=self._thing_number)
+            return back, []
         back = self._reborn(d, seen)
         if back:
             return back, []
@@ -850,7 +864,7 @@ class ThingRules:
 
     def _forget_lost(self) -> None:
         """Housekeeping, once a second: an unnamed thing lost (UNKNOWN / GONE) for over forget_unnamed_s
-        leaves the state, and unnamed things lost in place (no pick-up) at one spot (same_spot_cm, a like
+        leaves the state (seen again at its spot it is itself again, rule (b)), and unnamed things lost in place (no pick-up) at one spot (same_spot_cm, a like
         size: duplicates of one object) fold into the oldest, quietly (merged_into; history kept, no event).
         Named things, things holding others, things off the table or that left it within the room handoff
         window (a room zone may still take them), and configured objects are never touched. On the rig a clutter pile left 90 lost
@@ -863,12 +877,15 @@ class ThingRules:
         handoff = getattr(rc, 'handoff_s', 0.0) if rc is not None else 0.0
         keep = {e.parent for e in self.entities.values() if e.parent}
         keep |= {n for n, (t, _) in getattr(self, '_departures', {}).items() if self._now - t <= handoff}
+        # lost: archived and unseen for the whole presence window (a thing just confirmed is UNKNOWN, never
+        # seen, until its debounce says present: not lost)
         lost = [n for n in self._things if self.entities[n].merged_into is None and self.entities[n].zone == 'table'
-                and self.entities[n].status in ARCHIVED and not self.entities[n].aliases and n not in keep]
+                and self.entities[n].status in ARCHIVED and self.entities[n].last_seen is not None
+                and not any(self._bits[n]) and not self.entities[n].aliases and n not in keep]
         gone = set()
         for n in lost:
             e = self.entities[n]
-            if e.last_seen is None or self._wall - e.last_seen > tc.forget_unnamed_s:
+            if self._wall - e.last_seen > tc.forget_unnamed_s:
                 self._drop_thing(n, n)
                 gone.add(n)
         cells: dict[tuple, list[str]] = {}
@@ -902,6 +919,10 @@ class ThingRules:
         self._bits[name] = self._new_bits()
         self._present[name] = False
         self._merged.pop(name, None)
+        if into == name:
+            self._forgotten[name] = None
+            while len(self._forgotten) > FORGOTTEN_MAX:
+                del self._forgotten[next(iter(self._forgotten))]
 
     def _learn_looks(self) -> None:
         tc = self._tcfg

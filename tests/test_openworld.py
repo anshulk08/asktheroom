@@ -501,7 +501,21 @@ def test_unnamed_things_lost_long_ago_are_forgotten_but_named_ones_stay(scene, w
     assert things(world) == ['thing:2']
     assert world.get('thing:1').merged_into == 'thing:1'
     assert world.find('my charger') == 'thing:2'
-    assert [e.obj for e in appear(scene, world, 'a2', (40, 30), seconds=2.0)] == ['thing:3']   # a new thing
+    events = appear(scene, world, 'a2', (40, 30), seconds=2.0)      # seen again at its spot: itself
+    assert EventType.APPEARED not in types(events)
+    assert things(world) == ['thing:1', 'thing:2'] and world.get('thing:1').status == Status.VISIBLE
+    assert 'thing:1' in [e['name'] for e in world.state_json()['entities']]
+
+
+def test_housekeeping_never_touches_a_thing_not_yet_seen_as_present(scene, world):
+    """Between its confirmation and its debounce a new thing is UNKNOWN and never seen: forgetting it
+    then left its proposal to be born again a batch later (replay of the rig's laptop frames)."""
+    appear(scene, world, 'a', (40, 30), seconds=2.0)
+    ent = world.get('thing:1')
+    ent.status, ent.last_seen = Status.UNKNOWN, None
+    world._forget_t = float('-inf')
+    world._forget_lost()
+    assert ent.merged_into is None and things(world) == ['thing:1']
 
 
 def test_split_with_swapped_positions_is_resolved_by_appearance(scene, world):
