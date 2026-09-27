@@ -24,6 +24,14 @@ if [ "${ASKROOM_DEV_BIND:-1}" = 1 ]; then
 elif [ -d /dev/v4l ]; then
   cams=(-v /dev/v4l:/dev/v4l:ro)                # stable camera paths only (no replug)
 fi
-exec docker run --rm "${tty[@]}" --runtime=nvidia --ipc=host --network=host "${devs[@]}" "${cams[@]}" \
+# Docker masks /proc/device-tree, so Blinka (adafruit_servokit's `board`) and Jetson.GPIO can't tell which
+# Jetson this is ("board not supported"); name it from the host's device tree. Orin Nano / NX (p3767):
+# board.I2C() is then /dev/i2c-7, header pins 3/5.
+blinka=()
+if tr -d '\0' < /proc/device-tree/compatible 2>/dev/null | grep -q p3767; then
+  blinka=(-e BLINKA_FORCEBOARD="${BLINKA_FORCEBOARD:-JETSON_ORIN_NANO}" -e BLINKA_FORCECHIP="${BLINKA_FORCECHIP:-T234}"
+          -e JETSON_MODEL_NAME="${JETSON_MODEL_NAME:-JETSON_ORIN_NANO}")
+fi
+exec docker run --rm "${tty[@]}" --runtime=nvidia --ipc=host --network=host "${devs[@]}" "${cams[@]}" "${blinka[@]}" \
   -v /etc/localtime:/etc/localtime:ro -v /etc/timezone:/etc/timezone:ro \
   "${envf[@]}" -v "$PWD":/askroom -w /askroom -e PYTHONPATH=/askroom "$IMAGE" "$@"
