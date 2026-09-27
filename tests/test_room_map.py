@@ -122,6 +122,7 @@ def test_aim_px_recovers_from_a_wrong_jacobian(mapped, scale, monkeypatch):
         g.J, g.pulses = g.J * scale, (g.pulses[0] + 30, g.pulses[1] - 25)
         return g
     monkeypatch.setattr(rm, "pulses_for_px", skewed)
+    monkeypatch.setattr(laser, "max_on_s", 60.0)           # convergence, not the on-time budget (tested apart)
     rig.act.move(1500, 1500)                               # start far away: the feedforward is exact-ish
     t = center(rig.box_px("table"))
     t = (t[0] + 20, t[1] - 5)                              # off the sample grid
@@ -237,6 +238,8 @@ def room_main(tmp_path, monkeypatch):
     room = main.Room(cfg, demo_world(events), events, None, rig.frames, laser,
                      lambda text, source: Answer("x"))
     room.laser_timeout_s = 60
+    room._people_now = lambda img: []           # a person detector that sees nobody (this OpenCV may have no HOG)
+    room.room_head_px = (320.0, 0.0)            # the laser head, as the camera sees it (the beam check)
     return room, rig, Answer
 
 
@@ -308,3 +311,136 @@ def test_visual_point_off_the_table_becomes_a_room_action():
 def tempfile_dir():
     import tempfile
     return tempfile.mkdtemp(prefix="askroom_room_")
+
+
+# ----- room pointing on the room build (WS10): safety gates, routing from place(), the on-time cap
+
+def test_a_person_near_the_target_or_the_beam_refuses_the_aim(room_main):
+    room, rig, Answer = room_main
+    t = center(rig.box_px("table"))
+    n = len(rig.act.calls)
+    room._people_now = lambda img: [(t[0] + 30, t[1] - 200, t[0] + 120, t[1] + 20)]    # someone beside it
+    room.aim(Answer("x", action=f"room:{t[0]:.0f},{t[1]:.0f}"))
+    assert len(rig.act.calls) == n and room.world.laser["on"] is False
+
+
+def test_no_person_detector_able_to_look_means_no_aim(room_main):
+    room, rig, Answer = room_main
+    t = center(rig.box_px("table"))
+    n = len(rig.act.calls)
+    room._people_now = lambda img: None
+    room.aim(Answer("x", action=f"room:{t[0]:.0f},{t[1]:.0f}"))
+    assert len(rig.act.calls) == n and room.world.laser["on"] is False
+
+
+def test_a_point_at_an_object_with_a_full_frame_box_is_a_room_aim_at_its_centre(room_main):
+    from types import SimpleNamespace
+    room, rig, Answer = room_main
+    b = rig.box_px("table")
+    room.world.place = lambda name: SimpleNamespace(kind="room", box_px=b, pos_cm=None, via=name)
+    room.aim(Answer("Your keys are on the side table.", point_at="keys"))
+    assert room.world.laser["on"] is True and room.world.laser["target"] == "keys"
+    assert dist(rig.true_dot_px(), center(b)) < 13
+
+
+def test_hand_boxes_in_the_table_view_are_mapped_into_the_full_frame(room_main):
+    room, _, _ = room_main
+    room.view_rect = (0, 980, 817, 1440)                               # the rig's table view in 2560x1440
+    assert room._view_to_full((0, 0)) == (0, 980)
+    assert room._view_to_full((1280, 720)) == pytest.approx((817, 1440))
+
+
+def test_no_aim_stays_on_longer_than_max_on_s(room_main):
+    room, rig, Answer = room_main
+    room.max_on_s, room.room_dwell_s = 0.2, 30
+    t = center(rig.box_px("table"))
+    room.aim(Answer("x", action=f"room:{t[0]:.0f},{t[1]:.0f}"))
+    assert room.world.laser["on"] is True
+    assert wait_for(lambda: room.world.laser["on"] is False, 1.5) and rig.act.laser_on is False
+
+
+def test_people_are_looked_for_on_the_perception_thread(room_main):
+    """YOLOE isn't thread-safe: the aim asks, the perception thread runs the model on the newest full frame."""
+    import threading
+    room, _, _ = room_main
+    seen = []
+
+    class Prop:
+        def people(self, img):
+            seen.append(threading.current_thread().name)
+            return [(1, 2, 3, 4)]
+
+    room.detector = type("D", (), {"proposer": Prop()})()
+    del room._people_now                                 # the real one
+    t = threading.Thread(target=lambda: [room._people_want.wait(2), room._serve_people()], name="perception")
+    t.start()
+    assert room._people_now(None) == [(1, 2, 3, 4)] and seen == ["perception"]
+    t.join(2)
+
+
+# ----- eye safety inside aim_px (review of ws/laser): dark moves, per-try check, jumps, the on-time budget
+
+def lit_moves(act, since: float) -> list:
+    """Servo writes made while the laser was on, after `since`."""
+    log = [(t, on) for t, on in act.laser_log]
+    bad = []
+    for t, pan, tilt in act.writes:
+        if t < since:
+            continue
+        state = [on for tl, on in log if tl <= t]
+        if state and state[-1]:
+            bad.append((t, pan, tilt))
+    return bad
+
+
+def test_aim_px_never_moves_the_head_with_the_laser_on(mapped):
+    rig, laser, rm = mapped
+    t0 = rig.clock.now()
+    for box in ("table", "shelf"):
+        laser.aim_px(center(rig.box_px(box)), room_map=rm)      # the second aim slews from the first spot
+    assert lit_moves(rig.act, t0) == []
+    laser.off()
+
+
+def test_aim_px_stops_dark_when_the_safety_check_objects(mapped):
+    rig, laser, rm = mapped
+    calls = []
+
+    def check():
+        calls.append(1)
+        return "a person near the beam" if len(calls) >= 2 else None
+    r = laser.aim_px(center(rig.box_px("table")), room_map=rm, tol_px=0.01, check=check)
+    assert r.reason == "unsafe" and not r.on_target and rig.act.laser_on is False
+    assert laser.last_aim["unsafe"] == "a person near the beam"
+
+
+def test_aim_px_stops_dark_at_a_jump(mapped, monkeypatch):
+    rig, laser, rm = mapped
+    dots = iter([(100.0, 100.0), (600.0, 400.0), (100.0, 100.0), (100.0, 100.0)])   # 2nd look jumps far
+    monkeypatch.setattr(laser, "find_dot_px", lambda *a, **k: next(dots))
+    r = laser.aim_px(center(rig.box_px("table")), room_map=rm, tol_px=0.01)
+    assert r.reason == "jumped" and r.tries == 2 and not r.on_target and rig.act.laser_on is False
+
+
+def test_aim_px_stops_dark_at_the_on_time_budget(mapped, monkeypatch):
+    rig, laser, rm = mapped
+    monkeypatch.setattr(laser, "max_on_s", 0.3)
+    r = laser.aim_px(center(rig.box_px("table")), room_map=rm, tol_px=0.01)
+    assert r.reason == "budget" and not r.on_target and rig.act.laser_on is False
+    assert laser.last_aim["lit_s"] >= 0.3
+
+
+def test_an_exception_mid_aim_leaves_the_laser_off(mapped, monkeypatch):
+    rig, laser, rm = mapped
+    looks = iter([(100.0, 100.0)])
+
+    def look(*a, **k):
+        laser.act.laser(True)
+        try:
+            return next(looks)
+        except StopIteration:
+            raise OSError("camera gone")
+    monkeypatch.setattr(laser, "find_dot_px", look)
+    with pytest.raises(OSError):
+        laser.aim_px(center(rig.box_px("table")), room_map=rm, tol_px=0.01)
+    assert rig.act.laser_on is False

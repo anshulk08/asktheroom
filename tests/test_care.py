@@ -76,6 +76,7 @@ def test_end_to_end_condition_reminder_speaks_and_points(tmp_path, cal_path):
     care = Care(CFG, world, events, make_ask(CFG, world, events, net=None, other=no_grok), clock=lambda: now[0])
     rig = SimRig(CFG)
     room = main.Room(CFG, world, events, SimTable(CFG), None, rig.make_laser(cal_path), care.ask, tts=SpeakLog())
+    room.room_head_px, room._people_now = (640.0, 0.0), (lambda img: [])     # the laser gate: nobody in view
     room.laser_timeout_s = 60
     care.on_notice = room.respond
     care.morning.mark_delivered(now[0])        # this morning's report already played

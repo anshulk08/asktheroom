@@ -73,13 +73,13 @@ def test_fake_logs_calls_with_timestamps():
 
 
 def test_laser_auto_off_after_timeout():
-    a = fake()
+    a = fake(laser_timeout_s=3)
     a.laser(True)
-    a.clock.sleep(9.9)
+    a.clock.sleep(2.9)
     a.poll()
     assert a.laser_on
     a.laser(True)                                        # re-aim resets the timer
-    a.clock.sleep(9.9)
+    a.clock.sleep(2.9)
     a.poll()
     assert a.laser_on
     a.clock.sleep(0.2)
@@ -87,7 +87,19 @@ def test_laser_auto_off_after_timeout():
     assert not a.laser_on
     assert a.calls[-1][1] == "auto_off"
     t_off, on = a.laser_log[-1]
-    assert not on and t_off == pytest.approx(a.calls[-2][0] + 10)   # recorded at the deadline
+    assert not on and t_off == pytest.approx(a.calls[-2][0] + 3)    # recorded at the deadline
+
+
+def test_laser_timeout_never_exceeds_the_apps_max_on():
+    """The watchdog is the backstop for laser_room.max_on_s: a crash must not leave 10 s of beam."""
+    assert fake(laser_timeout_s=10).laser_timeout_s == 4.0
+    assert fake(laser_timeout_s=10, laser_room={"max_on_s": 2.5}).laser_timeout_s == 2.5
+    assert fake(laser_timeout_s=1).laser_timeout_s == 1.0
+    a = fake(laser_timeout_s=10)
+    a.laser(True)
+    a.clock.sleep(4.0)
+    a.poll()
+    assert not a.laser_on
 
 
 def test_laser_auto_off_realtime_watchdog():
@@ -95,6 +107,28 @@ def test_laser_auto_off_realtime_watchdog():
     a.laser(True)
     time.sleep(0.45)
     assert not a.laser_on
+    a.close()
+
+
+def test_the_watchdog_survives_a_failing_laser_off():
+    """One serial error must not end the only real-time guard on the laser."""
+    a = FakeActuator(dict(CFG, laser_timeout_s=0.15), realtime=True)
+    fails = []
+    hw_laser = a._hw_laser
+
+    def flaky(on, t):
+        if not on and not fails:
+            fails.append(t)
+            raise OSError("serial write failed")
+        hw_laser(on, t)
+
+    a._hw_laser = flaky
+    a.laser(True)
+    deadline = time.monotonic() + 2.0
+    while a.laser_on and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert fails and not a.laser_on                     # the retry after the failure switched it off
+    assert a._watchdog.is_alive()
     a.close()
 
 
@@ -184,3 +218,16 @@ def test_a_driver_that_cannot_start_falls_back_to_fake_with_the_reason(monkeypat
     assert type(a) is FakeActuator and "pca9685" in why and "adafruit_servokit" in why
     a, why = make_actuator_or_fake(dict(CFG, actuator="fake"), clock=SimClock())
     assert type(a) is FakeActuator and why is None
+
+
+def test_set_limits_only_narrows_and_reprograms_the_pca9685(monkeypatch):
+    monkeypatch.setitem(sys.modules, "adafruit_servokit", types.SimpleNamespace(ServoKit=_Kit))
+    a = make_actuator(dict(CFG, actuator="pca9685"), clock=SimClock())
+    a.set_limits(((1200, 1800), (500, 1600)))
+    assert a.limits() == ((1200.0, 1800.0), (700.0, 1600.0))             # tilt can't go below config's 700
+    assert a._kit.servo[0].range == (1200, 1800) and a._kit.servo[1].range == (700, 1600)
+    a.move(3000, 0, duration_s=0)
+    assert (a.pan, a.tilt) == (1800.0, 700.0)
+    with pytest.raises(ValueError):
+        a.set_limits(((2500, 2600), (800, 900)))
+    a.close()

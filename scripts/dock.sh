@@ -12,7 +12,10 @@ IMAGE="${ASKROOM_IMAGE:-askroom:latest}"   # docker/Dockerfile: the Ultralytics 
                                            # ASKROOM_IMAGE=askroom:demo to try a new build, latest to roll back
 devs=()
 # gpiochip: Blinka's board module (adafruit_servokit) imports Jetson.GPIO, which reads the GPIO chips.
-for d in /dev/video* /dev/i2c-7 /dev/gpiochip* /dev/snd /dev/input; do [ -e "$d" ] && devs+=(--device "$d"); done
+# ttyACM/ttyUSB: the stepper turret's Uno (actuator: turret) and serial actuators.
+for d in /dev/video* /dev/i2c-7 /dev/gpiochip* /dev/snd /dev/input /dev/ttyACM* /dev/ttyUSB*; do
+  [ -e "$d" ] && devs+=(--device "$d")
+done
 tty=(); [ -t 0 ] && tty=(-it)
 envf=(); [ -f .env ] && envf=(--env-file .env)   # API keys (e.g. XAI_API_KEY); .env is gitignored
 # Cameras: --device only passes the /dev/video* nodes that exist now, so a Brio replugged (or re-enumerated)
@@ -21,6 +24,8 @@ envf=(); [ -f .env ] && envf=(--env-file .env)   # API keys (e.g. XAI_API_KEY); 
 cams=()
 if [ "${ASKROOM_DEV_BIND:-1}" = 1 ]; then
   cams=(--device-cgroup-rule='c 81:* rmw' -v /dev:/dev)
+  # Same for serial boards (ttyACM 166, ttyUSB 188): a replugged Uno comes back as a new ttyACM node.
+  cams+=(--device-cgroup-rule='c 166:* rmw' --device-cgroup-rule='c 188:* rmw')
 elif [ -d /dev/v4l ]; then
   cams=(-v /dev/v4l:/dev/v4l:ro)                # stable camera paths only (no replug)
 fi
