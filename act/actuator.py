@@ -1,8 +1,9 @@
 """Pan-tilt head + laser actuators (spec H3). Owner: A.
 
-Pan/tilt are servo pulse widths in microseconds. Every actuator clamps to cfg servo_limits, eases
-moves in ~20 ms smoothstep steps, and switches the laser off after cfg laser_timeout_s, on close()
-and at interpreter exit. Hardware libraries are imported inside the driver classes only.
+Pan/tilt are servo pulse widths in microseconds (the stepper turret maps them to degrees). Every
+actuator clamps to cfg servo_limits, eases moves in ~20 ms smoothstep steps (the turret's firmware
+plans its own), and switches the laser off after cfg laser_timeout_s, on close() and at interpreter
+exit. Hardware libraries are imported inside the driver classes only.
 """
 from __future__ import annotations
 
@@ -288,12 +289,108 @@ class SerialActuator(BaseActuator):
             pass
 
 
+class TurretActuator(BaseActuator):
+    """Stepper pan-tilt head on firmware/turret: Arduino Uno + two MKS SERVO42D (firmware/README.md).
+
+    It takes servo-equivalent pulses, pulse = turret.center_us + degrees * turret.us_per_deg, so
+    act/laser.py, act/calibrate.py and act/room_map.py (fits, grids and tolerances in µs) work
+    unchanged. The firmware plans its own acceleration, so move() sends one aim and blocks until the
+    board reports DONE; duration_s is ignored. aim_deg() and point_at() take degrees and turret-frame
+    meters directly (act/pointing.py). Opening the port resets the Uno and makes wherever the mount
+    points 0 deg (= center_us), so close() parks it back there for the next start.
+    """
+
+    def __init__(self, cfg: dict, clock: Optional[Clock] = None, turret=None):
+        tc = cfg.get("turret") or {}
+        self.center_us = float(tc.get("center_us", 1500))
+        self.us_per_deg = float(tc.get("us_per_deg", 10))
+        if self.us_per_deg <= 0:
+            raise ValueError(f"turret.us_per_deg must be > 0, got {self.us_per_deg}")
+        self.move_timeout_s = float(tc.get("move_timeout_s", 10))
+        self.laser_offset_m = tuple(float(v) for v in tc.get("laser_offset_m", (0.0, 0.0, 0.0)))
+        self.park_on_close = bool(tc.get("park_on_close", True))
+        if turret is None:   # open the board first: a failure must not leave a half-made actuator live
+            from act.turret import Turret  # lazy: pyserial
+
+            turret = Turret(tc.get("port", "/dev/ttyACM0"), int(tc.get("baud", 115200)))
+        self._turret = turret
+        super().__init__(cfg, clock)
+        if tc.get("max_speed_deg_s"):
+            turret.speed(float(tc["max_speed_deg_s"]))
+        if tc.get("accel_deg_s2"):
+            turret.accel(float(tc["accel_deg_s2"]))
+        self.pan = self.tilt = self.center_us   # the firmware's 0,0 at power-up
+
+    # -- units
+    def us_to_deg(self, us: float) -> float:
+        return (float(us) - self.center_us) / self.us_per_deg
+
+    def deg_to_us(self, deg: float) -> float:
+        return self.center_us + float(deg) * self.us_per_deg
+
+    def limits_deg(self) -> tuple[tuple[float, float], tuple[float, float]]:
+        """servo_limits in degrees at the axis."""
+        (plo, phi), (tlo, thi) = self._limits
+        return ((self.us_to_deg(plo), self.us_to_deg(phi)), (self.us_to_deg(tlo), self.us_to_deg(thi)))
+
+    # -- protocol
+    def move(self, pan: float, tilt: float, duration_s: float = 0.3) -> None:
+        with self.lock:
+            self._check_timeout()
+            self._on_call("move", pan, tilt, duration_s)
+            self._emit(pan, tilt)
+            self.clock.sleep(SETTLE_S)   # the closed-loop driver trails the last pulse slightly
+
+    def aim_deg(self, pan_deg: float, tilt_deg: float) -> tuple[float, float]:
+        """Aim in degrees (clamped to servo_limits); blocks until settled. Returns the degrees reached."""
+        self.move(self.deg_to_us(pan_deg), self.deg_to_us(tilt_deg))
+        return self.us_to_deg(self.pan), self.us_to_deg(self.tilt)
+
+    def point_at(self, x: float, y: float, z: float) -> tuple[float, float]:
+        """Put the beam through turret-frame point (x right, y up, z forward, meters), correcting for
+        turret.laser_offset_m. Raises ActuatorError when the point is outside servo_limits."""
+        from act.pointing import solve_aim
+
+        aim = solve_aim((x, y, z), self.laser_offset_m, limits=self.limits_deg())
+        if not aim.reachable:
+            raise ActuatorError(f"({x}, {y}, {z}) m needs pan {aim.pan:.1f}, tilt {aim.tilt:.1f} deg: "
+                                f"outside servo_limits {self.limits_deg()}")
+        return self.aim_deg(aim.pan, aim.tilt)
+
+    # -- hardware hooks
+    def _emit(self, pan: float, tilt: float) -> None:
+        pan, tilt = self.clamp(pan, tilt)
+        self._hw_pulses(pan, tilt, self.clock.now())
+
+    def _hw_pulses(self, pan: float, tilt: float, t: float) -> None:
+        # The firmware clamps to its own soft limits too; keep what it actually targeted.
+        got = self._turret.aim(self.us_to_deg(pan), self.us_to_deg(tilt), wait=True,
+                               timeout_s=self.move_timeout_s)
+        self.pan, self.tilt = self.deg_to_us(got[0]), self.deg_to_us(got[1])
+
+    def _hw_laser(self, on: bool, t: float) -> None:
+        self._turret.laser(on)
+
+    def _hw_close(self) -> None:
+        try:
+            if self.park_on_close:
+                self._turret.aim(0.0, 0.0, wait=True, timeout_s=self.move_timeout_s)
+        except Exception:  # noqa: BLE001 - best effort: the port may already be gone
+            log.warning("turret: could not park at 0,0 before closing", exc_info=True)
+        finally:
+            try:
+                self._turret.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
 class BusServoActuator(BaseActuator):
     """Feetech STS / Dynamixel bus servos via a USB adapter. Not implemented for the hackathon."""
 
     def __init__(self, cfg: dict, clock: Optional[Clock] = None):
         raise NotImplementedError(
-            "BusServoActuator is a stub: use actuator: pca9685 (hobby servos) or serial (ESP32). "
+            "BusServoActuator is a stub: use actuator: pca9685 (hobby servos), serial (ESP32) or "
+            "turret (steppers on firmware/turret). "
             "For Feetech STS, map µs to 0-4095 steps and write register 42 (goal position).")
 
 
@@ -322,12 +419,12 @@ class FakeActuator(BaseActuator):
         super().close()
 
 
-ACTUATORS = {"pca9685": PCA9685Actuator, "serial": SerialActuator, "bus": BusServoActuator,
-             "fake": FakeActuator}
+ACTUATORS = {"pca9685": PCA9685Actuator, "serial": SerialActuator, "turret": TurretActuator,
+             "bus": BusServoActuator, "fake": FakeActuator}
 
 
 def make_actuator(cfg: dict, clock: Optional[Clock] = None) -> BaseActuator:
-    """Pick the driver by cfg['actuator'] (pca9685|serial|bus|fake, default fake)."""
+    """Pick the driver by cfg['actuator'] (pca9685|serial|turret|bus|fake, default fake)."""
     kind = str(cfg.get("actuator", "fake")).lower()
     if kind not in ACTUATORS:
         raise ValueError(f"unknown actuator {kind!r}; expected one of {sorted(ACTUATORS)}")
