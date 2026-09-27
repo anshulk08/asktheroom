@@ -281,6 +281,15 @@ def initial_prompt(cfg: dict, synonyms: bool = False) -> str:
     return f"Hey {wake}! Okay {wake}. {wake}, where are my {', '.join(names)}?"
 
 
+def question_prompt(cfg: dict) -> str:
+    """The Whisper prompt for a question (STT.listen: after the wake word or a click): stt.question_prompt,
+    natural questions the demo hears. Whisper takes the prompt as the speech before the clip, so questions
+    prime the way questions are phrased (the rig heard "What color is my pill bottle?" as "What car is my
+    belt?" with the list of names). Not for overheard speech: on babble, base.en wrote the prompt's questions
+    back ("What's on the kitchen counter?", scripts/eval_stt.py)."""
+    return str(((cfg or {}).get("stt") or {}).get("question_prompt") or "").strip() or initial_prompt(cfg)
+
+
 def echoes_prompt(text: str, prompt: str) -> bool:
     """Whisper writing its own prompt back on noise: the whole prompt, or its first two sentences or more
     ("Hey Room! Okay Room."). One greeting alone ("Okay room.") is what people say, so it isn't an echo."""
@@ -302,8 +311,12 @@ def clean(text: str) -> str:
 
 
 def filler_only(text: str) -> bool:
-    """What Whisper writes for noise: 'you' (12 times on the rig, Sat 26 Sep), 'Thank you.' (6), 'Thanks!'."""
+    """What Whisper writes for noise: 'you' (12 times on the rig, Sat 26 Sep), 'Thank you.' (6), 'Thanks!', and
+    one word over and over ('Room. Room. Room. Room.': small.en on babble with the greeting prompt,
+    scripts/eval_stt.py; nobody calls the rig three times in one breath)."""
     words = re.findall(r"[a-z]+", text.lower())
+    if len(words) >= 3 and len(set(words)) == 1:
+        return True
     return bool(words) and set(words) <= FILLER_WORDS and bool({"you", "thanks"} & set(words))
 
 
@@ -495,6 +508,74 @@ class WhisperServerBackend:
                 p.kill()
 
 
+class CloudBackend:
+    """Speech to text in the cloud, for questions only (STT.listen: after the wake word or a click). Overheard
+    speech (STT.hear) never leaves the rig: the always-on mic hears everyone's chatter.
+      xai   POST https://api.x.ai/v1/stt, $XAI_API_KEY (the key the rig already has for Grok), model
+            grok-voice-transcribe-2.0; the object names go as keyterms. $0.10 per audio hour, no free tier;
+            requests are kept 30 days, not trained on (docs.x.ai, checked 2026-09-27).
+      groq  POST https://api.groq.com/openai/v1/audio/transcriptions, $GROQ_API_KEY, whisper-large-v3-turbo with
+            the Whisper prompt. Free tier: 20 requests/min, 2,000/day, 28,800 audio s/day (each request billed
+            as at least 10 s); not stored by default (console.groq.com/docs, checked 2026-09-27).
+    transcribe raises on any failure; STT falls back to the local whisper.cpp model."""
+
+    APIS = {"xai": ("https://api.x.ai/v1/stt", "grok-voice-transcribe-2.0", "XAI_API_KEY"),
+            "groq": ("https://api.groq.com/openai/v1/audio/transcriptions", "whisper-large-v3-turbo", "GROQ_API_KEY")}
+
+    def __init__(self, provider: str, model: str = "", keyterms=(), timeout_s: float = 2.0, session=None):
+        if provider not in self.APIS:
+            raise ValueError(f"unknown stt.cloud.provider {provider!r}; expected none, xai or groq")
+        self.provider = provider
+        self.url, default_model, self.key_env = self.APIS[provider]
+        self.model = model or default_model
+        self.keyterms = [str(k)[:50] for k in keyterms][:100]
+        self.timeout_s = float(timeout_s)
+        if session is None:
+            import requests
+            session = requests.Session()
+        self.session = session
+
+    def key(self) -> str:
+        return os.environ.get(self.key_env, "").strip()
+
+    def transcribe(self, audio: np.ndarray, prompt: str, audio_ctx: int = 0) -> str:
+        import io
+        key = self.key()
+        if not key:
+            raise RuntimeError(f"${self.key_env} is not set")
+        buf = io.BytesIO()
+        write_wav(buf, audio)
+        if self.provider == "xai":
+            data = [("model", self.model), ("language", "en")] + [("keyterm", k) for k in self.keyterms]
+        else:
+            data = {"model": self.model, "language": "en", "temperature": "0", "response_format": "json",
+                    "prompt": prompt}
+        r = self.session.post(self.url, headers={"Authorization": f"Bearer {key}"}, data=data,
+                              files={"file": ("clip.wav", buf.getvalue(), "audio/wav")}, timeout=self.timeout_s)
+        r.raise_for_status()
+        return str(r.json().get("text", ""))
+
+
+def keyterms(cfg: dict) -> list[str]:
+    """The wake word, the object names and their synonyms, and stt.cloud.keyterms: the words a question here
+    is made of, for a cloud STT's vocabulary biasing."""
+    objs = cfg.get("objects") or {}
+    words = [str(((cfg.get("listen") or {}).get("wake_words") or ["room"])[0]).capitalize()]
+    words += [display_name(cfg, o) for o in objs]
+    words += [re.sub(r"^the ", "", str(k)) for k, v in (cfg.get("synonyms") or {}).items() if v in objs]
+    words += [str(k) for k in (((cfg.get("stt") or {}).get("cloud") or {}).get("keyterms") or [])]
+    return list(dict.fromkeys(words))
+
+
+def make_cloud(cfg: dict) -> Optional[CloudBackend]:
+    """stt.cloud.provider: none (default) | xai | groq."""
+    c = ((cfg or {}).get("stt") or {}).get("cloud") or {}
+    provider = str(c.get("provider") or "none").lower()
+    if provider in ("none", "off", "false"):
+        return None
+    return CloudBackend(provider, str(c.get("model") or ""), keyterms(cfg), float(c.get("timeout_s", 2.0)))
+
+
 BACKENDS = {"pywhispercpp": PyWhisperCppBackend, "cli": WhisperCliBackend,
             "server": WhisperServerBackend}
 
@@ -572,7 +653,7 @@ def read_wav(path) -> np.ndarray:
 
 class STT:
     def __init__(self, cfg: dict, clicker=None, backend: Optional[Backend] = None,
-                 vad: Optional[SileroVAD] = None, tts=None):
+                 vad: Optional[SileroVAD] = None, tts=None, cloud=None):
         """clicker: anything with pressed() -> bool; a press while recording ends it. backend and
         vad default to the cfg stt settings and are loaded on first use (or by warm()). tts: anything
         with a `.speaking` bool (voice.tts.TTS); when the rig starts talking mid-recording, the clip
@@ -593,8 +674,13 @@ class STT:
         self.device = s.get("input_device")
         self._dev, self._dev_ok = None, False
         self.input_status = ""              # default | index | match | ambiguous | missing | error, once resolved
-        self.prompt = initial_prompt(cfg or {}, synonyms=bool(s.get("prompt_synonyms", False)))
+        self.prompt = initial_prompt(cfg or {}, synonyms=bool(s.get("prompt_synonyms", False)))   # overheard
+        self.question_prompt = question_prompt(cfg or {})           # a question (listen)
         self._backend, self._vad = backend, vad
+        self.cloud = make_cloud(cfg or {}) if cloud is None else cloud   # questions only: STT.listen
+        self.cloud_down_s = float(((s.get("cloud") or {}).get("retry_after_s", 60)))
+        self._cloud_failed_t: Optional[float] = None
+        self.last_by = "local"              # who transcribed the last clip: local | xai | groq
         self.last_speech = False            # did the last recording contain speech?
         self.last_speech_s = 0.0            # how long: first to last speech block (0 without speech)
         self.last_clip_s = 0.0              # the whole recording, silence included
@@ -722,9 +808,11 @@ class STT:
         except Exception:
             return False
 
-    def transcribe(self, audio: np.ndarray, force: bool = False) -> str:
+    def transcribe(self, audio: np.ndarray, force: bool = False, question: bool = False) -> str:
         """Whisper base.en with the object-name prompt and a clip-sized audio_ctx. Empty audio
-        (VAD heard nobody) returns '' without running Whisper, which would hallucinate on silence."""
+        (VAD heard nobody) returns '' without running Whisper, which would hallucinate on silence.
+        question (STT.listen): the question prompt, and stt.cloud first when it is set up, the local model if
+        it fails or is slower than stt.cloud.timeout_s (then it is skipped for stt.cloud.retry_after_s)."""
         audio = np.asarray(audio, dtype=np.float32).reshape(-1)
         if len(audio) == 0 and not force:
             return ""
@@ -732,16 +820,40 @@ class STT:
         if len(audio) < n_min:
             audio = np.concatenate([audio, np.zeros(n_min - len(audio), dtype=np.float32)])
         t0 = time.monotonic()
-        ctx = audio_ctx_for(len(audio)) if self.audio_ctx == "sized" else self.audio_ctx
-        text = clean(self.backend.transcribe(audio, self.prompt, ctx))
+        prompt = self.question_prompt if question else self.prompt
+        text = self._cloud(audio, prompt) if question else None
+        self.last_by = self.cloud.provider if text is not None else "local"
+        if text is None:
+            ctx = audio_ctx_for(len(audio)) if self.audio_ctx == "sized" else self.audio_ctx
+            text = clean(self.backend.transcribe(audio, prompt, ctx))
         self.last_ms["transcribe"] = 1000 * (time.monotonic() - t0)
-        log.info("transcribed %.1f s in %.0f ms%s", len(audio) / RATE, self.last_ms["transcribe"],
-                 f": {text!r}" if self.log_text else "")
+        log.info("transcribed %.1f s in %.0f ms%s%s", len(audio) / RATE, self.last_ms["transcribe"],
+                 f" by {self.last_by}" if self.last_by != "local" else "", f": {text!r}" if self.log_text else "")
         return text
 
+    def _cloud(self, audio: np.ndarray, prompt: str) -> Optional[str]:
+        """The cloud STT's transcript, or None (not set up, no key, recently failed, failed now)."""
+        c = self.cloud
+        if c is None or not c.key():
+            return None
+        if self._cloud_failed_t is not None and time.monotonic() - self._cloud_failed_t < self.cloud_down_s:
+            return None
+        from net import call_with_deadline
+        try:
+            text = clean(call_with_deadline(c.transcribe, c.timeout_s + 0.3, audio, prompt, 0,
+                                            name=f"stt-{c.provider}"))
+            self._cloud_failed_t = None
+            return text
+        except Exception as ex:
+            self._cloud_failed_t = time.monotonic()
+            log.warning("%s speech to text failed (%s: %s); the local model transcribes for %.0f s",
+                        c.provider, type(ex).__name__, ex, self.cloud_down_s)
+            return None
+
     def listen(self) -> str:
-        """record_until_silence() then transcribe()."""
-        return self.transcribe(self.record_until_silence())
+        """A question (a click, or after the wake word): record_until_silence() then transcribe(), in the
+        cloud when stt.cloud is set up."""
+        return self.transcribe(self.record_until_silence(), question=True)
 
     def hear(self, idle_s: float = 8.0) -> str:
         """Always-on mic: wait up to idle_s for someone to speak, then record until they stop and
