@@ -175,3 +175,12 @@ def test_serial_protocol(monkeypatch):
     assert sent[-2] == b"P2400,1000,0\n" and sent[-1] == b"P2400,1000,1\n"
     a.close()
     assert sent[-1] == b"P2400,1000,0\n"
+
+
+def test_a_driver_that_cannot_start_falls_back_to_fake_with_the_reason(monkeypatch):
+    from act.actuator import make_actuator_or_fake
+    monkeypatch.setitem(sys.modules, "adafruit_servokit", None)
+    a, why = make_actuator_or_fake(dict(CFG, actuator="pca9685"), clock=SimClock())
+    assert type(a) is FakeActuator and "pca9685" in why and "adafruit_servokit" in why
+    a, why = make_actuator_or_fake(dict(CFG, actuator="fake"), clock=SimClock())
+    assert type(a) is FakeActuator and why is None

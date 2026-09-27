@@ -612,6 +612,15 @@ def test_laser_fitted_before_the_table_calibration_is_flagged(tmp_path):
     assert not main.laser_older_than_table(SimpleNamespace(timestamp=1000.0), str(tmp_path / "none.json"))
 
 
+def test_camera_defaults_to_the_configured_stable_path_when_it_exists(tmp_path):
+    dev = tmp_path / "usb-046d_Logitech_BRIO-video-index0"
+    assert main.default_camera({"demo_check": {"camera": str(dev)}}) == 0          # not plugged in
+    dev.write_text("")
+    assert main.default_camera({"demo_check": {"camera": str(dev)}}) == str(dev)
+    assert main.default_camera({"demo_check": {"camera": "3"}}) == 3
+    assert main.default_camera({}) == 0
+
+
 def test_the_ask_timeout_matches_the_server():
     import main
     from server.app import ASK_TIMEOUT_S

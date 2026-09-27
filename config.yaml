@@ -591,3 +591,13 @@ scoreboard:
 voice_guard:
   answer_limit_s: 10          # longest wait for a voice answer before the rules answer instead
   sorry_every_s: 10           # say "Sorry, something went wrong" at most this often
+
+# Morning checks of the running room app (demo_check.py checks 12-16; `--live` runs only the checks that
+# leave the camera and mic to the app). Read by demo_check.py only.
+room_check:
+  app_url: ""                 # the running app's dashboard; "" = http://127.0.0.1:<server.port>
+  app_log: data/room/app.log  # its log (scripts/room_app.sh appends here); the last log_lines are scanned
+  log_lines: 500
+  min_ram_mb: 1024            # MemAvailable with the app running (Jetson: 8 GB shared with the GPU)
+  max_frame_age_s: 5          # /state's last perception update must be this fresh
+  grok_timeout_s: 10          # GET /models on api.x.ai (no tokens) must answer within this

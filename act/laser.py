@@ -244,6 +244,7 @@ class Laser:
         self.jump_px = float(room.get("jump_px", 30))
         self.max_map_gap_px = float(room.get("max_map_gap_px", 60))
         self.fit: Optional[LaserFit] = None
+        self.disabled: Optional[str] = None   # why the hardware isn't usable (set by the app); aims refuse
         self.state = {"on": False, "target": None, "err_cm": None}
         self.last_aim: dict = {}
         self.last_frames: tuple[Optional[Frame], Optional[Frame]] = (None, None)
@@ -256,6 +257,8 @@ class Laser:
         return lk if lk is not None else contextlib.nullcontext()
 
     def _need_fit(self) -> LaserFit:
+        if self.disabled:
+            raise RuntimeError(f"laser disabled ({self.disabled})")
         if self.fit is None:
             raise RuntimeError(f"laser not calibrated (no {self.cal_path}); run python -m act.calibrate")
         return self.fit

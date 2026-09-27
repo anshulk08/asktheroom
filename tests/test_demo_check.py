@@ -27,10 +27,11 @@ def fake_rig():
     rig.close()
 
 
-def test_fake_run_passes_everything(capsys):
+def test_fake_run_passes_everything(capsys, monkeypatch):
+    monkeypatch.setattr(dc, "_xai_key", lambda: "")          # no real Grok call from the tests
     assert dc.main(["--fake", "--skip-manual"]) == 0
     out = capsys.readouterr().out
-    assert out.count("[PASS]") == 8 and "[SKIP] 8" in out and "[SKIP] 10" in out and "all checks passed" in out
+    assert out.count("[PASS]") == 9 and "[SKIP] 8" in out and "[SKIP] 10" in out and "all checks passed" in out
 
 
 def test_missing_camera_fails_every_check_that_needs_it(monkeypatch, capsys):
@@ -210,7 +211,7 @@ def test_clock_check_passes_on_a_set_clock_and_keeps_its_number():
         ok, msg = dc.check_clock(rig)
     finally:
         rig.close()
-    assert ok is True and dc.CHECKS[8][0] == "clock" and len(dc.CHECKS) == 11
+    assert ok is True and dc.CHECKS[8][0] == "clock" and len(dc.CHECKS) == 16
 
 
 def test_room_check_skips_when_off_and_rehits_the_sim_map():
@@ -221,7 +222,7 @@ def test_room_check_skips_when_off_and_rehits_the_sim_map():
         rig.cfg = dict(cfg, room=dict(cfg["room"], enabled=True))
         ok, msg = dc.check_room(rig)
         assert ok, msg
-        assert "re-hit" in msg and dc.CHECKS[-1][0] == "room"
+        assert "re-hit" in msg and dc.CHECKS[10][0] == "room"
         laser, _ = rig.part("room")
         laser.room_map.px[:, 0] += 80                    # the camera moved since the sweep
         laser.room_map._index()
@@ -250,3 +251,319 @@ def test_the_mic_check_records_the_named_mic_like_the_voice_loop(monkeypatch):
     with pytest.raises(RuntimeError, match="no input device"):
         rig.record(0.5)
     rig.close()
+
+
+class BlockingSoundDevice:
+    """sounddevice whose streams never finish and whose stop() never returns (a wedged ALSA device)."""
+
+    def __init__(self):
+        self.gate, self.rec_device = __import__("threading").Event(), None
+
+    def rec(self, n, samplerate, channels, dtype, device=None):
+        self.rec_device = device
+        return np.zeros((n, channels), np.float32)
+
+    def get_stream(self):
+        return type("S", (), {"active": True})()
+
+    def stop(self):
+        self.gate.wait()
+
+    def wait(self):
+        self.gate.wait()
+
+
+def test_a_blocking_audio_device_cannot_hang_the_run(monkeypatch, capsys):
+    import sys
+    import time
+    import voice.tts
+    sd = BlockingSoundDevice()
+    monkeypatch.setitem(sys.modules, "sounddevice", sd)
+    monkeypatch.setattr(voice.tts, "play_pcm", lambda pcm, rate, device=None: sd.gate.wait())
+    monkeypatch.setattr(voice.tts, "resolve_output_device", lambda spec: None)
+    import voice.stt                                          # the mic path is voice.stt.record_seconds
+    monkeypatch.setattr(voice.stt, "record_seconds", lambda seconds, spec=None: sd.gate.wait())
+    monkeypatch.setattr(dc, "DEFAULT_DEADLINE_S", 1.0)
+    monkeypatch.setattr(dc, "AUDIO_GRACE_S", 0.2)
+    t0 = time.monotonic()
+    try:
+        assert dc.main(["--skip-manual", "--only", "5", "9"]) == 1
+    finally:
+        sd.gate.set()
+    assert time.monotonic() - t0 < 5.0
+    out = capsys.readouterr().out
+    assert "[FAIL] 5 audio" in out and "timed out after 1 s" in out and "[PASS] 9 clock" in out
+
+
+def test_tone_plays_on_the_configured_speaker_with_a_deadline(monkeypatch):
+    import voice.tts
+    gate = __import__("threading").Event()
+    monkeypatch.setattr(dc, "AUDIO_GRACE_S", 0.1)
+    rig = dc.Rig(dict(CFG, tts={"output_device": "Jabra"}), manual=False)
+    try:
+        played = []
+        monkeypatch.setattr(voice.tts, "resolve_output_device", lambda spec: 7 if spec == "Jabra" else None)
+        monkeypatch.setattr(voice.tts, "play_pcm", lambda pcm, rate, device=None: played.append(device))
+        rig.play(np.zeros(2205, np.int16), 22050)
+        assert played == [7]                                 # the configured speaker, not the default (HDMI)
+        monkeypatch.setattr(voice.tts, "play_pcm", lambda pcm, rate, device=None: gate.wait())
+        with pytest.raises(TimeoutError, match="test tone"):
+            rig.play(np.zeros(2205, np.int16), 22050)
+    finally:
+        gate.set()
+        rig.close()
+
+def test_a_hung_part_fails_its_check_and_later_ones_fast(fake_rig):
+    import threading
+    gate = threading.Event()
+    fake_rig._make_thing = lambda: gate.wait() or 1
+    try:
+        ok, msg = dc.run_check_with_deadline(fake_rig, "x", lambda r: r.part("thing"), timeout=0.3)
+        assert ok is False and "timed out after 0 s" in msg and "wait" in msg
+        ok, msg = dc.run_check_with_deadline(fake_rig, "y", lambda r: r.part("thing"), timeout=5)
+        assert ok is False and "hung while starting" in msg
+    finally:
+        gate.set()
+
+
+def test_a_timed_out_prompt_does_not_swallow_the_next_answer():
+    import os
+    r, w = os.pipe()
+    rig = dc.Rig(CFG, fake=True, manual=True)
+    rig.prompts = dc.PromptReader(os.fdopen(r))
+    rig._ask = rig.prompts.ask
+    try:
+        ok, msg = dc.run_check_with_deadline(rig, "a", lambda rg: (True, rg.ask("first? ")), timeout=0.3)
+        assert ok is False and "timed out" in msg
+        os.write(w, b"yes\n")
+        ok, msg = dc.run_check_with_deadline(rig, "b", lambda rg: (True, rg.ask("second? ")), timeout=3)
+        assert (ok, msg) == (True, "yes")
+    finally:
+        os.close(w)
+        rig.close()
+
+
+def test_laser_off_now_does_not_wait_for_a_held_lock(fake_rig):
+    import threading
+    import time
+    laser = fake_rig.part("laser")
+    laser.act.laser(True)
+    held, release = threading.Event(), threading.Event()
+
+    def hog():
+        with laser.act.lock:
+            held.set()
+            release.wait(10)
+    threading.Thread(target=hog, daemon=True).start()
+    held.wait(2)
+    t0 = time.monotonic()
+    try:
+        fake_rig.laser_off_now()
+        assert time.monotonic() - t0 < 1.0
+        assert laser.act.laser_log[-1][1] is False                  # the hardware was told off
+    finally:
+        release.set()
+
+
+
+# ---------------------------------------------------------------- room checks (spec 0010 P1-3)
+
+class Resp:
+    def __init__(self, status=200, js=None, content=b""):
+        self.status_code, self._js, self.content = status, js, content
+
+    def json(self):
+        return self._js
+
+
+def room_rig(**cfg_over):
+    cfg = dict(CFG, room_memory=dict(CFG.get("room_memory") or {}, enabled=True), **cfg_over)
+    return dc.Rig(cfg, manual=False)
+
+
+def test_room_app_up_stalled_and_down():
+    import time
+    rig = room_rig()
+    try:
+        state = {"state": {"t": time.time(), "fps": 11.5, "room": {"keys": {"zone": "couch"}, "conflicts": []}}}
+        urls = []
+
+        def up(url, timeout):
+            urls.append(url)
+            return Resp(js=state) if url.endswith("/state") else Resp(content=b"\xff\xd8jpeg")
+        ok, msg = dc.check_room_app(rig, get=up)
+        assert ok and "11.5 fps" in msg and "room memory up (1 object" in msg, msg
+        assert urls[0] == "http://127.0.0.1:8000/state"
+        stale = {"state": {"t": time.time() - 60, "fps": 11.5}}
+        ok, msg = dc.check_room_app(rig, get=lambda url, timeout: Resp(js=stale))
+        assert not ok and "stalled" in msg
+        ok, msg = dc.check_room_app(rig, get=lambda url, timeout: Resp(js=state) if url.endswith("/state")
+                                    else Resp(404))
+        assert not ok and "room memory isn't running" in msg
+
+        def down(url, timeout):
+            raise ConnectionError("refused")
+        ok, msg = dc.check_room_app(rig, get=down)
+        assert not ok and "scripts/room_app.sh start" in msg
+    finally:
+        rig.close()
+
+
+def test_grok_reachable_refused_and_offline(monkeypatch):
+    rig = room_rig()
+    try:
+        monkeypatch.setenv("XAI_API_KEY", "sk-SECRET")
+        seen = {}
+
+        def ok_get(url, headers, timeout):
+            seen.update(url=url, auth=headers["Authorization"])
+            return Resp(200)
+        ok, msg = dc.check_grok(rig, get=ok_get)
+        assert ok and "ms round trip" in msg and seen["url"].endswith("/models") and seen["auth"] == "Bearer sk-SECRET"
+        ok, msg = dc.check_grok(rig, get=lambda url, headers, timeout: Resp(401))
+        assert not ok and "refused the key" in msg and "SECRET" not in msg
+
+        def offline(url, headers, timeout):
+            raise OSError("no route")
+        ok, msg = dc.check_grok(rig, get=offline)
+        assert not ok and "hotspot" in msg
+        monkeypatch.delenv("XAI_API_KEY")
+        monkeypatch.chdir(dc.tempfile.mkdtemp())            # no .env either
+        ok, msg = dc.check_grok(rig, get=ok_get)
+        assert not ok and "no XAI_API_KEY" in msg
+    finally:
+        rig.close()
+
+
+def test_grok_key_from_dotenv(tmp_path, monkeypatch):
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("OTHER=1\nexport XAI_API_KEY='sk-abc'\n")
+    assert dc._xai_key() == "sk-abc"
+
+
+DEVICES = [{"name": "HDMI 0", "max_input_channels": 0, "max_output_channels": 2},
+           {"name": "Logitech BRIO: USB Audio", "max_input_channels": 2, "max_output_channels": 0},
+           {"name": "Jabra SPEAK 410 USB", "max_input_channels": 1, "max_output_channels": 2}]
+
+
+@pytest.mark.parametrize("mic, spk, ok, want", [
+    ("jabra", "Jabra", True, "mic #2 Jabra"),
+    (1, "jabra", True, "mic #1 Logitech"),
+    ("jabra", None, False, "HDMI, silent"),
+    ("anker", "jabra", False, "no input device named like 'anker'"),
+    ("jabra", "brio", False, "no output device"),                 # the Brio has no speaker
+])
+def test_mic_and_speaker_are_found_by_name(mic, spk, ok, want):
+    rig = dc.Rig(dict(CFG, stt={"input_device": mic}, tts={"output_device": spk}), manual=False)
+    try:
+        got, msg = dc.check_devices(rig, query=lambda: DEVICES)
+        assert got is ok and want in msg, msg
+    finally:
+        rig.close()
+
+
+def test_memory_and_log_tail(tmp_path):
+    mi = tmp_path / "meminfo"
+    log = tmp_path / "app.log"
+    rig = dc.Rig(dict(CFG, room_check={"app_log": str(log), "log_lines": 50, "min_ram_mb": 1024}), manual=False)
+    try:
+        mi.write_text("MemTotal: 7800000 kB\nMemAvailable: 2097152 kB\n")
+        ok, msg = dc.check_memory(rig, meminfo=str(mi))
+        assert not ok and "no app log" in msg
+        old = ["NvMapMemAlloc error 12 at startup"] + ["fine"] * 80          # scrolled out of the tail
+        log.write_text("\n".join(old) + "\n")
+        ok, msg = dc.check_memory(rig, meminfo=str(mi))
+        assert ok and "2.0 GB available" in msg and "0 NvMapMemAlloc" in msg, msg
+        with open(log, "a") as f:
+            f.write("NvMapMemAlloc error 12\nTraceback (most recent call last):\n")
+        ok, msg = dc.check_memory(rig, meminfo=str(mi))
+        assert not ok and "1 NvMapMemAlloc, 1 tracebacks" in msg
+        log.write_text("fine\n")
+        mi.write_text("MemAvailable: 600000 kB\n")
+        ok, msg = dc.check_memory(rig, meminfo=str(mi))
+        assert not ok and "under 1.0 GB" in msg
+    finally:
+        rig.close()
+
+
+def test_namer_queue_is_bounded(fake_rig):
+    ok, msg = dc.check_namer(fake_rig)
+    assert ok and "-> 8 kept" in msg, msg
+
+
+def test_live_runs_only_the_checks_that_leave_the_camera(monkeypatch, capsys):
+    ran = []
+    monkeypatch.setattr(dc, "CHECKS", [(n, (lambda n: lambda rig: (ran.append(n), (True, "ok"))[1])(n))
+                                       for n, _ in dc.CHECKS])
+    assert dc.main(["--live", "--skip-manual"]) == 0
+    assert set(ran) == dc.LIVE_CHECKS and "camera" not in ran and "audio" not in ran
+
+
+def test_app_url_follows_config_then_the_saved_port(tmp_path):
+    args = tmp_path / "app.args"
+    assert dc.app_url(CFG, str(args)) == "http://127.0.0.1:8000"
+    args.write_text("--port\n8080\n--no-voice\n")
+    assert dc.app_url(CFG, str(args)) == "http://127.0.0.1:8080"          # what room_app.sh started
+    args.write_text("--port=9001\n")
+    assert dc.app_url(CFG, str(args)) == "http://127.0.0.1:9001"
+    cfg = dict(CFG, room_check={"app_url": "http://10.0.0.5:8080/"})
+    assert dc.app_url(cfg, str(args)) == "http://10.0.0.5:8080"
+
+
+def asound_tree(root, busy_mic=False):
+    """A /proc/asound like the rig's: HDMI (playback), the Brio (capture only), a Jabra (both)."""
+    (root / "cards").write_text(
+        " 0 [HDA            ]: tegra-hda - NVIDIA Jetson Orin Nano HDA\n"
+        "                      NVIDIA Jetson Orin Nano HDA at 0x3518000 irq 110\n"
+        " 1 [BRIO           ]: USB-Audio - Logitech BRIO\n"
+        "                      Logitech BRIO at usb-3610000.usb-2.3, super speed\n"
+        " 2 [USB            ]: USB-Audio - Jabra SPEAK 410 USB\n"
+        "                      Jabra SPEAK 410 USB at usb-3610000.usb-2.4, full speed\n")
+    for card, pcms in ((0, ["pcm3p"]), (1, ["pcm0c"]), (2, ["pcm0c", "pcm0p"])):
+        for pcm in pcms:
+            sub = root / f"card{card}" / pcm / "sub0"
+            sub.mkdir(parents=True)
+            running = busy_mic and card == 2 and pcm.endswith("c")
+            (sub / "status").write_text("state: RUNNING\nowner_pid   : 99\n" if running else "closed\n")
+
+
+@pytest.mark.parametrize("mic, spk, busy, ok, want", [
+    ("jabra", "jabra", True, True, "mic card 2 Jabra SPEAK 410 USB (in use by the app)"),
+    ("BRIO", "Jabra", False, True, "mic card 1 Logitech BRIO"),
+    ("jabra", "brio", False, False, "no output card named like 'brio'"),      # the Brio has no speaker
+    ("anker", "jabra", False, False, "no input card named like 'anker'"),
+    (2, "jabra", False, False, "indexes shift"),
+    ("jabra", None, False, False, "HDMI, silent"),
+])
+def test_live_devices_come_from_alsa_and_a_busy_mic_passes(tmp_path, mic, spk, busy, ok, want):
+    asound_tree(tmp_path, busy_mic=busy)
+    rig = dc.Rig(dict(CFG, stt={"input_device": mic}, tts={"output_device": spk}), manual=False)
+    rig.live = True
+    try:
+        got, msg = dc.check_devices(rig, asound=str(tmp_path))
+        assert got is ok and want in msg, msg
+    finally:
+        rig.close()
+
+
+def test_a_hung_mic_alone_times_out_check_5(monkeypatch, capsys):
+    """Rig.record is voice.stt.record_seconds (room/voice): the per-check deadline still bounds a mic that
+    never returns, with a speaker that works."""
+    import threading
+    import time
+    import voice.stt
+    import voice.tts
+    gate = threading.Event()
+    monkeypatch.setattr(voice.tts, "resolve_output_device", lambda spec: None)
+    monkeypatch.setattr(voice.tts, "play_pcm", lambda pcm, rate, device=None: None)
+    monkeypatch.setattr(voice.stt, "record_seconds", lambda seconds, spec=None: gate.wait())
+    monkeypatch.setattr(dc, "DEFAULT_DEADLINE_S", 1.0)
+    t0 = time.monotonic()
+    try:
+        assert dc.main(["--skip-manual", "--only", "5"]) == 1
+    finally:
+        gate.set()
+    assert time.monotonic() - t0 < 5.0
+    out = capsys.readouterr().out
+    assert "[FAIL] 5 audio" in out and "timed out after 1 s" in out, out

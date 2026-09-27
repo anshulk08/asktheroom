@@ -93,6 +93,17 @@ def camera_source(s: str):
     return int(s) if s.isdigit() else s
 
 
+def default_camera(cfg: dict):
+    """No --camera: the rig's Brio by its stable path (config demo_check.camera) when that path exists,
+    else index 0 (a laptop). An index is a guess on the rig: /dev/video2 is the Brio's infrared node."""
+    path = str((cfg.get("demo_check") or {}).get("camera") or "").strip()
+    if path and not path.isdigit() and os.path.exists(path):
+        return path
+    if path:
+        log.info("camera %s not found; using camera 0", path)
+    return camera_source(path) if path.isdigit() else 0
+
+
 def warm_on_connect(netmon, warm: Callable[[], object]) -> None:
     """Warm the connection to Grok (core.xai.warm) now if online, and every time the network comes back:
     otherwise the first question after a start or a drop pays for the TLS handshake and can run past its
@@ -956,13 +967,18 @@ def build(cfg: dict, fake: bool = False, camera: int = 0, with_voice: bool = Tru
     else:
         import act.actuator
         import act.laser
-        actuator = act.actuator.make_actuator(cfg)     # cfg["actuator"]: fake | pca9685 | serial
+        # A driver that can't start (adafruit_servokit missing, no board on I2C) logs "LASER DISABLED" and
+        # gives a FakeActuator: answers are spoken, the app runs.
+        actuator, why = act.actuator.make_actuator_or_fake(cfg)   # cfg["actuator"]: fake | pca9685 | serial
         cleanup.append(actuator.close)
-        if str(cfg.get("actuator", "fake")).lower() == "fake":
+        if why is None and str(cfg.get("actuator", "fake")).lower() == "fake":
             log.warning("actuator is 'fake': the servos will not move. On the rig set `actuator: pca9685` "
                         "(or serial/bus) in config.local.yaml")
         laser = act.laser.Laser(actuator, frames, table, cfg["paths"]["laser_cal"], cfg=cfg)
-        if laser.fit is None:
+        laser.disabled = why
+        if why is not None:
+            pass                                        # make_actuator_or_fake logged it
+        elif laser.fit is None:
             log.warning("laser not calibrated (%s missing); answers will be spoken only",
                         cfg["paths"]["laser_cal"])
         elif laser_older_than_table(laser.fit, table.cal_path):
@@ -1038,8 +1054,9 @@ def main(argv=None) -> int:
     ap.add_argument("--fake", action="store_true", help="no hardware: sim camera, simulated laser, Enter to ask")
     ap.add_argument("--no-voice", action="store_true", help="dashboard and /ask only")
     ap.add_argument("--listen", choices=["always", "wake", "click"], help="override listen.mode")
-    ap.add_argument("--camera", type=camera_source, default=0,
-                    help="camera index, or a stable path like /dev/v4l/by-id/usb-046d_0809_...-video-index0")
+    ap.add_argument("--camera", type=camera_source, default=None,
+                    help="camera index, or a stable path like /dev/v4l/by-id/usb-046d_...-video-index0 "
+                         "(default: config demo_check.camera if it exists, else 0)")
     ap.add_argument("--video", help="play this recording instead of the camera (through the real detector)")
     ap.add_argument("--host")
     ap.add_argument("--port", type=int)
@@ -1052,7 +1069,8 @@ def main(argv=None) -> int:
     cfg = load_config(args.config)
     if args.listen:
         cfg["listen"] = dict(cfg.get("listen") or {}, mode=args.listen)
-    room, perception = build(cfg, fake=args.fake, camera=args.camera, with_voice=not args.no_voice,
+    camera = args.camera if args.camera is not None else default_camera(cfg)
+    room, perception = build(cfg, fake=args.fake, camera=camera, with_voice=not args.no_voice,
                              video=args.video)
     host = args.host or cfg["server"]["host"]
     port = args.port or cfg["server"]["port"]
