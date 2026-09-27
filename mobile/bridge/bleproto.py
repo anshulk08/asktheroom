@@ -474,12 +474,14 @@ STATE_MAX_BYTES = 12_000
 
 
 def _cut_rank(e: dict) -> tuple:
-    """Which entity goes first when a state is over budget (lower first): unnamed things lost or gone,
-    then hidden, then visible, oldest first; named things and configured objects only after all of them."""
+    """Which entity goes first when a state is over budget (lower first): unnamed things, then ones with only
+    a guess, each lost or gone first, then hidden, then visible, oldest first; named things, configured
+    objects and registry objects only after all of them."""
     thing = str(e.get("n", "")).startswith("thing:")
-    named = not thing or bool(e.get("a")) or bool(e.get("g")) or "rg" in e   # registry objects are never cut
+    named = not thing or bool(e.get("a")) or "rg" in e      # configured, taught or in the registry
+    tier = 2 if named else 1 if e.get("g") else 0           # a Grok guess alone doesn't protect a duplicate
     status = {"X": 0, "G": 0, "U": 1, "I": 1, "H": 2, "V": 2}.get(e.get("s"), 0)
-    return (1 if named else 0, status, float(e.get("ls") or 0.0))
+    return (tier, status, float(e.get("ls") or 0.0))
 
 
 def cap_state(msg: dict, max_bytes: int = STATE_MAX_BYTES) -> dict:

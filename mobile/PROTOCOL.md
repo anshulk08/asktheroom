@@ -284,7 +284,7 @@ is kept). Named things and the configured objects are always sent. When a stale 
 | `e[].rg` | str | object permanence (spec 0011, `permanence.mode: registry`): the registry's state, `visible`/`hidden`/`carried`/`last_seen`/`unknown`. A registry object is never cut from a capped state. Optional |
 | `e[].rt` | 1 | the registry found it by a re-find (Grok), not by appearance alone: tentative. Optional |
 | `tx` | int | state chunks the bridge sent before this message. Between two states, `tx` grows by the chunks sent; the phone compares that with the chunks it received for its "lost" count |
-| `more` | int | entities left out to keep the message under the bridge's cap (`--state-max`, 12 KB of JSON): unnamed things lost or gone first, then hidden, then visible, oldest first; named things last. Optional |
+| `more` | int | entities left out to keep the message under the bridge's cap (`--state-max`, 12 KB of JSON): unnamed things first (those with only a guess next), lost or gone before hidden before visible, oldest first; named, configured and registry objects last. Optional |
 | `lh` | str | the room layout's hash (`GET /room_layout`, the room map from the user's seat). Absent: no room map |
 | `lay` | object | the room layout itself, `{"v", "size": [W, H], "front", "table": {"rect", "origin"}, "zones": [{"id", "say", "rect", "kind"}], "you": [x, y]}` in the user's frame. Sent on subscribe and when `lh` changes; keep the last one |
 
