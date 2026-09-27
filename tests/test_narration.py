@@ -163,7 +163,7 @@ def test_event_line_format_and_names():
     assert event_line(dict(wall=t, obj="thing:3", type="EXITED_VIEW", edge="left"), names) == \
         "14:02:11 phone charger EXITED_VIEW off the left edge"
     assert event_line(dict(wall=t, obj="thing:4", type="APPEARED"), names) == \
-        "14:02:11 unnamed object APPEARED"
+        "14:02:11 something new APPEARED"
     assert event_line(dict(wall=t, obj="pill_bottle", type="COVERED", parent="notebook"), names) == \
         "14:02:11 pill bottle COVERED by notebook"
 
