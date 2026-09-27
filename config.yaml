@@ -634,6 +634,7 @@ unknown_cover:
   side_changed: 0.5           # share of a side's pixels that differ: that side is changed
   sides_min: 3                # sides changed (of left, right, top, bottom): something lies over the spot ...
   mean_changed: 0.75          # ... and those sides changed this much on average (a dim sleeve: about 0.55)
+  person_hold_s: 20           # a person box (YOLOE) over an object's spot defers its absence this long (core/world.py)
   settle_s: 0.5               # the covered band unchanged over this long: a cover at rest, not a moving arm
   adopt_s: 1.0                # the band must look the same this long before it is remembered
   wait_max_s: 2.0             # longest wait on an unclear or settling band before the other rules decide
