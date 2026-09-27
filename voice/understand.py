@@ -70,7 +70,7 @@ import requests
 from core.config import load_config
 from core.types import INTENT_KINDS, Intent
 from net import call_with_deadline
-from voice.intents import (GENERAL, _spoken_name, _vocab, firm_question, fuzzy_match, matched_exactly, names_a_person,
+from voice.intents import (GENERAL, YOU_REQUEST, _spoken_name, _vocab, firm_question, fuzzy_match, matched_exactly, names_a_person,
                            normalize, parse)
 
 log = logging.getLogger(__name__)
@@ -420,6 +420,8 @@ class Understander:
             return False
         if rules.kind in ACTS and not opens_with_wake_word(text, self.cfg):   # "let's reset the room"
             return False
+        if not woke and rules.kind == "OTHER" and YOU_REQUEST.search(normalize(text)):
+            return False                       # "can you put your phone away": said to a person
         if woke or rules.obj is not None:      # a configured object (or a taught name, or one it sounds like)
             return True
         t = normalize(text)

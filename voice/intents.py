@@ -83,6 +83,13 @@ HISTORY = re.compile(r"\bwhat(?:s| has| had)? happen\w*|\bhappened to\b|\bwho\b|
                      r"|\b(?:story|deal|going on) with\b"
                      r"|\bhistory\b|\blast time\b|\bwhat did (?:i|you|someone|somebody|anyone) do with\b")
 WHERE2 = re.compile(r"\b(?:find|found|seen|locate\w*|lost|misplaced|look(?:ing)? for|spot(?:ted)?)\b")
+# 'did I put my glasses on the side table': where I put it. Only with I / we: 'can you put your phone away',
+# 'did you drop your keys' are said to a person.
+PUT_BY_ME = re.compile(r"\b(?:i|we)\s+(?:just\s+|last\s+)?(?:put|set|drop|dropped|place|placed)\b")
+# A request to a person, not a question for the rig: 'can you put your phone away', 'could you set my glasses
+# down'. Asking the rig to show, find or tell stays a question.
+YOU_REQUEST = re.compile(r"\b(?:can|could|would|will|did|do|should)\s+you\s+(?!(?:show|point|find|tell|see|spot|"
+                         r"locate|light|help|remember|look|check|know|say|guess)\b)[a-z]+")
 # Wants the laser on a named thing: 'show me my keys', 'point at the pills', 'light up the remote'.
 SHOW = re.compile(r"\b(?:show|point|pointing|light up|highlight|shine|flash|aim|where\s*abouts)\b")
 GENERAL = re.compile(r"\b(?:anything|something|everything|stuff|things|what happened"
@@ -400,7 +407,7 @@ def parse(text: str, cfg: dict, aliases=()) -> Intent:
     elif WHERE2.search(t) or (SHOW.search(t) and (obj or spoken)):
         kind = "WHERE"
     elif obj and (re.search(rf"\b(?:is|are)\s+(?:my|the|your|our)?\s*{re.escape(obj)}\b", t)
-                  or re.search(r"\b(?:leave|left|put|set|drop|dropped|place|placed)\b", t)
+                  or re.search(r"\b(?:leave|left)\b", t) or PUT_BY_ME.search(t)
                   or [w for w in t.split() if w not in ARTICLES] == [obj]):
         kind = "WHERE"
     elif obj is None and (re.search(r"\b(?:is|are)\s+(?:my|your|our)\s", t)

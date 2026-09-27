@@ -354,6 +354,8 @@ CHATTER = [
     "when is the next talk", "who won last year", "where are the stickers", "did someone take my seat",
     "has the schedule been changed", "is the keynote moved", "where do I sign up", "can you point me to the food",
     "where is it", "where did it go", "where are they",          # no live conversation turn to follow up
+    "can you put your phone away", "could you set my glasses down", "did you drop your keys",
+    "I'll put my keys on the counter",
 ]
 
 
@@ -485,3 +487,10 @@ def test_room_chatter_is_ignored(text):
     rules = Understander(dict(cfg, understand={"enabled": False}))
     grok = Understander(cfg, model=OtherGrok())
     assert rules(text, overheard=True).kind == IGNORE and grok(text, overheard=True).kind == IGNORE, text
+
+
+def test_ask_the_room_opens_a_reset_with_the_default_wake_words():
+    u = Understander(dict(CFG, understand={"enabled": False}))
+    assert u("ask the room, reset", overheard=True).kind == "RESET"
+    assert u("okay ask the room reset everything", overheard=True).kind == "RESET"
+    assert u("lets reset, ask the room", overheard=True).kind not in ("RESET", "RECAL")

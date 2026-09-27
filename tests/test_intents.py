@@ -295,3 +295,12 @@ def test_a_pronoun_asking_about_a_place_is_a_where_follow_up(text):
 def test_a_thing_named_with_a_place_word_is_still_a_thing():
     assert parse("is my charger on the couch", CFG).name == "charger"
     assert parse("where is my couch cushion", CFG).name == "couch cushion"
+
+
+@pytest.mark.parametrize("text, kind", [
+    ("did I put my glasses on the side table", "WHERE"), ("we just put the remote on the couch", "WHERE"),
+    ("can you put your phone away", "OTHER"), ("could you set my glasses down", "OTHER"),
+    ("did you drop your keys", "OTHER"),
+])
+def test_put_is_a_where_question_only_about_what_i_did(text, kind):
+    assert parse(text, CFG).kind == kind, text
