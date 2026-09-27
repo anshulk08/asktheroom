@@ -629,7 +629,7 @@ class Room:
             return
         if self._bare_wake(text):               # "Room!" ... pause ... the question: listen for it now
             self._log_wake(text)
-            self._asked(t_heard, after_wake=True)
+            self._asked(t_heard, after_wake=True, strict=self._wake_strict(text))
             return
         if not self._for_rig(text):
             self._ignored += 1                  # dropped: not logged, not stored, not sent
@@ -710,16 +710,25 @@ class Room:
         from voice.understand import has_wake_word
         return has_wake_word(text, self.cfg)
 
-    def _after_wake(self, text: str) -> bool:
-        """The question after a bare wake word: no wake word of its own needed (Understander.after_wake)."""
-        check = getattr(self.interpret, "after_wake", None)
+    def _wake_strict(self, text: str) -> bool:
+        """A bare wake word that chatter often makes (a misheard greeting, "Hey, bro!", or the wake word opening
+        a fragment): the question after it gets the strict check. The real wake word alone doesn't."""
+        from voice.understand import bare_wake, misheard_greeting
+        return misheard_greeting(text, self.cfg) or not bare_wake(text, self.cfg)
+
+    def _after_wake_drop(self, text: str, strict: bool) -> Optional[str]:
+        """Why the question after a bare wake word is dropped, or None to answer it
+        (Understander.after_wake_drop; no wake word of its own needed)."""
+        if not text:
+            return "nothing heard"
+        check = getattr(self.interpret, "after_wake_drop", None)
         if check is None:
-            return self._for_rig(text)
+            return None if self._for_rig(text) else "screen"
         try:
-            return bool(check(text))
+            return check(text, strict=strict)
         except Exception:
-            log.exception("after_wake() failed")
-            return False
+            log.exception("after_wake_drop() failed")
+            return "error"
 
     def _cue(self, kind: str) -> None:
         """Play a chime (voice/cues.py) and wait out the speaker's delay, so the mic doesn't record it."""
@@ -729,14 +738,15 @@ class Room:
         if self.tts.play_cue(chime_pcm(kind), RATE):
             self.stop_ev.wait(TAIL_S)
 
-    def _asked(self, t_press: float, after_wake: bool = False, again: int = 0) -> None:
+    def _asked(self, t_press: float, after_wake: bool = False, again: int = 0, strict: bool = True) -> None:
         """Clicker press, or the wake word alone: stop the current answer, chime and light up, listen for one
         question, answer it.
-        after_wake (a bare "Room!" heard by the always-on mic, which chatter or a mishearing can produce too):
-        the question needs no wake word of its own but must be a question or name a thing
-        (Understander.after_wake; RESET still needs the wake word in the same sentence), and nothing heard
-        is let go quietly instead of "Sorry, I didn't catch that". The wake word alone again listens again
-        (again: how many times, at most 2)."""
+        after_wake (a bare "Room!" heard by the always-on mic): the question needs no wake word of its own.
+        After the real wake word anything said is answered, except Whisper's "you" on noise and RESET without
+        the wake word; strict (after a misheard greeting or a fragment, which chatter makes too) it must also be
+        a question or name a thing (Understander.after_wake_drop). A drop is logged with its reason, never the
+        transcript, and nothing heard is let go quietly instead of "Sorry, I didn't catch that". The wake word
+        alone again listens again (again: how many times, at most 2)."""
         if self.tts is not None:
             self.tts.stop()                     # a click interrupts the previous answer
         if self.clicker is not None:
@@ -752,12 +762,16 @@ class Room:
         finally:
             self.indicator.off()
         t_heard = time.monotonic()
-        if after_wake and text and self._bare_wake(text) and again < 2:   # "Hey Drew!" ... "Okay, room."
+        from voice.understand import bare_wake
+        if after_wake and text and bare_wake(text, self.cfg) and again < 2:   # "Hey Drew!" ... "Okay, room."
             self._log_wake(text, again=True)
-            return self._asked(t_heard, after_wake=True, again=again + 1)
-        if after_wake and (not text or not self._after_wake(text)):
-            self._ignored += 1                  # not for the rig after all: dropped, not logged or said
-            return
+            return self._asked(t_heard, after_wake=True, again=again + 1, strict=self._wake_strict(text))
+        if after_wake:
+            reason = self._after_wake_drop(text, strict)
+            if reason is not None:
+                log.info("after-wake follow-up dropped: %s", reason)
+                self._ignored += 1              # not for the rig after all: not said, not stored
+                return
         if not text:
             self._speak(NOT_HEARD)
             self.report({"heard": "", "answer": NOT_HEARD, "mode": "asked",

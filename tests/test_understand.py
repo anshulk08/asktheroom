@@ -607,3 +607,20 @@ def test_questions_requests_and_bare_wakes_are_not_fragments(text):
 def test_a_taught_name_is_not_a_fragment():
     u = Understander(WAKE_CFG, aliases=lambda: ["blue mug"])
     assert not u.fragment("Room, the blue mug") and u.fragment("Room, the red thing")
+
+
+@pytest.mark.parametrize("text, misheard", [("Hey, bro!", True), ("Hey Drew!", True), ("Goodroom.", True),
+                                            ("Room!", False), ("Hey room", False), ("Heyroom.", False),
+                                            ("Okroom", False), ("Ask the room.", False), ("It's decent, bro.", False)])
+def test_misheard_greetings_get_the_strict_check(text, misheard):
+    from voice.understand import misheard_greeting
+    assert misheard_greeting(text, CFG) is misheard, text
+
+
+@pytest.mark.parametrize("text, reason", [("where is my wallet", None), ("can you see my keys", None),
+                                          ("we built this in like twenty hours", None), ("", "nothing heard"),
+                                          ("Thank you.", "hallucination"), ("you", "hallucination"),
+                                          ("reset everything", "reset or recalibrate without the wake word"),
+                                          ("room, reset", None)])
+def test_after_the_real_wake_word_anything_but_noise_or_a_reset_is_answered(text, reason):
+    assert Understander(WAKE_CFG).after_wake_drop(text, strict=False) == reason, text
