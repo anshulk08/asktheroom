@@ -164,6 +164,7 @@ class Room:
         self.stale_s = float(pg.get("stale_s", 2.0))
         self.voice_recal = bool(pg.get("voice_recalibrate", True))
         self._perceived_t: Optional[float] = None  # monotonic t of the live loop's last perception step
+        self._frame_err_t = float("-inf")          # last logged frame-read failure (rate limit)
         self._cal_warned = False
         self._aim_lock = threading.Lock()
         self._aim_gen = 0
@@ -460,9 +461,16 @@ class Room:
         period = 1.0 / self.max_fps if self.max_fps > 0 else 0.0
         self._perceived_t = time.monotonic()
         while not self.stop_ev.is_set():
-            self._mark_stale()
             t0 = time.monotonic()
-            frame = self.frames.wait_new(last_idx, timeout=1.0)
+            try:                           # a bad table view cut (TableView: ValueError) must not end the loop
+                self._mark_stale()
+                frame = self.frames.wait_new(last_idx, timeout=1.0)
+            except Exception:
+                if t0 - self._frame_err_t > 10:
+                    log.exception("reading a frame failed; skipping it")
+                    self._frame_err_t = t0
+                self.stop_ev.wait(0.1)
+                continue
             if frame is None:
                 continue
             last_idx = frame.idx
