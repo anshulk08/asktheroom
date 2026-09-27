@@ -476,6 +476,48 @@ def test_one_of_several_things_lost_at_one_spot_comes_back_not_a_new_one(scene, 
     assert things(world) == ['thing:1', 'thing:2']
 
 
+def test_lost_duplicates_at_one_spot_fold_into_the_oldest_after_the_handoff_window(scene, world):
+    """A clutter pile left 90 lost duplicates at one spot in the phone's state until a RESET. Lost in
+    place (no hand), unnamed, at one spot: once no room zone can take them, they are one thing, quietly."""
+    appear(scene, world, 'a', (40, 30), seconds=2.0)
+    appear(scene, world, 'b', (44.5, 30), seconds=2.0)
+    appear(scene, world, 'c', (60, 30), seconds=2.0)
+    for k in 'abc':
+        scene.remove(k)
+    events = scene.run(world, 130.0)
+    assert EventType.CORRECTED not in types(events)
+    assert world.get('thing:2').merged_into == 'thing:1'
+    assert things(world) == ['thing:1', 'thing:3']
+    assert 'thing:2' not in [e['name'] for e in world.state_json()['entities']]
+
+
+def test_unnamed_things_lost_long_ago_are_forgotten_but_named_ones_stay(scene, world, cfg):
+    appear(scene, world, 'a', (40, 30), seconds=2.0)
+    appear(scene, world, 'b', (70, 30), seconds=2.0)
+    assert world.bind_alias('thing:2', 'my charger')
+    scene.remove('a')
+    scene.remove('b')
+    scene.run(world, cfg.openworld.get('forget_unnamed_s', 600.0) + 5.0)
+    assert things(world) == ['thing:2']
+    assert world.get('thing:1').merged_into == 'thing:1'
+    assert world.find('my charger') == 'thing:2'
+    events = appear(scene, world, 'a2', (40, 30), seconds=2.0)      # seen again at its spot: itself
+    assert EventType.APPEARED not in types(events)
+    assert things(world) == ['thing:1', 'thing:2'] and world.get('thing:1').status == Status.VISIBLE
+    assert 'thing:1' in [e['name'] for e in world.state_json()['entities']]
+
+
+def test_housekeeping_never_touches_a_thing_not_yet_seen_as_present(scene, world):
+    """Between its confirmation and its debounce a new thing is UNKNOWN and never seen: forgetting it
+    then left its proposal to be born again a batch later (replay of the rig's laptop frames)."""
+    appear(scene, world, 'a', (40, 30), seconds=2.0)
+    ent = world.get('thing:1')
+    ent.status, ent.last_seen = Status.UNKNOWN, None
+    world._forget_t = float('-inf')
+    world._forget_lost()
+    assert ent.merged_into is None and things(world) == ['thing:1']
+
+
 def test_split_with_swapped_positions_is_resolved_by_appearance(scene, world):
     appear(scene, world, 'a', (40, 30), seconds=2.0)
     appear(scene, world, 'b', (50, 30), seconds=2.0)
@@ -620,6 +662,17 @@ def test_a_new_thing_is_born_only_inside_the_tabletop_outline(scene, table_world
     events = scene.run(table_world, 3.0)
     assert [(e.obj, e.type) for e in events] == [('thing:1', EventType.APPEARED)]
     assert table_world.get('thing:1').pos_cm == pytest.approx((60, 30))
+
+
+def test_a_tall_thing_standing_at_the_far_edge_is_born_where_it_stands(scene, table_world):
+    """From the corner camera a speaker or a paper bag at the far edge has its box centre past the edge
+    while its foot stands on the table: born, like a flat thing there would be. One with its foot off
+    the table (a chair back) is not."""
+    scene.thing('speaker', 60, 7, 6, 16)           # y 0..15: centre 7 in the band, foot 15 inside
+    scene.thing('chair', 90, 0, 8, 6)              # y -3..3: off the table
+    events = scene.run(table_world, 3.0)
+    assert [(e.obj, e.type) for e in events] == [('thing:1', EventType.APPEARED)]
+    assert table_world.get('thing:1').pos_cm == pytest.approx((60, 7))
 
 
 def test_without_an_outline_the_whole_view_is_the_table(scene, world):

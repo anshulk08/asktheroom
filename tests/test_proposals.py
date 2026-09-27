@@ -327,16 +327,30 @@ def test_overlapping_proposals_keep_the_most_confident():
     assert dedupe([b, a], [], [], DedupeConfig()) == [a]
 
 
-def test_a_box_nested_in_a_bigger_one_is_dropped_whatever_the_scores():
-    """A keycap scoring above its laptop dropped the laptop and kept the key (on the rig, dozens of
-    things on one laptop). The part goes, the object stays."""
-    laptop, key = P((100, 100, 300, 220), 0.4), P((150, 150, 170, 170), 0.9)
-    assert dedupe([key, laptop], [], [], DedupeConfig()) == [laptop]
+def test_a_box_nested_in_a_bigger_one_is_a_part_whatever_the_scores():
+    """A keycap scoring above its laptop dropped the laptop and kept the key as an object (on the rig,
+    dozens of things on one laptop). The laptop is the object; the key is kept only as a part: flagged
+    occluded, so it can carry on a thing already tracked there but never start one."""
+    laptop, key = P((100, 100, 300, 220), 0.4), P((150, 150, 170, 170), 0.6)
+    out = dedupe([key, laptop], [], [], DedupeConfig())
+    assert [(q.box_px, q.occluded) for q in out] == [(key.box_px, True), (laptop.box_px, False)]
 
 
-def test_only_the_outermost_of_nested_boxes_is_kept():
-    pile, wire, strand = P((100, 100, 200, 200), 0.3), P((110, 110, 160, 160), 0.8), P((120, 120, 140, 140), 0.9)
-    assert dedupe([strand, wire, pile], [], [], DedupeConfig()) == [pile]
+def test_only_the_outermost_of_nested_boxes_is_an_object():
+    pile, wire, strand = P((100, 100, 200, 200), 0.3), P((110, 110, 160, 160), 0.6), P((120, 120, 140, 140), 0.65)
+    out = dedupe([strand, wire, pile], [], [], DedupeConfig())
+    assert {q.box_px: q.occluded for q in out} == {strand.box_px: True, wire.box_px: True, pile.box_px: False}
+
+
+def test_a_small_confident_box_on_a_bigger_one_is_its_own_object():
+    """Keys in an open tub, a phone on a big tray: a quarter of the host or less, scoring nest_keep_conf."""
+    tub, keys = P((100, 100, 300, 260), 0.5), P((150, 150, 190, 180), 0.8)
+    assert [(q.box_px, q.occluded) for q in dedupe([tub, keys], [], [], DedupeConfig())] == \
+        [(keys.box_px, False), (tub.box_px, False)]
+    big = P((150, 150, 260, 240), 0.8)                # nearly as big as the tub: a part of it
+    assert {q.box_px: q.occluded for q in dedupe([tub, big], [], [], DedupeConfig())}[big.box_px] is True
+    cfg = DedupeConfig.from_dict({'nest_keep_conf': 0.9})
+    assert {q.box_px: q.occluded for q in dedupe([tub, keys], [], [], cfg)}[keys.box_px] is True
 
 
 def test_a_box_beside_or_partly_over_a_bigger_one_is_kept():
@@ -392,6 +406,14 @@ def test_yoloe_respects_the_table_roi():
     assert [q.box_px for q in y.propose(np.zeros((H, W, 3), np.uint8), [], [])] == [(600, 300, 690, 380)]
 
 
+def test_yoloe_keeps_a_tall_box_standing_inside_the_roi():
+    m = FakeYOLOE([(0, 0.6, (600, 20, 660, 160)),        # a bottle at the far edge: its foot is inside
+                   (0, 0.6, (300, 10, 360, 60))])         # wholly beyond it
+    y = YOLOEProposer({}, model=m)
+    y.set_roi([(200, 100), (1100, 100), (1100, 650), (200, 650)])
+    assert [q.box_px for q in y.propose(np.zeros((H, W, 3), np.uint8), [], [])] == [(600, 20, 660, 160)]
+
+
 def test_yoloe_flags_boxes_that_are_part_of_a_person():
     """Prompt-free YOLOE sees a hand as 'person' and boxes pieces of it as objects ('battery',
     'bracelet', 'gadget' on the rig). A box mostly inside a person box is kept but flagged occluded:
@@ -406,16 +428,24 @@ def test_yoloe_flags_boxes_that_are_part_of_a_person():
     assert flags == {(420, 480, 500, 540): True, (650, 600, 760, 690): False, (900, 300, 990, 380): False}
 
 
-def test_yoloe_treats_feet_and_clothes_as_people():
-    """Feet up at the coffee table came as 'shoe' / 'sock' / 'jeans' boxes and became things. They are
-    people: never a proposal, and what lies inside one (a lace read as 'cable') is occluded."""
-    m = FakeYOLOE([(4, 0.7, (300, 400, 420, 520)),          # shoe
+def test_yoloe_treats_worn_things_by_a_person_as_the_person():
+    """Feet up at the coffee table came as 'shoe' / 'sock' / 'jeans' boxes and became things. Worn, next
+    to a person box, they are the person: never a proposal, and what lies inside one is occluded."""
+    m = FakeYOLOE([(6, 0.8, (250, 380, 700, 719)),          # leg
+                   (4, 0.7, (300, 400, 420, 520)),          # shoe on it
                    (3, 0.5, (330, 430, 380, 470)),          # 'charger' inside the shoe
-                   (5, 0.6, (500, 200, 700, 300)),          # jeans
-                   (0, 0.6, (900, 300, 990, 380))])         # a cup
-    m.names = {**FakeYOLOE.names, 4: 'shoe', 5: 'jeans'}
+                   (5, 0.6, (720, 380, 900, 600)),          # jeans beside the leg (within worn_near_px)
+                   (0, 0.6, (900, 100, 990, 180))])         # a cup
+    m.names = {**FakeYOLOE.names, 4: 'shoe', 5: 'jeans', 6: 'leg'}
     props = YOLOEProposer({'conf': 0.15}, model=m).propose(np.zeros((H, W, 3), np.uint8), [], [])
-    assert {q.box_px: q.occluded for q in props} == {(330, 430, 380, 470): True, (900, 300, 990, 380): False}
+    assert {q.box_px: q.occluded for q in props} == {(330, 430, 380, 470): True, (900, 100, 990, 180): False}
+
+
+def test_yoloe_keeps_a_shoe_alone_on_the_table_as_an_object():
+    m = FakeYOLOE([(4, 0.7, (300, 200, 420, 300)), (1, 0.8, (900, 300, 1200, 700))])   # a person far off
+    m.names = {**FakeYOLOE.names, 4: 'shoe'}
+    props = YOLOEProposer({'conf': 0.15}, model=m).propose(np.zeros((H, W, 3), np.uint8), [], [])
+    assert [(q.box_px, q.occluded) for q in props] == [((300, 200, 420, 300), False)]
 
 
 def test_the_occluded_flag_reaches_the_world_on_the_detection():
