@@ -401,9 +401,10 @@ struct EntityDetailView: View {
                                 ForEach(entity.aliases, id: \.self) { Text($0) }
                             }
                         }
-                        if !entity.maybeSameAs.isEmpty {
+                        let matches = snapshot.knownMatches(of: entity)
+                        if !matches.isEmpty {
                             Section("Might be") {
-                                ForEach(entity.maybeSameAs, id: \.name) { m in
+                                ForEach(matches, id: \.name) { m in
                                     LabeledContent(snapshot.entity(named: m.name)?.displayName ?? Entity.displayName(for: m.name),
                                                    value: "\(Int((m.score * 100).rounded()))% alike")
                                 }

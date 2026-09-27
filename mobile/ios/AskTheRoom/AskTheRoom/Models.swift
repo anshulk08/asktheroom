@@ -194,6 +194,12 @@ struct Snapshot: Codable, Equatable {
 
     func entity(named name: String) -> Entity? { e.first { $0.n == name } }
 
+    /// Older things `entity` might be, leaving out ones with no name to tell them by:
+    /// "might be something new" says nothing.
+    func knownMatches(of entity: Entity) -> [MaybeSame] {
+        entity.maybeSameAs.filter { self.entity(named: $0.name).map { !$0.isNameless } ?? false }
+    }
+
     /// The chain from an entity out to the outermost thing holding it, e.g. keys → notebook → box.
     /// Stops at hands, missing parents and cycles; the rig nests at most 3 levels.
     func chain(from name: String) -> [Entity] {

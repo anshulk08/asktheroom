@@ -69,6 +69,14 @@ final class ModelsTests: XCTestCase {
         }
     }
 
+    func testKnownMatchesLeaveOutNamelessAndMissingThings() {
+        var s = MockData.sampleSnapshot
+        s.update("thing:9") { $0.m = [MaybeSame(name: "thing:4", score: 0.9), MaybeSame(name: "thing:13", score: 0.8),
+                                      MaybeSame(name: "thing:7", score: 0.7), MaybeSame(name: "thing:11", score: 0.6)] }
+        s.e.append(Entity(n: "thing:13", k: .target, s: .visible, xy: TablePoint(x: 5, y: 5)))
+        XCTAssertEqual(s.knownMatches(of: s.entity(named: "thing:9")!).map(\.name), ["thing:7", "thing:11"])
+    }
+
     func testNamedTargetsIgnoreGuesses() throws {
         let json = #"{"e":[{"n":"keys","k":"t","s":"V","g":"coins","gc":0.9}]}"#
         let keys = try XCTUnwrap(Wire.decode(Snapshot.self, from: Data(json.utf8))?.entities.first)

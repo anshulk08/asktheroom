@@ -148,7 +148,7 @@ enum MapLayout {
                 opacity: 1,
                 glyph: glyph(for: entity.status),
                 exitEdge: entity.status == .gone ? entity.edge : nil,
-                linkBadge: entity.isThing && !entity.maybeSameAs.isEmpty,
+                linkBadge: entity.isThing && !snapshot.knownMatches(of: entity).isEmpty,
                 layer: 0
             )
 
@@ -253,7 +253,7 @@ enum MapLayout {
         case .lost: return "lost track, last seen here"
         case .visible, .unrecognized: words = nil
         }
-        if words == nil, entity.isThing, let other = entity.maybeSameAs.first {
+        if words == nil, entity.isThing, let other = snapshot.knownMatches(of: entity).first {
             let otherName = snapshot.entity(named: other.name)?.displayName ?? Entity.displayName(for: other.name)
             words = "might be \(otherName)"
         }
