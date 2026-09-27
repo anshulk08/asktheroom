@@ -223,6 +223,10 @@ class SimCamera:
         rng = np.random.default_rng((rig.seed * 1_000_003 + k) & 0x7FFFFFFF)
         g = 1.0 + 0.02 * math.sin(t_state * 0.7) + rng.normal(0, 0.006)   # drift + flicker
         img = self._base * g + self._noise[k % 4]
+        for x, y in rig.notes:                     # sticky notes (act.calibrate's spot check)
+            r = rig.note_cm / 2
+            quad = rig.table.cm_to_px([[x - r, y - r], [x + r, y - r], [x + r, y + r], [x - r, y + r]])
+            cv2.fillConvexPoly(img, quad.astype(np.int32), (225, 185, 120))   # light blue
         pan, tilt, on = rig.act.state_at(t_state)
         if on and not rig.blocked:
             x, y = rig.geom.hit(pan, tilt)
@@ -230,6 +234,9 @@ class SimCamera:
             if -1.0 <= x <= w + 1 and -1.0 <= y <= h + 1:
                 px, py = rig.table.cm_to_px([[x, y]])[0]
                 self._draw_dot(img, px, py, rng.uniform(0.85, 1.0))
+        if on and rig.ghost_cm is not None:        # a glint of the beam elsewhere, brighter than the dot
+            px, py = rig.table.cm_to_px([rig.ghost_cm])[0]
+            self._draw_dot(img, px, py, 1.3)
         return np.clip(img, 0, 255).astype(np.uint8)
 
     @staticmethod
@@ -267,6 +274,9 @@ class SimRig:
         self.latency_s, self.backlash_deg = latency_s, backlash_deg
         self.pulse_noise_us, self.noise_sigma = pulse_noise_us, noise_sigma
         self.blocked = False                 # something between laser and table
+        self.ghost_cm: Optional[tuple[float, float]] = None   # a second, brighter dot while the laser is on
+        self.notes: list[tuple[float, float]] = []            # sticky notes on the table (centres, cm)
+        self.note_cm = 7.6
         size = tuple(((cfg or {}).get("table") or {}).get("size_cm", (90, 60)))
         self.table = SimTable(size)
         self.geom = geom or HeadGeometry(table=self.table.size_cm)

@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from act.calibrate import aim_stats, calibrate, measure_latency
-from act.laser import LaserFit, dot_px_diff
+from act.laser import MAX_MISSES, LaserFit, dot_px_diff
 from act.sim import SimRig
 from core.config import load_config
 
@@ -106,6 +106,8 @@ def test_calibrate_fit_error(cal):
     assert not rig.act.laser_on                            # calibration leaves the laser off
     back = LaserFit.load(path)
     assert np.allclose(back.predict((45, 30)), laser.fit.predict((45, 30)))
+    assert back.table_px_to_cm is not None and np.allclose(back.table_px_to_cm, laser.fit.table_px_to_cm)
+    assert back.servo_limits == laser.fit.servo_limits
 
 
 def test_aim_20_targets_median_under_3cm(cal):
@@ -167,3 +169,128 @@ def test_aim_requires_calibration():
     rig = SimRig(seed=0)
     with pytest.raises(RuntimeError):
         rig.make_laser("").aim((10, 10))
+
+
+def test_red_sleeve_does_not_hide_the_dot():
+    """A blob bigger than max_area (a red sleeve moving between the off and on frames) is skipped, not
+    taken as 'no dot'."""
+    off = np.full((200, 300, 3), 90, np.uint8)
+    on = off.copy()
+    on[20:120, 20:120, 2] = 250                          # sleeve: 10000 px of red rise
+    on[150:156, 200:206, 2] = 255                        # the dot
+    x, y = dot_px_diff(off, on, max_area=3000)
+    assert abs(x - 202.5) < 1 and abs(y - 152.5) < 1
+
+
+def test_glint_elsewhere_is_ignored(cal):
+    """A brighter second dot 40 cm away (a reflection) wins an ungated search, but not the aim's."""
+    rig, laser, _, _ = cal
+    target = (30.0, 20.0)
+    rig.ghost_cm = (70.0, 45.0)
+    try:
+        laser.move_to(*laser.fit.predict(target))
+        assert math.dist(laser.find_dot(), rig.ghost_cm) < 2        # the distractor works
+        err = laser.aim(target)
+        assert err < 2.0 and math.dist(rig.true_dot_cm(), target) < 2.0
+    finally:
+        rig.ghost_cm = None
+        laser.off()
+
+
+def test_dot_further_than_first_dot_cm_is_rejected(cal):
+    """Inside the search box but 17 cm from the target: not the dot."""
+    rig, laser, _, _ = cal
+    target = (40.0, 30.0)
+    laser.move_to(*laser.fit.predict(target))
+    rig.blocked, rig.ghost_cm = True, (52.0, 42.0)
+    try:
+        assert laser.find_dot() is not None
+        assert laser.find_dot(near_cm=target) is None
+        assert laser.find_dot(near_cm=target, radius_cm=20) is not None
+    finally:
+        rig.blocked, rig.ghost_cm = False, None
+        laser.off()
+
+
+def test_aim_stops_after_three_misses_and_holds_open_loop_pose(cal):
+    rig, laser, _, _ = cal
+    target = (60.0, 35.0)
+    rig.blocked = True
+    try:
+        t0 = rig.clock.now()
+        assert math.isinf(laser.aim(target))
+        assert laser.last_aim["tries"] == MAX_MISSES and laser.last_aim["reason"] == "not_seen"
+        assert rig.clock.now() - t0 < 4.0                            # was 8 blinks (~5 s)
+        assert np.allclose((rig.act.pan, rig.act.tilt), laser._clamp(*laser.fit.predict(target)))
+        assert not rig.act.laser_on and laser.state["on"] is False   # no unconfirmed dot left on
+        assert laser.last_aim["wide"]                                # the whole picture was searched once
+    finally:
+        rig.blocked = False
+        laser.off()
+
+
+class RefitTable:
+    """The same camera and table after a refit that turned the table frame 3 deg and moved it (4, -2.5) cm."""
+
+    def __init__(self, old, deg=3.0, t=(4.0, -2.5)):
+        a = math.radians(deg)
+        self.old, self.R, self.t = old, np.array([[math.cos(a), -math.sin(a)], [math.sin(a), math.cos(a)]]), np.array(t)
+
+    def to_new(self, cm):
+        return np.asarray(cm, dtype=np.float64) @ self.R.T + self.t
+
+    def px_to_cm(self, pts):
+        return self.to_new(self.old.px_to_cm(pts))
+
+    def cm_to_px(self, pts):
+        return self.old.cm_to_px((np.asarray(pts, dtype=np.float64).reshape(-1, 2) - self.t) @ self.R)
+
+
+def test_table_refit_is_remapped_through_the_camera(cal):
+    rig, laser, _, _ = cal
+    old_table, old_fit = laser.table, laser.fit
+    laser.table = RefitTable(old_table)
+    try:
+        assert laser.refit_moved_cm() > 4.0
+        for p in [(40.0, 25.0), (15.0, 50.0), (75.0, 10.0)]:
+            q = tuple(laser.table.to_new([p])[0])                 # the same spot in the new table's cm
+            laser.aim(q, mode="open")
+            assert math.dist(rig.true_dot_cm(), p) < 1.5, p       # open loop already lands
+            laser.aim(q)
+            assert math.dist(rig.true_dot_cm(), p) < 2.0, p
+        laser.fit = LaserFit.from_dict(dict(old_fit.to_dict(), table_px_to_cm=None))   # an old laser_cal.json
+        laser.aim(tuple(laser.table.to_new([(40.0, 25.0)])[0]), mode="open")
+        assert math.dist(rig.true_dot_cm(), (40.0, 25.0)) > 3.0    # without the stored frame it points off
+        assert laser.refit_moved_cm() is None
+    finally:
+        laser.table, laser.fit = old_table, old_fit
+        laser.off()
+    assert laser.refit_moved_cm() < 1e-6
+
+
+@pytest.mark.parametrize("deg", [7.0, 9.0])
+def test_a_knocked_head_is_found_by_the_whole_picture_search(deg):
+    """The head turned after calibration: the dot lands ~15-20 cm off, outside the 15 cm search box.
+    One whole-picture search finds it and the loop corrects onto the target."""
+    rig = SimRig(load_config(), seed=3)
+    laser = rig.make_laser("")
+    calibrate(laser)
+    rig.geom.off = (rig.geom.off[0] + deg, rig.geom.off[1])
+    target = (45.0, 30.0)
+    laser.aim(target, mode="open")
+    assert math.dist(rig.true_dot_cm(), target) > 12.0                 # open loop is far off
+    err = laser.aim(target)
+    assert laser.last_aim["wide"] and laser.last_aim["reason"] == "within_tol", laser.last_aim
+    assert err < 2.0 and math.dist(rig.true_dot_cm(), target) < 2.5 and rig.act.laser_on
+
+
+def test_whole_picture_search_needs_exactly_one_dot(cal):
+    rig, laser, _, _ = cal
+    laser.move_to(*laser.fit.predict((30.0, 20.0)))
+    try:
+        assert laser.find_dot_wide() is not None
+        rig.ghost_cm = (70.0, 45.0)                                    # two dots: ambiguous
+        assert laser.find_dot_wide() is None
+    finally:
+        rig.ghost_cm = None
+        laser.off()

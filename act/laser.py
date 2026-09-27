@@ -24,7 +24,9 @@ from core.types import Frame, Point
 
 log = logging.getLogger(__name__)
 
-DEFAULT_LATENCY_S = 0.06
+DEFAULT_LATENCY_S = 0.15       # safe until act.calibrate --rig measures camera_latency_s (too short: stale frames)
+FIRST_DOT_CM = 15.0            # a dot further than this from the target is something else (sleeve, reflection)
+MAX_MISSES = 3                 # aim() gives up after this many looks in a row without the dot
 
 
 class FrameSource(Protocol):
@@ -41,13 +43,15 @@ class TableMap(Protocol):
 
 def _largest_blob(mask: np.ndarray, weight: np.ndarray, min_area: int, max_area: int
                   ) -> Optional[tuple[float, float]]:
+    """Largest blob with min_area <= area <= max_area (a bigger one, e.g. a red sleeve, is skipped)."""
     n, lab, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
     if n <= 1:
         return None
-    i = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
-    area = int(stats[i, cv2.CC_STAT_AREA])
-    if area < min_area or area > max_area:
+    areas = stats[1:, cv2.CC_STAT_AREA]
+    ok = (areas >= min_area) & (areas <= max_area)
+    if not ok.any():
         return None
+    i = 1 + int(np.argmax(np.where(ok, areas, -1)))
     x, y, w, h = (int(stats[i, k]) for k in (cv2.CC_STAT_LEFT, cv2.CC_STAT_TOP,
                                               cv2.CC_STAT_WIDTH, cv2.CC_STAT_HEIGHT))
     m = (lab[y:y + h, x:x + w] == i)
@@ -72,12 +76,12 @@ def dot_px_diff(off: np.ndarray, on: np.ndarray, thr: int = 40, min_area: int = 
     return _largest_blob(mask, score, min_area, max_area)
 
 
-def _dot_blob(mask: np.ndarray, weight: np.ndarray, min_area: int, max_area: int,
-              max_aspect: float = 4.0, min_fill: float = 0.3) -> Optional[tuple[float, float]]:
-    """Brightest dot-shaped blob: area in range, not a streak (aspect), not a ring or edge (fill).
-    Centre of gravity of the score over the blob's bounding box."""
+def _dot_blobs(mask: np.ndarray, weight: np.ndarray, min_area: int, max_area: int,
+               max_aspect: float = 4.0, min_fill: float = 0.3) -> list[tuple[float, float, float]]:
+    """Every dot-shaped blob (area in range, not a streak by aspect, not a ring or edge by fill) as
+    (x, y, peak): the centre of gravity of the score over the blob's bounding box, and its peak score."""
     n, lab, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
-    best, best_peak = None, -np.inf
+    out = []
     for i in range(1, n):
         x, y, w, h, area = (int(stats[i, k]) for k in (cv2.CC_STAT_LEFT, cv2.CC_STAT_TOP,
                                                        cv2.CC_STAT_WIDTH, cv2.CC_STAT_HEIGHT,
@@ -86,16 +90,21 @@ def _dot_blob(mask: np.ndarray, weight: np.ndarray, min_area: int, max_area: int
                 or area < min_fill * w * h:
             continue
         m = lab[y:y + h, x:x + w] == i
-        peak = float(weight[y:y + h, x:x + w][m].max())
-        if peak > best_peak:
-            best, best_peak = (x, y, w, h, m), peak
-    if best is None:
+        wt = np.where(m, np.maximum(weight[y:y + h, x:x + w].astype(np.float64), 1.0), 0.0)
+        ys, xs = np.mgrid[y:y + h, x:x + w]
+        s = wt.sum()
+        out.append((float((xs * wt).sum() / s), float((ys * wt).sum() / s), float(weight[y:y + h, x:x + w][m].max())))
+    return out
+
+
+def _dot_blob(mask: np.ndarray, weight: np.ndarray, min_area: int, max_area: int,
+              max_aspect: float = 4.0, min_fill: float = 0.3) -> Optional[tuple[float, float]]:
+    """Brightest dot-shaped blob (see _dot_blobs), or None."""
+    blobs = _dot_blobs(mask, weight, min_area, max_area, max_aspect, min_fill)
+    if not blobs:
         return None
-    x, y, w, h, m = best
-    wt = np.where(m, np.maximum(weight[y:y + h, x:x + w].astype(np.float64), 1.0), 0.0)
-    ys, xs = np.mgrid[y:y + h, x:x + w]
-    s = wt.sum()
-    return float((xs * wt).sum() / s), float((ys * wt).sum() / s)
+    x, y, _ = max(blobs, key=lambda b: b[2])
+    return x, y
 
 
 def dot_px_hsv(on: np.ndarray, min_area: int = 2, max_area: int = 1500) -> Optional[tuple[float, float]]:
@@ -106,6 +115,35 @@ def dot_px_hsv(on: np.ndarray, min_area: int = 2, max_area: int = 1500) -> Optio
     hi = cv2.inRange(hsv, (172, 120, 230), (180, 255, 255))
     mask = ((lo | hi) > 0).astype(np.uint8)
     return _largest_blob(mask, hsv[..., 2], min_area, max_area)
+
+
+# ---------------------------------------------------------------- table frame
+
+def homography(src, dst) -> np.ndarray:
+    """3x3 H with dst ~ H @ src from 4 point pairs, in float64 (cv2.getPerspectiveTransform is float32)."""
+    A, b = [], []
+    for (x, y), (u, v) in zip(np.asarray(src, dtype=np.float64), np.asarray(dst, dtype=np.float64)):
+        A += [[x, y, 1, 0, 0, 0, -u * x, -u * y], [0, 0, 0, x, y, 1, -v * x, -v * y]]
+        b += [u, v]
+    return np.append(np.linalg.solve(np.asarray(A), np.asarray(b)), 1.0).reshape(3, 3)
+
+
+def apply_h(H: np.ndarray, pts) -> np.ndarray:
+    p = np.asarray(pts, dtype=np.float64)
+    q = p.reshape(-1, 2) @ H[:, :2].T + H[:, 2]
+    return (q[:, :2] / q[:, 2:3]).reshape(p.shape)
+
+
+def table_px_to_cm(table: "TableMap", size_cm) -> Optional[np.ndarray]:
+    """The table's current px -> cm homography, read through its cm_to_px (so any TableMap works).
+    None if the table isn't calibrated."""
+    w, h = (float(v) for v in size_cm)
+    cm = np.array([[0, 0], [w, 0], [w, h], [0, h]], dtype=np.float64)
+    try:
+        px = np.asarray(table.cm_to_px(cm), dtype=np.float64).reshape(4, 2)
+        return homography(px, cm) if np.isfinite(px).all() else None
+    except Exception:  # noqa: BLE001 - uncalibrated table, degenerate corners
+        return None
 
 
 # ---------------------------------------------------------------- calibration model
@@ -123,6 +161,10 @@ class LaserFit:
     n_points: int = 0
     grid: Optional[int] = None
     timestamp: float = 0.0
+    # The table's px -> cm homography when the fit was made. The fit's cm are that table frame's cm, so
+    # after a table refit Laser maps new cm -> px -> these cm (exact while the camera and head stay put).
+    table_px_to_cm: Optional[np.ndarray] = None
+    servo_limits: Optional[dict] = None    # the limits it was fitted within (for the record)
 
     def _uv(self, xy: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         cx, cy, s = self.norm
@@ -151,13 +193,16 @@ class LaserFit:
     def to_dict(self) -> dict:
         return {"model": "poly2", "coef": self.coef.tolist(), "norm": list(self.norm),
                 "fit_error_cm": self.fit_error_cm, "n_points": self.n_points, "grid": self.grid,
-                "timestamp": self.timestamp}
+                "timestamp": self.timestamp, "servo_limits": self.servo_limits,
+                "table_px_to_cm": None if self.table_px_to_cm is None else self.table_px_to_cm.tolist()}
 
     @classmethod
     def from_dict(cls, d: dict) -> "LaserFit":
+        H = d.get("table_px_to_cm")
         return cls(np.asarray(d["coef"], dtype=np.float64), tuple(d["norm"]),  # type: ignore[arg-type]
                    d.get("fit_error_cm", {}), int(d.get("n_points", 0)), d.get("grid"),
-                   float(d.get("timestamp", 0.0)))
+                   float(d.get("timestamp", 0.0)),
+                   None if H is None else np.asarray(H, dtype=np.float64), d.get("servo_limits"))
 
     def save(self, path: str) -> None:
         d = os.path.dirname(os.path.abspath(path))
@@ -235,6 +280,7 @@ class Laser:
         self.anti_backlash_us = float(cfg.get("laser_anti_backlash_us", 25))
         self.diff_thr = int(cfg.get("laser_diff_thr", 40))
         self.max_dot_px = int(cfg.get("laser_max_dot_px", 3000))
+        self.first_dot_cm = float(cfg.get("laser_first_dot_cm", FIRST_DOT_CM))
         self.table_size = tuple((cfg.get("table") or {}).get("size_cm", (90, 60)))
         room = cfg.get("room") or {}
         self.room_map = None            # act.room_map.RoomMap, set by the caller (main.py) when enabled
@@ -244,6 +290,7 @@ class Laser:
         self.jump_px = float(room.get("jump_px", 30))
         self.max_map_gap_px = float(room.get("max_map_gap_px", 60))
         self.fit: Optional[LaserFit] = None
+        self.disabled: Optional[str] = None   # why the hardware isn't usable (set by the app); aims refuse
         self.state = {"on": False, "target": None, "err_cm": None}
         self.last_aim: dict = {}
         self.last_frames: tuple[Optional[Frame], Optional[Frame]] = (None, None)
@@ -256,9 +303,33 @@ class Laser:
         return lk if lk is not None else contextlib.nullcontext()
 
     def _need_fit(self) -> LaserFit:
+        if self.disabled:
+            raise RuntimeError(f"laser disabled ({self.disabled})")
         if self.fit is None:
-            raise RuntimeError(f"laser not calibrated (no {self.cal_path}); run python -m act.calibrate")
+            raise RuntimeError(f"laser not calibrated (no {self.cal_path}); run python -m act.calibrate --rig")
         return self.fit
+
+    def to_fit_cm(self, cm) -> np.ndarray:
+        """Current table cm -> the cm the fit was made in (through the camera pixel; the identity when the
+        table hasn't been refitted, or for a fit saved before the homography was stored)."""
+        cm = np.asarray(cm, dtype=np.float64)
+        H = self.fit.table_px_to_cm if self.fit is not None else None
+        if H is None:
+            return cm
+        try:
+            px = np.asarray(self.table.cm_to_px(cm.reshape(-1, 2)), dtype=np.float64)
+        except Exception:  # noqa: BLE001 - table not calibrated: nothing to map through
+            return cm
+        return apply_h(H, px).reshape(cm.shape)
+
+    def refit_moved_cm(self) -> Optional[float]:
+        """How far (cm, max over the table corners) the current table frame is from the fit's. None if
+        the fit has no stored homography or the table isn't calibrated."""
+        if self.fit is None or self.fit.table_px_to_cm is None or table_px_to_cm(self.table, self.table_size) is None:
+            return None
+        w, h = self.table_size
+        c = np.array([[0, 0], [w, 0], [w, h], [0, h]], dtype=np.float64)
+        return float(np.linalg.norm(self.to_fit_cm(c) - c, axis=1).max())
 
     def _clamp(self, pan: float, tilt: float) -> tuple[float, float]:
         (plo, phi), (tlo, thi) = self.act.limits()
@@ -292,11 +363,15 @@ class Laser:
             self.clock.sleep(0.005)
 
     # -- spec API
-    def find_dot_px(self, n_pairs: int = 1, gate: bool = True) -> Optional[tuple[float, float]]:
+    def find_dot_px(self, n_pairs: int = 1, gate: bool = True,
+                    roi: Optional[tuple[int, int, int, int]] = None,
+                    unique: bool = False) -> Optional[tuple[float, float]]:
         """Blink the laser n_pairs times and return the dot in image px (None if not seen). Laser ends on.
         The pairs' scores are averaged, which lifts a dim far dot out of sensor noise (SNR ~ sqrt(n));
         the threshold drops by sqrt(n) to keep the false-alarm rate. gate: pick the brightest
-        dot-shaped blob instead of the largest one."""
+        dot-shaped blob instead of the largest one. roi: (x0, y0, x1, y1) px; only look inside it.
+        unique (with gate): None unless exactly one dot-shaped blob shows (faint specks under half the
+        brightest one's peak don't count)."""
         with self._locked():
             acc, n, off, on = None, 0, None, None
             for _ in range(max(1, n_pairs)):
@@ -311,19 +386,56 @@ class Laser:
             self.last_frames = (off, on)
             if on is None:
                 return None
+            x0, y0, x1, y1 = 0, 0, on.img.shape[1], on.img.shape[0]
+            if roi is not None:
+                x0, y0 = max(0, int(roi[0])), max(0, int(roi[1]))
+                x1, y1 = min(x1, int(math.ceil(roi[2]))), min(y1, int(math.ceil(roi[3])))
+                if x0 >= x1 or y0 >= y1:
+                    return None             # the region is off the picture
             if acc is None:
                 # Fallback only without an off frame: when the diff is possible and empty, the dot
                 # really isn't visible, and a single-frame red mask would fire on warm surfaces.
-                return dot_px_hsv(on.img, max_area=self.max_dot_px // 2)
+                d = dot_px_hsv(on.img[y0:y1, x0:x1], max_area=self.max_dot_px // 2)
+                return None if d is None else (d[0] + x0, d[1] + y0)
             score = acc / n
             mask = (score > self.diff_thr / math.sqrt(n)).astype(np.uint8)
+            if roi is not None:
+                keep = np.zeros_like(mask)
+                keep[y0:y1, x0:x1] = 1
+                mask &= keep
+            if gate and unique:        # a second blob half as bright or more (a glint) makes it ambiguous
+                blobs = sorted(_dot_blobs(mask, score, 2, self.max_dot_px), key=lambda b: -b[2])
+                if not blobs or (len(blobs) > 1 and blobs[1][2] >= 0.5 * blobs[0][2]):
+                    return None
+                return blobs[0][0], blobs[0][1]
             if gate:
                 return _dot_blob(mask, score, 2, self.max_dot_px)
             return _largest_blob(mask, score, 2, self.max_dot_px)
 
-    def find_dot(self) -> Optional[Point]:
-        """Blink the laser and return the dot position in table cm (None if not seen). Laser ends on."""
-        px = self.find_dot_px(1, gate=False)
+    def find_dot(self, near_cm=None, radius_cm: Optional[float] = None) -> Optional[Point]:
+        """Blink the laser and return the dot position in table cm (None if not seen). Laser ends on.
+        Picks the brightest dot-shaped blob. near_cm: look only within radius_cm (default
+        first_dot_cm) of it, and reject a dot further than that, so a red sleeve, skin or a
+        reflection elsewhere on the table is never taken for the dot."""
+        roi = None
+        if near_cm is not None:
+            r = self.first_dot_cm if radius_cm is None else float(radius_cm)
+            c = np.asarray(near_cm, dtype=np.float64)
+            box = self.table.cm_to_px(c + np.array([[-r, -r], [r, -r], [r, r], [-r, r]]))
+            roi = (*np.floor(box.min(axis=0)), *np.ceil(box.max(axis=0)))
+        px = self.find_dot_px(1, gate=True, roi=roi)
+        if px is None:
+            return None
+        cm = self.table.px_to_cm(np.array([px], dtype=np.float64)).reshape(-1)
+        if near_cm is not None and math.dist(cm, near_cm) > r:
+            return None
+        return float(cm[0]), float(cm[1])
+
+    def find_dot_wide(self, n_pairs: int = 3) -> Optional[Point]:
+        """The whole picture, averaged over n_pairs blinks, when the dot isn't near the target (the head or
+        camera was knocked, or the fit is off). Only an unambiguous answer counts: one dot-shaped blob
+        and no other half as bright, else None. Laser ends on."""
+        px = self.find_dot_px(n_pairs, gate=True, unique=True)
         if px is None:
             return None
         cm = self.table.px_to_cm(np.array([px], dtype=np.float64)).reshape(-1)
@@ -331,31 +443,52 @@ class Laser:
 
     def aim(self, target_cm: tuple, mode: str = "point") -> float:
         """Point at target_cm. mode 'point' closes the loop on the seen dot (<= 8 tries, stop < tol_cm);
-        'open' just moves to the prediction and measures once. Returns the last measured error in cm
-        (inf if the dot was never seen). Leaves the laser on; the actuator's auto-off timer restarts."""
+        'open' just moves to the prediction and measures once. Only a dot within first_dot_cm of the
+        target counts; if the first look misses, one whole-picture search (find_dot_wide) may find a
+        dot that is further off (knocked head), and the loop corrects from there. After MAX_MISSES
+        looks in a row without it, stop and hold the pose. Returns the last measured error in cm (inf if
+        the dot was never seen). Leaves the laser on, except when the dot was never seen: an unconfirmed
+        dot could be anywhere, so the laser goes off. The actuator's auto-off timer restarts."""
         fit = self._need_fit()
         target = np.asarray(target_cm, dtype=np.float64)
+        target_fit = self.to_fit_cm(target)
         tries = 1 if mode == "open" else self.max_tries
-        err, first, n = math.inf, None, 0
+        err, first, n, misses, reason, wide = math.inf, None, 0, 0, "max_tries", False
         with self._locked():
-            cmd = np.array(self._clamp(*fit.predict(target)))
+            cmd = np.array(self._clamp(*fit.predict(target_fit)))
             self.move_to(*cmd)
             for i in range(tries):
                 self.clock.sleep(self.settle_s)
-                dot = self.find_dot()
+                dot = self.find_dot(near_cm=target)
                 n += 1
-                if dot is None:
-                    continue            # occluded or missed: look again (counts as a try)
-                e = target - np.asarray(dot)
-                err = float(np.linalg.norm(e))
+                if dot is None and first is None and not wide and mode != "open":
+                    wide = True
+                    dot = self.find_dot_wide()
+                    if dot is not None:
+                        log.warning("laser dot %.0f cm from the target: head or camera moved? (found by a "
+                                    "whole-picture search)", math.dist(dot, target))
+                if dot is None:         # occluded or missed: look again (counts as a try)
+                    misses += 1
+                    if misses >= MAX_MISSES:
+                        reason = "lost" if first is not None else "not_seen"
+                        break
+                    continue
+                misses = 0
+                err = float(np.linalg.norm(target - np.asarray(dot)))
                 first = err if first is None else first
-                if err < self.tol_cm or i == tries - 1:
+                if err < self.tol_cm:
+                    reason = "within_tol"
                     break
-                cmd = np.array(self._clamp(*(cmd + self.gain * fit.jacobian(target) @ e)))
+                if i == tries - 1:
+                    break
+                e = target_fit - self.to_fit_cm(np.asarray(dot))
+                cmd = np.array(self._clamp(*(cmd + self.gain * fit.jacobian(target_fit) @ e)))
                 self.move_to(*cmd, duration_s=0.1)
-            self.act.laser(True)
-        self.last_aim = {"tries": n, "first_err_cm": first, "err_cm": err}
-        self.state = {"on": True, "target": None,
+            if first is None:
+                reason = "not_seen"
+            self.act.laser(reason != "not_seen")
+        self.last_aim = {"tries": n, "first_err_cm": first, "err_cm": err, "reason": reason, "wide": wide}
+        self.state = {"on": reason != "not_seen", "target": None,
                       "err_cm": None if math.isinf(err) else round(err, 2)}
         return err
 
@@ -449,7 +582,7 @@ class Laser:
     def _trace(self, pts_cm: np.ndarray, seg_s: float) -> None:
         fit = self._need_fit()
         with self._locked():
-            pul = fit.predict(pts_cm)
+            pul = fit.predict(self.to_fit_cm(pts_cm))
             self.act.laser(True)
             self.act.move(*self._clamp(*pul[0]), duration_s=0.3)
             for p in pul[1:]:

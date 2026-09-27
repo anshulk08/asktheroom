@@ -17,7 +17,10 @@
 
 Missing hardware fails that check with the reason, so this also runs on a laptop. Parts (camera,
 table, detector, laser) are built on first use and shared; one that fails to build fails every
-check that needs it, with the same reason.
+check that needs it, with the same reason. Every check has a deadline (DEADLINE_S: the detector and
+world checks 180 s for a TensorRT load, prompts 300 s, the rest 30 s): a check that hangs (a speaker
+that never takes the tone, a camera that never answers) fails "timed out" with its stack on stderr,
+and the run goes on. Recording and the test tone have their own shorter deadlines.
 
 --fake: the camera is a FrameBuffer over a rendered home layout (server.sim's painter and LAYOUT,
 with ArUco 0-3 drawn in), the detector's backend reads boxes off that layout, the laser is an
@@ -27,6 +30,7 @@ network check is real.
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import math
 import os
 import shutil
@@ -34,7 +38,11 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+import traceback
+import weakref
+from collections import deque
 from typing import Callable, Optional, Union
 from urllib.parse import urlparse
 
@@ -54,6 +62,11 @@ SPEECH_DBFS = -35.0             # loudest 32 ms block while someone talks, at ar
 SILENT_DBFS = -90.0             # below this the mic is sending digital zeros (muted or wrong device)
 
 Result = tuple[Optional[bool], str]         # ok (None = skipped), message
+
+DEADLINE_S = {"detector": 180.0, "world": 180.0}   # may load the TensorRT engine
+MANUAL_DEADLINE_S = 300.0                          # checks that wait for a person to answer
+DEFAULT_DEADLINE_S = 30.0
+AUDIO_GRACE_S = 3.0                                # recording / tone may overrun their length by this
 
 
 # ---------------------------------------------------------------- fake hardware
@@ -126,6 +139,56 @@ class LayoutBackend:
         return list(self.raw)
 
 
+# ---------------------------------------------------------------- prompts
+
+class PromptReader:
+    """input() for checks that can be abandoned: one thread reads stdin lines into a queue, and a check
+    that timed out while waiting for an answer is marked so it can never take a later answer (a plain
+    input() left blocked would swallow the next Enter)."""
+
+    def __init__(self, stream=None):
+        self.stream = stream if stream is not None else sys.stdin
+        self.lines: deque = deque()
+        self.cv = threading.Condition()
+        self.eof = False
+        self.dead: "weakref.WeakSet[threading.Thread]" = weakref.WeakSet()   # checks that timed out (idents get reused)
+        self._thread: Optional[threading.Thread] = None
+
+    def _run(self) -> None:
+        while True:
+            try:
+                line = self.stream.readline()
+            except (OSError, ValueError):
+                line = ""
+            with self.cv:
+                if not line:
+                    self.eof = True
+                    self.cv.notify_all()
+                    return
+                self.lines.append(line.rstrip("\r\n"))
+                self.cv.notify_all()
+
+    def ask(self, prompt: str) -> str:
+        print(prompt, end="", flush=True)
+        with self.cv:
+            if self._thread is None:
+                self._thread = threading.Thread(target=self._run, name="stdin", daemon=True)
+                self._thread.start()
+            while True:
+                if threading.current_thread() in self.dead:
+                    raise TimeoutError("prompt abandoned: its check timed out")
+                if self.lines:
+                    return self.lines.popleft()
+                if self.eof:
+                    raise EOFError
+                self.cv.wait(0.5)
+
+    def abandon(self, thread: threading.Thread) -> None:
+        with self.cv:
+            self.dead.add(thread)
+            self.cv.notify_all()
+
+
 # ---------------------------------------------------------------- the parts, built on first use
 
 class Rig:
@@ -133,25 +196,44 @@ class Rig:
     so every check that needs a missing camera reports the camera, not a knock-on error."""
 
     def __init__(self, cfg: dict, fake: bool = False, camera: Union[int, str] = 0, manual: bool = True,
-                 ask: Callable[[str], str] = input):
+                 ask: Optional[Callable[[str], str]] = None):
         self.fake = fake
-        self.cfg = fake_cfg(cfg) if fake else cfg
-        self.camera, self.manual, self._ask = camera, manual, ask
+        self.cfg = fake_cfg(cfg) if fake else self._saved_table(cfg)
+        self.prompts = PromptReader() if ask is None else None
+        self.camera, self.manual = camera, manual
+        self._ask = ask if ask is not None else self.prompts.ask
         self._parts: dict[str, object] = {}
+        self.building: set[str] = set()             # parts being made right now (a hung check marks them)
         self._cleanup: list[Callable[[], None]] = []
         self.tmp = tempfile.mkdtemp(prefix="askroom_check_")
         self.home_cm = (fake_layout(self.cfg) if fake else
                         {o: tuple(v) for o, v in ((cfg.get("demo_check") or {}).get("home_cm") or {}).items()})
         self.home_tol_cm = float((cfg.get("demo_check") or {}).get("home_tol_cm", 5))
 
+    @staticmethod
+    def _saved_table(cfg: dict) -> dict:
+        """As main.build: the saved one-tag tracked area and tabletop outline, before the laser reads them."""
+        import copy
+
+        import core.table
+        import core.table_area
+        cfg = copy.deepcopy(cfg)
+        core.table.apply_saved_size(cfg)
+        core.table_area.apply_saved_area(cfg)
+        return cfg
+
     def part(self, name: str):
         got = self._parts.get(name)
         if got is None:
+            self.building.add(name)
             try:
                 got = getattr(self, f"_make_{name}")()
             except Exception as e:                 # noqa: BLE001 - reported as the check's reason
                 got = e
-            self._parts[name] = got
+            finally:
+                self.building.discard(name)
+            self._parts.setdefault(name, got)      # a timeout may have marked it failed meanwhile
+            got = self._parts[name]
         if isinstance(got, Exception):
             raise got
         return got
@@ -227,6 +309,20 @@ class Rig:
         laser.room_map = RoomMap.load(path)
         return laser, self.part("frames")
 
+    def laser_off_now(self, timeout: float = 2.0) -> None:
+        """Best effort before exiting: write laser-off straight to the hardware, without the actuator's
+        lock (a timed-out check may still hold it) and with a deadline."""
+        for name in ("laser", "room"):
+            got = self._parts.get(name)
+            laser = got[0] if isinstance(got, tuple) else got
+            act = getattr(laser, "act", None)
+            hw = getattr(act, "_hw_laser", None)
+            if hw is None:
+                continue
+            t = threading.Thread(target=hw, args=(False, time.monotonic()), name="laser-off", daemon=True)
+            t.start()
+            t.join(timeout)
+
     def close(self) -> None:
         for fn in reversed(self._cleanup):
             try:
@@ -244,14 +340,31 @@ class Rig:
         import sounddevice as sd
         dev = (self.cfg.get("stt") or {}).get("input_device")
         a = sd.rec(int(seconds * 16000), samplerate=16000, channels=1, dtype="float32", device=dev)
-        sd.wait()
+        deadline = time.monotonic() + seconds + AUDIO_GRACE_S
+        while time.monotonic() < deadline and sd.get_stream().active:   # sd.wait() can wait forever
+            time.sleep(0.05)
+        done = not sd.get_stream().active
+        sd.stop()
+        if not done:
+            raise TimeoutError(f"mic recording didn't finish in {seconds + AUDIO_GRACE_S:.0f} s "
+                               f"(stt.input_device {dev!r})")
         return a[:, 0]
 
     def play(self, pcm: np.ndarray, rate: int) -> None:
+        """The test tone on tts.output_device (what the voice uses; the default is HDMI in the container,
+        which can block forever), on a thread with a deadline."""
         if self.fake:
             return
-        from voice.tts import play_pcm
-        play_pcm(pcm, rate)
+        from voice.tts import play_pcm, resolve_output_device
+        spec = (self.cfg.get("tts") or {}).get("output_device")
+        dev = resolve_output_device(spec)
+        t = threading.Thread(target=play_pcm, args=(pcm, rate, dev), name="tone", daemon=True)
+        t.start()
+        t.join(len(pcm) / rate + AUDIO_GRACE_S)
+        if t.is_alive():
+            raise TimeoutError(f"speaker didn't finish the test tone (tts.output_device {spec!r}"
+                               f"{' = default device' if dev is None else f' = {dev}'}): "
+                               "check it with python -m voice.tts --devices")
 
 
 def dbfs(x: np.ndarray) -> float:
@@ -368,17 +481,26 @@ def _check_tag(table, img) -> Result:
 def check_laser(rig: Rig) -> Result:
     laser = rig.part("laser")
     if laser.fit is None:
-        return False, f"not calibrated ({laser.cal_path} missing): run python -m act.calibrate"
+        return False, f"not calibrated ({laser.cal_path} missing): run python -m act.calibrate --rig"
+    from act.calibrate import Region
     fe = laser.fit.fit_error_cm or {}
     med, mx = float(fe.get("median", math.inf)), float(fe.get("max", math.inf))
-    w, h = laser.table_size
+    centre = Region.from_cfg(rig.cfg, laser.table_size).centre     # the tabletop's, if outlined
     try:
-        err = laser.aim((w / 2, h / 2))
+        err = laser.aim(centre)
+        first = laser.last_aim.get("first_err_cm")
     finally:
         laser.off()
     msg = f"fit {med:.2f} cm median ({mx:.2f} max, {laser.fit.n_points} pts); centre test "
     msg += "dot not seen" if math.isinf(err) else f"{err:.2f} cm"
-    return med < MAX_LASER_FIT_CM and err < MAX_LASER_AIM_CM, msg
+    # The closed loop hides a bad prediction (a camera bumped since the fit, remapped wrongly), so the
+    # first, open-loop look must land too.
+    open_ok = first is not None and first < MAX_LASER_AIM_CM
+    if first is not None:
+        msg += f" (open loop {first:.2f} cm)"
+        if not open_ok:
+            msg += ": the fit no longer predicts the dot; camera or head moved? python -m act.calibrate --rig"
+    return med < MAX_LASER_FIT_CM and err < MAX_LASER_AIM_CM and open_ok, msg
 
 
 def check_audio(rig: Rig) -> Result:
@@ -548,6 +670,44 @@ def run_check(rig: Rig, fn: Callable[[Rig], Result]) -> Result:
         return False, f"{type(e).__name__}: {e}"
 
 
+def deadline_for(name: str, rig: Rig) -> float:
+    if rig.manual and name in ("audio", "kill switch"):
+        return MANUAL_DEADLINE_S
+    return DEADLINE_S.get(name, DEFAULT_DEADLINE_S)
+
+
+def run_check_with_deadline(rig: Rig, name: str, fn: Callable[[Rig], Result],
+                            timeout: Optional[float] = None) -> Result:
+    """run_check on a daemon thread. Past the deadline the check fails "timed out", its stack goes to
+    stderr, and any part it was still building is marked failed so later checks don't wait on it too."""
+    timeout = deadline_for(name, rig) if timeout is None else timeout
+    box: list[Result] = []
+    t = threading.Thread(target=lambda: box.append(run_check(rig, fn)), name=f"check-{name}", daemon=True)
+    try:                                                   # a long check shows where it is, every minute
+        faulthandler.dump_traceback_later(60, repeat=True, file=sys.__stderr__)
+    except (AttributeError, OSError, ValueError):          # no real stderr (e.g. under a test runner)
+        pass
+    try:
+        t.start()
+        t.join(timeout)
+    finally:
+        faulthandler.cancel_dump_traceback_later()
+    if box:
+        return box[0]
+    frame = sys._current_frames().get(t.ident or -1)
+    where = ""
+    if frame is not None:
+        stack = traceback.extract_stack(frame)
+        print(f"--- check {name!r} stuck after {timeout:.0f} s:", file=sys.stderr)
+        print("".join(traceback.format_list(stack)), file=sys.stderr, flush=True)
+        where = f" in {stack[-1].name} ({os.path.basename(stack[-1].filename)}:{stack[-1].lineno})"
+    if rig.prompts is not None:
+        rig.prompts.abandon(t)                        # it can't take a later check's answer
+    for part in list(rig.building):
+        rig._parts[part] = TimeoutError(f"{part} hung while starting (check {name!r} timed out)")
+    return False, f"timed out after {timeout:.0f} s{where}"
+
+
 def line(i: int, name: str, ok: Optional[bool], msg: str, color: bool = True) -> str:
     tag, c = ("PASS", GREEN) if ok else ("SKIP", YELLOW) if ok is None else ("FAIL", RED)
     s = f"[{tag}] {i} {name:<12s} {msg}"
@@ -575,14 +735,22 @@ def main(argv=None) -> int:
         for i, (name, fn) in enumerate(CHECKS, 1):
             if a.only and i not in a.only:
                 continue
-            ok, msg = run_check(rig, fn)
+            ok, msg = run_check_with_deadline(rig, name, fn)
             print(line(i, name, ok, msg, color), flush=True)
             failed += ok is False
     finally:
-        rig.close()
-    print(f"{failed} failed" if failed else "all checks passed")
+        rig.laser_off_now()                                 # even if a hung check holds the actuator
+        closer = threading.Thread(target=rig.close, name="close", daemon=True)
+        closer.start()
+        closer.join(10.0)
+        if closer.is_alive():
+            print("(cleanup still running after 10 s; exiting anyway)", file=sys.stderr)
+    print(f"{failed} failed" if failed else "all checks passed", flush=True)
     return 1 if failed else 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    code = main()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)           # a hung check's thread or an audio library's exit hook can't hold the process

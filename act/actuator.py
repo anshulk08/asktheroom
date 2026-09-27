@@ -132,6 +132,22 @@ class BaseActuator:
     def limits(self) -> Limits:
         return self._limits
 
+    def set_limits(self, limits: Limits) -> None:
+        """New servo limits (act.calibrate --rig's jog measures them). Only narrower than the current
+        ones: a jog can't widen what config allows."""
+        (plo, phi), (tlo, thi) = self._limits
+        new = ((max(plo, float(limits[0][0])), min(phi, float(limits[0][1]))),
+               (max(tlo, float(limits[1][0])), min(thi, float(limits[1][1]))))
+        for lo, hi in new:
+            if not lo < hi:
+                raise ValueError(f"bad servo_limits {limits} (current {self._limits})")
+        with self.lock:
+            self._limits = new                               # type: ignore[assignment]
+            self._on_limits()
+
+    def _on_limits(self) -> None:
+        pass
+
     def clamp(self, pan: float, tilt: float) -> tuple[float, float]:
         (plo, phi), (tlo, thi) = self._limits
         return clamp(float(pan), plo, phi), clamp(float(tilt), tlo, thi)
@@ -234,6 +250,10 @@ class PCA9685Actuator(BaseActuator):
         self._pca = self._kit._pca  # ServoKit has no public raw-channel API
         self._hw_laser(False, 0.0)
 
+    def _on_limits(self) -> None:
+        for ch, (lo, hi) in ((self._pan_ch, self._limits[0]), (self._tilt_ch, self._limits[1])):
+            self._kit.servo[ch].set_pulse_width_range(int(lo), int(hi))
+
     def _hw_pulses(self, pan: float, tilt: float, t: float) -> None:
         (plo, phi), (tlo, thi) = self._limits
         self._kit.servo[self._pan_ch].fraction = (pan - plo) / (phi - plo)
@@ -332,3 +352,16 @@ def make_actuator(cfg: dict, clock: Optional[Clock] = None) -> BaseActuator:
     if kind not in ACTUATORS:
         raise ValueError(f"unknown actuator {kind!r}; expected one of {sorted(ACTUATORS)}")
     return ACTUATORS[kind](cfg, clock)
+
+
+def make_actuator_or_fake(cfg: dict, clock: Optional[Clock] = None) -> tuple[BaseActuator, Optional[str]]:
+    """make_actuator, but a driver that can't start (adafruit_servokit missing from the image, no board
+    on I2C, serial port gone) gives a FakeActuator and the reason instead of stopping the app: the
+    caller then runs with the laser disabled and answers by voice only."""
+    try:
+        return make_actuator(cfg, clock), None
+    except Exception as e:  # noqa: BLE001 - ImportError, OSError, ValueError, NotImplementedError ...
+        why = f"actuator {cfg.get('actuator')!r} failed to start: {type(e).__name__}: {e}"
+        log.error("%s. LASER DISABLED: answers are spoken only. Fix it (docker/Dockerfile installs "
+                  "adafruit-circuitpython-servokit; check the board with i2cdetect -y -r 7) and restart.", why)
+        return FakeActuator(cfg, clock), why
