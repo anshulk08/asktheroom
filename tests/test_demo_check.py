@@ -229,3 +229,24 @@ def test_room_check_skips_when_off_and_rehits_the_sim_map():
         assert not ok and "sweep again" in msg
     finally:
         rig.close()
+
+
+def test_the_mic_check_records_the_named_mic_like_the_voice_loop(monkeypatch):
+    """sd.rec with the raw stt.input_device string failed on a shared name or a 48 kHz-only mic while the
+    voice loop worked; a named mic that isn't there must fail the check, not pass on the default mic."""
+    import numpy as np
+
+    import voice.stt as stt
+    cfg = dict(CFG, stt=dict(CFG.get("stt") or {}, input_device="PnP"))
+    rig = dc.Rig(cfg, fake=False, manual=False)
+    got = []
+    monkeypatch.setattr(stt, "record_seconds", lambda s, spec: got.append((s, spec)) or np.zeros(int(s * 16000), np.float32))
+    assert len(rig.record(0.5)) == 8000 and got == [(0.5, "PnP")]
+
+    def missing(s, spec):
+        raise RuntimeError(f"stt.input_device {spec!r}: no input device has that name")
+
+    monkeypatch.setattr(stt, "record_seconds", missing)
+    with pytest.raises(RuntimeError, match="no input device"):
+        rig.record(0.5)
+    rig.close()

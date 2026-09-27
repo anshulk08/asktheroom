@@ -68,6 +68,7 @@ from core.narration import NarrationConfig, NarrationError, ProviderError, _pars
 from core.narration_store import med_claim, parse_window, redact_meds
 from core.types import Answer, Intent, Status
 from core.visual_memory import VisualArchive, VisualConfig, digest_text, make_embedder
+from net import call_with_deadline
 
 if TYPE_CHECKING:
     from core.crops import Crop
@@ -88,6 +89,7 @@ HIDDEN = (Status.HELD.value, Status.UNDER.value, Status.INSIDE.value)
 POINT_MARGIN_CM = 2.0      # a VLM point this close outside a marked box still lands on it
 POINT_NEAR_CM = 6.0
 BIND_CONF = 0.7                  # a picked unnamed thing takes the asked-for name at or above this confidence
+VLM_MARGIN_S = 2.0               # wall-clock deadline per Grok call: visual_memory.timeout_s plus this
 
 PAST = re.compile(r"\b(?:was|were|did|had|earlier|before|ago|yesterday|used to|show(?:ed|n)? up|appeared"
                   r"|last time|when i left|before i left|while i was)\b")
@@ -441,8 +443,15 @@ class VisualQA:
         return len(self._calls) >= self.c.max_per_hour
 
     def _vlm(self, system: str, parts: list, schema: dict) -> dict:
+        """One Grok call, bounded in wall time: requests' timeout is per phase (DNS, connect, each read),
+        so a stalling connection could hold a spoken answer far past visual_memory.timeout_s. Past
+        timeout_s + VLM_MARGIN_S it raises ProviderError, and the callers' usual failure answer is said."""
         self._calls.append(self.clock())
-        reply = self.provider.narrate(system, parts, schema)
+        limit = float(self.c.timeout_s) + VLM_MARGIN_S
+        try:
+            reply = call_with_deadline(self.provider.narrate, limit, system, parts, schema, name="visual-grok")
+        except TimeoutError:
+            raise ProviderError(f"no reply after {limit:.1f} s") from None
         d = _parse_json(reply.text)
         self.last = {"latency_ms": reply.latency_ms, "usage": reply.usage, "reply": d}
         return d

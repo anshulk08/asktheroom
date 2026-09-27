@@ -228,7 +228,7 @@ tts:
 net:
   check_host: https://api.x.ai
   interval_s: 5
-  timeout_s: 0.3
+  timeout_s: 1.5                # per HEAD; offline takes 2 failed probes in a row (net.py)
 
 server:
   host: 0.0.0.0
@@ -280,7 +280,9 @@ n8n:
 
 listen:
   mode: always                # always: answer what's meant for the rig | wake: only "room, ..." | click: clicker only
-  wake_words: [room]          # also lets overheard speech reset or ask open questions ("room, reset")
+  wake_words: [room, ask the room]   # also lets overheard speech reset or ask open questions ("room, reset",
+                              # "ask the room, reset"; the wake word must open a reset). Room demo: see
+                              # config.local.yaml.example
   idle_s: 8                   # reopen the mic after this long with nobody talking
   echo_tail_s: 0.4            # keep the mic shut this long after the rig stops speaking
 
@@ -578,3 +580,11 @@ unknown_cover:
 # GET /scoreboard?date=today|yesterday|all|YYYY-MM-DD returns the counts; the dashboard shows today's.
 scoreboard:
   trials_dir: data/room       # uploaded results files (and any room_trials.py file copied here)
+
+# Voice path guards (main.py voice_loop / _ask_with_cue). An error answering one question is logged and met
+# with a short sorry, and the loop listens again; a watchdog restarts the loop if it ever exits. A voice answer
+# not ready after answer_limit_s (Wi-Fi stalled mid-Grok) is replaced by the rules' and templates' answer, so
+# the mic never stays shut waiting on the network.
+voice_guard:
+  answer_limit_s: 10          # longest wait for a voice answer before the rules answer instead
+  sorry_every_s: 10           # say "Sorry, something went wrong" at most this often

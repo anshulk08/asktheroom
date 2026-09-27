@@ -843,3 +843,14 @@ def test_the_bridge_follows_a_recalibrated_table_size(tmp_path):
     tcal.write_text('{"H": [[1,0,0],[0,1,0],[0,0,1]]}')               # four-marker file: keeps the size
     os.utime(tcal, (2e9, 2e9))
     assert core.current_table_cm() == (95.0, 55.0)
+
+
+def test_a_room_object_carries_its_zone_and_no_table_position():
+    """Room memory (spec 0010): a prop carried to the couch has no table cm; the phone lists it by zone."""
+    room = P.compact_entity({"name": "wallet", "kind": "target", "status": "VISIBLE", "pos_cm": None,
+                             "resolved_cm": None, "confidence": 0.8, "zone": "couch", "last_seen": 1790389800.0})
+    assert room["z"] == "couch" and "xy" not in room and "r" not in room
+    table = P.compact_entity({"name": "wallet", "kind": "target", "status": "VISIBLE", "pos_cm": [10, 20],
+                              "zone": "table"})
+    assert "z" not in table and table["xy"] == [10.0, 20.0]
+    assert "z" not in P.compact_entity({"name": "keys", "kind": "target", "status": "VISIBLE"})   # older server

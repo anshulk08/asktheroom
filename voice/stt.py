@@ -66,21 +66,54 @@ TAG = re.compile(r"\[[^\]]*\]|\([^)]*\)")    # [BLANK_AUDIO], (music), ...
 
 # ---------------------------------------------------------------- audio seam
 
+def _to_block(x: np.ndarray, block: int) -> np.ndarray:
+    """One device block resampled to exactly `block` samples: an average over each group when the
+    ratio is whole (48 kHz -> 16 kHz: 3 samples, which also filters what would alias), else linear."""
+    n = len(x)
+    if n == block:
+        return x
+    if n % block == 0:
+        return x.reshape(block, n // block).mean(axis=1).astype(np.float32)
+    return np.interp(np.linspace(0, n - 1, block), np.arange(n), x).astype(np.float32)
+
+
+_DEVICE_RATE: dict = {}        # (device, wanted rate) -> the rate it records at instead (one failed open per run)
+
+
 class AudioIn:
-    """float32 mono blocks from the default input device (sounddevice/PortAudio)."""
+    """float32 mono blocks of `block` samples at `rate` from an input device (sounddevice/PortAudio).
+    A device that refuses `rate` (an ALSA hw device on the Jetson often takes only 44.1 / 48 kHz) is
+    opened at its own default rate, and each block is resampled to `block` samples at `rate` (the VAD
+    needs exactly 512 at 16 kHz)."""
 
     def __init__(self, rate: int, block: int, device=None):
         import sounddevice as sd
         self._q: "queue.Queue[np.ndarray]" = queue.Queue()
         self.overflows = 0
+        self.device_rate = rate
+        known = _DEVICE_RATE.get((device, rate))              # this device refused `rate` before
 
         def cb(indata, frames, t, status):
             if status.input_overflow:
                 self.overflows += 1
-            self._q.put(indata[:, 0].copy())
+            x = indata[:, 0].copy()
+            self._q.put(x if len(x) == block else _to_block(x, block))
 
-        self.stream = sd.InputStream(samplerate=rate, blocksize=block, channels=1, dtype="float32",
-                                     device=device, callback=cb)
+        try:
+            if known:
+                raise sd.PortAudioError("known to refuse this rate")
+            self.stream = sd.InputStream(samplerate=rate, blocksize=block, channels=1, dtype="float32",
+                                         device=device, callback=cb)
+        except sd.PortAudioError:
+            dev_rate = known or int(sd.query_devices(device, "input")["default_samplerate"])
+            if dev_rate == rate:
+                raise
+            if not known:
+                log.info("input device refuses %d Hz; recording at its %d Hz, resampled", rate, dev_rate)
+                _DEVICE_RATE[(device, rate)] = dev_rate
+            self.device_rate = dev_rate
+            self.stream = sd.InputStream(samplerate=dev_rate, blocksize=round(block * dev_rate / rate),
+                                         channels=1, dtype="float32", device=device, callback=cb)
         self.stream.start()
 
     def read(self, timeout: float = 1.0) -> Optional[np.ndarray]:
@@ -98,6 +131,64 @@ class AudioIn:
 
 def open_input(rate: int, block: int, device=None) -> AudioIn:
     return AudioIn(rate, block, device)
+
+
+def input_devices() -> list[dict]:
+    """sounddevice devices that can record (max_input_channels > 0), each with its 'index'."""
+    import sounddevice as sd
+    return [dict(d, index=i) for i, d in enumerate(sd.query_devices()) if d.get("max_input_channels", 0) > 0]
+
+
+def find_input_device(spec) -> tuple[Optional[int], str, list]:
+    """stt.input_device -> (sounddevice index or None for the default mic, what it is, the matches). Like
+    tts.output_device: an int (or digits) is the index; any other string, the first input device whose name
+    contains it, case insensitive (sounddevice itself refuses a name several devices share: the Brio, a USB
+    mic and a USB speaker are all "USB Audio"). The status is default | index | match | ambiguous | missing;
+    missing means a name was set and no input device has it."""
+    if spec is None or (isinstance(spec, str) and not spec.strip()):
+        return None, "default", []
+    if isinstance(spec, int) or (isinstance(spec, str) and spec.strip().isdigit()):
+        return int(spec), "index", []
+    want = str(spec).strip().lower()
+    hits = [d for d in input_devices() if want in str(d.get("name", "")).lower()]
+    if not hits:
+        return None, "missing", []
+    return int(hits[0]["index"]), ("ambiguous" if len(hits) > 1 else "match"), hits
+
+
+def resolve_input_device(spec) -> Optional[int]:
+    """find_input_device's index, logging a missing mic (ERROR: the default mic may be the Brio across the
+    room) or an ambiguous name (every match, and the one used)."""
+    idx, status, hits = find_input_device(spec)
+    if status == "missing":
+        log.error("stt.input_device %r: no input device has that name; using the default mic "
+                  "(python -m voice.stt --devices lists them)", spec)
+    elif status == "ambiguous":
+        log.info("stt.input_device %r matches %s; using %d: %s", spec,
+                 "; ".join(f"{d['index']}: {d['name']}" for d in hits), idx, hits[0]["name"])
+    elif status == "match":
+        log.info("microphone: %d: %s", idx, hits[0]["name"])
+    return idx
+
+
+def record_seconds(seconds: float, spec=None, rate: int = RATE) -> np.ndarray:
+    """`seconds` of float32 mono from the stt.input_device mic, the way the voice loop opens it (by name,
+    resampled if it won't record at `rate`). RuntimeError if a named mic isn't there: demo_check's mic
+    check must fail then, not pass on the default mic."""
+    idx, status, _ = find_input_device(spec)
+    if status == "missing":
+        raise RuntimeError(f"stt.input_device {spec!r}: no input device has that name")
+    src = open_input(rate, BLOCK, idx)
+    out, need = [], int(seconds * rate)
+    try:
+        while sum(len(b) for b in out) < need:
+            b = src.read(timeout=2.0)
+            if b is None:
+                raise RuntimeError("no audio from the microphone")
+            out.append(b)
+    finally:
+        src.close()
+    return np.concatenate(out)[:need] if out else np.zeros(0, np.float32)
 
 
 # ---------------------------------------------------------------- VAD
@@ -454,12 +545,15 @@ def read_wav(path) -> np.ndarray:
 
 class STT:
     def __init__(self, cfg: dict, clicker=None, backend: Optional[Backend] = None,
-                 vad: Optional[SileroVAD] = None):
+                 vad: Optional[SileroVAD] = None, tts=None):
         """clicker: anything with pressed() -> bool; a press while recording ends it. backend and
-        vad default to the cfg stt settings and are loaded on first use (or by warm())."""
+        vad default to the cfg stt settings and are loaded on first use (or by warm()). tts: anything
+        with a `.speaking` bool (voice.tts.TTS); when the rig starts talking mid-recording, the clip
+        (its own voice from now on) is dropped."""
         s = (cfg or {}).get("stt") or {}
         self.cfg = cfg
         self.clicker = clicker
+        self.tts = tts
         self.max_s = float(s.get("max_s", 6))
         self.silence_ms = float(s.get("silence_ms", 700))
         self.threshold = float(s.get("vad_threshold", 0.5))
@@ -469,12 +563,28 @@ class STT:
         drop = s.get("end_drop_db")
         self.end_drop_db = None if drop in (None, "", 0) else float(drop)
         self.device = s.get("input_device")
+        self._dev, self._dev_ok = None, False
+        self.input_status = ""              # default | index | match | ambiguous | missing | error, once resolved
         self.prompt = initial_prompt(cfg or {}, synonyms=bool(s.get("prompt_synonyms", False)))
         self._backend, self._vad = backend, vad
         self.last_speech = False            # did the last recording contain speech?
-        self.last_stop = ""                 # why it ended: silence | max_s | click | no speech | no audio
+        self.last_stop = ""                 # why it ended: silence | max_s | click | no speech | no audio | tts
         self.log_text = True                # always-on mic: main.py turns this off, so chatter isn't logged
         self.last_ms: dict[str, float] = {}
+
+    def _input(self):
+        """stt.input_device as a sounddevice index, resolved once (logged then: the device used, or an
+        ERROR for a named mic that isn't there) and again only after an open failed (a replugged mic may
+        have a new index). None: the default mic."""
+        if not self._dev_ok:
+            try:
+                self._dev = resolve_input_device(self.device)
+                self.input_status = find_input_device(self.device)[1] if self.device not in (None, "") else "default"
+            except Exception:
+                log.exception("input device lookup failed; using the default mic")
+                self._dev, self.input_status = None, "error"
+            self._dev_ok = True
+        return self._dev
 
     @property
     def vad(self) -> SileroVAD:
@@ -499,7 +609,10 @@ class STT:
                              no_speech_s: Optional[float] = None) -> np.ndarray:
         """Record 16 kHz mono float32 until silence_ms of non-speech follows speech, max_s passes,
         a clicker press, or no_speech_s with no speech at all. Returns the speech plus a little
-        padding, or an empty array if nobody spoke."""
+        padding, or an empty array if nobody spoke. If the TTS starts speaking while this records (a care
+        notice, a dashboard or phone answer), the recording ends and the clip is discarded (empty array,
+        last_stop 'tts'): the mic would hear the rig and answer itself. Speech already playing when the
+        recording starts (a clicked answer still cutting off) doesn't count until it has stopped once."""
         max_s = self.max_s if max_s is None else max_s
         silence_ms = self.silence_ms if silence_ms is None else silence_ms
         no_speech_s = self.no_speech_s if no_speech_s is None else no_speech_s
@@ -513,8 +626,13 @@ class STT:
         first = last = None                 # first / last speech block index
         quiet = 0
         stop = "max_s"
+        was_quiet = not self._tts_speaking()    # the rig's voice counts once it has been off
         t0 = time.monotonic()
-        src = open_input(RATE, BLOCK, self.device)
+        try:
+            src = open_input(RATE, BLOCK, self._input())
+        except Exception:
+            self._dev_ok = False            # look the name up again next time (unplugged, replugged)
+            raise
         try:
             while len(blocks) * block_s < max_s:
                 b = src.read(timeout=1.0)
@@ -542,17 +660,32 @@ class STT:
                 if self.clicker is not None and self.clicker.pressed():
                     stop = "click"
                     break
+                if self._tts_speaking():
+                    if was_quiet:
+                        stop = "tts"
+                        break
+                else:
+                    was_quiet = True
         finally:
             src.close()
+        if stop == "tts":
+            first = None                        # the rig talking over it: nothing here is a question
         self.last_ms["record"] = 1000 * (time.monotonic() - t0)
         self.last_speech = first is not None
         self.last_stop = stop
-        log.info("recorded %.2f s, stopped by %s, speech=%s", len(blocks) * block_s, stop, self.last_speech)
+        log.info("recorded %.2f s, stopped by %s, speech=%s%s", len(blocks) * block_s, stop, self.last_speech,
+                 " (the rig started speaking: discarded)" if stop == "tts" else "")
         if first is None:
             return np.zeros(0, dtype=np.float32)
         a = max(0, first - int(PREROLL_S / block_s))
         b = min(len(blocks), last + 1 + int(TAIL_S / block_s))
         return np.concatenate(blocks[a:b]).astype(np.float32)
+
+    def _tts_speaking(self) -> bool:
+        try:
+            return bool(getattr(self.tts, "speaking", False))
+        except Exception:
+            return False
 
     def transcribe(self, audio: np.ndarray, force: bool = False) -> str:
         """Whisper base.en with the object-name prompt and a clip-sized audio_ctx. Empty audio
@@ -592,10 +725,25 @@ def main(argv=None) -> int:
     ap.add_argument("--wav", nargs="*", help="transcribe these files instead of the microphone")
     ap.add_argument("--record-questions", metavar="DIR",
                     help="read out tests/stt_questions.json and save 01.wav ... into DIR")
+    ap.add_argument("--devices", action="store_true", help="list input devices (* = stt.input_device, d = default)")
+    ap.add_argument("--level", type=float, metavar="SECONDS",
+                    help="mic level and speech probability every half second (the 2 m check), then quit")
     ap.add_argument("--config")
     a = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     cfg = load_config(a.config)
+    if a.devices:
+        import sounddevice as sd
+        spec = (cfg.get("stt") or {}).get("input_device")
+        chosen, default_in = resolve_input_device(spec), sd.default.device[0]
+        print(f"stt.input_device: {spec!r}")
+        for d in input_devices():
+            mark = ("*" if d["index"] == chosen else " ") + ("d" if d["index"] == default_in else " ")
+            print(f"{mark} {d['index']:3d}  {d['name']}  ({d['max_input_channels']} ch, "
+                  f"{int(d['default_samplerate'])} Hz)")
+        return 0
+    if a.level:
+        return level_meter(STT(cfg), a.level)
     if a.record_questions:
         return record_questions(cfg, Path(a.record_questions))
     if a.wav:
@@ -616,6 +764,36 @@ def main(argv=None) -> int:
         it = parse(text, cfg)
         print(f"{text!r} -> {it.kind} {it.obj}  (record {stt.last_ms.get('record', 0):.0f} ms, "
               f"transcribe {stt.last_ms.get('transcribe', 0):.0f} ms)")
+
+
+def level_meter(stt: "STT", seconds: float, out=print) -> int:
+    """Print the mic level (dBFS) and the VAD's highest speech probability every half second for `seconds`.
+    Stand where the judge will and talk: speech should reach stt.vad_threshold with the room's noise below
+    it. Nothing is recorded or kept."""
+    src = open_input(RATE, BLOCK, stt._input())
+    vad = stt.vad
+    vad.reset()
+    per = max(1, RATE // BLOCK // 2)
+    out(f"input at {getattr(src, 'device_rate', RATE)} Hz; speech threshold {stt.threshold:.2f}")
+    try:
+        t, n, sq, pmax = 0.0, 0, 0.0, 0.0
+        while t < seconds:
+            x = src.read(timeout=1.0)
+            if x is None:
+                out("no audio from the input device")
+                return 1
+            sq += float(np.mean(x.astype(np.float64) ** 2))
+            pmax = max(pmax, vad(x))
+            n += 1
+            if n == per:
+                t += n * BLOCK / RATE
+                db = 10 * np.log10(sq / n + 1e-12)
+                out(f"{t:5.1f} s  level {db:6.1f} dBFS  speech {pmax:.2f} {'#' * int(pmax * 20):20s}"
+                    f"{'  SPEECH' if pmax >= stt.threshold else ''}")
+                n, sq, pmax = 0, 0.0, 0.0
+    finally:
+        src.close()
+    return 0
 
 
 def record_questions(cfg: dict, out: Path) -> int:

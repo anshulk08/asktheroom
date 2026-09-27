@@ -246,6 +246,9 @@ def compact_entity(e: dict) -> dict:
         pass
     if e.get("edge"):
         out["edge"] = str(e["edge"])
+    zone = e.get("zone")
+    if zone and zone != "table":                          # room memory (spec 0009/0010): the room zone it is in
+        out["z"] = str(zone)
     is_thing = str(e.get("name")).startswith("thing:")
     if is_thing:                                           # open-world things only
         aliases = e.get("aliases")

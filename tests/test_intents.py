@@ -169,3 +169,138 @@ def test_taught_aliases_are_matched_like_object_names():
     it = parse("what happened to the blue mugs", CFG, aliases=al)
     assert (it.kind, it.obj) == ("HISTORY", "blue mug")
     assert parse("Did anyone move my blue mug?", CFG, aliases=al).kind == "HANDLED"
+
+
+@pytest.mark.parametrize("text,kind,obj", [
+    # asking for the laser on a named thing is a location question (offline this was OTHER: no laser)
+    ("Show me my wallet", "WHERE", "wallet"),
+    ("Could you point to my glasses?", "WHERE", "glasses"),
+    ("point at the remote please", "WHERE", "remote"),
+    ("light up my phone", "WHERE", "phone"),
+    ("highlight the pills", "WHERE", "pill_bottle"),
+    ("can you locate my specs", "WHERE", "glasses"),
+    ("show me the charger", "WHERE", None),                 # open world: name 'charger'
+    ("show me something cool", "OTHER", None),              # nothing named: not a location question
+    # yes/no touch questions, more ways to say them
+    ("was my wallet moved", "HANDLED", "wallet"),
+    ("were the keys touched while I was out", "HANDLED", "keys"),
+    ("did my son pick up my glasses", "HANDLED", "glasses"),
+    ("did the dog get into my wallet", "HANDLED", "wallet"),
+    ("has anyone messed with the remote", "HANDLED", "remote"),
+    ("has somebody been at my pills", "HANDLED", "pill_bottle"),
+    ("has the phone been picked up", "HANDLED", "phone"),
+    # who / when opening the question asks for the history
+    ("when did someone last touch my keys", "HISTORY", "keys"),
+    ("who's been near my wallet", "HISTORY", "wallet"),
+    ("who has touched my phone", "HISTORY", "phone"),
+    ("what's going on with my remote", "HISTORY", "remote"),
+    ("what's the deal with the pills", "HISTORY", "pill_bottle"),
+])
+def test_wider_phrasings(text, kind, obj):
+    it = parse(text, CFG)
+    assert (it.kind, it.obj) == (kind, obj), (text, it)
+
+
+@pytest.mark.parametrize("text,obj", [
+    ("wears my wall it", "wallet"),
+    ("wear is my wallet", "wallet"),
+    ("where are my kiss", "keys"),
+    ("where did I leave my wall et", "wallet"),
+    ("wheres the note book", "notebook"),
+    ("where is my phon", "phone"),
+    ("where are my glases", "glasses"),
+])
+def test_misheard_names_sound_like_objects(text, obj):
+    it = parse(text, CFG)
+    assert (it.kind, it.obj) == ("WHERE", obj), (text, it)
+
+
+@pytest.mark.parametrize("text,name", [
+    ("where are my kids", "kids"),             # a real word that only looks like keys stays a name
+    ("where is my case", "case"),
+    ("where are the papers", "papers"),
+    ("where is my mug", "mug"),
+])
+def test_other_words_are_not_forced_onto_objects(text, name):
+    it = parse(text, CFG)
+    assert (it.kind, it.obj, it.name) == ("WHERE", None, name), (text, it)
+
+
+def test_matched_exactly_tells_a_guess_from_a_name():
+    from voice.intents import matched_exactly
+    assert matched_exactly("where are my keys", "keys", CFG)
+    assert matched_exactly("where is the clicker", "remote", CFG)
+    assert matched_exactly("wheres the note book", "notebook", CFG)   # the same letters, split
+    assert not matched_exactly("where are my kiss", "keys", CFG)
+    assert not matched_exactly("where are my keys", None, CFG)
+
+
+def test_wear_is_only_where_as_the_first_word():
+    assert normalize("wears my wallet") == "wheres my wallet"
+    assert normalize("what she wears my wallet") == "what she wears my wallet"
+    assert normalize("wear sunscreen") == "wear sunscreen"
+
+
+def test_passive_participles_end_a_spoken_name():
+    it = parse("was my charger moved", CFG)
+    assert (it.kind, it.name) == ("HANDLED", "charger")
+    assert parse("has my stapler been taken", CFG).name == "stapler"
+
+
+def test_teaching_a_person_is_recognised():
+    from voice.intents import names_a_person
+    assert names_a_person(parse("This is my wife Karen", CFG).name)
+    assert names_a_person("friend") and not names_a_person("travel charger")
+    assert not names_a_person("friends mug", "this is my friend's mug")
+
+
+@pytest.mark.parametrize("text", ["room, this is my mug", "Hey room, this is my mug", "room this is my mug please"])
+def test_a_teaching_sentence_may_open_with_the_wake_word(text):
+    it = parse(text, CFG)
+    assert (it.kind, it.name) == ("TEACH", "mug")
+
+
+def test_the_wake_word_is_only_stripped_at_the_start():
+    assert parse("the room this is my mug", CFG).kind != "TEACH"
+    assert parse("roommate this is my mug", CFG).kind != "TEACH"
+
+
+# -- the room demo (spec 0010): places are where things are, never things
+
+@pytest.mark.parametrize("text, obj", [
+    ("where's my wallet", "wallet"), ("where is my glasses case", "glasses"), ("where are my pills", "pill_bottle"),
+    ("where did I leave the remote", "remote"), ("is my wallet on the couch", "wallet"),
+    ("is the pill bottle on the kitchen counter", "pill_bottle"), ("did I put my glasses on the side table", "glasses"),
+    ("where did I put the remote in the living room", "remote"),
+])
+def test_room_questions_about_the_demo_set(text, obj):
+    it = parse(text, CFG)
+    assert (it.kind, it.obj) == ("WHERE", obj), (text, it)
+
+
+@pytest.mark.parametrize("text", ["where's the couch", "where is the kitchen counter", "where's the side table",
+                                  "where is the kitchen", "show me the couch", "where's the living room"])
+def test_a_place_is_not_an_untaught_thing(text):
+    it = parse(text, CFG)
+    assert it.kind == "OTHER" and it.name is None, (text, it)
+
+
+@pytest.mark.parametrize("text", ["is it on the counter?", "are they under the couch", "is it still on the side table",
+                                  "and is it in the kitchen"])
+def test_a_pronoun_asking_about_a_place_is_a_where_follow_up(text):
+    it = parse(text, CFG)
+    assert (it.kind, it.obj, it.name) == ("WHERE", None, None), (text, it)
+
+
+def test_a_thing_named_with_a_place_word_is_still_a_thing():
+    assert parse("is my charger on the couch", CFG).name == "charger"
+    assert parse("where is my couch cushion", CFG).name == "couch cushion"
+
+
+@pytest.mark.parametrize("text, kind", [
+    ("did I put my glasses on the side table", "WHERE"), ("we just put the remote on the couch", "WHERE"),
+    ("can you put your phone away", "OTHER"), ("could you set my glasses down", "OTHER"),
+    ("did you drop your keys", "OTHER"),
+])
+def test_put_is_a_where_question_only_about_what_i_did(text, kind):
+    assert parse(text, CFG).kind == kind, text
