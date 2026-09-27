@@ -27,10 +27,11 @@ def fake_rig():
     rig.close()
 
 
-def test_fake_run_passes_everything(capsys):
+def test_fake_run_passes_everything(capsys, monkeypatch):
+    monkeypatch.setattr(dc, "_xai_key", lambda: "")          # no real Grok call from the tests
     assert dc.main(["--fake", "--skip-manual"]) == 0
     out = capsys.readouterr().out
-    assert out.count("[PASS]") == 8 and "[SKIP] 8" in out and "[SKIP] 10" in out and "all checks passed" in out
+    assert out.count("[PASS]") == 9 and "[SKIP] 8" in out and "[SKIP] 10" in out and "all checks passed" in out
 
 
 def test_missing_camera_fails_every_check_that_needs_it(monkeypatch, capsys):
@@ -210,7 +211,7 @@ def test_clock_check_passes_on_a_set_clock_and_keeps_its_number():
         ok, msg = dc.check_clock(rig)
     finally:
         rig.close()
-    assert ok is True and dc.CHECKS[8][0] == "clock" and len(dc.CHECKS) == 11
+    assert ok is True and dc.CHECKS[8][0] == "clock" and len(dc.CHECKS) == 16
 
 
 def test_room_check_skips_when_off_and_rehits_the_sim_map():
@@ -221,7 +222,7 @@ def test_room_check_skips_when_off_and_rehits_the_sim_map():
         rig.cfg = dict(cfg, room=dict(cfg["room"], enabled=True))
         ok, msg = dc.check_room(rig)
         assert ok, msg
-        assert "re-hit" in msg and dc.CHECKS[-1][0] == "room"
+        assert "re-hit" in msg and dc.CHECKS[10][0] == "room"
         laser, _ = rig.part("room")
         laser.room_map.px[:, 0] += 80                    # the camera moved since the sweep
         laser.room_map._index()
@@ -346,3 +347,138 @@ def test_laser_off_now_does_not_wait_for_a_held_lock(fake_rig):
         assert laser.act.laser_log[-1][1] is False                  # the hardware was told off
     finally:
         release.set()
+
+
+
+# ---------------------------------------------------------------- room checks (spec 0010 P1-3)
+
+class Resp:
+    def __init__(self, status=200, js=None, content=b""):
+        self.status_code, self._js, self.content = status, js, content
+
+    def json(self):
+        return self._js
+
+
+def room_rig(**cfg_over):
+    cfg = dict(CFG, room_memory=dict(CFG.get("room_memory") or {}, enabled=True), **cfg_over)
+    return dc.Rig(cfg, manual=False)
+
+
+def test_room_app_up_stalled_and_down():
+    import time
+    rig = room_rig()
+    try:
+        state = {"state": {"t": time.time(), "fps": 11.5, "room": {"keys": {"zone": "couch"}, "conflicts": []}}}
+        urls = []
+
+        def up(url, timeout):
+            urls.append(url)
+            return Resp(js=state) if url.endswith("/state") else Resp(content=b"\xff\xd8jpeg")
+        ok, msg = dc.check_room_app(rig, get=up)
+        assert ok and "11.5 fps" in msg and "room memory up (1 object" in msg, msg
+        assert urls[0] == "http://127.0.0.1:8000/state"
+        stale = {"state": {"t": time.time() - 60, "fps": 11.5}}
+        ok, msg = dc.check_room_app(rig, get=lambda url, timeout: Resp(js=stale))
+        assert not ok and "stalled" in msg
+        ok, msg = dc.check_room_app(rig, get=lambda url, timeout: Resp(js=state) if url.endswith("/state")
+                                    else Resp(404))
+        assert not ok and "room memory isn't running" in msg
+
+        def down(url, timeout):
+            raise ConnectionError("refused")
+        ok, msg = dc.check_room_app(rig, get=down)
+        assert not ok and "scripts/room_app.sh start" in msg
+    finally:
+        rig.close()
+
+
+def test_grok_reachable_refused_and_offline(monkeypatch):
+    rig = room_rig()
+    try:
+        monkeypatch.setenv("XAI_API_KEY", "sk-SECRET")
+        seen = {}
+
+        def ok_get(url, headers, timeout):
+            seen.update(url=url, auth=headers["Authorization"])
+            return Resp(200)
+        ok, msg = dc.check_grok(rig, get=ok_get)
+        assert ok and "ms round trip" in msg and seen["url"].endswith("/models") and seen["auth"] == "Bearer sk-SECRET"
+        ok, msg = dc.check_grok(rig, get=lambda url, headers, timeout: Resp(401))
+        assert not ok and "refused the key" in msg and "SECRET" not in msg
+
+        def offline(url, headers, timeout):
+            raise OSError("no route")
+        ok, msg = dc.check_grok(rig, get=offline)
+        assert not ok and "hotspot" in msg
+        monkeypatch.delenv("XAI_API_KEY")
+        monkeypatch.chdir(dc.tempfile.mkdtemp())            # no .env either
+        ok, msg = dc.check_grok(rig, get=ok_get)
+        assert not ok and "no XAI_API_KEY" in msg
+    finally:
+        rig.close()
+
+
+def test_grok_key_from_dotenv(tmp_path, monkeypatch):
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("OTHER=1\nexport XAI_API_KEY='sk-abc'\n")
+    assert dc._xai_key() == "sk-abc"
+
+
+DEVICES = [{"name": "HDMI 0", "max_input_channels": 0, "max_output_channels": 2},
+           {"name": "Logitech BRIO: USB Audio", "max_input_channels": 2, "max_output_channels": 0},
+           {"name": "Jabra SPEAK 410 USB", "max_input_channels": 1, "max_output_channels": 2}]
+
+
+@pytest.mark.parametrize("mic, spk, ok, want", [
+    ("jabra", "Jabra", True, "mic #2 Jabra"),
+    (1, "jabra", True, "mic #1 Logitech"),
+    ("jabra", None, False, "HDMI, silent"),
+    ("anker", "jabra", False, "no input device named like 'anker'"),
+    ("jabra", "brio", False, "no output device"),                 # the Brio has no speaker
+])
+def test_mic_and_speaker_are_found_by_name(mic, spk, ok, want):
+    rig = dc.Rig(dict(CFG, stt={"input_device": mic}, tts={"output_device": spk}), manual=False)
+    try:
+        got, msg = dc.check_devices(rig, query=lambda: DEVICES)
+        assert got is ok and want in msg, msg
+    finally:
+        rig.close()
+
+
+def test_memory_and_log_tail(tmp_path):
+    mi = tmp_path / "meminfo"
+    log = tmp_path / "app.log"
+    rig = dc.Rig(dict(CFG, room_check={"app_log": str(log), "log_lines": 50, "min_ram_mb": 1024}), manual=False)
+    try:
+        mi.write_text("MemTotal: 7800000 kB\nMemAvailable: 2097152 kB\n")
+        ok, msg = dc.check_memory(rig, meminfo=str(mi))
+        assert not ok and "no app log" in msg
+        old = ["NvMapMemAlloc error 12 at startup"] + ["fine"] * 80          # scrolled out of the tail
+        log.write_text("\n".join(old) + "\n")
+        ok, msg = dc.check_memory(rig, meminfo=str(mi))
+        assert ok and "2.0 GB available" in msg and "0 NvMapMemAlloc" in msg, msg
+        with open(log, "a") as f:
+            f.write("NvMapMemAlloc error 12\nTraceback (most recent call last):\n")
+        ok, msg = dc.check_memory(rig, meminfo=str(mi))
+        assert not ok and "1 NvMapMemAlloc, 1 tracebacks" in msg
+        log.write_text("fine\n")
+        mi.write_text("MemAvailable: 600000 kB\n")
+        ok, msg = dc.check_memory(rig, meminfo=str(mi))
+        assert not ok and "under 1.0 GB" in msg
+    finally:
+        rig.close()
+
+
+def test_namer_queue_is_bounded(fake_rig):
+    ok, msg = dc.check_namer(fake_rig)
+    assert ok and "-> 8 kept" in msg, msg
+
+
+def test_live_runs_only_the_checks_that_leave_the_camera(monkeypatch, capsys):
+    ran = []
+    monkeypatch.setattr(dc, "CHECKS", [(n, (lambda n: lambda rig: (ran.append(n), (True, "ok"))[1])(n))
+                                       for n, _ in dc.CHECKS])
+    assert dc.main(["--live", "--skip-manual"]) == 0
+    assert set(ran) == dc.LIVE_CHECKS and "camera" not in ran and "audio" not in ran

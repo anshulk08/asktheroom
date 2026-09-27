@@ -16,6 +16,14 @@
   9 clock       not behind the last saved file (a Jetson offline with no RTC battery boots stale)
  10 room memory when room_memory.enabled: the zones file has zones drawn at this camera view (files only)
  11 room        when room.enabled: the room dot map matches the camera and mapped dots are hit again
+ 12 room app    the running app answers: perception fresh (fps), and /full.jpg (room memory's full frame)
+ 13 grok        api.x.ai answers GET /models with XAI_API_KEY (no tokens), with the round trip time
+ 14 devices     the mic (stt.input_device) and speaker (tts.output_device) named in config are present
+ 15 memory      MemAvailable >= room_check.min_ram_mb; no NvMapMemAlloc / Traceback in the app log's tail
+ 16 namer       the room namer's queue is bounded (a burst of 100 crops keeps <= 8)
+
+    python demo_check.py --live           # the morning pass while the room app runs (it keeps the camera
+                                          # and mic): checks 6, 9, 10, 12-16 only
 
 Missing hardware fails that check with the reason, so this also runs on a laptop. Parts (camera,
 table, detector, laser) are built on first use and shared; one that fails to build fails every
@@ -656,6 +664,197 @@ def check_room(rig: Rig) -> Result:
     return True, f"{rm.n_seen} dots, zones: {zones}; re-hit {shown} px"
 
 
+# ---------------------------------------------------------------- the running room app (spec 0010 P1-3)
+
+def _rc(rig: Rig) -> dict:
+    return rig.cfg.get("room_check") or {}
+
+
+def app_url(cfg: dict) -> str:
+    url = str((cfg.get("room_check") or {}).get("app_url") or "").strip()
+    return (url or f"http://127.0.0.1:{(cfg.get('server') or {}).get('port', 8000)}").rstrip("/")
+
+
+def check_room_app(rig: Rig, get: Optional[Callable] = None) -> Result:
+    """The running app (not this process) answers: /state is fresh (perception alive, its fps), and with
+    room memory on, /full.jpg serves the full camera frame (the room pipeline is up)."""
+    if rig.fake and get is None:
+        return None, "skipped: no running app in --fake"
+    import requests
+    get = get or requests.get
+    url = app_url(rig.cfg)
+    try:
+        st = get(f"{url}/state", timeout=5).json().get("state") or {}
+    except Exception as e:                                  # noqa: BLE001
+        return False, (f"no room app at {url} ({type(e).__name__}): start it (scripts/room_app.sh start) "
+                       "or check room_check.app_url")
+    age = time.time() - float(st.get("t") or 0.0)
+    fps = float(st.get("fps") or 0.0)
+    max_age = float(_rc(rig).get("max_frame_age_s", 5))
+    msg = f"app at {url}: {fps:.1f} fps, state {age:.1f} s old"
+    if age > max_age or fps <= 0:
+        return False, msg + ": perception has stalled (camera unplugged or busy?): restart the app"
+    if not (rig.cfg.get("room_memory") or {}).get("enabled"):
+        return True, msg + "; room memory off"
+    try:
+        r = get(f"{url}/full.jpg", timeout=10)
+        ok = r.status_code == 200 and r.content[:2] == b"\xff\xd8"
+    except Exception as e:                                  # noqa: BLE001
+        return False, msg + f"; /full.jpg failed ({type(e).__name__})"
+    if not ok:
+        return False, msg + f"; no full camera frame (HTTP {r.status_code}): room memory isn't running"
+    places = [n for n, v in (st.get("room") or {}).items() if isinstance(v, dict)]
+    return True, msg + f"; room memory up ({len(places)} object(s) in zones)"
+
+
+def _xai_key() -> str:
+    """XAI_API_KEY from the environment, else from ./.env (never printed)."""
+    key = os.environ.get("XAI_API_KEY", "").strip()
+    if key or not os.path.isfile(".env"):
+        return key
+    for ln in open(".env", encoding="utf-8", errors="ignore"):
+        k, _, v = ln.strip().partition("=")
+        if k.strip().removeprefix("export ").strip() == "XAI_API_KEY":
+            return v.strip().strip("'\"")
+    return ""
+
+
+def check_grok(rig: Rig, get: Optional[Callable] = None) -> Result:
+    """api.x.ai reachable with our key: GET /models (no tokens), timed. Room naming stops without it."""
+    import requests
+
+    from core.xai import BASE_URL
+    injected, get = get is not None, get or requests.get
+    key = _xai_key()
+    if not key:
+        if rig.fake and not injected:
+            return None, "skipped: no XAI_API_KEY in --fake"
+        return False, "no XAI_API_KEY (environment or .env): Grok naming and answers are off"
+    base = ((rig.cfg.get("llm") or {}).get("base_url") or BASE_URL).rstrip("/")
+    t0 = time.monotonic()
+    try:
+        r = get(f"{base}/models", headers={"Authorization": f"Bearer {key}"},
+                timeout=float(_rc(rig).get("grok_timeout_s", 10)))
+    except Exception as e:                                  # noqa: BLE001
+        return False, (f"{base} unreachable ({type(e).__name__}): offline, room naming stops. Switch to the "
+                       "phone hotspot (docs/HOTSPOT.md)")
+    ms = (time.monotonic() - t0) * 1000
+    if r.status_code in (401, 403):
+        return False, f"Grok refused the key (HTTP {r.status_code}) in {ms:.0f} ms: check XAI_API_KEY"
+    if r.status_code >= 400:
+        return False, f"Grok answered HTTP {r.status_code} in {ms:.0f} ms"
+    slow = "; slow: answers will need the thinking cue" if ms > 1500 else ""
+    return True, f"Grok reachable, {ms:.0f} ms round trip{slow}"
+
+
+def _find_device(devices: list, spec, kind: str) -> tuple[Optional[dict], str]:
+    """(device, why) for a config spec: an index, or part of a name (case-insensitive), among devices
+    that have `kind` channels."""
+    ch = "max_input_channels" if kind == "input" else "max_output_channels"
+    cands = [dict(d, index=i) for i, d in enumerate(devices) if d.get(ch, 0) > 0]
+    if isinstance(spec, int) or str(spec).strip().isdigit():
+        hit = [d for d in cands if d["index"] == int(spec)]
+        return (hit[0], "") if hit else (None, f"no {kind} device #{spec}")
+    hit = [d for d in cands if str(spec).strip().lower() in str(d.get("name", "")).lower()]
+    if not hit:
+        return None, f"no {kind} device named like {spec!r}"
+    return hit[0], (f" ({len(hit)} match, first used)" if len(hit) > 1 else "")
+
+
+def check_devices(rig: Rig, query: Optional[Callable[[], list]] = None) -> Result:
+    """The mic and speaker named in config are plugged in. Null means the default device, which on the
+    rig is the Brio's mic in the corner and HDMI (no speaker), so both must be named."""
+    if query is None:
+        if rig.fake:
+            return None, "skipped: no audio devices in --fake"
+        import sounddevice as sd
+        query = lambda: list(sd.query_devices())            # noqa: E731
+    devices = query()
+    parts, problems = [], []
+    for kind, section, key in (("input", "stt", "input_device"), ("output", "tts", "output_device")):
+        spec = (rig.cfg.get(section) or {}).get(key)
+        label = "mic" if kind == "input" else "speaker"
+        if spec is None or (isinstance(spec, str) and not spec.strip()):
+            problems.append(f"{section}.{key} not set: the {label} would be the default "
+                            f"({'Brio in the corner' if kind == 'input' else 'HDMI, silent'})")
+            continue
+        d, why = _find_device(devices, spec, kind)
+        if d is None:
+            problems.append(f"{why}: plug the {label} in (python -m voice.tts --devices lists them)")
+        else:
+            parts.append(f"{label} #{d['index']} {d.get('name')}{why}")
+    msg = "; ".join(parts + problems)
+    return not problems, msg
+
+
+def meminfo_available_mb(path: str = "/proc/meminfo") -> Optional[float]:
+    try:
+        for ln in open(path):
+            if ln.startswith("MemAvailable:"):
+                return int(ln.split()[1]) / 1024
+    except OSError:
+        return None
+    return None
+
+
+def log_tail(path: str, n: int) -> Optional[list[str]]:
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - 400 * n))                  # ~400 bytes a line is plenty
+            return f.read().decode(errors="replace").splitlines()[-n:]
+    except OSError:
+        return None
+
+
+def check_memory(rig: Rig, meminfo: str = "/proc/meminfo") -> Result:
+    """RAM left with the app running, and the app log's tail free of GPU allocation failures
+    (NvMapMemAlloc) and tracebacks. The Orin Nano's 8 GB are shared with the GPU."""
+    if rig.fake and meminfo == "/proc/meminfo":
+        return None, "skipped: no room app in --fake"
+    rc = _rc(rig)
+    avail = meminfo_available_mb(meminfo)
+    need = float(rc.get("min_ram_mb", 1024))
+    problems, parts = [], []
+    if avail is None:
+        parts.append("RAM not readable here (no /proc/meminfo)")
+    else:
+        parts.append(f"{avail / 1024:.1f} GB available")
+        if avail < need:
+            problems.append(f"under {need / 1024:.1f} GB: turn the visual-memory archive or narration off, "
+                            "or restart the app")
+    path, n = str(rc.get("app_log", "data/room/app.log")), int(rc.get("log_lines", 500))
+    tail = log_tail(path, n)
+    if tail is None:
+        problems.append(f"no app log at {path}")
+    else:
+        nvmap = sum("NvMapMemAlloc" in ln for ln in tail)
+        tb = sum(ln.startswith("Traceback") for ln in tail)
+        parts.append(f"log tail ({len(tail)} lines): {nvmap} NvMapMemAlloc, {tb} tracebacks")
+        if nvmap:
+            problems.append("GPU memory allocation failures in the log: the app is short of memory")
+        if tb:
+            problems.append(f"tracebacks in {path}: read them")
+    return not problems, "; ".join(parts + problems)
+
+
+def check_namer(rig: Rig) -> Result:
+    """The room namer (Grok names for room crops) keeps a bounded queue: a burst of 100 crops from a busy
+    room must not grow memory or starve newer objects. Checked on the code the app runs, offline."""
+    from core.room import RoomNamer
+    namer = RoomNamer(lambda img: None, online=lambda: False, start=False)
+    img = np.zeros((8, 8, 3), np.uint8)
+    track = type("T", (), {"tid": "t", "zone": "z", "guess": None})()
+    for _ in range(100):
+        namer.submit(track, img)
+    n = namer.pending()
+    cap = (rig.cfg.get("room_memory") or {}).get("names_per_minute", "?")
+    return n <= 8, f"100 crops queued offline -> {n} kept (cap 8); Grok calls <= {cap}/min"
+
+
+LIVE_CHECKS = {"network", "clock", "room memory", "room app", "grok", "devices", "memory", "namer"}
+
 CHECKS: list[tuple[str, Callable[[Rig], Result]]] = [
     ("camera", check_camera),
     ("detector", check_detector),
@@ -668,6 +867,11 @@ CHECKS: list[tuple[str, Callable[[Rig], Result]]] = [
     ("clock", check_clock),
     ("room memory", check_room_memory),
     ("room", check_room),
+    ("room app", check_room_app),
+    ("grok", check_grok),
+    ("devices", check_devices),
+    ("memory", check_memory),
+    ("namer", check_namer),
 ]
 
 
@@ -729,6 +933,8 @@ def main(argv=None) -> int:
     ap.add_argument("--camera", default=None,
                     help="camera index or /dev/v4l/by-id/ path (default: config demo_check.camera)")
     ap.add_argument("--only", type=int, nargs="*", help="run only these check numbers")
+    ap.add_argument("--live", action="store_true",
+                    help="the room app is running: only the checks that leave it the camera and mic")
     ap.add_argument("--config")
     a = ap.parse_args(argv)
 
@@ -742,6 +948,8 @@ def main(argv=None) -> int:
     try:
         for i, (name, fn) in enumerate(CHECKS, 1):
             if a.only and i not in a.only:
+                continue
+            if a.live and name not in LIVE_CHECKS:
                 continue
             ok, msg = run_check_with_deadline(rig, name, fn)
             print(line(i, name, ok, msg, color), flush=True)

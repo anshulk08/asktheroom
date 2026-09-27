@@ -565,3 +565,13 @@ unknown_cover:
   settle_s: 0.5               # the covered band unchanged over this long: a cover at rest, not a moving arm
   adopt_s: 1.0                # the band must look the same this long before it is remembered
   wait_max_s: 2.0             # longest wait on an unclear or settling band before the other rules decide
+
+# Morning checks of the running room app (demo_check.py checks 12-16; `--live` runs only the checks that
+# leave the camera and mic to the app). Read by demo_check.py only.
+room_check:
+  app_url: ""                 # the running app's dashboard; "" = http://127.0.0.1:<server.port>
+  app_log: data/room/app.log  # its log (scripts/room_app.sh appends here); the last log_lines are scanned
+  log_lines: 500
+  min_ram_mb: 1024            # MemAvailable with the app running (Jetson: 8 GB shared with the GPU)
+  max_frame_age_s: 5          # /state's last perception update must be this fresh
+  grok_timeout_s: 10          # GET /models on api.x.ai (no tokens) must answer within this
