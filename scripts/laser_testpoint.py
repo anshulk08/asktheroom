@@ -1,7 +1,10 @@
 """One lit test point: does the camera see the dot? Before any full sweep (docs/LASER_DEMO_RUNBOOK.md).
 
-    scripts/dock.sh python3 scripts/laser_testpoint.py 0 -22            # pan, tilt in degrees (the couch seat)
-    scripts/dock.sh python3 scripts/laser_testpoint.py 0 -22 --blinks 3 # then 3 slow 1 s blinks a person can see
+    scripts/dock.sh python3 scripts/laser_testpoint.py 0 -22 --eye-safe-confirmed            # pan, tilt (deg)
+    scripts/dock.sh python3 scripts/laser_testpoint.py 0 -22 --blinks 3 --eye-safe-confirmed # + 3 slow blinks
+
+No person check here: run it only with the room in front of the turret confirmed clear (--eye-safe-confirmed),
+and never while the app runs (it holds the serial port and the camera).
 
 Moves dark to (pan, tilt) (clamped to servo_limits and turret.tilt_max_deg), blinks --pairs off/on pairs and
 prints the dot px (or None), the strongest score and where it is (a dot too faint for laser_diff_thr shows as
@@ -33,7 +36,14 @@ def main(argv=None) -> int:
     ap.add_argument("--pairs", type=int, default=5)
     ap.add_argument("--blinks", type=int, default=0, help="slow visible blinks afterwards (1 s on)")
     ap.add_argument("--camera")
+    ap.add_argument("--eye-safe-confirmed", action="store_true",
+                    help="required: the operator confirms nobody is in front of the turret (this script has no "
+                         "person check) and the module is the approved one")
     a = ap.parse_args(argv)
+    if not a.eye_safe_confirmed:
+        print("refused: this lights the laser with no person check; confirm the room in front of the turret is "
+              "clear and rerun with --eye-safe-confirmed", file=sys.stderr)
+        return 2
     cfg = load_config()
     laser, frames = _real_rig(cfg, camera_source(a.camera) if a.camera else default_camera(cfg))
     try:

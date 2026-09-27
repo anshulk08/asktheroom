@@ -189,6 +189,12 @@ class Room:
         self.max_frame_age_s = float(lr.get("max_frame_age_s", 0.5))    # an older camera frame proves nothing
         self.allow_hog = bool(lr.get("allow_hog", False))               # HOG misses seated people
         self.allow_sweep = bool(lr.get("allow_sweep", False))           # 'carried off' sweeps run where they left
+        # A shifted zero (lost steps: the steppers are open loop) shows as the first look landing far off, aim
+        # after aim: after drift_aims of them in a row the laser locks off until a re-home and restart.
+        self.drift_px = float(lr.get("drift_px", 300))
+        self.drift_aims = int(lr.get("drift_aims", 2))
+        self._drift_n = 0
+        self.laser_locked: Optional[str] = None
         self.view_rect: Optional[tuple] = None     # the table view's rect in the full frame (room memory on)
         self.fw, self.fh = (float(v) for v in cfg.get("frame_size_px", (1280, 720)))    # the table view's size
         self._people_want = threading.Event()      # an aim asks the perception thread for person boxes ...
@@ -520,7 +526,9 @@ class Room:
         before every look. True if the dot is on target; otherwise the laser is off."""
         rm = getattr(self.laser, "room_map", None)
         why = None
-        if not self.room_enabled or rm is None:
+        if self.laser_locked:
+            why = self.laser_locked
+        elif not self.room_enabled or rm is None:
             why = "room pointing is off or there is no room map"
         elif self.room_require_zone and rm.zone_at(uv) is None:
             why = f"({uv[0]:.0f}, {uv[1]:.0f}) is outside every room zone"
@@ -542,7 +550,25 @@ class Room:
         if not r.on_target:                   # never leave the dot somewhere it wasn't confirmed
             self.laser.off()
             self.world.laser = dict(OFF)
+        self._note_drift(r)
         return r.on_target
+
+    def _note_drift(self, r) -> None:
+        """Count aims whose first seen dot landed over drift_px from the target; drift_aims in a row lock the
+        laser off (the head lost steps: its zero moved, so every aim now starts somewhere else)."""
+        first = getattr(r, "first_err_px", None)
+        if first is None:
+            return
+        self._drift_n = self._drift_n + 1 if first > self.drift_px else 0
+        if self._drift_n >= self.drift_aims and not self.laser_locked:
+            self.laser_locked = (f"the laser's zero moved ({self._drift_n} aims in a row first landed over "
+                                 f"{self.drift_px:.0f} px off): locked off until it is re-homed and restarted")
+            log.error("LASER LOCKED: %s", self.laser_locked)
+            self._safe_off()
+            try:
+                self._speak("The laser needs re-homing, so I've turned it off.")
+            except Exception:
+                log.exception("speaking the laser lock failed")
 
     def _schedule_off(self, timeout_s: Optional[float] = None) -> None:
         """Show the laser as off once the actuator's auto-off would have fired (and turn it off,

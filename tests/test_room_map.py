@@ -560,3 +560,26 @@ def test_an_aborted_sweep_saves_a_snapshot_of_what_it_saw(tmp_path):
     part.write_text(json.dumps({"px": [[100, 100], None]}))
     path = abort_snapshot(rig.frames, "the dot doesn't follow the moves", str(part), out_dir=str(tmp_path))
     assert path is not None and (tmp_path / path.split("/")[-1]).exists()
+
+
+def test_two_aims_in_a_row_landing_far_off_lock_the_laser_until_restart(room_main, monkeypatch):
+    """Rig, 05:00: the head lost steps at the pan end, and every aim then first landed ~1000 px off."""
+    from act.laser import PxAim
+    room, rig, Answer = room_main
+    said = []
+    room._speak = said.append
+    t = center(rig.box_px("table"))
+    far = PxAim(900.0, False, True, 2, (t[0] + 900, t[1]), "budget", 1000.0)
+    near = PxAim(5.0, True, True, 1, t, "in_box", 8.0)
+    results = iter([far, near, far, far, near])
+    monkeypatch.setattr(room.laser, "aim_px", lambda *a, **k: next(results))
+    act = f"room:{t[0]:.0f},{t[1]:.0f}"
+    room.aim(Answer("x", action=act))              # far
+    room.aim(Answer("x", action=act))              # near: the count restarts
+    room.aim(Answer("x", action=act))              # far
+    assert room.laser_locked is None
+    room.aim(Answer("x", action=act))              # far again: locked
+    assert room.laser_locked and said and "re-homing" in said[-1] and rig.act.laser_on is False
+    n = len(rig.act.calls)
+    room.aim(Answer("x", action=act))              # refused, no hardware calls
+    assert len(rig.act.calls) == n

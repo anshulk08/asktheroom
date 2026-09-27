@@ -730,6 +730,8 @@ laser_room:
   allow_hog: false            # HOG as the fallback person detector (it misses seated people)
   allow_sweep: false          # 'carried off' edge sweeps run down the edge the person walked out by
   color: red                  # the dot's colour: red | green (the detector looks for this channel's rise)
+  drift_px: 300               # an aim's first seen dot this far off the target, drift_aims in a row: the head
+  drift_aims: 2               # lost steps (its zero moved), so the laser locks off until re-homed and restarted
   ignore_px: []               # [[x1, y1, x2, y2], ...] full-frame px the dot finder never looks in: the laser
                               # module itself, if the camera sees it (rig: [[850, 1250, 1300, 1440]])
 

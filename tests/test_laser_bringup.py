@@ -201,3 +201,9 @@ def test_check_probes_the_turret_serial_port_not_i2c():
     assert serial_probe("/dev/x", exists=lambda p: False)[0] is False
     assert serial_probe("/dev/x", exists=lambda p: True, access=lambda p, m: False)[0] is False
     assert serial_probe("/dev/x", exists=lambda p: True, access=lambda p, m: True)[0] is True
+
+
+def test_the_test_point_refuses_without_the_eye_safe_confirmation(capsys):
+    from scripts.laser_testpoint import main
+    assert main(["0", "-22"]) == 2
+    assert "eye-safe-confirmed" in capsys.readouterr().err
