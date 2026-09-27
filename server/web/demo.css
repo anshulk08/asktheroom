@@ -27,6 +27,7 @@
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }          /* .listen and friends set display; hidden must still hide */
 html, body { margin: 0; height: 100%; }
 
 body {
