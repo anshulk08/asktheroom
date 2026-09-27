@@ -444,7 +444,9 @@ table_area:
 auto_name:
   enabled: true
   max_per_minute: 10          # Grok calls per minute; more new things wait their turn
-  min_confidence: 0.5         # a guess below this is not kept (and not asked again)
+  min_confidence: 0.65        # a guess below this is not kept (and not asked again). Grok says 0.6 when it is
+                              # unsure (277 of 706 rig guesses); eval/naming.py on 120 rig crops: 0.65 halves
+                              # wrong names (16.7 -> 9 of 59) for 4 fewer right ones (37 -> 33)
   retry_after_s: 30           # a failed call is tried once more this much later
 
 # Briefly unseen is not lost (core/world.py, rule 4). An object on the table that no rule explains (no hand
