@@ -334,7 +334,7 @@ def test_where_reads_the_registry_for_each_state():
     assert ask(fw, "where is my remote", clock.t).startswith("Your remote is on the couch.")
     s.person("judge", (950, 300, 1150, 720))
     run(p, s, clock)
-    assert ask(fw, "where is my remote", clock.t).startswith("Someone is in front of your remote right now.")
+    assert ask(fw, "where is my remote", clock.t).startswith("Your remote is probably still on the couch, behind someone.")
     s.take("remote")
     s.leave("judge")
     run(p, s, clock)
@@ -535,3 +535,48 @@ def test_turned_down_suspects_are_not_asked_about_again_and_never_seen_objects_o
         settle(p, s, clock)
     assert asked.count("remote") == 1
     assert asked.count("keys") <= 1                                  # never seen: a backstop, then rarely
+
+
+def test_a_busy_view_embeds_at_most_max_embed_per_view_spots_first():
+    clock, s = Clock(), Scene()
+    calls = []
+
+    def counting(img, boxes):
+        calls.append(list(boxes))
+        return embed(img, boxes)
+
+    c = PermanenceConfig.from_dict({"mode": "registry", "tiles": [1, 1], "zoom": [], "verify": False,
+                                    "max_embed_per_view": 2})
+    p = Permanence(c, detect, counting, places=PLACES, clock=clock)
+    p.add_ref("remote", np.full((40, 40, 3), REMOTE, np.uint8))
+    s.put("remote", REMOTE, (100, 500, 160, 540))
+    run(p, s, clock)
+    assert p.objects["remote"].state == VISIBLE
+    for j, colour in enumerate([MUG, KEYS, (0, 200, 200)]):
+        s.put(f"x{j}", colour, (400 + 120 * j, 100, 440 + 120 * j, 140))
+    s.put("remote", REMOTE, (115, 500, 175, 540))                   # moved a little: embedded again, first
+    calls.clear()
+    run(p, s, clock)
+    assert len(calls[-1]) == 2 and (115, 500, 175, 540) in calls[-1]
+    assert p.objects["remote"].state == VISIBLE
+
+
+def test_slow_embeddings_are_limited_to_the_time_budget():
+    clock, s = Clock(), Scene()
+    calls = []
+
+    def slow(img, boxes):
+        calls.append(len(boxes))
+        time.sleep(0.03 * len(boxes))                                # 30 ms a crop: a CPU without the engine
+        return embed(img, boxes)
+
+    c = PermanenceConfig.from_dict({"mode": "registry", "tiles": [1, 1], "zoom": [], "verify": False,
+                                    "embed_budget_ms": 60})
+    p = Permanence(c, detect, slow, places=PLACES, clock=clock)
+    for j, colour in enumerate([MUG, KEYS, (0, 200, 200), REMOTE]):
+        s.put(f"x{j}", colour, (100 + 150 * j, 100, 140 + 150 * j, 140))
+    run(p, s, clock)                                                # first look: the cost isn't known yet
+    for j, colour in enumerate([MUG, KEYS, (0, 200, 200), REMOTE]):
+        s.put(f"x{j}", colour, (100 + 150 * j, 300, 140 + 150 * j, 340))   # all moved: all need embedding
+    run(p, s, clock)
+    assert calls[0] == 4 and 1 <= calls[1] <= 2                      # 60 ms of ~30 ms crops

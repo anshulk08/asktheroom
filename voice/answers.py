@@ -28,6 +28,8 @@ CHANGES_WINDOW_S = 600  # default look-back for 'what changed'
 ALSO_NAMED_MAX = 3      # 'what changed': other changed things named, the rest 'a few other things'
 PUT_DOWN = ("PUT_BACK", "MOVED", "PUT_INSIDE", "COVERED", "EXITED_VIEW")
 TOUCHED = PUT_DOWN + ("PICKED_UP", "UNCOVERED", "TAKEN_OUT")    # a hand did it, not the tracker
+PICKUP_Q = re.compile(r"\b(pick(ed|ing)?\s+up|touch(ed)?|handled?)\b", re.I)   # 'when did I last
+                        # pick up my pills': the HANDLED answer (picked up at 3:12 PM, 2 minutes ago), with its time
 UNNAMED = "new thing"   # a thing with no taught name and no confident guess (never its number)
 GUESS_MIN = 0.5         # an automatic guess below this confidence is not spoken
 YOUNG_S = 30.0          # 'what changed' leaves out a thing seen for less than this that no hand touched
@@ -258,7 +260,7 @@ def _where_room(obj: str, place, cfg: dict, now: float, world=None) -> Answer:
         return Answer(f"{Y} {n} {be} {prep} {pn}, which I last saw {on}{at}.")
     state = getattr(place, "state", None)            # the object registry's states (spec 0011)
     if state == "hidden":
-        return Answer(f"Someone is in front of {Y.lower()} {n} right now. I last saw {it} {on}{at}.")
+        return Answer(f"{Y} {n} {be} probably still {on}, behind someone. I last saw {it} there{at}.")
     if state == "carried":
         src = say if say.startswith("near ") else f"from {say}"
         return Answer(f"Someone picked up {Y.lower()} {n} {src}{at}. I haven't seen where {It.lower()} went yet.")
@@ -522,7 +524,7 @@ def answer(intent: Intent, world, events, cfg: Optional[dict] = None,
             return _guessed_answer(k, intent, guessed, world, events, cfg, now)
         if k == "WHERE":
             return _maybe_back(obj, _where(obj, world, events, cfg, now), world, cfg)
-        if k == "HISTORY":
+        if k == "HISTORY" and not PICKUP_Q.search(intent.raw or ""):
             return _plus_narration(_history(obj, world, cfg, now), obj, world, events, cfg, now)
         return _plus_narration(_handled(obj, world, events, cfg, now), obj, world, events, cfg, now)
     return Answer("I can tell you where things are, what happened to them, or what changed.")
