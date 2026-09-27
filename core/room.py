@@ -215,8 +215,9 @@ class RoomNamer:
                  online: Optional[Callable[[], bool]] = None, clock: Callable[[], float] = time.monotonic,
                  retry_s: float = 5.0, max_pending: int = 8, start: bool = True,
                  verify_fn: Optional[Callable[[np.ndarray, list], Optional[dict]]] = None,
-                 on_named: Optional[Callable[[RoomTrack], None]] = None):
+                 on_named: Optional[Callable[[RoomTrack], None]] = None, first: tuple = ()):
         self.name_fn = name_fn
+        self.first = tuple(first)          # zones named first (after verifications): what the laser should point at
         self.verify_fn = verify_fn         # (img, hints) -> guess: "is this one of these?" beats open naming
         self.on_named = on_named           # called with the track once its guess is set (the worker thread)
         self.per_minute = int(per_minute)
@@ -260,7 +261,9 @@ class RoomNamer:
         now = self.clock() if now is None else now
         with self._lock:
             due = [j for j in reversed(self._jobs) if j.due <= now]              # newest first: the fresh arrival
-            job = next((j for j in due if j.hints), due[0] if due else None)     # a verification first
+            job = next((j for j in due if j.hints), None)                        # a verification first,
+            job = job or next((j for j in due if j.track.zone in self.first), None)   # then the first zones
+            job = job or (due[0] if due else None)
             if job is None or not self.online():
                 return False
             while self._calls and self._calls[0] <= now - 60.0:
@@ -422,7 +425,8 @@ class RoomMemory:
         hand_conf = float(ct.get("hand", ct.get("default", 0.35))) if isinstance(ct, dict) else float(ct)
         if not rc.things:
             proposer = None
-        namer = RoomNamer(name_fn, per_minute=rc.names_per_minute, online=online, verify_fn=verify_fn) \
+        namer = RoomNamer(name_fn, per_minute=rc.names_per_minute, online=online, verify_fn=verify_fn,
+                          first=tuple(rc.name_first or ())) \
             if proposer is not None and name_fn is not None else None
         log.info("room memory on: zones %s; things %s", ", ".join(f"{z.name} ({z.say})" for z in zones.zones.values()),
                  "off" if proposer is None else ("named by Grok" if namer is not None else "unnamed"))
@@ -594,8 +598,11 @@ class RoomMemory:
                 # While a handoff is open only arrivals (their spot changed) are sent: static clutter never
                 # arrived, so it can't be the carried object, and each junk call cost ~1 s of Grok's time
                 # ahead of the one that matters (counter clutter, rig run Sat 26 Sep).
-                if (tr.cls == THING and tr.guess is None and not tr.name_asked and hints != []
-                        and (hints is None or tr.changed)):
+                # room_memory.name_all: with no handoff open every confirmed thing is named once (the laser
+                # points at named room tracks); a handoff still sends only arrivals meanwhile.
+                every = self.cfg.name_all and not hints
+                if (tr.cls == THING and tr.guess is None and not tr.name_asked
+                        and (every or (hints != [] and (hints is None or tr.changed)))):
                     verify = bool(hints and self.namer.verify_fn)
                     img = (_marked_close_up(visit.crop, tr.box_px, x1, y1) if verify
                            else _close_up(visit.crop, tr.box_px, x1, y1))

@@ -608,6 +608,9 @@ room_memory:
   name_match_min: 2.0         # how well two Grok names must match (core.auto_name.match_score; 2 = same head noun)
   names_per_minute: 60        # Grok calls for room crops, at most (only while a handoff is possible; xAI allows
                               # 3 requests/s on grok-4.3, so latency is the limit, not this)
+  name_all: false             # true: every confirmed room thing is named once, handoff or not, so the laser can point at
+                              # it (room.aim_tracks); off, only arrivals while a handoff is open (the Grok cap)
+  name_first: []              # zones named first, e.g. [side_table, counter]
   room_every_n_hot: 2         # while a handoff is open (something just left the table) process one zone every
                               # N frames instead of room_every_n, so a far zone is seen within a frame or two
                               # (spec 0010 P0-3; the cost is one more prop + YOLOE pass per frame: measure fps)
