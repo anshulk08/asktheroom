@@ -112,6 +112,7 @@ def test_spot_check_finds_each_note_and_scores_the_ruler(cal_rig):
     got = [v for s in rep["spots"] for v in (s["x_cm"], s["y_cm"])]
     assert got == pytest.approx([v for p in spots for v in p], abs=1.0)
     assert max(measured) < 2.0 and not rig.act.laser_on
+    assert all(0 < s["surface_red"] < 215 for s in rep["spots"])      # light-blue notes: headroom for the dot
     assert "| spot |" in lines[-1] and "PASS" in lines[-1]
 
 
@@ -137,3 +138,19 @@ def test_rig_refuses_the_fake_actuator(capsys):
     assert main(["--rig"]) == 2                              # config.yaml: actuator fake
     assert "pca9685" in capsys.readouterr().err
     assert main([]) == 2
+
+
+def test_a_surface_near_saturation_gets_the_exposure_hint(cal_rig, monkeypatch):
+    import act.calibrate as ac
+    rig, laser = cal_rig
+    monkeypatch.setattr(ac, "surface_red", lambda laser, cm, img, r_cm=2.0: 240.0)   # a white box top
+    answers = iter(["", "1.0"])
+
+    def ask(prompt):
+        if "sticky note" in prompt:
+            rig.notes.append((60.0, 40.0))
+        return next(answers)
+    lines = []
+    rep = spot_check(laser, ask, n=1, out=lines.append)
+    assert rep["spots"][0]["surface_red"] == 240
+    assert any("near saturation" in s and "camera_setup.sh" in s for s in lines)
