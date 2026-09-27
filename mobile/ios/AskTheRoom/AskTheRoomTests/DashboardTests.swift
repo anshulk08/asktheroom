@@ -28,13 +28,13 @@ final class DashboardTests: XCTestCase {
 
     func testNoticesOrderedGoneLostNew() {
         let notices = Dashboard.notices(in: sample)
-        XCTAssertEqual(notices.map(\.kind), [.leftTable, .lostTrack, .unnamed, .unnamed, .unnamed])
+        XCTAssertEqual(notices.map(\.kind), [.leftTable, .lostTrack, .unnamed, .unnamed])
         XCTAssertEqual(notices[0].text, "Your phone was moved off the table, on the left side.")
         XCTAssertEqual(notices[1].text, "The room can't see your glasses right now.")
-        // thing:9 might be thing:4, which has no name, and its own guess is weak: don't guess.
-        XCTAssertEqual(notices[2].text, "Something new is on the table.")
-        XCTAssertEqual(notices[3].text, "Something new is on the table. It looks like a phone charger.")
-        XCTAssertEqual(notices[4].text, "Something new is on the table. It looks like a tape roll.")
+        XCTAssertEqual(notices[2].text, "Something new is on the table. It looks like a phone charger.")
+        XCTAssertEqual(notices[3].text, "Something new is on the table. It looks like a tape roll.")
+        // thing:9 has only a weak guess: no card, or a crowded table buries the rest.
+        XCTAssertFalse(notices.contains { $0.entity == "thing:9" })
     }
 
     func testGrokNamedThingsArentThePersons() {
@@ -98,9 +98,9 @@ final class DashboardTests: XCTestCase {
 
     func testNoticeGuessesOnlyNamesThePersonKnows() {
         var s = sample
-        s.update("thing:9") { $0.m = [MaybeSame(name: "thing:7", score: 0.7)] }
-        XCTAssertEqual(Dashboard.notices(in: s).first { $0.entity == "thing:9" }?.text,
-                       "Something new is on the table. It might be my charger.")
+        s.update("thing:11") { $0.m = [MaybeSame(name: "thing:7", score: 0.7)] }
+        XCTAssertEqual(Dashboard.notices(in: s).first { $0.entity == "thing:11" }?.text,
+                       "Something new is on the table. It looks like a phone charger. It might be my charger.")
     }
 
     func testChangesDescribeEachMove() {
@@ -222,11 +222,11 @@ final class RoomStoreActivityTests: XCTestCase {
         store.receive(state: third)
         XCTAssertEqual(store.activity.map(\.text), ["Wallet was put down", "Wallet was picked up"])
 
-        let unnamed = store.notices.first { $0.kind == .unnamed }!
-        XCTAssertNil(unnamed.question, "the room can't be asked about a nameless thing; show it instead")
-        store.showOnMap(unnamed.entity)
-        XCTAssertEqual(store.highlight?.entity, "thing:9")
-        XCTAssertEqual(store.highlight?.target, TablePoint(x: 82, y: 10))
+        let guessed = store.notices.first { $0.kind == .unnamed }!
+        XCTAssertNil(guessed.question, "the room's guess isn't a name it answers to; show it instead")
+        store.showOnMap(guessed.entity)
+        XCTAssertEqual(store.highlight?.entity, "thing:11")
+        XCTAssertEqual(store.highlight?.target, TablePoint(x: 45, y: 24))
 
         let phone = store.notices.first { $0.entity == "phone" }!
         store.dismiss(phone)

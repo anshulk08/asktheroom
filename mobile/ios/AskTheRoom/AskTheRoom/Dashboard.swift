@@ -126,7 +126,8 @@ enum Dashboard {
         return "Where \(isPlural(e.displayName) ? "are" : "is") \(e.displayName.hasPrefix("my ") ? "" : "my ")\(e.displayName)?"
     }
 
-    /// Things to point out, most urgent first: gone, then lost, then unnamed newcomers.
+    /// Things to point out, most urgent first: gone, then lost, then newcomers the room has a
+    /// guess for. Nameless things get no card: a crowded table would bury the rest in them.
     static func notices(in snapshot: Snapshot) -> [Notice] {
         var out: [Notice] = []
         for e in snapshot.entities {
@@ -146,7 +147,7 @@ enum Dashboard {
             default:
                 break
             }
-            if e.isThing, !e.hasTaughtName, e.status == .visible {
+            if e.isThing, !e.hasTaughtName, !e.isNameless, e.status == .visible {
                 // The room's own guess, hedged, then an older thing only if the person named it.
                 let looks = e.hedgedName.map { " It looks like \(Entity.withArticle($0))." } ?? ""
                 let known = e.maybeSameAs.lazy.compactMap { snapshot.entity(named: $0.name) }
