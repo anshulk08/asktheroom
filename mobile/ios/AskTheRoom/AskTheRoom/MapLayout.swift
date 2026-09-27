@@ -6,33 +6,66 @@ import Foundation
 /// outside it so "left the table" arrows have somewhere to go.
 struct MapGeometry {
     static let margin: CGFloat = 16
+    /// The margin below the near edge when the map shows where the person sits: room for the
+    /// "You" marker under the band the "left the table" arrows use.
+    static let youMargin: CGFloat = 36
+    /// The "You" marker's height, glyph and word on one line.
+    static let youHeight: CGFloat = 18
 
     var table: TablePoint
     var size: CGSize
+    /// The map is in the person's frame (the snapshot has a `view`): mark them at the bottom.
+    var showsYou = false
 
-    /// Width over height for a view that shows the whole table plus its margin.
-    static func aspectRatio(for table: TablePoint, width: CGFloat = 390) -> CGFloat {
+    init(table: TablePoint, size: CGSize, showsYou: Bool = false) {
+        self.table = table
+        self.size = size
+        self.showsYou = showsYou
+    }
+
+    var bottomMargin: CGFloat { Self.bottomMargin(showsYou: showsYou) }
+
+    static func bottomMargin(showsYou: Bool) -> CGFloat { showsYou ? youMargin : margin }
+
+    /// Width over height for a view that shows the whole table plus its margins.
+    static func aspectRatio(for table: TablePoint, width: CGFloat = 390, showsYou: Bool = false) -> CGFloat {
         guard table.x > 0, table.y > 0 else { return 1.5 }
-        let height = (width - 2 * margin) * table.y / table.x + 2 * margin
+        let height = (width - 2 * margin) * table.y / table.x + margin + bottomMargin(showsYou: showsYou)
         return width / height
     }
 
     var scale: CGFloat {
         guard table.x > 0, table.y > 0 else { return 0 }
         let sx = (size.width - 2 * Self.margin) / table.x
-        let sy = (size.height - 2 * Self.margin) / table.y
+        let sy = (size.height - Self.margin - bottomMargin) / table.y
         return max(0, min(sx, sy))
     }
 
+    /// Centred across; down, centred in the space between the top margin and the bottom one.
     var tableRect: CGRect {
         let w = table.x * scale
         let h = table.y * scale
-        return CGRect(x: (size.width - w) / 2, y: (size.height - h) / 2, width: w, height: h)
+        let top = Self.margin + (size.height - Self.margin - bottomMargin - h) / 2
+        return CGRect(x: (size.width - w) / 2, y: top, width: w, height: h)
+    }
+
+    /// The centre of the "You" marker: just outside the near edge, below the arrows' band.
+    var youPoint: CGPoint {
+        let rect = tableRect
+        return CGPoint(x: rect.midX, y: rect.maxY + Self.youMargin - Self.youHeight / 2 - 2)
     }
 
     func point(_ p: TablePoint) -> CGPoint {
         let rect = tableRect
         return CGPoint(x: rect.minX + p.x * scale, y: rect.minY + p.y * scale)
+    }
+
+    /// `point`, pulled onto the table: the rig can report things in the band just past the
+    /// tabletop's edge, and those are drawn at the edge rather than off the map.
+    func pointOnTable(_ p: TablePoint) -> CGPoint {
+        let rect = tableRect
+        let q = point(p)
+        return CGPoint(x: min(max(q.x, rect.minX), rect.maxX), y: min(max(q.y, rect.minY), rect.maxY))
     }
 
     func length(_ cm: Double) -> CGFloat { cm * scale }
@@ -308,7 +341,7 @@ extension MapLayout {
 
         for item in items {
             guard case .block(let w, let h) = item.shape else { continue }
-            let p = geo.point(item.center)
+            let p = geo.pointOnTable(item.center)
             out[item.id] = p
             let body = CGRect(x: p.x - geo.length(w) / 2, y: p.y - geo.length(h) / 2, width: geo.length(w), height: geo.length(h))
             let titleWidth = CGFloat(item.label.count) * 7 + 8 + blockTitleHeight

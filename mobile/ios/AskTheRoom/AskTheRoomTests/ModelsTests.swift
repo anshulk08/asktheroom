@@ -208,4 +208,139 @@ final class ModelsTests: XCTestCase {
         XCTAssertLessThanOrEqual(data.count, Question.maxBytes)
         XCTAssertNil(VoiceSettings(voice: .init(e: "grok", v: String(repeating: "x", count: 300), s: 1)).encoded())
     }
+
+    // MARK: where the person sits (the "view" key and the orient write)
+
+    func testViewDecodesFromTheSample() throws {
+        let snap = try XCTUnwrap(Wire.decode(Snapshot.self, from: Data(MockData.sampleSnapshotJSON.utf8)))
+        let view = try XCTUnwrap(snap.view)
+        XCTAssertEqual(view, ViewInfo(front: .right, outline: true, sides: [.right: "couch"]))
+        XCTAssertEqual(view.name(at: .bottom), "couch", "the couch is where the person sits")
+        XCTAssertNil(view.name(at: .top))
+        XCTAssertEqual(view.viewerEdge(of: .right), .bottom)
+    }
+
+    func testOlderRigsSendNoView() throws {
+        let snap = try XCTUnwrap(Wire.decode(Snapshot.self, from: Data(#"{"v":1,"table":[90,60],"e":[]}"#.utf8)))
+        XCTAssertNil(snap.view)
+    }
+
+    func testViewIsTolerant() throws {
+        let odd = #"{"e":[],"view":{"f":"diagonal","s":{"upstairs":"x","left":"window"}}}"#
+        let view = try XCTUnwrap(Wire.decode(Snapshot.self, from: Data(odd.utf8))?.view)
+        XCTAssertEqual(view.front, .bottom, "an unknown side reads as the camera's own")
+        XCTAssertFalse(view.outline)
+        XCTAssertEqual(view.sides, [.left: "window"])
+
+        let bare = try XCTUnwrap(Wire.decode(Snapshot.self, from: Data(#"{"e":[],"view":{"f":"top"}}"#.utf8))?.view)
+        XCTAssertEqual(bare, ViewInfo(front: .top))
+    }
+
+    /// The saved map keeps its view.
+    func testViewSurvivesSavingTheMap() throws {
+        let snap = MockData.sampleSnapshot
+        let again = try JSONDecoder().decode(Snapshot.self, from: try JSONEncoder().encode(snap))
+        XCTAssertEqual(again, snap)
+        XCTAssertNotNil(again.view)
+    }
+
+    /// The rig's camera to viewer table, per front, written out in full.
+    private let rigTable: [Side: [Side: Edge]] = [
+        .bottom: [.left: .left, .right: .right, .top: .top, .bottom: .bottom],
+        .top: [.left: .right, .right: .left, .top: .bottom, .bottom: .top],
+        .right: [.right: .bottom, .left: .top, .bottom: .left, .top: .right],
+        .left: [.left: .bottom, .right: .top, .top: .left, .bottom: .right],
+    ]
+
+    func testCameraSidesTurnLikeTheRigsTable() {
+        for front in Side.allCases {
+            for side in Side.allCases {
+                XCTAssertEqual(Seat.viewerEdge(of: side, front: front), rigTable[front]![side]!, "\(side) sitting at \(front)")
+            }
+        }
+    }
+
+    func testViewerEdgesTurnBackToCameraSides() {
+        for front in Side.allCases {
+            for (side, edge) in rigTable[front]! {
+                XCTAssertEqual(Seat.cameraSide(at: edge, front: front), side, "\(edge) sitting at \(front)")
+            }
+        }
+    }
+
+    func testTurningIsARoundTripAndTheSeatIsAlwaysAtTheBottom() {
+        for front in Side.allCases {
+            XCTAssertEqual(Seat.viewerEdge(of: front, front: front), .bottom)
+            XCTAssertEqual(Seat.cameraSide(at: .bottom, front: front), front)
+            for edge in Edge.allCases {
+                XCTAssertEqual(Seat.viewerEdge(of: Seat.cameraSide(at: edge, front: front), front: front), edge)
+                XCTAssertEqual(Seat.cameraSide(at: Seat.viewerEdge(of: edge, front: front), front: front), edge)
+            }
+            XCTAssertEqual(Set(Edge.allCases.map { Seat.cameraSide(at: $0, front: front) }), Set(Side.allCases))
+        }
+    }
+
+    func testOrientIsOneShortWriteTheRigReads() throws {
+        let data = try XCTUnwrap(OrientSettings(front: .right).encoded())
+        XCTAssertEqual(String(decoding: data, as: UTF8.self), #"{"orient":{"front":"right"}}"#)
+        XCTAssertEqual(OrientSettings(front: .left).front, .left)
+    }
+
+    /// The reset must carry an explicit null: a missing key isn't a reset.
+    func testResetSendsAnExplicitNull() throws {
+        let data = try XCTUnwrap(OrientSettings.reset.encoded())
+        XCTAssertEqual(String(decoding: data, as: UTF8.self), #"{"orient":{"front":null}}"#)
+        XCTAssertEqual(data.count, 25)
+        XCTAssertNil(OrientSettings.reset.front)
+        let parsed = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: [String: Any]])
+        XCTAssertTrue(parsed["orient"]?["front"] is NSNull)
+    }
+
+    private func clearSeat() {
+        UserDefaults.standard.removeObject(forKey: Seat.savedKey)
+        UserDefaults.standard.removeObject(forKey: Seat.resetKey)
+    }
+
+    func testSavedSeatIsACameraSideAndGoesOnEveryConnect() {
+        clearSeat()
+        defer { clearSeat() }
+        XCTAssertNil(Seat.savedOrient, "never chosen: the rig's default applies")
+        XCTAssertNil(Seat.orientForConnect())
+        Seat.choose(.top)
+        XCTAssertEqual(Seat.saved, .top)
+        XCTAssertEqual(Seat.savedOrient, OrientSettings(front: .top))
+        XCTAssertEqual(Seat.orientForConnect(), OrientSettings(front: .top))
+        XCTAssertEqual(Seat.orientForConnect(), OrientSettings(front: .top), "again on the next connect")
+    }
+
+    /// Back to the default: a reset now and on the next connect, then nothing.
+    func testResetGoesOutOnOneConnectThenNothing() {
+        clearSeat()
+        defer { clearSeat() }
+        Seat.choose(.left)
+        Seat.choose(nil)
+        XCTAssertNil(Seat.saved)
+        XCTAssertEqual(Seat.savedOrient, .reset, "sent when picked")
+        XCTAssertEqual(Seat.orientForConnect(), .reset, "and on the next connect")
+        XCTAssertNil(Seat.orientForConnect(), "then forgotten")
+        XCTAssertNil(Seat.savedOrient)
+        Seat.choose(nil)
+        Seat.choose(.bottom)
+        XCTAssertEqual(Seat.orientForConnect(), OrientSettings(front: .bottom), "a new seat cancels an owed reset")
+    }
+
+    /// `s` is keyed by camera side, like `f`: it lands wherever that side is on the turned map.
+    func testSideNamesAreKeyedByCameraSide() throws {
+        func view(_ f: String) throws -> ViewInfo {
+            let json = #"{"e":[],"view":{"f":"\#(f)","o":true,"s":{"right":"couch"}}}"#
+            return try XCTUnwrap(Wire.decode(Snapshot.self, from: Data(json.utf8))?.view)
+        }
+        XCTAssertEqual(try view("right").name(at: .bottom), "couch", "on the couch: 'You · Couch'")
+        XCTAssertEqual(try view("top").name(at: .left), "couch")
+        XCTAssertEqual(try view("left").name(at: .top), "couch")
+        XCTAssertEqual(try view("bottom").name(at: .right), "couch")
+        for f in ["right", "top", "left", "bottom"] {
+            XCTAssertEqual(Edge.allCases.compactMap { try? view(f).name(at: $0) }, ["couch"], f)
+        }
+    }
 }

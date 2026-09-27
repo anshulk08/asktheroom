@@ -23,6 +23,8 @@ final class MockRoom: RoomTransport {
     static let stepInterval: Duration = .seconds(5)
     static let laserOnFor: Duration = .seconds(5)
     static let answerDelay: Duration = .milliseconds(700)
+    /// The sample's seat, like a rig configured for the couch.
+    static let defaultFront: Side = .right
 
     private weak var store: RoomStore?
     private(set) var snapshot: Snapshot
@@ -35,6 +37,9 @@ final class MockRoom: RoomTransport {
         self.store = store
         snapshot = Self.startingSnapshot()
         snapshot.online = !defaults.bool(forKey: "mockOffline")
+        if let front = defaults.string(forKey: Seat.savedKey).flatMap(Side.init(rawValue:)) {
+            snapshot.view?.front = front
+        }
 
         store.receive(status: RigStatus(
             app: defaults.bool(forKey: "mockAppDown") ? "down" : "up",
@@ -82,6 +87,13 @@ final class MockRoom: RoomTransport {
         }
         s.update("pill_bottle") { $0.ls = now.timeIntervalSince1970 - 25 * 60 }
         return s
+    }
+
+    /// Like the rig: no answer, just a fresh state facing the new seat (a reset goes back to the
+    /// sample's couch side). The pretend table isn't turned; only the side names move.
+    func send(orient: OrientSettings) {
+        snapshot.view?.front = orient.front ?? Self.defaultFront
+        publish()
     }
 
     func stop() {
