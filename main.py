@@ -151,6 +151,10 @@ class Room:
         self.listen_mode = str(li.get("mode", "always"))       # always | wake | click
         self.idle_s = float(li.get("idle_s", 8))
         self.echo_tail_s = float(li.get("echo_tail_s", 0.4))
+        # "speak now": a chime and the listening light when the rig listens for a question (voice/cues.py)
+        self.chime = bool(li.get("chime", True))
+        from voice.cues import ListenIndicator
+        self.indicator = ListenIndicator(cfg)
         demo = cfg.get("demo") or {}
         self.cue_after_s = float(demo.get("thinking_cue_s", 1.0))       # 0 = off
         self.cue_phrases = list(demo.get("thinking_phrases") or ["Let me look.", "One moment.", "Hmm, let me check."])
@@ -507,6 +511,8 @@ class Room:
                 ignored += 1                    # dropped: not logged, not stored, not sent
                 continue
             log.info("heard: %r", text)
+            if self._addressed(text):
+                self._cue("ack")                # "Room, where are my keys?": heard, the answer is coming
             self._answer(text, t_heard, t_heard, {"mode": "overheard", "ignored_since_last": ignored})
             ignored = 0
 
@@ -523,18 +529,35 @@ class Room:
         wake = set(wake_words(self.cfg))
         return bool(words) and any(w in wake for w in words) and all(w in wake or w in WAKE_FILLER for w in words)
 
+    def _addressed(self, text: str) -> bool:
+        from voice.understand import has_wake_word
+        return has_wake_word(text, self.cfg)
+
+    def _cue(self, kind: str) -> None:
+        """Play a chime (voice/cues.py) and wait out the speaker's delay, so the mic doesn't record it."""
+        if not self.chime or self.tts is None or not hasattr(self.tts, "play_cue"):
+            return
+        from voice.cues import RATE, TAIL_S, chime_pcm
+        if self.tts.play_cue(chime_pcm(kind), RATE):
+            self.stop_ev.wait(TAIL_S)
+
     def _asked(self, t_press: float) -> None:
-        """Clicker press, or the wake word alone: stop the current answer, listen for one question, answer it."""
+        """Clicker press, or the wake word alone: stop the current answer, chime and light up, listen for
+        one question, answer it."""
         if self.tts is not None:
             self.tts.stop()                     # a click interrupts the previous answer
         if self.clicker is not None:
             self.clicker.clear()
+        self._cue("listen")                     # "speak now"
+        self.indicator.on()
         try:
             text = self.stt.listen()
         except Exception:
             log.exception("listening failed")
             self._speak("Sorry, the microphone isn't working.")
             return
+        finally:
+            self.indicator.off()
         t_heard = time.monotonic()
         if not text:
             self._speak(NOT_HEARD)
@@ -909,6 +932,7 @@ def build(cfg: dict, fake: bool = False, camera: int = 0, with_voice: bool = Tru
 
     room = Room(cfg, world, events, table, frames, laser, ask, netmon=netmon, tts=tts, stt=stt,
                 clicker=clicker, detector=detector, hands=hands, interpret=interpret)
+    cleanup.append(room.indicator.close)
     room.cleanup = cleanup
     if room_rect is not None:
         room.room_memory = make_room_memory(cfg, world, detector, room_rect)

@@ -562,6 +562,27 @@ class TTS:
         """True while an answer plays (the always-on mic waits, or it would answer itself)."""
         return self._lock.locked()
 
+    def play_cue(self, pcm: bytes, rate: int, deadline_s: float = 3.0) -> bool:
+        """A short cue (voice/cues.py chimes) on the speech output, blocking until it has played. Never
+        overlaps an answer (skipped if one is still playing after 0.5 s) and never hangs the caller past
+        deadline_s on a stalled speaker. False when it didn't play."""
+        if not self._lock.acquire(timeout=0.5):
+            return False
+        try:
+            def play() -> None:
+                out = open_output(rate, self._device())
+                try:
+                    out.write(pcm)
+                finally:
+                    out.close()
+            call_with_deadline(play, deadline_s, name="tts-cue")
+            return True
+        except Exception as ex:
+            log.warning("cue not played: %s: %s", type(ex).__name__, ex)
+            return False
+        finally:
+            self._lock.release()
+
     def stop(self) -> None:
         """Cut off current speech (safe from any thread; returns within about ABORT_S)."""
         u = self._utt
