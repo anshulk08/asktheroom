@@ -212,6 +212,7 @@ class Rig:
         self.prompts = PromptReader() if ask is None else None
         self.camera, self.manual = camera, manual
         self._ask = ask if ask is not None else self.prompts.ask
+        self.live = False                          # --live: the room app is running and holds camera and audio
         self._parts: dict[str, object] = {}
         self.building: set[str] = set()             # parts being made right now (a hung check marks them)
         self._cleanup: list[Callable[[], None]] = []
@@ -670,9 +671,26 @@ def _rc(rig: Rig) -> dict:
     return rig.cfg.get("room_check") or {}
 
 
-def app_url(cfg: dict) -> str:
+def saved_port(path: str = "data/room/app.args") -> Optional[int]:
+    """--port from the args scripts/room_app.sh started the app with (one per line), if any."""
+    try:
+        args = open(path).read().split("\n")
+    except OSError:
+        return None
+    for i, a in enumerate(args):
+        v = a[len("--port="):] if a.startswith("--port=") else (args[i + 1] if a == "--port" and i + 1 < len(args) else "")
+        if v.strip().isdigit():
+            return int(v)
+    return None
+
+
+def app_url(cfg: dict, args_path: str = "data/room/app.args") -> str:
+    """room_check.app_url; else the --port scripts/room_app.sh saved; else server.port."""
     url = str((cfg.get("room_check") or {}).get("app_url") or "").strip()
-    return (url or f"http://127.0.0.1:{(cfg.get('server') or {}).get('port', 8000)}").rstrip("/")
+    if url:
+        return url.rstrip("/")
+    port = saved_port(args_path) or (cfg.get("server") or {}).get("port", 8000)
+    return f"http://127.0.0.1:{port}"
 
 
 def check_room_app(rig: Rig, get: Optional[Callable] = None) -> Result:
@@ -761,9 +779,75 @@ def _find_device(devices: list, spec, kind: str) -> tuple[Optional[dict], str]:
     return hit[0], (f" ({len(hit)} match, first used)" if len(hit) > 1 else "")
 
 
-def check_devices(rig: Rig, query: Optional[Callable[[], list]] = None) -> Result:
+def asound_cards(root: str = "/proc/asound") -> list[dict]:
+    """ALSA's own card list: [{'num', 'name' (id, driver, long names: matched), 'label' (shown), 'capture',
+    'playback', 'busy_c', 'busy_p'}]. Unlike PortAudio, it lists a card the running app has open, and says so (a substream in
+    state RUNNING)."""
+    import glob
+    import re
+    try:
+        lines = open(os.path.join(root, "cards")).read().splitlines()
+    except OSError:
+        return []
+    cards = []
+    for i, ln in enumerate(lines):
+        m = re.match(r"\s*(\d+)\s+\[([^\]]*)\]:\s*(.*)", ln)
+        if not m:
+            continue
+        num = int(m.group(1))
+        more = lines[i + 1].strip() if i + 1 < len(lines) and not re.match(r"\s*\d+\s+\[", lines[i + 1]) else ""
+        card = {"num": num, "name": f"{m.group(2).strip()} {m.group(3).strip()} {more}".strip(),
+                "label": m.group(3).split(" - ", 1)[-1].strip()}
+        for d in ("c", "p"):
+            pcms = glob.glob(os.path.join(root, f"card{num}", f"pcm*{d}"))
+            card["capture" if d == "c" else "playback"] = bool(pcms)
+            busy = False
+            for st in glob.glob(os.path.join(root, f"card{num}", f"pcm*{d}", "sub*", "status")):
+                try:
+                    busy |= "RUNNING" in open(st).read()
+                except OSError:
+                    pass
+            card["busy_" + d] = busy
+        cards.append(card)
+    return cards
+
+
+def _check_devices_alsa(rig: Rig, root: str) -> Result:
+    """--live: the app holds the mic and speaker, and PortAudio hides a busy device, so look in ALSA's card
+    list instead. A card in use counts as present (the app has it)."""
+    cards = asound_cards(root)
+    if not cards:
+        return None, f"no {root}/cards (not Linux?): devices not checked"
+    parts, problems = [], []
+    for kind, section, key in (("input", "stt", "input_device"), ("output", "tts", "output_device")):
+        spec = (rig.cfg.get(section) or {}).get(key)
+        label = "mic" if kind == "input" else "speaker"
+        d = "c" if kind == "input" else "p"
+        if spec is None or (isinstance(spec, str) and not spec.strip()):
+            problems.append(f"{section}.{key} not set: the {label} would be the default "
+                            f"({'Brio in the corner' if kind == 'input' else 'HDMI, silent'})")
+            continue
+        if isinstance(spec, int) or str(spec).strip().isdigit():
+            problems.append(f"{section}.{key} is an index ({spec}): indexes shift on replug, set part of the "
+                            f"{label}'s name instead")
+            continue
+        hits = [c for c in cards if str(spec).strip().lower() in c["name"].lower()
+                and c["capture" if kind == "input" else "playback"]]
+        if not hits:
+            problems.append(f"no {kind} card named like {spec!r}: plug the {label} in (cat {root}/cards)")
+            continue
+        c = hits[0]
+        parts.append(f"{label} card {c['num']} {c['label']}"
+                     + (" (in use by the app)" if c["busy_" + d] else ""))
+    return not problems, "; ".join(parts + problems)
+
+
+def check_devices(rig: Rig, query: Optional[Callable[[], list]] = None, asound: str = "/proc/asound") -> Result:
     """The mic and speaker named in config are plugged in. Null means the default device, which on the
-    rig is the Brio's mic in the corner and HDMI (no speaker), so both must be named."""
+    rig is the Brio's mic in the corner and HDMI (no speaker), so both must be named. --live reads ALSA's
+    card list, since the running app has the devices open."""
+    if rig.live and query is None and not rig.fake:
+        return _check_devices_alsa(rig, asound)
     if query is None:
         if rig.fake:
             return None, "skipped: no audio devices in --fake"
@@ -944,6 +1028,7 @@ def main(argv=None) -> int:
     manual = not a.skip_manual and sys.stdin.isatty()
     color = sys.stdout.isatty()
     rig = Rig(cfg, fake=a.fake, camera=camera, manual=manual)
+    rig.live = a.live
     failed = 0
     try:
         for i, (name, fn) in enumerate(CHECKS, 1):

@@ -272,30 +272,41 @@ def test_a_blocking_audio_device_cannot_hang_the_run(monkeypatch, capsys):
     assert "[FAIL] 5 audio" in out and "timed out after 1 s" in out and "[PASS] 9 clock" in out
 
 
-def test_mic_and_tone_have_their_own_deadlines(monkeypatch):
+def test_mic_recording_has_a_deadline(monkeypatch):
+    """The polled sd.rec path. If voice.stt.record_seconds (room/voice) replaces Rig.record's body at the
+    merge, drop this test: record_seconds bounds each read at 2 s itself."""
     import sys
-    import voice.tts
     sd = BlockingSoundDevice()
     sd.stop = lambda: None                                   # stop works, the stream just never ends
     monkeypatch.setitem(sys.modules, "sounddevice", sd)
     monkeypatch.setattr(dc, "AUDIO_GRACE_S", 0.1)
-    rig = dc.Rig(dict(CFG, stt={"input_device": 4}, tts={"output_device": "Jabra"}), manual=False)
+    rig = dc.Rig(dict(CFG, stt={"input_device": 4}), manual=False)
     try:
         with pytest.raises(TimeoutError, match="mic recording"):
             rig.record(0.1)
         assert sd.rec_device == 4
+    finally:
+        sd.gate.set()
+        rig.close()
+
+
+def test_tone_plays_on_the_configured_speaker_with_a_deadline(monkeypatch):
+    import voice.tts
+    gate = __import__("threading").Event()
+    monkeypatch.setattr(dc, "AUDIO_GRACE_S", 0.1)
+    rig = dc.Rig(dict(CFG, tts={"output_device": "Jabra"}), manual=False)
+    try:
         played = []
         monkeypatch.setattr(voice.tts, "resolve_output_device", lambda spec: 7 if spec == "Jabra" else None)
         monkeypatch.setattr(voice.tts, "play_pcm", lambda pcm, rate, device=None: played.append(device))
         rig.play(np.zeros(2205, np.int16), 22050)
         assert played == [7]                                 # the configured speaker, not the default (HDMI)
-        monkeypatch.setattr(voice.tts, "play_pcm", lambda pcm, rate, device=None: sd.gate.wait())
+        monkeypatch.setattr(voice.tts, "play_pcm", lambda pcm, rate, device=None: gate.wait())
         with pytest.raises(TimeoutError, match="test tone"):
             rig.play(np.zeros(2205, np.int16), 22050)
     finally:
-        sd.gate.set()
+        gate.set()
         rig.close()
-
 
 def test_a_hung_part_fails_its_check_and_later_ones_fast(fake_rig):
     import threading
@@ -482,3 +493,50 @@ def test_live_runs_only_the_checks_that_leave_the_camera(monkeypatch, capsys):
                                        for n, _ in dc.CHECKS])
     assert dc.main(["--live", "--skip-manual"]) == 0
     assert set(ran) == dc.LIVE_CHECKS and "camera" not in ran and "audio" not in ran
+
+
+def test_app_url_follows_config_then_the_saved_port(tmp_path):
+    args = tmp_path / "app.args"
+    assert dc.app_url(CFG, str(args)) == "http://127.0.0.1:8000"
+    args.write_text("--port\n8080\n--no-voice\n")
+    assert dc.app_url(CFG, str(args)) == "http://127.0.0.1:8080"          # what room_app.sh started
+    args.write_text("--port=9001\n")
+    assert dc.app_url(CFG, str(args)) == "http://127.0.0.1:9001"
+    cfg = dict(CFG, room_check={"app_url": "http://10.0.0.5:8080/"})
+    assert dc.app_url(cfg, str(args)) == "http://10.0.0.5:8080"
+
+
+def asound_tree(root, busy_mic=False):
+    """A /proc/asound like the rig's: HDMI (playback), the Brio (capture only), a Jabra (both)."""
+    (root / "cards").write_text(
+        " 0 [HDA            ]: tegra-hda - NVIDIA Jetson Orin Nano HDA\n"
+        "                      NVIDIA Jetson Orin Nano HDA at 0x3518000 irq 110\n"
+        " 1 [BRIO           ]: USB-Audio - Logitech BRIO\n"
+        "                      Logitech BRIO at usb-3610000.usb-2.3, super speed\n"
+        " 2 [USB            ]: USB-Audio - Jabra SPEAK 410 USB\n"
+        "                      Jabra SPEAK 410 USB at usb-3610000.usb-2.4, full speed\n")
+    for card, pcms in ((0, ["pcm3p"]), (1, ["pcm0c"]), (2, ["pcm0c", "pcm0p"])):
+        for pcm in pcms:
+            sub = root / f"card{card}" / pcm / "sub0"
+            sub.mkdir(parents=True)
+            running = busy_mic and card == 2 and pcm.endswith("c")
+            (sub / "status").write_text("state: RUNNING\nowner_pid   : 99\n" if running else "closed\n")
+
+
+@pytest.mark.parametrize("mic, spk, busy, ok, want", [
+    ("jabra", "jabra", True, True, "mic card 2 Jabra SPEAK 410 USB (in use by the app)"),
+    ("BRIO", "Jabra", False, True, "mic card 1 Logitech BRIO"),
+    ("jabra", "brio", False, False, "no output card named like 'brio'"),      # the Brio has no speaker
+    ("anker", "jabra", False, False, "no input card named like 'anker'"),
+    (2, "jabra", False, False, "indexes shift"),
+    ("jabra", None, False, False, "HDMI, silent"),
+])
+def test_live_devices_come_from_alsa_and_a_busy_mic_passes(tmp_path, mic, spk, busy, ok, want):
+    asound_tree(tmp_path, busy_mic=busy)
+    rig = dc.Rig(dict(CFG, stt={"input_device": mic}, tts={"output_device": spk}), manual=False)
+    rig.live = True
+    try:
+        got, msg = dc.check_devices(rig, asound=str(tmp_path))
+        assert got is ok and want in msg, msg
+    finally:
+        rig.close()
