@@ -153,11 +153,23 @@ final class DashboardTests: XCTestCase {
         XCTAssertTrue(Dashboard.changes(from: sample, to: new).isEmpty)
     }
 
-    func testNewUnnamedObjectAppears() {
+    func testNewNamelessThingIsLeftOutOfRecent() {
         var new = sample
         new.e.append(Entity(n: "thing:14", k: .target, s: .visible, p: nil, xy: TablePoint(x: 5, y: 5), r: nil,
                             c: 1, edge: nil, a: nil, m: nil, ls: nil))
-        XCTAssertEqual(Dashboard.changes(from: sample, to: new).map(\.text), ["Something new appeared on the table"])
+        XCTAssertTrue(Dashboard.changes(from: sample, to: new).isEmpty)
+    }
+
+    /// Recent and Home skip things with no name; named things and the room's guesses stay.
+    func testNamelessThingsAreHiddenFromRecentAndHome() {
+        var new = sample
+        new.update("keys") { $0.s = .held; $0.p = "hand:1" }
+        new.update("thing:9") { $0.s = .held; $0.p = "hand:2" }
+        new.update("thing:11") { $0.s = .gone; $0.edge = .right }
+        let changes = Dashboard.changes(from: sample, to: new)
+        XCTAssertEqual(changes.map(\.entity), ["keys", "thing:11"])
+        XCTAssertEqual(changes.map(\.text), ["Keys were picked up", "What looks like a phone charger left the table on the right"])
+        XCTAssertFalse(Dashboard.things(in: sample).contains { $0.isNameless })
     }
 
     func testNamelessParentReadsNaturally() {
@@ -219,6 +231,23 @@ final class RoomStoreActivityTests: XCTestCase {
         let phone = store.notices.first { $0.entity == "phone" }!
         store.dismiss(phone)
         XCTAssertFalse(store.notices.contains { $0.entity == "phone" })
+    }
+
+    func testRecentTabLeavesOutNamelessThings() {
+        let store = RoomStore()
+        let first = MockData.sampleSnapshot
+        store.receive(state: first)
+        var second = first
+        second.update("keys") { $0.s = .held; $0.p = "hand:1" }
+        second.update("thing:9") { $0.s = .held; $0.p = "hand:2" }
+        second.update("thing:11") { $0.s = .gone; $0.edge = .right }
+        store.receive(state: second)
+
+        let recent = Dashboard.recent(activity: store.activity, exchanges: [], now: second.time!)
+        let shown = recent.lastHour.compactMap { entry -> String? in
+            if case .change(let e) = entry { return e.entity } else { return nil }
+        }
+        XCTAssertEqual(Set(shown), ["keys", "thing:11"])
     }
 
     func testShowThemAgainBringsBackDismissedNotices() {

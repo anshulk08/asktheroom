@@ -164,17 +164,16 @@ enum Dashboard {
     }
 
     /// What changed from `old` to `new`, one line per entity. Neutral wording throughout:
-    /// the pill bottle is "picked up", never "taken".
+    /// the pill bottle is "picked up", never "taken". Nameless things are left out: a line
+    /// about "something new" in Recent says nothing the map doesn't.
     static func changes(from old: Snapshot, to new: Snapshot, now: Date = Date()) -> [ActivityEvent] {
         let time = new.time ?? now
         var out: [ActivityEvent] = []
-        for e in new.entities {
+        for e in new.entities where !e.isNameless {
             let name = e.phrase
             guard let before = old.entity(named: e.name) else {
                 if e.kind == .target {
-                    out.append(ActivityEvent(entity: e.name, text: e.isNameless
-                                             ? "Something new appeared on the table" : "\(capitalized(name)) appeared on the table",
-                                             time: time))
+                    out.append(ActivityEvent(entity: e.name, text: "\(capitalized(name)) appeared on the table", time: time))
                 }
                 continue
             }
