@@ -25,10 +25,10 @@ class FakeGrounder:
 
 
 def look_qa(log, tmp_path, answer="Your mug is on the couch.", yes=True, boxes=((300, 500, 360, 550, 0.8),),
-            on=True, fail=False):
+            on=True, fail=False, found=True):
     q, prov = zoned_qa(log, tmp_path, reply=json.dumps({"seen": "", "answer": answer, "confidence": 0.9}))
     q.cfg = {**q.cfg, "room": {**(q.cfg.get("room") or {}), "point_looks": on}}
-    prov.replies = [json.dumps({"seen": "", "answer": answer, "confidence": 0.9}),
+    prov.replies = [json.dumps({"seen": "", "answer": answer, "confidence": 0.9, "found": found}),
                     json.dumps({"yes": yes, "confidence": 0.9})]
     g = FakeGrounder(boxes, fail)
     q._look_grounder = g if on else None
@@ -53,9 +53,12 @@ def test_a_thing_placed_in_a_zone_gets_a_checked_aim_in_full_frame_px(log, tmp_p
     assert a.evidence[0]["box_px"] == [795, 763, 855, 813]                             # the receipt is boxed
 
 
-@pytest.mark.parametrize("answer", ["I don't see a mug.", "I can't tell from here.", "I see a mug somewhere."])
+@pytest.mark.parametrize("answer", ["I don't see a mug.", "I can't tell from here.", "I see a mug somewhere.",
+                                    # WS8's review: negatives that name a zone (normalize: "isn't" -> "isnt")
+                                    "Your mug isn't on the couch.", "Nothing on the couch looks like a mug.",
+                                    "I can't see it on the couch.", "There's no mug on the couch."])
 def test_no_aim_without_a_placed_answer(log, tmp_path, answer):
-    q, prov, g = look_qa(log, tmp_path, answer=answer)
+    q, prov, g = look_qa(log, tmp_path, answer=answer)      # even if Grok's found said true
     a = q.look_room("where is my mug?", "mug")
     assert a.action is None and g.calls == []
 
@@ -103,3 +106,9 @@ def test_a_thing_resting_above_the_drawn_edge_of_its_zone_still_counts():
     assert on_zone(couch, (1097, 1008))                   # on the seat, above the drawn edge
     assert not on_zone(couch, (850, 1008))                # beside the couch
     assert not on_zone(couch, (1097, 500))                # far above it (the wall)
+
+
+def test_found_false_or_missing_never_aims(log, tmp_path):
+    for found in (False, None):
+        q, _, g = look_qa(log, tmp_path, found=found)
+        assert q.look_room("where is my mug?", "mug").action is None and g.calls == []

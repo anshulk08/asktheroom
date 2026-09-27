@@ -143,13 +143,15 @@ Rules:
 - Don't describe people beyond "someone"; never guess who they are.
 - Never state or imply that medication was taken, swallowed, skipped or missed.
 - confidence: 0 to 1, how sure you are that your answer is right.
+- found: true only if the question asks where a thing is (or whether it is there) and your answer says you see it; false for "I don't see it", "can't tell", or any other question.
 Reply with the JSON object only."""
 
 # seen comes first: listing what is in view before answering stopped "I don't see X" for things in plain
 # view (eval/room_look.py: 4 of 4 visible things found, against 0 of 4 answering directly).
-ROOM_SCHEMA = {
-    "type": "object", "additionalProperties": False, "required": ["seen", "answer", "confidence"],
-    "properties": {"seen": {"type": "string"}, "answer": {"type": "string"}, "confidence": {"type": "number"}},
+ROOM_SCHEMA = {                  # found: the laser may only ever aim on found=true (room.point_looks)
+    "type": "object", "additionalProperties": False, "required": ["seen", "answer", "confidence", "found"],
+    "properties": {"seen": {"type": "string"}, "answer": {"type": "string"}, "confidence": {"type": "number"},
+                   "found": {"type": "boolean"}},
 }
 
 LOOK_SCHEMA = {
@@ -184,7 +186,9 @@ IS_A_SCHEMA = {
 }
 POINT_LOOK_MAX_FRAC = 0.05       # a box over this share of the camera frame is furniture, not the thing
 POINT_LOOK_TIMEOUT_S = 3.0       # Moondream + Grok's check, altogether; past it the spoken answer goes alone
-NOT_SEEN = re.compile(r"\b(?:don'?t|do not|can'?t|cannot|couldn'?t|not)\b.{0,20}\b(?:see|tell|find|sure|seen)\b|\bno\b")
+# Any negation anywhere in the normalized answer (normalize drops apostrophes: "isn't" -> "isnt") means no aim.
+NEGATION = re.compile(r"\b(?:not|no|nothing|none|isnt|arent|wasnt|werent|dont|doesnt|didnt|cant|cannot|couldnt"
+                      r"|never|unable|without|nowhere)\b")
 
 # The second look when the marked frame gave no pick: every marked thing as its own numbered close-up. On
 # the rig (27 Sep 02:56) "where are the batteries?" got no mark among ~14 on the whole table view, then a
@@ -855,7 +859,7 @@ class VisualQA:
         text = _spoken(_unmark(str(d.get("answer") or "")))
         if not text or _conf(d) < self.c.abstain_below:
             return Answer(ABSTAIN)
-        box = self._point_look(f.img, find, text) if find else None
+        box = self._point_look(f.img, find, text, d.get("found")) if find else None
         ans = Answer(text, evidence=self._look_evidence(img, f.wall, box, f.img.shape[1::-1]))
         if box is not None:
             x1, y1, x2, y2 = box
@@ -879,22 +883,22 @@ class VisualQA:
                 return None
         return self._look_grounder
 
-    def _answer_zone(self, text: str) -> Optional[str]:
-        """The zone a positive answer places the thing in ('on the side table'), or None (no zone named, or
-        'I don't see it', 'can't tell')."""
+    def _answer_zone(self, text: str, found) -> Optional[str]:
+        """The zone a positive answer places the thing in ('on the side table'), or None: Grok's found is not
+        true, the answer has any negation ("isn't", "nothing", "can't"), or it names no zone or several."""
         from voice.intents import normalize
         t = normalize(text)
-        if NOT_SEEN.search(t):
+        if found is not True or NEGATION.search(t):
             return None
         zones = self._named_zones(t)
         return zones[0] if len(zones) == 1 else None
 
-    def _point_look(self, img: np.ndarray, find: str, text: str) -> Optional[tuple]:
+    def _point_look(self, img: np.ndarray, find: str, text: str, found=None) -> Optional[tuple]:
         """A full-frame px box to aim at for `find`, which the answer `text` placed in one zone: Moondream's
         /detect on that zone's native close-up, a box inside the zone and at most POINT_LOOK_MAX_FRAC of the
         frame, then Grok's yes on a red-box close-up. None on anything else (the spoken answer stands)."""
         g = self._grounder_for_looks()
-        zone = self._answer_zone(text) if g is not None else None
+        zone = self._answer_zone(text, found) if g is not None else None
         if zone is None:
             return None
         h, w = img.shape[:2]
