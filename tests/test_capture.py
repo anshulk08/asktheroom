@@ -172,3 +172,67 @@ def test_a_test_source_without_a_device_is_never_reopened():
         assert fb.reconnects == 0 and fb.failures > 0
     finally:
         fb.stop()
+
+
+# ----- decode only what the app uses: grab every frame, retrieve (JPEG decode) at most decode_fps -----
+
+class GrabCam(FakeCam):
+    """grab() takes a frame off the camera; retrieve() decodes the last grabbed one (counted)."""
+    def __init__(self, fps=200.0):
+        super().__init__(fps=fps)
+        self.decodes = 0
+
+    def grab(self):
+        time.sleep(self.dt)
+        self.n += 1
+        return True
+
+    def retrieve(self):
+        self.decodes += 1
+        return True, np.full((4, 4, 3), self.n % 256, np.uint8)
+
+    def read(self):                                 # OpenCV's read() is grab() + retrieve()
+        return (self.retrieve() if self.grab() else (False, None))
+
+
+def test_frames_are_grabbed_at_camera_rate_but_decoded_at_most_decode_fps():
+    cam = GrabCam(fps=200)
+    fb = FrameBuffer(cam, decode_fps=20)
+    try:
+        time.sleep(1.0)
+        grabbed, decoded = cam.n, cam.decodes
+    finally:
+        fb.stop()
+    assert grabbed > 100                            # the driver is drained at camera rate
+    assert 12 <= decoded <= 24                      # but only ~20 frames a second are decoded
+    assert fb.latest() is not None
+
+
+def test_the_newest_decoded_frame_is_fresh():
+    cam = GrabCam(fps=200)
+    fb = FrameBuffer(cam, decode_fps=20)
+    try:
+        time.sleep(0.5)
+        f = fb.latest()
+        assert f is not None and time.monotonic() - f.t < 0.1     # at most one decode period old
+        assert (cam.n - int(f.img[0, 0, 0])) % 256 < 12        # decoded from a grab ~one period ago at most
+    finally:
+        fb.stop()
+
+
+def test_without_decode_fps_every_frame_is_decoded_as_before():
+    cam = GrabCam(fps=200)
+    fb = FrameBuffer(cam)
+    try:
+        time.sleep(0.3)
+    finally:
+        fb.stop()
+    assert cam.decodes >= cam.n - 1
+
+
+def test_a_source_without_grab_still_works_with_decode_fps():
+    fb = FrameBuffer(FakeCam(fps=100), decode_fps=10)
+    try:
+        assert wait_for(lambda: fb.latest() is not None)
+    finally:
+        fb.stop()

@@ -66,13 +66,17 @@ class FrameBuffer:
     """
 
     def __init__(self, source: Union[int, str, object] = 0, ring_s: float = 10.0, name: str = "capture",
-                 opener=None, controls=None, reopen_after_s: float = 1.0, retry_s: float = 1.0):
+                 opener=None, controls=None, reopen_after_s: float = 1.0, retry_s: float = 1.0,
+                 decode_fps: Optional[float] = None):
         self._device = source if isinstance(source, (int, str)) else None
         self._opener = opener or open_camera
         if controls is None:
             from core import v4l2ctl as controls
         self._controls = controls
         self.reopen_after_s, self.retry_s = reopen_after_s, retry_s
+        self.decode_period = 1.0 / decode_fps if decode_fps else 0.0
+        self._decoded_t = float("-inf")
+        self.grabbed = 0                         # frames taken off the camera; failures + frames decoded
         self.reconnects = 0
         self.cap = self._opener(source) if self._device is not None else source
         self._snapshot = self._controls.snapshot(self._ctl_path()) if self._device is not None else []
@@ -123,8 +127,11 @@ class FrameBuffer:
     def _run(self) -> None:
         dead_since = None
         while not self._stop.is_set():
-            ok, img = self.cap.read()
+            ok, img = self._next()
             now, wall = time.monotonic(), time.time()
+            if ok and img is None:              # grabbed, not decoded: a frame nobody would use
+                dead_since = None
+                continue
             if not ok or img is None:
                 self.failures += 1
                 if self.failures % 30 == 1:
@@ -144,6 +151,22 @@ class FrameBuffer:
                     self._ring.popleft()
                 self._times.append(now)
                 self._fresh.notify_all()
+
+    def _next(self) -> tuple[bool, Optional[np.ndarray]]:
+        """The next camera frame. With decode_period, every frame is grabbed (the driver never backs up)
+        but only one per period is decoded (retrieve: the MJPEG decode, the costly part at 1440p/1080p);
+        the others come back as (True, None). Sources without grab/retrieve (tests, recordings) read()."""
+        grab = getattr(self.cap, "grab", None)
+        if not self.decode_period or grab is None or not hasattr(self.cap, "retrieve"):
+            return self.cap.read()
+        if not grab():
+            return False, None
+        self.grabbed += 1
+        now = time.monotonic()
+        if now - self._decoded_t < self.decode_period:
+            return True, None
+        self._decoded_t = now
+        return self.cap.retrieve()
 
     def latest(self) -> Optional[Frame]:
         with self._lock:
@@ -263,9 +286,13 @@ def main(argv=None) -> None:
     ap.add_argument("--device", default="0")
     ap.add_argument("--seconds", type=float, default=10.0)
     ap.add_argument("--save", help="write the last frame here")
+    ap.add_argument("--size", default=f"{W}x{H}", help="capture size, e.g. 2560x1440")
+    ap.add_argument("--decode-fps", type=float, help="grab every frame, decode only this many a second")
     a = ap.parse_args(argv)
     dev = int(a.device) if a.device.isdigit() else a.device
-    fb = FrameBuffer(dev)
+    w, h = (int(v) for v in a.size.lower().split("x"))
+    t_cpu = time.process_time()
+    fb = FrameBuffer(dev, opener=lambda src: open_camera(src, w, h), decode_fps=a.decode_fps)
     ages, last_idx, t_end = [], 0, time.monotonic() + a.seconds
     while time.monotonic() < t_end:
         time.sleep(0.013)                        # sample at an unrelated rate
@@ -273,8 +300,10 @@ def main(argv=None) -> None:
         if f is not None and f.idx > 30:         # skip warm-up
             ages.append(time.monotonic() - f.t)
             last_idx = f.idx
-    print(f"fps {fb.fps:.1f}; frames {last_idx}; read failures {fb.failures}; "
-          f"latest() age median {1000 * float(np.median(ages)):.0f} ms, max {1000 * max(ages):.0f} ms")
+    cpu = time.process_time() - t_cpu
+    print(f"fps {fb.fps:.1f} decoded ({fb.grabbed / a.seconds:.1f} grabbed/s); frames {last_idx}; read failures "
+          f"{fb.failures}; latest() age median {1000 * float(np.median(ages)):.0f} ms, max {1000 * max(ages):.0f} ms; "
+          f"CPU {100 * cpu / a.seconds:.0f}% of one core")
     if a.save and fb.latest() is not None:
         cv2.imwrite(a.save, fb.latest().img)
     fb.stop()

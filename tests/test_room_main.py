@@ -177,7 +177,7 @@ def fake_capture(monkeypatch):
 def test_room_memory_off_opens_the_camera_as_always(fake_capture):
     frames, rect = main.open_frames(room_cfg(enabled=False), "/dev/video0")
     assert rect is None and frames is fake_capture["fb"][0]
-    assert frames.source == "/dev/video0" and frames.kw == {}             # FrameBuffer(camera), nothing else
+    assert frames.source == "/dev/video0" and frames.kw == {"decode_fps": 20}   # FrameBuffer(camera) + capture.decode_fps
     assert fake_capture["views"] == []
 
 
@@ -186,7 +186,7 @@ def test_room_memory_on_opens_the_full_frame_behind_the_table_view(fake_capture)
     fb = fake_capture["fb"][0]
     assert rect == RECT and frames is fake_capture["views"][0]
     assert frames.source is fb and frames.rect == RECT and tuple(frames.out_size) == (1280, 720)
-    assert fb.source == 2 and fb.kw["ring_s"] == 0.5
+    assert fb.source == 2 and fb.kw["ring_s"] == 0.5 and fb.kw["decode_fps"] == 20
     assert fb.kw["opener"](2) == "cap" and fake_capture["opened"] == [(2, 1920, 1080)]     # 1080p, not 720p
 
 

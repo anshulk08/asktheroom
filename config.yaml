@@ -578,3 +578,11 @@ unknown_cover:
   settle_s: 0.5               # the covered band unchanged over this long: a cover at rest, not a moving arm
   adopt_s: 1.0                # the band must look the same this long before it is remembered
   wait_max_s: 2.0             # longest wait on an unclear or settling band before the other rules decide
+
+# Camera decoding (core/capture.py). The camera sends 30 frames a second and each MJPEG frame costs a CPU
+# decode (measured on the Jetson: ~23 ms at 1920x1080, ~41 ms at 2560x1440, ~80 ms at 4K). Every frame is
+# still taken off the camera (so none queue up and the newest is always fresh), but only this many a second
+# are decoded: perception runs at main.perception_max_fps (15), so the rest were decoded for nothing.
+# null decodes every frame (the old behaviour).
+capture:
+  decode_fps: 20
