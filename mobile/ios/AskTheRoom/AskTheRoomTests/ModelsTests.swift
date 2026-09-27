@@ -398,4 +398,55 @@ final class ModelsTests: XCTestCase {
         let notAnObject = try XCTUnwrap(Wire.decode(Snapshot.self, from: Data(#"{"e":[],"lay":"soon"}"#.utf8)))
         XCTAssertEqual(notAnObject.lay, RoomLayout())
     }
+
+    /// Room memory (spec 0010/0011): a thing off the table carries its zone and the registry's word.
+    func testZoneAndRegistryDecode() throws {
+        let json = #"{"e":[{"n":"wallet","k":"t","s":"V","z":"couch","rg":"last_seen","rt":1},"#
+            + #"{"n":"keys","k":"t","s":"V","xy":[1,2]},{"n":"mug","k":"t","s":"H","z":"table","rg":"carried","rt":true},"#
+            + #"{"n":"cup","k":"t","s":"V","rg":"teleported","rt":"yes"}]}"#
+        let snap = try XCTUnwrap(Wire.decode(Snapshot.self, from: Data(json.utf8)))
+        let wallet = try XCTUnwrap(snap.entity(named: "wallet"))
+        XCTAssertEqual(wallet.zone, "couch")
+        XCTAssertNil(wallet.drawPoint)
+        XCTAssertEqual(wallet.registry, .lastSeen)
+        XCTAssertTrue(wallet.isTentative)
+        XCTAssertEqual(wallet.presence, .lastSeen, "the registry's word beats the status")
+
+        let keys = try XCTUnwrap(snap.entity(named: "keys"))
+        XCTAssertNil(keys.zone)
+        XCTAssertNil(keys.registry)
+        XCTAssertFalse(keys.isTentative)
+        XCTAssertEqual(keys.presence, .seen)
+
+        let mug = try XCTUnwrap(snap.entity(named: "mug"))
+        XCTAssertNil(mug.zone, "on the table")
+        XCTAssertEqual(mug.registry, .carried)
+        XCTAssertTrue(mug.isTentative, "a bool works too")
+
+        let cup = try XCTUnwrap(snap.entity(named: "cup"), "odd values don't cost the thing")
+        XCTAssertEqual(cup.registry, .unrecognized)
+        XCTAssertFalse(cup.isTentative)
+        XCTAssertEqual(cup.presence, .seen, "an unknown registry word falls back to the status")
+
+        // Round trip, as the saved map does.
+        let again = try JSONDecoder().decode(Snapshot.self, from: JSONEncoder().encode(snap))
+        XCTAssertEqual(again, snap)
+    }
+
+    func testPresenceFromStatus() {
+        func presence(_ s: EntityStatus, _ rg: RegistryState? = nil) -> Entity.Presence {
+            Entity(n: "x", k: .target, s: s, rg: rg).presence
+        }
+        XCTAssertEqual(presence(.visible), .seen)
+        XCTAssertEqual(presence(.inside), .hidden)
+        XCTAssertEqual(presence(.under), .hidden)
+        XCTAssertEqual(presence(.held), .carried)
+        XCTAssertEqual(presence(.lost), .lastSeen)
+        XCTAssertEqual(presence(.gone), .lastSeen)
+        XCTAssertEqual(presence(.visible, .hidden), .hidden)
+        XCTAssertEqual(presence(.visible, .carried), .carried)
+        XCTAssertEqual(presence(.visible, .unknown), .lastSeen)
+        XCTAssertEqual(presence(.lost, .visible), .seen)
+    }
 }
+

@@ -257,14 +257,15 @@ final class RoomStore {
     }
 
     func receive(state: Snapshot) {
+        keepLayout(from: state)
+        let current = withLayout(state)
         // Changes against a saved map happened at unknown times, so they don't go on Recent.
         if let old = snapshot, !isSavedMap {
-            activity.insert(contentsOf: Dashboard.changes(from: old, to: state).reversed(), at: 0)
+            activity.insert(contentsOf: Dashboard.changes(from: old, to: current).reversed(), at: 0)
             if activity.count > Dashboard.activityLimit { activity.removeLast(activity.count - Dashboard.activityLimit) }
         }
-        snapshot = state
+        snapshot = current
         isSavedMap = false
-        keepLayout(from: state)
         saveMap(state)
     }
 
@@ -272,6 +273,15 @@ final class RoomStore {
         guard let lay = state.lay else { return }
         layout = lay
         layoutHash = state.lh
+    }
+
+    /// The state with the kept layout on it when the state names that layout (`lh`), so anything
+    /// holding the snapshot can say "on the couch" from the layout's own words.
+    private func withLayout(_ state: Snapshot) -> Snapshot {
+        guard state.lay == nil, let layout, let lh = state.lh, lh == layoutHash else { return state }
+        var state = state
+        state.lay = layout
+        return state
     }
 
     func receive(linkStats: LinkStats) {

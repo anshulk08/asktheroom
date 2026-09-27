@@ -27,4 +27,49 @@ enum MockData {
         // The literal above is fixed and covered by tests, so this can't fail at runtime.
         Wire.decode(Snapshot.self, from: Data(sampleSnapshotJSON.utf8))!
     }
+
+    /// The real room seen from the couch (the rig turns it to the seat, front = camera right):
+    /// the couch along the near side with you on it, the TV stand (camera left, past the far
+    /// edge) across the far wall, the doorway (far back) on the right wall, and the counter
+    /// (camera far right) in the near right corner. Centimetres, schematic. The table is the
+    /// sample's 90 x 60, and `origin` is its top-left, so a table thing sits at origin + r.
+    static let sampleLayoutJSON = """
+    {"v":1,"size":[320,280],"front":"right",
+     "table":{"rect":[105,100,90,60],"origin":[105,100]},
+     "zones":[
+      {"id":"side_table","say":"the TV stand","rect":[92,8,136,38],"kind":"surface"},
+      {"id":"doorway","say":"the doorway","rect":[276,20,36,104],"kind":"door"},
+      {"id":"counter","say":"the counter","rect":[246,170,66,102],"kind":"surface"},
+      {"id":"couch","say":"the couch","rect":[24,198,206,74],"kind":"seat"}
+     ],
+     "you":[184,254]}
+    """
+
+    static var sampleLayout: RoomLayout {
+        Wire.decode(RoomLayout.self, from: Data(sampleLayoutJSON.utf8))!
+    }
+
+    /// Things around the room rather than on the table, one of each look: seen on the couch,
+    /// carried off from the counter, hidden in the TV stand, and last seen by the door.
+    static let roomEntitiesJSON = """
+    [
+     {"n":"headphones","k":"t","s":"V","z":"couch","c":1.0,"rg":"visible"},
+     {"n":"mug","k":"t","s":"H","z":"counter","c":0.9,"rg":"carried"},
+     {"n":"book","k":"t","s":"U","z":"side_table","c":0.9,"rg":"hidden"},
+     {"n":"umbrella","k":"t","s":"X","z":"doorway","c":0.5,"rg":"last_seen","rt":1}
+    ]
+    """
+
+    static var roomEntities: [Entity] {
+        Wire.decode([Entity].self, from: Data(roomEntitiesJSON.utf8))!
+    }
+
+    /// The sample with the room around it: the layout, its hash and the room's things.
+    static var roomSnapshot: Snapshot {
+        var s = sampleSnapshot
+        s.e += roomEntities
+        s.lay = sampleLayout
+        s.lh = "mock-room"
+        return s
+    }
 }

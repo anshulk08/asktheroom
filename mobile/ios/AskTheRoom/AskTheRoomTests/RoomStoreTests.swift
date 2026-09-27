@@ -267,6 +267,21 @@ final class RoomStoreTests: XCTestCase {
         XCTAssertTrue(store.layoutIsCurrent)
     }
 
+    /// The kept layout rides on the snapshot the state names, so words can use its `say`.
+    func testSnapshotCarriesTheKeptLayout() {
+        store.receive(state: MockData.roomSnapshot)
+        var plain = MockData.roomSnapshot
+        plain.lay = nil
+        store.receive(state: plain)
+        XCTAssertEqual(store.snapshot?.lay, MockData.sampleLayout)
+        XCTAssertEqual(Dashboard.whereabouts(store.snapshot!.entity(named: "headphones")!, in: store.snapshot!),
+                       "On the couch")
+
+        plain.lh = "newer"
+        store.receive(state: plain)
+        XCTAssertNil(store.snapshot?.lay, "not a layout this state names")
+    }
+
     func testLinkStatsArePublished() {
         XCTAssertNil(store.linkStats)
         var stats = LinkStats()

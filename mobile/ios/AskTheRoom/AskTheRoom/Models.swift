@@ -154,6 +154,41 @@ enum Seat {
     }
 }
 
+/// Object permanence (entity `rg`): what the rig's registry believes about a thing it has
+/// seen, whether or not it can see it now. An unknown word reads as `unrecognized`.
+enum RegistryState: String, Codable {
+    case visible, hidden, carried, lastSeen = "last_seen", unknown, unrecognized
+
+    init(from decoder: Decoder) throws {
+        let raw = try? decoder.singleValueContainer().decode(String.self)
+        self = raw.flatMap(RegistryState.init(rawValue:)) ?? .unrecognized
+    }
+}
+
+/// A 0/1 flag on the wire (`rt: 1`). Also takes `true`/`false`, and anything else reads as
+/// false, so an odd value never fails the whole state message.
+struct WireFlag: Codable, Equatable {
+    var isOn: Bool
+
+    init(_ isOn: Bool) { self.isOn = isOn }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.singleValueContainer()
+        if let i = try? c.decode(Int.self) {
+            isOn = i != 0
+        } else if let b = try? c.decode(Bool.self) {
+            isOn = b
+        } else {
+            isOn = false
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        try c.encode(isOn ? 1 : 0)
+    }
+}
+
 /// "Possibly the same as": an unconfirmed link to an older thing, sent as `[name, score]`.
 struct MaybeSame: Codable, Equatable, Hashable {
     var name: String
@@ -194,9 +229,14 @@ struct Entity: Codable, Equatable, Identifiable {
     var gc: Double?
     /// `as` on the wire: "grok" when `a[0]` was set by Grok, not taught by a person.
     var aliasSource: String?
+    /// The room zone it is in when it's off the table (`couch`, `counter`); such a thing has no `xy`/`r`.
+    var z: String?
+    /// The object-permanence registry's state, and whether that's still tentative (`rt: 1`).
+    var rg: RegistryState?
+    var rt: WireFlag?
 
     private enum CodingKeys: String, CodingKey {
-        case n, k, s, p, xy, r, c, edge, a, m, ls, g, gc
+        case n, k, s, p, xy, r, c, edge, a, m, ls, g, gc, z, rg, rt
         case aliasSource = "as"
     }
 
@@ -209,6 +249,31 @@ struct Entity: Codable, Equatable, Identifiable {
     var aliases: [String] { a ?? [] }
     var maybeSameAs: [MaybeSame] { m ?? [] }
     var lastSeen: Date? { ls.map(Date.init(timeIntervalSince1970:)) }
+    /// The room zone it is in, off the table. "table" (or empty) means it's on the table.
+    var zone: String? { z.flatMap { $0.isEmpty || $0 == "table" ? nil : $0 } }
+    var registry: RegistryState? { rg }
+    var isTentative: Bool { rt?.isOn ?? false }
+
+    /// Seen, hidden, carried, or only last seen: the registry's word when there is one, else the status.
+    enum Presence: CaseIterable, Equatable {
+        case seen, hidden, carried, lastSeen
+    }
+
+    var presence: Presence {
+        switch rg {
+        case .visible: return .seen
+        case .hidden: return .hidden
+        case .carried: return .carried
+        case .lastSeen, .unknown: return .lastSeen
+        case .unrecognized, nil: break
+        }
+        switch s {
+        case .visible: return .seen
+        case .inside, .under: return .hidden
+        case .held: return .carried
+        case .gone, .lost, .unrecognized: return .lastSeen
+        }
+    }
 
     /// Where to draw and highlight: the resolved position, else where it was last seen.
     var drawPoint: TablePoint? { r ?? xy }
