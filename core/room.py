@@ -376,6 +376,7 @@ class RoomMemory:
         self._since = 0                        # calls since the last processed zone (the cadence)
         self._next = 0
         self._last_idx = -1                    # frame_idx of the last processed zone (synthetic visits)
+        self._last_full: Optional[np.ndarray] = None   # its whole frame (a reference): synthetic visits' snapshots
         self._prev: dict[str, np.ndarray] = {}  # zone -> grey crop of its previous visit (change evidence)
         self._extra: list[Event] = []          # events of visits decided off the perception thread (_on_named)
         self._extra_lock = threading.Lock()
@@ -468,7 +469,7 @@ class RoomMemory:
         if self._since < max(1, int(every)):
             return out
         self._since = 0
-        self._last_idx = full.idx
+        self._last_idx, self._last_full = full.idx, full.img
         zone = self.zones.zones[names[self._next % len(names)]]
         self._next += 1
         visit = self._visit(zone, full, hints)
@@ -483,7 +484,8 @@ class RoomMemory:
 
     def _on_named(self, track: RoomTrack) -> None:
         """RoomNamer's callback, on its worker thread: Grok named `track`. The World decides it now, with a
-        synthetic visit of its zone holding just this track (the track's last sighting, no crop), instead
+        synthetic visit of its zone holding just this track (the track's last sighting; the zone crop and whole
+        view from the newest processed frame, for its event snapshot and answer evidence), instead
         of on the zone's next visit, which cold could be ~1.7 s away (spec 0010 P0-3). room_update takes the
         world lock; the tracker is only read (a track it dropped meanwhile is not decided: it would never be
         refreshed or missed again). The visit's events come out of the next step(). A failure is logged,
@@ -492,8 +494,15 @@ class RoomMemory:
             zone = self.zones.zones.get(track.zone)
             if zone is None or not track.confirmed or not any(t is track for t in self.tracker.tracks(track.zone)):
                 return
+            img, crop = self._last_full, None
+            if img is not None:                 # the newest processed frame: the arrival's receipt (evidence)
+                h, w = img.shape[:2]
+                bx1, by1, bx2, by2 = zone.bbox()
+                x1, y1, x2, y2 = max(0, bx1), max(0, by1), min(w, bx2), min(h, by2)
+                crop = img[y1:y2, x1:x2].copy() if x2 > x1 and y2 > y1 else None
             visit = ZoneVisit(zone=track.zone, say=zone.say, t=track.last_seen, wall=track.last_wall,
-                              frame_idx=self._last_idx, confirmed=[track], crop=None)
+                              frame_idx=self._last_idx, confirmed=[track], crop=crop)
+            visit.full = img
             events = list(self.world.room_update(visit) or [])
             if events:
                 with self._extra_lock:

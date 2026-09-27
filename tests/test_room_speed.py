@@ -42,7 +42,8 @@ class HintWorld(StubWorld):
         return list(self.hints)
 
     def room_update(self, visit):
-        if self.fail_synthetic and visit.crop is None:
+        if self.fail_synthetic:                              # armed by a test: the next visit (the synthetic one) fails
+            self.fail_synthetic = False
             raise RuntimeError("world broke")
         return super().room_update(visit)
 
@@ -249,8 +250,11 @@ def test_a_landed_name_is_decided_at_once_with_a_one_track_visit():
     assert len(world.visits) == n + 1
     v = world.visits[-1]
     assert isinstance(v, ZoneVisit) and v.confirmed == [th] and v.missed == [] and v.dropped == []
-    assert (v.zone, v.say, v.t, v.wall, v.crop) == ("shelf", "the bookshelf", th.last_seen, th.last_wall, None)
+    assert (v.zone, v.say, v.t, v.wall) == ("shelf", "the bookshelf", th.last_seen, th.last_wall)
     assert v.frame_idx == 2                                  # the last frame the driver processed
+    # its receipt: the zone crop and whole view of that frame (a FOUND with no snapshot had no evidence)
+    x1, y1, x2, y2 = SHELF.bbox()
+    assert v.full is rm._last_full and v.crop.shape[:2] == (y2 - y1, x2 - x1)
     assert rm.tracker.tracks() == [th]                       # the tracker was not touched
 
 
@@ -271,7 +275,8 @@ def test_a_synthetic_visit_needs_the_namer_wired_to_the_driver():
 
 
 def test_on_named_failures_are_logged_never_raised(caplog):
-    rm, namer, th = confirmed_arrival(HintWorld([REMOTE], fail_synthetic=True))
+    rm, namer, th = confirmed_arrival(HintWorld([REMOTE]))
+    rm.world.fail_synthetic = True
     with caplog.at_level(logging.WARNING, logger="core.room"):
         assert namer.step(0.0)
     assert th.guess == REMOTE
