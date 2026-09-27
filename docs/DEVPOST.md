@@ -110,21 +110,23 @@ detector retrained on this view. More than one instance per object name.
 
 ## Privacy
 
-Adapted for the room build from the README's statement, which still describes the overhead table camera
-and needs the same update before submission.
+The same statement as the README's.
 
 Audio stays on the device and is never written to disk, and speech not meant for the rig is dropped
-unlogged. Accepted questions (text) and event snapshots are kept, snapshots and saved frames for 24 hours.
-The camera sees the room from a corner, so frames can show the people in it; frames stay on the rig
-except as follows, and only while online. When a new object is confirmed in a zone or on the table, one
-close-up crop of it is sent to Grok (xAI) to name it, at most 20 a minute and only while a handoff is
-possible; a name you teach always wins. The text of a question the rules can't read, or an open question
-with a compact world state, goes to Grok; a question about what the camera sees sends the current frame
-(and for "earlier" questions up to 6 saved frames). Answer text goes to ElevenLabs for the voice; SMS
-answers go through Twilio. The iPhone app reaches the rig only over Bluetooth and turns dictated questions
-into text on the phone; with "Read answers aloud" on and the Grok or rig voice chosen, the phone sends
-each answer's text to xAI or ElevenLabs with a key kept in the phone's Keychain (the iPhone voice sends
-nothing). Offline, nothing leaves the rig: the table still answers from rules, and room naming waits.
+unlogged; no audio is ever sent anywhere. The camera sits high in a corner of the room, so its frames show
+the room and the people in it. Kept on the rig: accepted questions (text), event snapshots (for events in
+a room zone, the crop of that zone) and saved frames of the table view; those files are deleted once
+older than 24 hours. The whole-room view on the dashboard is live and not stored. When online, and only
+then: when an unnamed object is confirmed in a room zone, one close-up crop of it is sent to Grok (xAI)
+to name it, at most 20 a minute and only while a handoff is possible, and the crop is not kept; a new
+object on the table gets one close-up sent once, and a name you teach always wins. The text of a question
+the rules can't read, or an open question with a compact world state, goes to Grok; a question about what
+the camera sees sends the current table-view frame (and for "earlier" questions up to 6 saved frames).
+Answer text goes to ElevenLabs for the voice; SMS answers go through Twilio. Offline, nothing leaves the
+rig, and room naming waits. The iPhone app reaches the rig only over Bluetooth and turns dictated
+questions into text on the phone; with "Read answers aloud" on and the Grok or rig voice chosen, the phone
+sends each answer's text to xAI or ElevenLabs with a key kept in the phone's Keychain (the iPhone voice
+sends nothing).
 
 ## Built with
 
