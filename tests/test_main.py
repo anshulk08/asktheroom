@@ -495,12 +495,12 @@ def test_reset_clears_the_detectors_proposals_and_crops_on_the_perception_thread
 
 def test_where_answers_hedge_while_perception_is_stale(tmp_path):
     room, _ = make_room(tmp_path)
-    assert not room.ask("where is my wallet?", "dashboard").text.startswith("I can't see")   # no live loop
+    assert not room.ask("where is my wallet?", "dashboard").text.startswith("My camera view")   # no live loop
     room._perceived_t = time.monotonic() - 5                          # the live loop stuck for 5 s
     ans = room.ask("where is my wallet?", "dashboard")
-    assert ans.text.startswith("I can't see the table right now.") and ans.point_at == "wallet"
+    assert ans.text.startswith("My camera view is not updating right now.") and ans.point_at == "wallet"
     room._perceived_t = time.monotonic()
-    assert not room.ask("where is my wallet?", "dashboard").text.startswith("I can't see")
+    assert not room.ask("where is my wallet?", "dashboard").text.startswith("My camera view")
 
 
 def test_the_perception_loop_puts_staleness_on_state(tmp_path):

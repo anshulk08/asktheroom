@@ -567,7 +567,7 @@ unknown_cover:
   wait_max_s: 2.0             # longest wait on an unclear or settling band before the other rules decide
 
 # Perception health (main.py Room). The live loop finishing no step for stale_s (camera or detector stuck):
-# answers about where things are start "I can't see the table right now." and /state has perception.stale.
+# answers about where things are start "My camera view is not updating right now." and /state has perception.stale.
 # voice_recalibrate false: a spoken "recalibrate" is refused (set it so in config.local.yaml for the demo,
 # once the table calibration is frozen: a refit mid-demo moves the frame under the world and the laser).
 perception_guard:

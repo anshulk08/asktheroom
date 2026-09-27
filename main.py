@@ -200,7 +200,7 @@ class Room:
             threading.Thread(target=self._recalibrate_and_tell, args=(source != "sms",), name="recal",
                              daemon=True).start()
         elif (kind == "WHERE" or ans.point_at is not None) and self.perception_stale():
-            ans = Answer("I can't see the table right now. " + ans.text, ans.point_at, ans.action, ans.target_cm)
+            ans = Answer("My camera view is not updating right now. " + ans.text, ans.point_at, ans.action, ans.target_cm)
         return ans
 
     def perception_stale(self) -> bool:
