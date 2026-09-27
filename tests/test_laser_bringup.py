@@ -186,3 +186,18 @@ def test_cmd_check_reports_driver_and_exit_code():
     assert "FAIL not found" in text and "FakeActuator" in text
     assert "fell back" in text or "config says actuator: fake" in text
     assert lb.cmd_check(dict(CFG, actuator="fake"), out=out.append, probe=lambda b, a: (True, "ok")) == 0
+
+
+def test_check_probes_the_turret_serial_port_not_i2c():
+    from scripts.laser_bringup import cmd_check, serial_probe
+    out, i2c = [], []
+    cfg = {"actuator": "turret", "turret": {"port": "/dev/ttyACM9"}}
+    rc = cmd_check(dict(cfg, actuator="fake"), out=out.append, probe=lambda b, a: i2c.append(1) or (True, "i2c"),
+                   sprobe=lambda p: (False, p))
+    assert i2c == [1] and rc == 0
+    out.clear()
+    rc = cmd_check(cfg, out=out.append, probe=lambda b, a: (True, "i2c"), sprobe=lambda p: (False, f"no {p}"))
+    assert rc == 1 and out[0] == "FAIL no /dev/ttyACM9"
+    assert serial_probe("/dev/x", exists=lambda p: False)[0] is False
+    assert serial_probe("/dev/x", exists=lambda p: True, access=lambda p, m: False)[0] is False
+    assert serial_probe("/dev/x", exists=lambda p: True, access=lambda p, m: True)[0] is True

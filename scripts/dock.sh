@@ -12,7 +12,8 @@ IMAGE="${ASKROOM_IMAGE:-askroom:latest}"   # docker/Dockerfile: the Ultralytics 
                                            # ASKROOM_IMAGE=askroom:demo to try a new build, latest to roll back
 devs=()
 # gpiochip: Blinka's board module (adafruit_servokit) imports Jetson.GPIO, which reads the GPIO chips.
-for d in /dev/video* /dev/i2c-7 /dev/gpiochip* /dev/snd /dev/input; do [ -e "$d" ] && devs+=(--device "$d"); done
+# ttyACM: the laser turret's Arduino Uno (actuator: turret); the app runs as root in the container, so no dialout.
+for d in /dev/video* /dev/i2c-7 /dev/gpiochip* /dev/snd /dev/input /dev/ttyACM*; do [ -e "$d" ] && devs+=(--device "$d"); done
 tty=(); [ -t 0 ] && tty=(-it)
 envf=(); [ -f .env ] && envf=(--env-file .env)   # API keys (e.g. XAI_API_KEY); .env is gitignored
 # Cameras: --device only passes the /dev/video* nodes that exist now, so a Brio replugged (or re-enumerated)

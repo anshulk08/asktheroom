@@ -1,4 +1,4 @@
-"""Pan-tilt laser head bring-up (PCA9685 via act/actuator.py): I2C check, servo range sweep, keypress jog.
+"""Pan-tilt laser head bring-up (act/actuator.py: the stepper turret or a PCA9685): port check, range sweep, jog.
 
     scripts/dock.sh python3 scripts/laser_bringup.py check
     scripts/dock.sh python3 scripts/laser_bringup.py range                  # pan, then tilt, over servo_limits
@@ -6,8 +6,10 @@
     scripts/dock.sh python3 scripts/laser_bringup.py jog                    # find the limits, laser off
     scripts/dock.sh python3 scripts/laser_bringup.py jog --laser --eye-safe-confirmed --max-on-s 4
 
-No camera. Uses actuator: / servo_limits / *_channel from config.yaml + config.local.yaml, so set
-actuator: pca9685 there first. The laser is off at start and on every exit; it can only be lit with
+No camera. Uses actuator: / servo_limits / turret: / *_channel from config.yaml + config.local.yaml, so set
+actuator: turret (the stepper head: Arduino Uno on /dev/ttyACM0, firmware/README.md) or pca9685 there first.
+Turret: opening the port resets the Uno and wherever the mount points becomes 0,0, so line it up first; only
+one process can hold the port, so the app must not be running with actuator: turret. The laser is off at start and on every exit; it can only be lit with
 --laser AND --eye-safe-confirmed (the module is Class 2, < 1 mW), and each on period is cut at --max-on-s.
 The live app may share the board: opening it re-inits the PCA9685, so its servos go limp until it moves again.
 """
@@ -70,9 +72,21 @@ def i2c_probe(bus: int = 7, addr: int = 0x40, exists: Callable[[str], bool] = os
     return False, f"0x{addr:02x} not seen on {dev} (i2cdetect rc {r.returncode}): check wiring and power"
 
 
-def cmd_check(cfg: dict, out=print, probe=i2c_probe) -> int:
-    addr = int(cfg.get("pca9685_address", 0x40))
-    found, msg = probe(7, addr)
+def serial_probe(port: str, exists: Callable[[str], bool] = os.path.exists,
+                 access: Callable[[str, int], bool] = os.access) -> tuple[bool, str]:
+    """(found, message) for the turret's serial port, without opening it (opening resets the Uno)."""
+    if not exists(port):
+        return False, f"{port} missing: plug the Uno into the Jetson (USB), and pass it into the container (scripts/dock.sh)"
+    if not access(port, os.R_OK | os.W_OK):
+        return False, f"{port} exists but isn't readable/writable here: run in the container (root) or join dialout"
+    return True, f"{port} present and accessible"
+
+
+def cmd_check(cfg: dict, out=print, probe=i2c_probe, sprobe=serial_probe) -> int:
+    if str(cfg.get("actuator", "fake")).lower() == "turret":
+        found, msg = sprobe(str((cfg.get("turret") or {}).get("port", "/dev/ttyACM0")))
+    else:
+        found, msg = probe(7, int(cfg.get("pca9685_address", 0x40)))
     out(("OK   " if found else "FAIL ") + msg)
     act, why = make_actuator_or_fake(cfg)
     try:
@@ -81,7 +95,7 @@ def cmd_check(cfg: dict, out=print, probe=i2c_probe) -> int:
         if why:
             out(f"fell back to FakeActuator: {why}")
         elif str(cfg.get("actuator", "fake")).lower() == "fake":
-            out("config says actuator: fake, so nothing moves: set actuator: pca9685 in config.local.yaml")
+            out("config says actuator: fake, so nothing moves: set actuator: turret (or pca9685) in config.local.yaml")
         out(f"channels pan {cfg.get('pan_channel', 0)} tilt {cfg.get('tilt_channel', 1)} laser "
             f"{cfg.get('laser_channel', 15)}; limits {act.limits()}")
     finally:
