@@ -169,7 +169,7 @@ table:
 servo_limits:
   pan: [600, 2400]
   tilt: [600, 2400]
-actuator: fake               # pca9685 | serial | bus | fake
+actuator: fake               # pca9685 | serial | turret | bus | fake
 pan_channel: 0
 tilt_channel: 1
 pca9685_address: 0x40
@@ -697,3 +697,24 @@ laser_room:
   person_margin_px: 60
   people_wait_s: 1.0
   max_on_s: 4.0
+
+# Stepper turret (actuator: turret; act/actuator.py TurretActuator, act/turret.py, firmware/turret).
+# An Arduino Uno drives two MKS SERVO42D closed-loop steppers; wiring and driver menu settings are in
+# firmware/README.md. The rest of act/ thinks in servo pulses, so the turret takes servo-equivalent
+# pulses: pulse = center_us + degrees * us_per_deg. With 10 us/deg the servo-tuned values keep their
+# scale (laser_anti_backlash_us 25 = 2.5 deg, room.deadband_us 8 = 0.8 deg), and servo_limits
+# [1050, 1950] means +/-45 deg. Keep servo_limits inside the firmware's own limits (pan +/-170,
+# tilt -45..90 deg) and, for act.calibrate, covering just the table.
+# Opening the port resets the Uno: wherever the mount points then is 0,0 (center_us), so line it up
+# first; close() parks it back at 0,0. On the rig set the port in config.local.yaml
+# (Jetson: /dev/ttyACM0, the user needs the dialout group).
+turret:
+  port: /dev/ttyACM0
+  baud: 115200
+  center_us: 1500
+  us_per_deg: 10
+  move_timeout_s: 10          # one move must report DONE within this
+  laser_offset_m: [0, 0, 0]   # laser vs. where the axes cross, in the head's x right / y up / z forward
+  park_on_close: true
+  max_speed_deg_s: null       # null = the firmware default (120 deg/s at the axis)
+  accel_deg_s2: null          # null = the firmware default (600 deg/s^2)
