@@ -115,11 +115,17 @@ class AudioOut:
             self.stream.close()
 
     def abort(self) -> None:
-        """Drop queued audio and close now."""
+        """Drop queued audio and close now. Only on the thread that writes: PortAudio doesn't allow
+        closing a stream another thread is blocked writing to (ALSA may crash)."""
         try:
             self.stream.abort()
         finally:
             self.stream.close()
+
+    def interrupt(self) -> None:
+        """Drop queued audio and stop now, from any thread; a write blocked on the stream returns (or
+        raises) and the writing thread closes it (abort())."""
+        self.stream.abort()
 
 
 def open_output(rate: int, device: Optional[int] = None) -> AudioOut:
@@ -233,12 +239,14 @@ def playback_budget_s(text: str) -> float:
     return len(text) * PLAY_S_PER_CHAR + PLAY_SLACK_S
 
 
-def _abort_quietly(out) -> None:
-    """out.abort(), given ABORT_S at most (on its own thread) and never raising."""
+def _abort_quietly(out, close: bool = True) -> None:
+    """out.abort() (close=True: on the writing thread) or out.interrupt() (close=False: from another
+    thread, which must not close a stream being written to), given ABORT_S at most and never raising."""
     if out is None:
         return
+    fn = out.abort if close else getattr(out, "interrupt", out.abort)
     try:
-        call_with_deadline(out.abort, ABORT_S, name="tts-abort")
+        call_with_deadline(fn, ABORT_S, name="tts-abort")
     except TimeoutError:
         log.warning("speaker abort hung for %.1f s; leaving it", ABORT_S)
     except Exception:
@@ -376,7 +384,7 @@ class TTS:
                 resp.close()
             except Exception:
                 pass
-        _abort_quietly(out)
+        _abort_quietly(out, close=False)      # the worker closes it (_finish), unless it is stuck for good
 
     # -- engines
 

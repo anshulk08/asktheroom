@@ -325,3 +325,78 @@ def test_no_voice_at_all_logs_clearly(monkeypatch, audio, caplog):
     t.speak("nobody hears this")
     assert t.last_engine is None and audio.opened == [] and not t.speaking
     assert "was not said" in caplog.text
+
+
+class WedgedOut:
+    """Like PortAudio: interrupt() (stream.abort) makes a blocked write return. Records, per call,
+    whether a write was still in progress."""
+
+    def __init__(self):
+        self.unblock, self.calls, self.writing = threading.Event(), [], False
+
+    def write(self, b):
+        self.writing = True
+        self.unblock.wait()
+        time.sleep(0.02)                       # the write takes a moment to unwind
+        self.writing = False
+
+    def interrupt(self):
+        self.calls.append(("interrupt", self.writing))
+        self.unblock.set()
+
+    def abort(self):
+        self.calls.append(("abort", self.writing))
+        self.unblock.set()
+
+    def close(self):
+        self.calls.append(("close", self.writing))
+
+
+@pytest.mark.parametrize("how", ["deadline", "stop"])
+def test_the_stream_is_never_closed_mid_write(monkeypatch, piper, how):
+    """Closing a PortAudio stream another thread is blocked writing to is not allowed (ALSA may crash):
+    the deadline and stop() only interrupt it; the worker, once its write returns, closes it."""
+    monkeypatch.setattr(tts, "PLAY_S_PER_CHAR", 0.0)
+    monkeypatch.setattr(tts, "PLAY_SLACK_S", 0.15)
+    out = WedgedOut()
+    monkeypatch.setattr(tts, "open_output", lambda rate, device=None: out)
+    t = TTS(CFG, online(False))
+    if how == "deadline":
+        t.speak("wedged")
+    else:
+        th = threading.Thread(target=t.speak, args=("a long answer " * 20,), daemon=True)
+        th.start()
+        time.sleep(0.05)
+        t.stop()
+        th.join(1)
+    assert wait_until(lambda: any(c == "abort" or c == "close" for c, _ in out.calls))
+    assert out.calls[0] == ("interrupt", True)                  # from outside, mid-write: interrupt only
+    assert all(not writing for c, writing in out.calls if c in ("abort", "close"))
+    assert not t.speaking
+
+
+def wait_until(cond, timeout=2.0):
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if cond():
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def test_audio_out_interrupt_does_not_close(monkeypatch):
+    calls = []
+
+    class Stream:
+        def abort(self):
+            calls.append("abort")
+
+        def close(self):
+            calls.append("close")
+
+    out = tts.AudioOut.__new__(tts.AudioOut)
+    out.stream = Stream()
+    out.interrupt()
+    assert calls == ["abort"]
+    out.abort()
+    assert calls == ["abort", "abort", "close"]
