@@ -1,8 +1,8 @@
 # Recording the room-demo identity clips (spec 0010)
 
 Tonight's failure: one real object on the coffee table became dozens of `thing:N` identities (feet at the
-table edge, clutter, people on the couch). These eight guided clips record it once, on the rig, so it can
-be replayed and scored on the Mac as often as needed (`eval/scorecard.py`). Total camera time: about 20
+table edge, clutter, people on the couch). These ten guided clips record it once, on the rig, so it can
+be replayed and scored on the Mac as often as needed (`eval/scorecard.py`). Total camera time: about 25
 minutes, including stopping and restarting the app.
 
 **Who does what.** The rig owner (WS7) stops and restarts the live app; nobody else touches it. One person
@@ -19,7 +19,9 @@ at the Mac runs the commands (the Mac speaks every cue). One or two people act i
 | `room_move` | 96 s | wallet, phone, notebook put down; phone and wallet picked up and put down elsewhere; notebook slid | one entity per object after moves |
 | `room_remove` | 123 s | the six props put down, then taken away one by one, then nobody near | removed props not ghosted, no phantom births |
 | `room_straight` | 81 s | wallet and notebook put down; then the phone put straight onto the couch and the keys onto the floor, never on the table | room placement seen, no false handoff of a table prop, no table phantom |
-| `room_block` | 73 s | wallet, phone, pill bottle put down; someone sits or crouches in front of the pill bottle ~10 s, then moves away | the pill bottle keeps its identity through the occlusion |
+| `room_block` | 77 s | wallet, phone, pill bottle put down; someone sits or crouches in front of the pill bottle ~15 s, then moves away | hidden, not gone, and the same identity after |
+| `room_keys_off` | 97 s | keys put down, carried straight to the couch (no other zone on the way), back; then to the floor by the doorway (no drawn zone), back | handoff to the couch; no zone at all for the floor; same identity back on the table |
+| `room_return` | 81 s | wallet, phone, notebook put down; the wallet carried out of the room, then brought back to a different spot | found again with the same identity |
 
 Every clip starts by putting each prop down on a spoken cue: that tells the scorer which identity is which
 prop, with no annotation afterwards.
@@ -53,6 +55,8 @@ python -m eval.guided room_move    --id room_move_1
 python -m eval.guided room_remove  --id room_remove_1
 python -m eval.guided room_straight --id room_straight_1
 python -m eval.guided room_block   --id room_block_1
+python -m eval.guided room_keys_off --id room_keys_off_1
+python -m eval.guided room_return  --id room_return_1
 ```
 
 Each run prints the setup and waits for Enter, says "Get ready", then speaks each cue. Each clip lands in
@@ -83,7 +87,14 @@ real times), hundreds means the Jetson could not encode 1440p fast enough; say s
   table. Neither ever touches the table. Then everyone steps away.
 - **room_block.** Put the pill bottle near the table edge by the couch, then the others, on the cues. On the
   block cue sit or crouch in front of the pill bottle so the camera can't see it, keep still without
-  touching it; on the next cue move away.
+  touching it (about 15 s); on the next cue move away.
+- **room_keys_off.** Phone and notebook on the table beforehand; hold the keys. Put them down on the cue.
+  On the couch cue carry them straight to the couch, the shortest way, not past the side table or counter;
+  on the next cue bring them back. On the floor cue put them on the floor by the doorway, away from every
+  drawn zone; bring them back when told.
+- **room_return.** Put the wallet, phone and notebook down on the cues. On the cue carry the wallet right out
+  of the room (round a corner, behind a door); on the next cue bring it back and put it on a different spot
+  of the table.
 
 ## After (rig owner, WS7)
 
@@ -94,26 +105,33 @@ scripts/room_app.sh status
 
 ## Scoring (Mac, any time, no rig)
 
+What a clip holds: `video.mp4` is the **full-resolution camera frame** as captured (2560x1440 with room
+memory on), not the table view; the table-view cut (`table_view_rect`, resized to 1280x720) is made at
+replay by the app's own `TableView`, and room memory gets the full frame. Every score goes through the
+tracker output contract (`docs/track-format.md`), for our replay and for any other tracker alike.
+
 ```bash
 # the Mac has no TensorRT: hands off (no fixed-class detector) and the YOLOE .pt the rig's engine was made from
 python -m eval.scorecard data/clips/room_*_1 --hands-off --yoloe-model models/yoloe-26s-seg-pf.pt \
-    --save-trace --json card.json
-python -m eval.scorecard data/clips/room_*_1 --from-trace          # rescore without replaying
-python -m eval.scorecard data/clips/room_carry_1 --hands-off --yoloe-model models/yoloe-26s-seg-pf.pt --grok
-                                                                  # names (body parts, handoffs) need Grok
-python -m eval.score_clip data/clips/room_move_1 --hands-off --yoloe-model models/yoloe-26s-seg-pf.pt
-                                                                  # the older PASS/FAIL report
-# another tracker on the same clips, same code path: any config key (dotted, YAML value), repeatable
+    --save-track --json card.json                     # writes data/clips/<id>/track-askroom.jsonl
+python -m eval.scorecard data/clips/room_*_1 --track track-askroom.jsonl     # rescore without replaying
+python -m eval.scorecard data/clips/room_*_1 --track track-registry.jsonl    # another tracker's output
+# names (body parts, room handoffs of things, the naming block) need a naming provider
+python -m eval.scorecard data/clips/room_carry_1 --hands-off --yoloe-model models/yoloe-26s-seg-pf.pt \
+    --names grok                                      # live Grok (XAI_API_KEY)
+python -m eval.scorecard data/clips/room_carry_1 --hands-off --yoloe-model models/yoloe-26s-seg-pf.pt \
+    --names eval.naming:CachedProvider                # an injected provider (WS3), called with cfg=, clip_dir=
+# our tracker in another mode, same clips, same code: any config key (dotted, YAML value), repeatable
 python -m eval.scorecard data/clips/room_*_1 --hands-off --yoloe-model models/yoloe-26s-seg-pf.pt \
-    --mode registry --json card-registry.json        # --mode M is --set permanence.mode=M
+    --mode registry --save-track track-registry.jsonl --tracker registry --json card-registry.json
 python -m eval.scorecard data/clips/room_*_1 --set permanence.mode=registry --set proposals.yoloe.conf=0.25
+python -m eval.score_clip data/clips/room_move_1 --hands-off --yoloe-model models/yoloe-26s-seg-pf.pt
+                                                      # the older PASS/FAIL report
 ```
 
-Name the traces per tracker when saving them (`--save-trace --trace-name trace-registry.json`), since
-`--from-trace` rescores whatever trace it finds. The card header lists the overrides it replayed with.
-
-Replay cuts each 1440p frame to the table view exactly as the app does (`TableView`, the recorded
-`table_view_rect`) and runs room memory on the full frame with the recorded zones. Offline, nothing is
-named: body-part things and the naming hook read n/a, and thing handoffs (which need a Grok name) only
-happen with `--grok` (live calls, so two replays can differ). On the Jetson (stop the app first),
-`scripts/dock.sh python3 -m eval.scorecard data/clips/<id>` replays with the recorded engines and hands.
+The card header lists the overrides and the naming provider it replayed with. With a provider, names are
+asked on clip time right after each perception step, so they land at once (live they take ~1-3 s). On the
+Jetson (stop the app first), `scripts/dock.sh python3 -m eval.scorecard data/clips/<id>` replays with the
+recorded engines and hands. A 60-frame 1440p smoke clip replayed hands-off with the YOLOE .pt at about 8
+frames/s on the Mac (CPU; laptop number), so a 2-minute clip at the 15 fps cap takes a few minutes: save
+the track once and rescore with `--track`.
