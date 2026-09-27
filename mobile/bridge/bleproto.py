@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import zlib
 from typing import Any, Callable, Optional
 
@@ -470,6 +471,60 @@ def compact_state(state: Optional[dict], table_cm: tuple, now: float, view: Opti
     return out
 
 
+SIGHTING_TTL_S = 1800.0
+SIGHTING_MAX = 8
+SIGHTING_KINDS = ("look", "recall")       # answer evidence kinds (core/evidence.py) that come from Grok seeing
+_NEGATIVE = re.compile(r"\b(don't|do not|can't|cannot|couldn't|could not|no longer|not|isn't|aren't|nowhere|"
+                       r"no sign|haven't|didn't)\b", re.I)
+
+
+def zone_phrases(zones) -> list:
+    """[(zone id, [phrases])] from room layout zones ({"id", "say"}) or room_zones.json-style {id: {"say"}}:
+    the say without a leading "the" ("floor by the doorway") and the id in words ("doorway")."""
+    items = zones.items() if isinstance(zones, dict) else ((z.get("id"), z) for z in zones or [] if isinstance(z, dict))
+    out = []
+    for zid, z in items:
+        if not zid:
+            continue
+        say = str((z or {}).get("say") or "").strip().lower()
+        say = say[4:] if say.startswith("the ") else say
+        words = {p for p in (say, str(zid).replace("_", " ").lower()) if p}
+        out.append((str(zid), sorted(words, key=len, reverse=True)))
+    return out
+
+
+def sighting_of(row: dict, phrases: list) -> Optional[tuple]:
+    """(name, zone id, t, source) when an answer says Grok saw an object in a room zone ("I see glasses on the
+    couch": evidence kind look or recall, the answer's obj, a zone named in its text), else None. A negative
+    answer ("I don't see your glasses") is never a sighting."""
+    if not isinstance(row, dict) or not row.get("obj") or not isinstance(row.get("text"), str):
+        return None
+    kinds = [e.get("kind") for e in row.get("evidence") or [] if isinstance(e, dict)]
+    src = next((k for k in kinds if k in SIGHTING_KINDS), None)
+    text = row["text"].lower()
+    if src is None or _NEGATIVE.search(text):
+        return None
+    name = str(row["obj"])
+    at = text.find(name.replace("_", " ").lower())
+    best = None
+    for zid, words in phrases:
+        for w in words:
+            for m in re.finditer(rf"\b{re.escape(w)}\b", text):
+                key = (m.start() < at, m.start())          # after the object's name first, then earliest
+                if best is None or key < best[0]:
+                    best = (key, zid)
+    if best is None:
+        return None
+    t = row.get("t")
+    return name, best[1], float(t) if isinstance(t, (int, float)) and not isinstance(t, bool) else None, src
+
+
+def sightings_msg(sightings: dict, now: float, ttl: float = SIGHTING_TTL_S, cap: int = SIGHTING_MAX) -> list:
+    """{name: (zone, t, src)} -> the state's "sg": [[name, zone, t, src], ...] newest first, fresh ones only."""
+    rows = [[n, z, round(t, 1), src] for n, (z, t, src) in sightings.items() if now - t <= ttl]
+    return sorted(rows, key=lambda r: -r[2])[:cap]
+
+
 STATE_MAX_BYTES = 12_000
 
 
@@ -523,7 +578,7 @@ def state_changed(prev: Optional[dict], cur: dict) -> bool:
     0.05)."""
     if prev is None:
         return True
-    for k in ("table", "online", "laser", "view", "lh"):
+    for k in ("table", "online", "laser", "view", "lh", "sg"):
         if prev.get(k) != cur.get(k):
             return True
     pe = {e["n"]: e for e in prev.get("e", [])}

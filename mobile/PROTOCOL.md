@@ -285,6 +285,7 @@ is kept). Named things and the configured objects are always sent. When a stale 
 | `e[].rt` | 1 | the registry found it by a re-find (Grok), not by appearance alone: tentative. Optional |
 | `tx` | int | state chunks the bridge sent before this message. Between two states, `tx` grows by the chunks sent; the phone compares that with the chunks it received for its "lost" count |
 | `more` | int | entities left out to keep the message under the bridge's cap (`--state-max`, 12 KB of JSON): unnamed things first (those with only a guess next), lost or gone before hidden before visible, oldest first; named, configured and registry objects last. Optional |
+| `sg` | [[name, zone, t, src]] | live sightings: an object Grok saw in a room zone ("I see glasses on the couch": an answer with evidence `look` or `recall`, its `obj`, and a zone from the room layout or `room_zones.json` named in its text; never a negative answer). Newest first, at most 8, each for 30 min; sent in the state right after the answer. Draw it as a hollow "seen" pin in that zone ("glasses · seen 4:37") until a tracked thing with that name is placed. Optional |
 | `lh` | str | the room layout's hash (`GET /room_layout`, the room map from the user's seat). Absent: no room map |
 | `lay` | object | the room layout itself, `{"v", "size": [W, H], "front", "table": {"rect", "origin"}, "zones": [{"id", "say", "rect", "kind"}], "you": [x, y]}` in the user's frame. Sent on subscribe and when `lh` changes; keep the last one |
 

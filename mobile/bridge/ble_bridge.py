@@ -219,6 +219,8 @@ class BridgeCore:
         self.layout_hash: Optional[str] = None
         self.layout_every_s, self.layout_at = float(layout_every_s), float("-inf")
         self.last_sent_lh: Optional[str] = None
+        self.sightings: dict[str, tuple] = {}          # name -> (zone id, wall t, source): Grok saw it there
+        self.zones_file: Optional[str] = None          # room_zones.json, for zone names without a room layout
 
     # -- link facts from the BLE layer
 
@@ -355,6 +357,8 @@ class BridgeCore:
             for r in rs:
                 if r[idk] <= last or not r.get("text"):
                     continue
+                if key == "answers":
+                    self.note_sighting(r)
                 target = P.target_of(self.latest_state, r.get("point_at"), self.latest_view)
                 action = P.view_action(r.get("action"), self.latest_view)
                 if key == "answers" and r.get("src") != self.source:
@@ -368,6 +372,27 @@ class BridgeCore:
         for m in out if live else []:
             self._send("answer", m)
             self.stats["room_msgs"] = self.stats.get("room_msgs", 0) + 1
+
+    def zone_phrases(self) -> list:
+        zones = (self.layout or {}).get("zones")
+        if not zones and self.zones_file:
+            try:
+                with open(self.zones_file) as f:
+                    zones = json.load(f).get("zones")
+            except (OSError, ValueError, AttributeError):
+                zones = None
+        return P.zone_phrases(zones or [])
+
+    def note_sighting(self, row: dict) -> None:
+        """A room answer that saw an object in a zone: kept SIGHTING_TTL_S and sent in the state at once."""
+        s = P.sighting_of(row, self.zone_phrases())
+        if s is None:
+            return
+        name, zone, t, src = s
+        with self.lock:
+            self.sightings[name] = (zone, t if t is not None else self.clock(), src)
+            self.force_state = True
+        log.info("sighting: %s in %s (%s)", name, zone, src)
 
     def compact_now(self) -> dict:
         with self.lock:
@@ -406,6 +431,9 @@ class BridgeCore:
             if not self.notifying["state"]:
                 return
             cur = P.cap_state(self.compact_now(), self.state_max_bytes)
+            sg = P.sightings_msg(self.sightings, self.clock())
+            if sg:
+                cur["sg"] = sg
             if self.layout_hash:
                 cur["lh"] = self.layout_hash
             due = self.force_state or now - self.state_sent_at >= self.heartbeat_s or (
@@ -927,6 +955,7 @@ def main(argv=None) -> int:
     log.info("bridge starting: api %s, table %gx%g cm, source %r", args.url, *table_cm, args.source)
     core = BridgeCore(RoomHTTP(args.url), emit=lambda c, ch: None, table_cm=table_cm, table_cal=tcal,
                       laser_cal=lcal, source=args.source, default_mtu=args.mtu, state_max_bytes=args.state_max)
+    core.zones_file = os.path.join(args.repo, "room_zones.json")
     interval = tuple(int(x) for x in args.adv_interval.split(",")) if args.adv_interval else None
     mask = None if str(args.le_event_mask).lower() in ("", "none", "off") else args.le_event_mask
     return run_ble(core, args.adapter, adv_interval_ms=interval, event_mask=mask, rate_bps=args.rate)
