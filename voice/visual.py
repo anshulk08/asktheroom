@@ -768,6 +768,16 @@ class VisualQA:
         t = _without_wake_word(t, self.cfg)
         return bool(ROOM_Q.search(t) or self._named_zones(t))
 
+    def _where_anything(self, t: str) -> bool:
+        """'Where's the TV?' (t normalized) with room memory on: a where-question for a thing the parser named
+        no object for. Rig 27 Sep 06:51 answered it from the tracker's table state ("I don't see a TV on the
+        table.") with the TV in plain view on the side table; the room look answers it now."""
+        if not self._room_on():
+            return False
+        from voice.intents import _without_wake_word
+        return bool(re.match(r"^(?:where(?:s| s| is| are| did| do)?|can you (?:find|point to|show me)|point to|show me)\b\s*\S",
+                             _without_wake_word(t, self.cfg)))
+
     def _room_default(self, t: str) -> bool:
         """With room memory on, a question the camera answers looks at the whole room unless it says
         "table" (and names no zone: "the side table" is the room). t normalized."""
@@ -1281,7 +1291,7 @@ class VisualQA:
         past = bool(PAST.search(t))
         target = None
         if k == "OTHER":
-            about_room = self._about_room(t)
+            about_room = self._about_room(t) or self._where_anything(t)
             if not about_room and not self._about_table(intent, t):
                 return None
             if past:
@@ -1314,6 +1324,8 @@ class VisualQA:
                 how = "recall"
             else:
                 return None
+        elif k == "WHERE" and self._where_anything(t):
+            how, said = "room", []      # "where's the TV?": a name the parser has no object for; the room look finds it
         else:
             return None
         online = self.online() if online is None else online

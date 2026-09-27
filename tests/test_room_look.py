@@ -533,3 +533,33 @@ def test_no_second_look_when_found_or_not_a_where(log, tmp_path):
     q, prov = zoned_qa(log, tmp_path, reply=room_reply("There is nothing on the couch."))
     q.look_room("what's on the couch?")
     assert len(prov.calls) == 1
+
+
+# -- "where's the TV?": no object the parser knows (rig 27 Sep 06:51: answered from the tracker's table state,
+# "I don't see a TV on the table.", with the TV on the side table)
+
+@pytest.mark.parametrize("text", ["where's the TV?", "room, where is the TV?", "can you point to the TV?"])
+def test_a_where_for_a_thing_the_parser_has_no_object_for_is_a_room_look(log, text):
+    from core.types import Intent
+    q, prov = room_qa(log, reply=room_reply("The TV is on the side table."))
+    for intent in (Intent("OTHER", None, text), Intent("WHERE", None, text)):
+        prov.calls.clear()
+        a = q.route(intent, text, online=True)
+        assert a is not None and a.text == "The TV is on the side table.", (intent.kind, text)
+        assert "room" in prov.calls[0].system.lower()
+
+
+def test_without_room_memory_such_a_where_is_left_to_the_other_answerer(log):
+    from core.types import Intent
+    from tests.test_visual import qa
+    q, prov = qa(log, room_reply("x"))
+    assert q.route(Intent("OTHER", None, "where's the TV?"), "where's the TV?", online=True) is None
+    assert q.route(Intent("WHERE", None, "where's the TV?"), "where's the TV?", online=True) is None
+
+
+def test_offline_such_a_where_says_it_needs_the_connection_or_passes(log):
+    from core.types import Intent
+    q, prov = room_qa(log)
+    assert "offline" in q.route(Intent("OTHER", None, "where's the TV?"), "where's the TV?", online=False).text.lower()
+    assert q.route(Intent("WHERE", None, "where's the TV?"), "where's the TV?", online=False) is None
+    assert prov.calls == []
