@@ -25,6 +25,7 @@ from core.types import Frame, Point
 log = logging.getLogger(__name__)
 
 DEFAULT_LATENCY_S = 0.15       # safe until act.calibrate --rig measures camera_latency_s (too short: stale frames)
+BIAS_MAX_PX = 250.0            # the learned first-guess offset (Laser.px_bias) never exceeds this
 FIRST_DOT_CM = 15.0            # a dot further than this from the target is something else (sleeve, reflection)
 MAX_MISSES = 3                 # aim() gives up after this many looks in a row without the dot
 
@@ -315,6 +316,10 @@ class Laser:
         room = cfg.get("room") or {}
         self.room_map = None            # act.room_map.RoomMap, set by the caller (main.py) when enabled
         self.px_frames: Optional[FrameSource] = None   # room pointing's frames (FullFrames); None: self.frames
+        # Where the first dot lands relative to where the map was asked to aim, averaged over recent aims: a
+        # small consistent offset (a hand re-home vs the sweep's zero; 52-60 px on the rig) is taken out of the
+        # next first guess. Reset by a re-home zero or a restart; at most BIAS_MAX_PX.
+        self.px_bias = np.zeros(2)
         self.room_n_pairs = int(room.get("n_pairs", 3))
         self.tol_px = float(room.get("tol_px", 12))
         self.deadband_us = float(room.get("deadband_us", 8))
@@ -611,9 +616,15 @@ class Laser:
         # a target between the sweep's dots is fine: the closed loop finishes (at the rig's 12x9 sweep the
         # dots were 111 px apart and a 60 px gap refused every aim as 'unmapped')
         sp = rm.spacing_px if math.isfinite(getattr(rm, "spacing_px", math.nan)) else 0.0
-        g = rm.pulses_for_px(target, max_gap_px=max(self.max_map_gap_px, 3.0 * sp))
+        gap = max(self.max_map_gap_px, 3.0 * sp)
+        asked = target - self.px_bias                                   # aim the map where the dot then lands
+        g = rm.pulses_for_px(asked, max_gap_px=gap)
+        if g is None and self.px_bias.any():
+            asked = target
+            g = rm.pulses_for_px(asked, max_gap_px=gap)
         if g is None:
             return PxAim(math.inf, False, False, 0, None, "unmapped")
+        first_dot = None
         J = np.array(g.J, dtype=np.float64)                          # px per µs
         cap = 2.0 * np.asarray(rm.step_us, dtype=np.float64)
         n, misses, first, err = 0, 0, None, math.inf
@@ -658,7 +669,8 @@ class Laser:
                             J = J2
                 e = target - dot
                 err = float(np.linalg.norm(e))
-                first = err if first is None else first
+                if first is None:
+                    first, first_dot = err, dot
                 if box_px is not None and _in_box(dot, box_px):
                     reason = "in_box"
                     break
@@ -676,6 +688,10 @@ class Laser:
                 reason = "lost"
             ok = reason in ("in_box", "within_tol") and not jumped
             self.act.laser(ok)
+        if first_dot is not None and not jumped and reason not in ("unsafe", "stalled"):
+            b = 0.5 * self.px_bias + 0.5 * (np.asarray(first_dot) - asked)
+            n_b = float(np.linalg.norm(b))
+            self.px_bias = b * (BIAS_MAX_PX / n_b) if n_b > BIAS_MAX_PX else b
         res = PxAim(err, ok, seen, n, None if dot is None else (float(dot[0]), float(dot[1])),
                     reason, first)
         self.last_aim = {"tries": n, "first_err_px": first, "err_px": err, "reason": reason, "unsafe": unsafe,

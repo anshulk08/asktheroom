@@ -635,3 +635,29 @@ def test_densify_never_asks_for_more_than_max_points():
     rm.zones = {"all": [[0, 0], [rm.size_px[0], 0], [rm.size_px[0], rm.size_px[1]], [0, rm.size_px[1]]]}
     _, (nx, ny) = densify_ranges(rm, ["all"], target_px=2.0, max_points=120)
     assert nx * ny <= 120 and nx >= 2 and ny >= 2
+
+
+def test_a_consistent_small_offset_is_learned_and_the_next_aim_hits_first_try(mapped, monkeypatch):
+    """Rig, 05:15-05:46: after a hand re-home every first look landed 52-60 px off and ran out its budget."""
+    import numpy as np
+    rig, laser, rm = mapped
+    real = rm.pulses_for_px
+
+    def offset(uv, **kw):                                  # the zero moved: every guess lands ~60 px off
+        g = real(uv, **kw)
+        if g is not None:
+            g.pulses = (g.pulses[0] + 45, g.pulses[1] - 30)
+        return g
+    monkeypatch.setattr(rm, "pulses_for_px", offset)
+    monkeypatch.setattr(laser, "max_on_s", 60.0)
+    laser.px_bias = np.zeros(2)
+    t = center(rig.box_px("table"))
+    box = (t[0] - 12, t[1] - 12, t[0] + 12, t[1] + 12)
+    first = laser.aim_px(t, box, room_map=rm)
+    assert first.first_err_px > 15                           # the first aim lands off, then learns
+    for _ in range(2):
+        r = laser.aim_px(t, box, room_map=rm)
+    assert r.on_target and r.tries == 1, r
+    assert np.linalg.norm(laser.px_bias) <= 250
+    laser.off()
+    laser.px_bias = np.zeros(2)

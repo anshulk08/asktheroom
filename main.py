@@ -623,6 +623,8 @@ class Room:
                 act = self.laser.act
                 act.pan = act.tilt = getattr(act, "center_us", 1500.0)
                 self.laser_locked, self._drift_n = None, 0          # only after Z and E 1 succeeded
+                if hasattr(self.laser, "px_bias"):
+                    self.laser.px_bias[:] = 0                        # a new zero: the learned offset is stale
                 log.warning("laser re-homed (level confirmed); lock cleared (was: %s)", was)
             else:
                 return {"ok": False, "why": f"step must be release or zero, not {step!r}"}
