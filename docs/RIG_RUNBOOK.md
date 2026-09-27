@@ -150,7 +150,8 @@ reach and nobody's eyes at table height. The laser turns itself off after 10 s i
 
 1. Put servokit's wheels into `docker/wheels`: the `pip3 download adafruit-circuitpython-servokit==1.3.24
    Jetson.GPIO==2.1.11 ...` command is in the header of `docker/Dockerfile`.
-2. The image with servokit and espeak-ng is `askroom:demo` (built Sat 26 Sep; `askroom:latest` is left as it
+2. The image with servokit and espeak-ng is `askroom:demo` (servokit is pinned in `docker/Dockerfile`; a
+   missing wheel is a build WARNING, not a failure) (built Sat 26 Sep; `askroom:latest` is left as it
    was). To rebuild: `docker build -t askroom:demo docker/` (network needed for espeak-ng, e.g. a hotspot).
    From here on run the laser steps with `export ASKROOM_IMAGE=askroom:demo` so `$D` uses it.
 3. On the host, `i2cdetect -y -r 7` (no sudo: guru is in the i2c group) must show `40`: the PCA9685 on I2C
@@ -166,21 +167,27 @@ If servokit is missing or the board isn't found, main.py logs `LASER DISABLED ..
 
 ### 3.1 Calibrate
 
+First check the terminal passes single keys into the container (one key must print at once; if the
+terminal misbehaves with the /dev bind, prefix `ASKROOM_DEV_BIND=0`):
+
 ```bash
+$D python3 -c "import sys,tty,termios; fd=sys.stdin.fileno(); o=termios.tcgetattr(fd); tty.setcbreak(fd); print('press a key'); print(repr(sys.stdin.read(1))); termios.tcsetattr(fd, termios.TCSADRAIN, o)"
 $D python3 -m act.calibrate --rig        # from a real terminal (ssh -t): the jog reads single keys
 ```
 
 - **Jog.** The dot starts mid-travel. `a`/`d` (or left/right) pan, `w`/`s` (or up/down) tilt, `[`/`]` change
-  the step (2-50 µs a press; start at 10). Drive the dot to each corner of the tabletop in order (top-left,
-  top-right, bottom-right, bottom-left, as the camera sees it) and press Enter at each. `u` undoes the last
-  corner, `l` toggles the laser, `q` quits. If the dot goes out (10 s auto-off), any key lights it again.
+  the step (2-50 µs a press; start at 10). Drive the dot to **8 points** of the tabletop, clockwise from the
+  top-left as the camera sees it: top-left corner, top edge middle, top-right corner, right edge middle,
+  bottom-right corner, bottom edge middle, bottom-left corner, left edge middle (the prompt names each), and
+  press Enter at each. `u` undoes the last point, `l` toggles the laser, `q` quits. If the dot goes out (10 s auto-off), any key lights it again.
 - **Then it runs by itself for 1-2 min:** latency measurement, the grid fit (dots off the tabletop outline
   are dropped), 10 held-out aims, the centre aim.
 - **It prints** `fit: N points ... error median X cm`, then `F6 gate: fit median X < 1.5 cm PASS/FAIL; centre
   ... Y cm < 3 cm PASS/FAIL`, and a `servo_limits:` / `camera_latency_s:` block: copy that block into
   `config.local.yaml`.
 - It saves `laser_cal.json`, which also stores the table homography, so a later table recalibration is
-  remapped. Recalibrate the laser only if the camera or the laser head moves. Then
+  remapped. That remap is only right when the camera didn't move: if the camera was bumped (and the table
+  recalibrated after it) or the laser head moved, run `act.calibrate --rig` again. Then
   `cp -p laser_cal.json calib_frozen/`.
 - Redo without jogging: `$D python3 -m act.calibrate --rig --limits PAN_LO PAN_HI TILT_LO TILT_HI` with the
   printed limits.
@@ -213,7 +220,8 @@ Gate: ruler median < 1.5 cm and max < 3 cm.
 $D python3 demo_check.py --only 4 8
 ```
 
-- Check 4: fit median < 1.5 cm, and the aim at the tabletop's centre lands < 3 cm away.
+- Check 4: fit median < 1.5 cm, the first (open-loop) look at the tabletop's centre is < 3 cm off, and the
+  aim lands < 3 cm away. A FAIL saying "camera or head moved?" means: run `act.calibrate --rig` again.
 - Check 8: the laser turns on; press the kill switch, then Enter; answer `y` only if the dot went out. Release
   the switch and run `--only 4` again to confirm the laser comes back.
 - Every demo_check step has a deadline: a wedged speaker or camera shows `FAIL ... timed out`, not a hang.
