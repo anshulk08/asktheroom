@@ -679,6 +679,9 @@ permanence:
   contact_s: 3.0              # a person or hand at it this recently before it went: carried
   miss_visits: 2              # valid views without it, and ...
   miss_s: 3.0                 # ... this long unseen: carried or last seen
+  refind: grok_marks          # re-find backend: Grok picks the object among numbered suspects (set-of-marks) ...
+  confirm: true               # ... and a closed same-object question confirms the pick (Grok leans to yes)
+  confirm_conf: 0.8
   verify_per_minute: 20
   backstop_s: 180             # carried or last seen this long with nothing new arriving: ask about its best matches (0: off)
   places: []                  # extra spoken places after the zones: [{name: floor, say: the floor by the doorway, poly: [[x, y], ...]}]

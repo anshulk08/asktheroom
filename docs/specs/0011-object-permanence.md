@@ -83,7 +83,24 @@ somewhere new. The rules:
 | The object was never seen, or nothing new arrived for `backstop_s`, or someone asked where it is | its suspects are the candidates most like it (`sim_backstop` 0.35 and up), asked the same way |
 
 Candidates held by another registered object are never suspects; candidates inside a person box are asked about
-last. One question in flight per object, one per `ask_every_s` per object, `verify_per_minute` in all. A Grok
+last.
+
+**Grok leans to yes (0010), so a pick is confirmed.** Live on rig frames (Sun 27 Sep, 1440p frame vs an older
+frame from another pose): the first version picked a counter bottle for a pill bottle that wasn't in the frame
+(0.95), and a number drawn between two boxes was misread. Now: suspects that overlap are thinned out; the
+question image is the area around them, enlarged up to 3x; each number sits where it overlaps no other box or
+number; the prompt says that often none is the object; and a picked mark must pass a second closed question
+(the reference beside a tight patch of the pick: same object, yes or no, `confirm_conf` 0.8). Grok's references
+are context patches (the object boxed in its surroundings), not tight crops: a small object's tight crop is a
+coloured blob Grok won't vouch for. Result on those frames: the moved tissue box and the counter cup re-found
+at the right spots, the absent pill bottle never found (its one wrong pick rejected by the confirmation);
+0.6-1.2 s per question.
+
+**Pluggable re-find.** `refind(name, refs, view image, view box, suspect boxes) -> [(box, confidence, source)]`
+(full-frame px). `permanence.refind: grok_marks` is the set-of-marks backend above (`needs_suspects`); a grounding
+backend (text query by the name plus the reference) sets `needs_suspects = False`, searches the views in turn
+when there are no suspects, and may return a box that isn't a candidate: it is embedded and used, unless another
+registered object holds it. One question in flight per object, one per `ask_every_s` per object, `verify_per_minute` in all. A Grok
 find is hedged in answers ("I think") until the object is re-found by appearance alone. Offline, only the
 appearance rules run.
 

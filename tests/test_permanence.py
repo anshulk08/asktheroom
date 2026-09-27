@@ -10,7 +10,7 @@ import pytest
 from core.config import load_config
 from core.fakeworld import FakeWorld
 from core.permanence import (CARRIED, HIDDEN, LAST_SEEN, UNKNOWN, VISIBLE, Permanence, PermanenceConfig,
-                             Places, Region, attach, make_permanence, tile_boxes)
+                             Places, Region, attach, make_permanence, marks_refinder, tile_boxes)
 from core.types import Entity, Status
 from voice.answers import answer
 from voice.intents import Intent
@@ -102,7 +102,9 @@ PLACES = Places([COUCH], table_rect=(0, 450, 600, 720), table_say="the table", f
 def reg(clock=None, verify=None, **kw):
     c = PermanenceConfig.from_dict({"mode": "registry", "tiles": [3, 2], "zoom": [], "miss_s": 2.0,
                                     "verify": verify is not None, **kw})
-    p = Permanence(c, detect, embed, places=PLACES, verify=verify, clock=clock or Clock())
+    refind = verify if getattr(verify, "needs_suspects", None) is not None else \
+        (marks_refinder(verify) if verify is not None else None)
+    p = Permanence(c, detect, embed, places=PLACES, refind=refind, clock=clock or Clock())
     for name, colour in (("remote", REMOTE), ("keys", KEYS)):
         crop = np.full((40, 40, 3), colour, np.uint8)
         assert p.add_ref(name, crop)
@@ -428,3 +430,94 @@ def test_places_are_said_in_human_terms():
     assert PLACES.at((1000, 600, 1060, 640)) == ("couch", "the couch")
     assert PLACES.at((800, 600, 840, 640)) == ("near:couch", "near the couch")
     assert PLACES.at((100, 100, 140, 140)) == ("room:left", "the left side of the room")
+
+
+def test_a_person_cut_by_two_tiles_still_hides_the_object():
+    clock, s = Clock(), Scene()
+    p = reg(clock)
+    s.put("remote", REMOTE, (400, 330, 460, 370))                  # just below the tiles' seam (y = 360)
+    run(p, s, clock)
+    s.person("judge", (300, 150, 560, 720))                        # the person spans both rows of tiles
+    run(p, s, clock, sweeps=3)
+    assert p.objects["remote"].state == HIDDEN
+
+
+def test_teaching_registers_the_taught_thing_from_the_full_frame():
+    from types import SimpleNamespace as NS
+    from core.permanence import hook_teach
+    clock, s = Clock(), Scene()
+    p = reg(clock)
+    s.put("mug", MUG, (300, 500, 360, 560))
+
+    class World:
+        def teach(self, name):
+            return "thing:9"
+
+        def get(self, name):
+            return NS(box_cm=(30.0, 50.0, 36.0, 56.0))
+
+    class Table:                                                    # 1 cm = 10 table-view px
+        ok = True
+
+        def cm_to_px(self, pts):
+            return np.asarray(pts, float) * 10
+
+    frames = NS(latest_full=lambda: NS(img=s.frame()))
+    w = World()
+    hook_teach(p, w, frames, Table(), (0, 0, 1280, 720))           # table view = the whole (test) frame
+    assert w.teach("my mug") == "thing:9"
+    assert p.objects["thing:9"].state == VISIBLE and p.objects["thing:9"].box == (300, 500, 360, 560)
+
+
+def test_the_registry_does_not_start_without_the_reid_model():
+    cfg = {**CFG, "permanence": {"mode": "registry"}, "reid": {"model": "models/reid/missing.onnx"}}
+    fw = FakeWorld([])
+    place = fw.place
+    assert make_permanence(cfg, fw) is None and fw.place == place
+
+
+def test_a_grounding_backend_finds_it_anywhere_without_suspects_but_never_on_another_object():
+    clock, s = Clock(), Scene()
+    seen = []
+
+    def grounding(name, refs, view_img, view, suspects):            # "find the remote": the colour, anywhere
+        seen.append(suspects)
+        m = np.all(view_img == (20, 20, 180), axis=2)
+        if not m.any():
+            return [((700, 100, 740, 130), 0.95, "grounding")]      # a wrong answer: the keys' box
+        ys, xs = np.nonzero(m)
+        return [((view[0] + xs.min(), view[1] + ys.min(), view[0] + xs.max() + 1, view[1] + ys.max() + 1),
+                 0.9, "grounding")]
+    grounding.needs_suspects = False
+
+    p = reg(clock, verify=grounding)
+    s.put("keys", KEYS, (700, 100, 740, 130))
+    s.put("remote", REMOTE, (100, 500, 160, 540))
+    run(p, s, clock)
+    s.take("remote")
+    run(p, s, clock, sweeps=3)
+    assert p.objects["remote"].state == LAST_SEEN
+    LOOKS[(20, 20, 180)] = like(BASE[REMOTE], 0.1)
+    try:
+        s.put("remote", (20, 20, 180), (1000, 600, 1060, 640))
+        for _ in range(12):                                          # the backend searches the views in turn
+            clock.t += p.c.ask_every_s
+            run(p, s, clock)
+            settle(p, s, clock)
+            if p.objects["remote"].state == VISIBLE:
+                break
+    finally:
+        del LOOKS[(20, 20, 180)]
+    o = p.objects["remote"]
+    assert o.state == VISIBLE and o.say == "the couch" and o.how == "refind:grounding"
+    assert p.objects["keys"].state == VISIBLE and p.objects["keys"].box == (700, 100, 740, 130)
+
+
+def test_mark_numbers_never_sit_on_another_box():
+    from core.permanence import _mark
+    img = np.full((300, 300, 3), 90, np.uint8)
+    boxes = [(100, 2, 130, 60), (100, 70, 130, 120)]               # a box at the top edge, one just below it
+    out = _mark(img.copy(), boxes)
+    white = np.all(out == (255, 255, 255), axis=2)
+    for x1, y1, x2, y2 in boxes:
+        assert not white[y1 + 2:y2 - 1, x1 + 2:x2 - 1].any()          # no number inside or over a box

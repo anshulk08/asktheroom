@@ -34,7 +34,8 @@ sys.path.insert(0, str(ROOT))
 
 from core import geom  # noqa: E402
 from core.permanence import (CARRIED, HIDDEN, LAST_SEEN, UNKNOWN, VISIBLE, Permanence,  # noqa: E402
-                             PermanenceConfig, Places, Region, grok_verify, r_box, yoloe_detect)
+                             PermanenceConfig, Places, Region, make_refinder, r_box, ref_patch,
+                             yoloe_detect)
 
 TRACK_STATE = {VISIBLE: "visible", HIDDEN: "hidden", CARRIED: "carried", LAST_SEEN: "last_seen"}
 TRACK_EVENT = {"FOUND": "found", "PICKED_UP": "picked_up", "LOST_TRACK": "lost", "MOVED": "moved"}
@@ -192,14 +193,15 @@ def main(argv=None) -> int:
     zoom = [r_box(r) for r in regions] if c.zoom == "zones" else list(c.zoom or [])
     clock = {"wall": 0.0}
     p = Permanence(c, yoloe_detect(model, c.imgsz, c.conf), emb.batch, places=places,
-                   verify=grok_verify({}, c.verify_timeout_s) if a.verify else None, zoom_boxes=zoom,
+                   refind=make_refinder({}, c) if a.verify else None, zoom_boxes=zoom,
                    clock=lambda: clock["wall"])
     if a.refs:
         p.enroll_dir(a.refs)
     for name, image, *box in a.enroll:
         img = cv2.imread(image)
         box = tuple(int(float(v)) for v in box)
-        ok = p.add_ref(name, img[box[1]:box[3], box[0]:box[2]].copy(), (emb.batch(img, [box]) or [None])[0])
+        ok = p.add_ref(name, img[box[1]:box[3], box[0]:box[2]].copy(), (emb.batch(img, [box]) or [None])[0],
+                       ref_patch(img, box))
         print(f"enrolled {name}: {ok}", file=sys.stderr)
     to_cm = TableCm(meta, rect)
     track = open(a.track, "w") if a.track else None

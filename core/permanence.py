@@ -44,6 +44,7 @@ log = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parents[1]
 
 VISIBLE, HIDDEN, CARRIED, LAST_SEEN, UNKNOWN = "visible", "hidden", "carried", "last_seen", "unknown"
+REFIND = "refind"       # how: found by a re-find backend (answers hedge until appearance alone re-finds it)
 PEOPLE = ("person", "man", "woman", "child", "boy", "girl", "people")
 # never a registered object: people's parts and clothing, and the room itself
 IGNORE = PEOPLE + ("hand", "arm", "finger", "leg", "knee", "foot", "feet", "toe", "sock", "shoe", "sneaker",
@@ -89,7 +90,10 @@ class PermanenceConfig:
     miss_visits: int = 2                    # valid views without it ...
     miss_s: float = 3.0                     # ... and this long since it was seen: carried or last seen
     fresh_s: float = 10.0                   # seen this recently: said in the present tense
-    verify: bool = True                     # Grok picks the object among marked candidates (set-of-marks)
+    verify: bool = True                     # re-find missing objects at new spots (below: the backend)
+    refind: str = "grok_marks"              # grok_marks: Grok picks among numbered suspects (set-of-marks)
+    confirm: bool = True                    # ... and a closed same-object question confirms the pick
+    confirm_conf: float = 0.8
     verify_conf: float = 0.7
     verify_per_minute: int = 20
     verify_timeout_s: float = 8.0
@@ -209,7 +213,8 @@ class RegObject:
     learned_wall: float = 0.0
     asking: bool = False                        # a Grok question about it is in flight
     asked_wall: float = float("-inf")
-    how: str = ""                               # how it was last found: 'look', 'grok', 'backstop'
+    search_view: int = 0                        # a grounding re-find's next view
+    how: str = ""                               # how it was last found: 'look', 'teach', 'refind:<source>'
 
 
 def _crop(img: np.ndarray, box, margin: float = 0.15, min_side: int = 0) -> Optional[np.ndarray]:
@@ -231,6 +236,21 @@ def _small(img: Optional[np.ndarray], side: int = 160) -> Optional[np.ndarray]:
     s = side / max(img.shape[:2])
     return cv2.resize(img, (max(1, round(img.shape[1] * s)), max(1, round(img.shape[0] * s))),
                       interpolation=cv2.INTER_AREA) if s < 1 else img
+
+
+def ref_patch(img: np.ndarray, box: BoxPx) -> np.ndarray:
+    """What Grok is shown as a reference: the object in a red box inside some of its surroundings."""
+    x1, y1, x2, y2 = box
+    s = max(160, 3 * max(x2 - x1, y2 - y1))
+    cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+    h, w = img.shape[:2]
+    a, b = int(max(0, cx - s / 2)), int(max(0, cy - s / 2))
+    c, d = int(min(w, cx + s / 2)), int(min(h, cy + s / 2))
+    patch = img[b:d, a:c].copy()
+    k = min(3.0, max(1.0, 320 / max(1, min(patch.shape[:2]))))
+    patch = cv2.resize(patch, (round(patch.shape[1] * k), round(patch.shape[0] * k)), interpolation=cv2.INTER_CUBIC)
+    cv2.rectangle(patch, (int((x1 - a) * k), int((y1 - b) * k)), (int((x2 - a) * k), int((y2 - b) * k)), (0, 0, 255), 2)
+    return patch
 
 
 def _covers(a: BoxPx, b: BoxPx) -> float:
@@ -257,17 +277,19 @@ def tile_boxes(w: int, h: int, grid: tuple = (3, 2), overlap: float = 0.15) -> l
 
 class Permanence:
     """The registry and its slow whole-frame loop. Injected callables keep it testable without models:
-    detect(img) -> [(class name, conf, box px in img)], embed(img, boxes) -> [unit vector | None],
-    verify(name, ref crop, marked patch) -> (same, confidence) | None (None: couldn't ask)."""
+    detect(img) -> [(class name, conf, box px in img)], embed(img, boxes) -> [unit vector | None], and
+    refind(name, refs, view img, view box, suspect boxes) -> [(box, confidence, source)] (full-frame px): the
+    re-find backend for a missing object (marks_refinder: Grok picks among numbered suspects; a grounding
+    backend may return a box anywhere in the view). It runs on a worker thread."""
 
     def __init__(self, c: PermanenceConfig, detect: Callable, embed: Callable, events=None,
-                 places: Optional[Places] = None, verify: Optional[Callable] = None,
+                 places: Optional[Places] = None, refind: Optional[Callable] = None,
                  names: Optional[Callable[[str], str]] = None, clock: Callable[[], float] = time.time,
                  zoom_boxes: Sequence[BoxPx] = (), online: Callable[[], bool] = lambda: True):
         self.c = c
         self.detect, self.embed, self.events = detect, embed, events
         self.places = places or Places(table_say=c.table_say)
-        self.verify_fn = verify if c.verify else None
+        self.refind = refind if c.verify else None
         self.names = names or (lambda n: n.replace("_", " "))
         self.clock, self.online = clock, online
         self.zoom_boxes = [tuple(int(v) for v in b) for b in zoom_boxes]
@@ -298,8 +320,11 @@ class Permanence:
                 self.objects[name] = RegObject(name, ExemplarBank(self.c.refs_max, DUP_SIM))
             return self.objects[name]
 
-    def add_ref(self, name: str, crop: np.ndarray, emb: Optional[np.ndarray] = None) -> bool:
-        """A reference view of name (a BGR crop around the object); embedded here unless emb is given."""
+    def add_ref(self, name: str, crop: np.ndarray, emb: Optional[np.ndarray] = None,
+                context: Optional[np.ndarray] = None) -> bool:
+        """A reference view of name (a BGR crop around the object); embedded here unless emb is given. context
+        (the object boxed in its surroundings, ref_patch) is what Grok is shown, if given: a tight crop of a
+        small object is a coloured blob Grok can't vouch for (rig, Sun 27 Sep)."""
         if crop is None or crop.size == 0:
             return False
         if emb is None:
@@ -311,7 +336,7 @@ class Permanence:
         with self.lock:
             added = o.bank.add(np.asarray(emb, np.float32))
             if added:
-                o.refs = (o.refs + [_small(crop)])[-self.c.refs_max:]
+                o.refs = (o.refs + [context if context is not None else _small(crop)])[-self.c.refs_max:]
             return added
 
     def enroll_dir(self, root: Optional[str] = None) -> int:
@@ -329,7 +354,7 @@ class Permanence:
         """'this is my X' bound entity name to the object at box (full-frame px of img): register it."""
         crop = _crop(img, box, 0.0)
         emb = (self.embed(img, [tuple(box)]) or [None])[0]
-        ok = self.add_ref(name, crop, emb) if crop is not None else False
+        ok = self.add_ref(name, crop, emb, ref_patch(img, box)) if crop is not None else False
         if ok:
             with self.lock:
                 o = self.objects[name]
@@ -340,9 +365,8 @@ class Permanence:
     def reset(self) -> None:
         """Forget where everything is (a new judge); keep what everything looks like."""
         with self.lock:
-            for o in self.objects.values():
-                refs, bank = o.refs, o.bank
-                self.objects[o.name] = RegObject(o.name, bank, refs)
+            for o in list(self.objects.values()):
+                self.objects[o.name] = RegObject(o.name, o.bank, o.refs)
             self._cands.clear()
             self._people.clear()
 
@@ -432,6 +456,8 @@ class Permanence:
         with self.lock:
             self._frame = img
             self._cands[i], self._people[i] = cands, people
+            # people from every view's latest look: a tile cuts one person into a head here and a torso there
+            people = [b for ps in self._people.values() for b in ps]
             touch = list(people) + [tuple(b) for b in blockers]
             for o in self.objects.values():
                 if o.box is not None and o.state in (VISIBLE, HIDDEN) and _inside(o.box, vb) \
@@ -450,7 +476,7 @@ class Permanence:
                 o, k = self.objects[name], cands[j]
                 near = self._near(o, k.box)
                 if near or sim >= self.c.sim_accept_far:
-                    how = o.how if near and o.how == "grok" else "look"    # found by Grok: still hedged
+                    how = o.how if near and o.how.startswith(REFIND) else "look"   # found by re-find: hedged
                     evs += self._seen(o, k, wall, people, how=how, sim=sim)
                     matched.add(name)
                     used.add(j)
@@ -496,7 +522,7 @@ class Permanence:
         if how == "look" and k.emb is not None and sim >= self.c.learn_sim \
                 and wall - o.learned_wall >= self.c.learn_every_s and self._frame is not None:
             if o.bank.add(k.emb):
-                o.refs = (o.refs + [_small(_crop(self._frame, k.box, 0.1))])[-self.c.refs_max:]
+                o.refs = (o.refs + [ref_patch(self._frame, k.box)])[-self.c.refs_max:]
             o.learned_wall = wall
         return evs
 
@@ -550,21 +576,26 @@ class Permanence:
         return sorted(good, key=lambda q: (q[1].in_person, -o.bank.sim(q[1].emb)))
 
     def _maybe_ask(self, img: np.ndarray, wall: float) -> None:
-        if self.verify_fn is None:
+        if self.refind is None:
             return
+        grounding = not getattr(self.refind, "needs_suspects", True)
+        views = self.views(img.shape[1], img.shape[0])
         for o in self.objects.values():
             if o.state in (VISIBLE, HIDDEN) or o.asking or not o.refs or wall - o.asked_wall < self.c.ask_every_s:
                 continue
             if not self._can_ask(wall):
                 return
             sus = self.suspects(o, wall)
-            if not sus:
+            if not sus and not grounding:
                 continue
-            view = sus[0][0]
+            if sus:
+                view = sus[0][0]
+            else:                               # a grounding backend searches the views in turn
+                view, o.search_view = o.search_view % len(views), o.search_view + 1
             ks = [k for i, k in sus if i == view][:self.c.marks]
-            marked = marked_view(img, self.views(img.shape[1], img.shape[0])[view], [k.box for k in ks])
+            x1, y1, x2, y2 = views[view]
             try:
-                self._asks.put_nowait((o.name, o.refs[-2:], marked, ks))
+                self._asks.put_nowait((o.name, o.refs[-2:], img[y1:y2, x1:x2].copy(), views[view], ks))
             except queue.Full:
                 return
             o.asking, o.asked_wall = True, wall
@@ -587,21 +618,21 @@ class Permanence:
     def _work(self) -> None:
         while not self._stop.is_set():
             try:
-                name, refs, marked, ks = self._asks.get(timeout=0.5)
+                name, refs, view_img, view, ks = self._asks.get(timeout=0.5)
             except queue.Empty:
                 continue
             try:
-                r = self.verify_fn(self.names(name), refs, marked, len(ks))
+                r = list(self.refind(self.names(name), refs, view_img, view, [k.box for k in ks]) or [])
             except Exception:
-                log.exception("permanence: verify failed")
-                r = None
+                log.exception("permanence: re-find failed")
+                r = []
             self._results.put((name, ks, r))
 
     def _apply_results(self, wall: float) -> list[Event]:
         evs = []
         while True:
             try:
-                name, ks, r = self._results.get_nowait()
+                name, ks, found = self._results.get_nowait()
             except queue.Empty:
                 return evs
             with self.lock:
@@ -609,15 +640,28 @@ class Permanence:
                 if o is None:
                     continue
                 o.asking = False
-                if not r or not 1 <= int(r[0]) <= len(ks) or float(r[1]) < self.c.verify_conf:
+                if o.state in (VISIBLE, HIDDEN):
                     continue
-                k = ks[int(r[0]) - 1]
-                if o.state in (VISIBLE, HIDDEN) or not self._still_there(k):
-                    continue
-                evs += self._seen(o, k, wall, [], how="grok")
-                if k.emb is not None and o.bank.add(k.emb):    # this spot's look: refreshes need no Grok
-                    o.refs = (o.refs + [_small(_crop(self._frame, k.box, 0.1))])[-self.c.refs_max:] \
-                        if self._frame is not None else o.refs
+                claimed = self._claimed()
+                for box, conf, source in sorted(found, key=lambda f: -float(f[1])):
+                    if float(conf) < self.c.verify_conf or any(geom.iou(box, b) >= 0.5 for b in claimed):
+                        continue
+                    k = self._candidate_at(box)
+                    if k is None and source != "marks" and self._frame is not None:   # grounding: a box of its own
+                        emb = (self.embed(self._frame, [tuple(int(v) for v in box)]) or [None])[0]
+                        k = Candidate(tuple(int(v) for v in box), float(conf), source, emb=emb, first_wall=wall)
+                    if k is None:
+                        continue
+                    evs += self._seen(o, k, wall, [], how=f"{REFIND}:{source}")
+                    if k.emb is not None and o.bank.add(k.emb):    # this spot's look: refreshes need no re-find
+                        if self._frame is not None:
+                            o.refs = (o.refs + [ref_patch(self._frame, k.box)])[-self.c.refs_max:]
+                    break
+
+    def _candidate_at(self, box) -> Optional[Candidate]:
+        """The latest views' candidate at box (IoU 0.5), or None: it has moved on since the question."""
+        best = max((c for cs in self._cands.values() for c in cs), key=lambda c: geom.iou(box, c.box), default=None)
+        return best if best is not None and geom.iou(box, best.box) >= 0.5 else None
 
     def _still_there(self, k: Candidate) -> bool:
         """The candidate Grok picked is still proposed where it was (in the latest views)."""
@@ -642,7 +686,7 @@ class Permanence:
             return RegPlace(kind="room", zone=o.zone or "room", say=o.say, status=status, chain=[name], via=name,
                             box_px=o.box, fresh=self.fresh(o, now) or o.state == HIDDEN,
                             absent=o.state == LAST_SEEN, arrived_wall=o.arrived_wall, last_seen_wall=o.seen_wall,
-                            arrival_observed=o.arrival_observed, tentative=o.how == "grok", state=o.state,
+                            arrival_observed=o.arrival_observed, tentative=o.how.startswith(REFIND), state=o.state,
                             since_wall=o.since_wall)
 
     def status(self) -> dict:
@@ -688,11 +732,57 @@ def marked_view(img: np.ndarray, view: BoxPx, boxes: Sequence[BoxPx], out_px: in
     k = min(1.0, out_px / max(out.shape[:2]))
     if k < 1:
         out = cv2.resize(out, (round(out.shape[1] * k), round(out.shape[0] * k)), interpolation=cv2.INTER_AREA)
+    return _mark(out, [((b[0] - x1) * k, (b[1] - y1) * k, (b[2] - x1) * k, (b[3] - y1) * k) for b in boxes])
+
+
+def _mark(img: np.ndarray, boxes) -> np.ndarray:
+    """Red boxes numbered from 1. Each number sits beside its own box, at the first spot (above, left, right,
+    below) that overlaps no other box or number: a number between two boxes is misread (rig, Sun 27 Sep)."""
+    h, w = img.shape[:2]
+    boxes = [tuple(int(v) for v in b) for b in boxes]
+    for b in boxes:
+        cv2.rectangle(img, b[:2], b[2:], (0, 0, 255), 2)
+    taken: list = []
     for n, b in enumerate(boxes, 1):
-        a, c = (int((b[0] - x1) * k), int((b[1] - y1) * k)), (int((b[2] - x1) * k), int((b[3] - y1) * k))
-        cv2.rectangle(out, a, c, (0, 0, 255), 2)
-        cv2.putText(out, str(n), (a[0], max(14, a[1] - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-    return out
+        (tw, th), _ = cv2.getTextSize(str(n), cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
+        lw, lh = tw + 6, th + 8
+        spots = [(b[0], b[1] - lh - 2), (b[0] - lw - 2, b[1]), (b[2] + 2, b[1]), (b[0], b[3] + 2)]
+        others = [q for q in boxes if q != b] + taken
+        ok = [(x, y) for x, y in spots if 0 <= x and x + lw <= w and 0 <= y and y + lh <= h]
+        free = [(x, y) for x, y in ok if not any(geom.intersection((x, y, x + lw, y + lh), q) for q in others)]
+        x, y = (free or ok or [(max(0, b[0]), max(0, b[1]))])[0]
+        taken.append((x, y, x + lw, y + lh))
+        cv2.rectangle(img, (x, y), (x + lw, y + lh), (255, 255, 255), -1)
+        cv2.putText(img, str(n), (x + 3, y + th + 3), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+    return img
+
+
+def question_image(view_img: np.ndarray, boxes: Sequence[BoxPx], min_px: int = 640, max_px: int = 1280,
+                   margin_px: int = 160) -> tuple[np.ndarray, list]:
+    """The part of a view around the suspects (view px), enlarged so small objects are big enough to judge
+    (up to 3x), with the suspects numbered; returns (image, the boxes in its px)."""
+    h, w = view_img.shape[:2]
+    xs1, ys1 = min(b[0] for b in boxes), min(b[1] for b in boxes)
+    xs2, ys2 = max(b[2] for b in boxes), max(b[3] for b in boxes)
+    m = max(margin_px, 0.5 * max(xs2 - xs1, ys2 - ys1))
+    a, b0 = int(max(0, xs1 - m)), int(max(0, ys1 - m))
+    c, d = int(min(w, xs2 + m)), int(min(h, ys2 + m))
+    crop = view_img[b0:d, a:c]
+    k = min(3.0, max(1.0, min_px / max(1, min(crop.shape[:2]))), max_px / max(crop.shape[:2]))
+    out = cv2.resize(crop, (round(crop.shape[1] * k), round(crop.shape[0] * k)),
+                     interpolation=cv2.INTER_CUBIC if k > 1 else cv2.INTER_AREA)
+    local = [((q[0] - a) * k, (q[1] - b0) * k, (q[2] - a) * k, (q[3] - b0) * k) for q in boxes]
+    return _mark(out, local), local
+
+
+def distinct(boxes: Sequence[BoxPx], thr: float = 0.3) -> list[int]:
+    """Indices of boxes that don't overlap an earlier (better) one: two boxes on one spot confuse the marks."""
+    keep: list[int] = []
+    for i, b in enumerate(boxes):
+        if all(geom.iou(b, boxes[j]) < thr and geom.overlap_frac(boxes[j], b) < 0.6
+               and geom.overlap_frac(b, boxes[j]) < 0.6 for j in keep):
+            keep.append(i)
+    return keep
 
 
 # ================================================================================ the world adapter
@@ -788,43 +878,122 @@ def registry_embedder(cfg: dict):
     return e.batch
 
 
-VERIFY_SYSTEM = ("You find one person's object in a room photo. Image 1 (and 2, if given) show the owner's object. "
+def marks_refinder(ask: Callable, confirm: Optional[Callable] = None, confirm_conf: float = 0.8) -> Callable:
+    """A re-find backend from set-of-marks questions: ask(name, refs, marked image, n) -> (mark, confidence),
+    mark 0 = none; then, with confirm(name, refs, patch) -> (same, confidence), the pick must be confirmed by a
+    closed same-object question (Grok leans to yes: 0010 section 3). Only suspects can be picked."""
+    def refind(name: str, refs: list, view_img: np.ndarray, view: BoxPx, suspects: list):
+        keep = distinct(suspects)
+        if not keep:
+            return []
+        x1, y1 = view[0], view[1]
+        local = [(suspects[i][0] - x1, suspects[i][1] - y1, suspects[i][2] - x1, suspects[i][3] - y1) for i in keep]
+        img, _ = question_image(view_img, local)
+        r = ask(name, refs, img, len(local))
+        if not r or not 1 <= int(r[0]) <= len(local):
+            return []
+        pick = keep[int(r[0]) - 1]
+        conf = float(r[1])
+        if confirm is not None:
+            lb = local[int(r[0]) - 1]
+            patch, _ = question_image(view_img, [lb], min_px=320, max_px=640, margin_px=60)
+            c = confirm(name, refs, patch)
+            if not c or not c[0] or float(c[1]) < confirm_conf:
+                return []
+            conf = min(conf, float(c[1]))
+        return [(suspects[pick], conf, "marks")]
+    refind.needs_suspects = True
+    return refind
+
+
+VERIFY_SYSTEM = ("You find one person's object in a room photo. The first image(s) show the owner's object. "
                  "The last image is part of the room with numbered red boxes. Say which box holds that same "
-                 "object: same kind, colours and shape. A different object of the same kind is not it. If none "
-                 "does, mark is 0. Never guess.")
+                 "object: the same kind, colours, shape and markings. A different object of the same kind is not "
+                 "it. Often none of the boxes is the object: then mark is 0. Never guess.")
 VERIFY_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["mark", "confidence"],
                  "properties": {"mark": {"type": "integer"}, "confidence": {"type": "number"}}}
+SAME_SYSTEM = ("You compare photos from one room camera. The first image(s) show a person's object in a red box. "
+               "The last image shows an object in a red box, maybe from another angle, distance or light. Is it "
+               "the same object: the same kind, colour, shape and markings? A different object of the same kind "
+               "(another bottle, another box) is same=false.")
+SAME_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["same", "confidence", "what"],
+               "properties": {"same": {"type": "boolean"}, "confidence": {"type": "number"},
+                              "what": {"type": "string"}}}
 
 
-def grok_verify(cfg: dict, timeout_s: float = 8.0) -> Optional[Callable]:
-    """verify(name, refs, marked view, n marks) -> (mark, confidence) | None, through the visual_memory
-    provider (Grok); mark 0 is none of them."""
+def _provider(cfg: dict):
+    from core.narration import NarrationConfig, make_provider
+    from core.visual_memory import VisualConfig
+    v = VisualConfig.from_dict((cfg or {}).get("visual_memory"))
+    return make_provider(NarrationConfig.from_dict({
+        "provider": v.provider, "model": v.model, "base_url": v.base_url, "api_key_env": v.api_key_env,
+        "reasoning_effort": v.reasoning_effort, "timeout_s": v.timeout_s, "max_tokens": 120}))
+
+
+def _jpg(img: np.ndarray) -> bytes:
+    return cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 90])[1].tobytes()
+
+
+def _ref_parts(name: str, refs: list) -> list:
+    parts: list = []
+    for j, ref in enumerate(refs, 1):
+        big = cv2.resize(ref, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC) if max(ref.shape[:2]) < 200 else ref
+        parts += [("text", f"Image {j}: the owner's {name} (in the red box)."), ("image", _jpg(big))]
+    return parts
+
+
+def grok_marks(cfg: dict, timeout_s: float = 8.0) -> Optional[Callable]:
+    """ask(name, refs, marked image, n) -> (mark, confidence), through the visual_memory provider (Grok);
+    mark 0 is none of them."""
     try:
-        from core.narration import NarrationConfig, make_provider, _parse_json
-        from core.visual_memory import VisualConfig
+        from core.narration import _parse_json
         from net import call_with_deadline
-        v = VisualConfig.from_dict((cfg or {}).get("visual_memory"))
-        provider = make_provider(NarrationConfig.from_dict({
-            "provider": v.provider, "model": v.model, "base_url": v.base_url, "api_key_env": v.api_key_env,
-            "reasoning_effort": v.reasoning_effort, "timeout_s": v.timeout_s, "max_tokens": 120}))
+        provider = _provider(cfg)
     except Exception:
-        log.exception("permanence: no Grok provider; verify off")
+        log.exception("permanence: no Grok provider; re-find off")
         return None
 
-    def jpg(img: np.ndarray) -> bytes:
-        return cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 90])[1].tobytes()
-
-    def verify(name: str, refs: list, marked: np.ndarray, n: int):
-        parts: list = []
-        for j, ref in enumerate(refs, 1):
-            parts += [("text", f"Image {j}: the owner's {name}."), ("image", jpg(ref))]
-        parts += [("text", f"Image {len(refs) + 1}: part of the room, boxes 1 to {n}. Which box is the owner's "
-                           f"{name}? 0 if none."), ("image", jpg(marked))]
+    def ask(name: str, refs: list, marked: np.ndarray, n: int):
+        parts = _ref_parts(name, refs) + [
+            ("text", f"Image {len(refs) + 1}: part of the room, boxes 1 to {n}. Which box is the owner's {name}? "
+                     f"0 if none."), ("image", _jpg(marked))]
         reply = call_with_deadline(provider.narrate, timeout_s, VERIFY_SYSTEM, parts, VERIFY_SCHEMA,
-                                   name="permanence-verify")
+                                   name="permanence-refind")
         d = _parse_json(reply.text) or {}
         return int(d.get("mark") or 0), float(d.get("confidence") or 0.0)
-    return verify
+    return ask
+
+
+def grok_same(cfg: dict, timeout_s: float = 8.0) -> Optional[Callable]:
+    """confirm(name, refs, patch) -> (same, confidence): the closed question after a mark is picked."""
+    try:
+        from core.narration import _parse_json
+        from net import call_with_deadline
+        provider = _provider(cfg)
+    except Exception:
+        log.exception("permanence: no Grok provider; no confirmation")
+        return None
+
+    def confirm(name: str, refs: list, patch: np.ndarray):
+        parts = _ref_parts(name, refs) + [
+            ("text", f"Image {len(refs) + 1}: is the object in the red box the owner's {name}?"), ("image", _jpg(patch))]
+        reply = call_with_deadline(provider.narrate, timeout_s, SAME_SYSTEM, parts, SAME_SCHEMA,
+                                   name="permanence-confirm")
+        d = _parse_json(reply.text) or {}
+        return bool(d.get("same")), float(d.get("confidence") or 0.0)
+    return confirm
+
+
+def make_refinder(cfg: dict, c: PermanenceConfig) -> Optional[Callable]:
+    """The re-find backend permanence.refind names: 'grok_marks' (default), or off with verify: false."""
+    if not c.verify:
+        return None
+    if c.refind == "grok_marks":
+        ask = grok_marks(cfg, c.verify_timeout_s)
+        confirm = grok_same(cfg, c.verify_timeout_s) if c.confirm else None
+        return marks_refinder(ask, confirm, c.confirm_conf) if ask is not None else None
+    log.warning("permanence: unknown refind backend %r; re-find off", c.refind)
+    return None
 
 
 def make_permanence(cfg: dict, world=None, detector=None, events=None, online=None) -> Optional[Permanence]:
@@ -845,7 +1014,7 @@ def make_permanence(cfg: dict, world=None, detector=None, events=None, online=No
     zoom = [r_box(r) for r in places.regions] if c.zoom == "zones" else list(c.zoom or [])
     display = (cfg or {}).get("display_names") or {}
     p = Permanence(c, yoloe_detect(model, c.imgsz, c.conf), embed, events=events, places=places,
-                   verify=grok_verify(cfg, c.verify_timeout_s) if c.verify else None,
+                   refind=make_refinder(cfg, c),
                    names=lambda n: display.get(n, n.replace("_", " ")), zoom_boxes=zoom,
                    online=online or (lambda: bool(getattr(world, "online", True))))
     for n in (c.objects if c.objects is not None else list((cfg or {}).get("objects") or {})):
