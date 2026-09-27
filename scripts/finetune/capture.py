@@ -7,6 +7,8 @@ Run on the Jetson host venv (cv2 + numpy only) with the app stopped, since it ho
     python scripts/finetune/capture.py --qa                     # rebuild the contact sheet only
     python scripts/finetune/capture.py --distractors airpods mug charger    # objects + hands + other things
     python scripts/finetune/capture.py --distractors airpods mug --only airpods   # redo one distractor
+    python scripts/finetune/capture.py --room table --data data/ft-corner-table   # the room build's table view
+    python scripts/finetune/capture.py --room couch --data data/ft-corner-couch   # one room zone's crop
 
 Each object lies alone on the empty table, so bglabel.py's difference against the empty table is its
 box. Writes into --data (default data/finetune), the layout the other scripts use:
@@ -199,6 +201,26 @@ class Capture:
         self.say(f"  {j} hand frames")
         return j
 
+    def capture_scene(self, seconds: float = 60.0, every_s: float = 0.3) -> int:
+        """Unlabelled frames of the demo layout for the go/no-go sweep (eval/conf_sweep.py --images), into
+        <data>/scene/: nothing here is trained on."""
+        out = self.data / "scene"
+        out.mkdir(parents=True, exist_ok=True)
+        for p in out.glob("scene-*.jpg"):
+            p.unlink()
+        self._prompt(f"Scene: lay out the demo (notebook, box, keys, ...) as for a judge; for {seconds:.0f} s "
+                     f"reach in now and then (a hand in view about half the time). Enter to start: ")
+        f = self._next()
+        t0, last, j = f.t, -1e9, 0
+        while f.t - t0 < seconds:
+            if f.t - last >= every_s:
+                last = f.t
+                cv2.imwrite(str(out / f"scene-{j:04d}.jpg"), f.img, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                j += 1
+            f = self._next()
+        self.say(f"  {j} scene frames in {out}")
+        return j
+
     def run(self, only: Optional[list[str]] = None, hands: bool = True, hand_seconds: float = 40.0) -> dict:
         got = {}
         try:
@@ -218,6 +240,42 @@ class Capture:
         qa = write_qa(self.data, self.names)
         self.say(f"captured {got}; contact sheet: {qa}")
         return got
+
+
+def room_rect(cfg: dict, view: str) -> tuple[tuple[int, int, int, int], tuple[int, int]]:
+    """(full-frame rect, out size) of what the room build's detector sees (room_memory: in config.yaml plus
+    config.local.yaml): 'table' is the table view (table_view_rect, or the centred default, resized to
+    frame_size_px, as main.open_frames / core.room_view.TableView cut it); any other name is that zone of
+    room_memory.zones_path (its bbox in the camera frame, shrunk to max_crop_px like core/room.py _visit)."""
+    from core.room_types import RoomConfig
+    from core.room_view import default_rect
+    rc = RoomConfig.from_dict(cfg.get("room_memory"))
+    fw, fh = rc.capture_size
+    if view == "table":
+        out = tuple(int(v) for v in cfg.get("frame_size_px", (1280, 720)))
+        rect = rc.table_view_rect or default_rect(rc.capture_size, rc.zoom, rc.ref_zoom, out)
+        return tuple(int(v) for v in rect), out
+    from core.room_zones import Zones
+    zones = Zones.load(rc.zones_path).zones
+    if view not in zones:
+        raise ValueError(f"no zone {view!r} in {rc.zones_path}; zones: {sorted(zones)} (or 'table')")
+    bx1, by1, bx2, by2 = zones[view].bbox()
+    x1, y1, x2, y2 = max(0, bx1), max(0, by1), min(fw, bx2), min(fh, by2)
+    s = min(1.0, rc.max_crop_px / max(x2 - x1, y2 - y1))
+    return (x1, y1, x2, y2), (max(1, round((x2 - x1) * s)), max(1, round((y2 - y1) * s)))
+
+
+def room_source(cfg: dict, device, view: str):
+    """The camera at room_memory.capture_size, seen through room_rect(view): a FrameBuffer-like source."""
+    from core.capture import FrameBuffer, open_camera
+    from core.room_types import RoomConfig
+    from core.room_view import TableView
+    rc = RoomConfig.from_dict(cfg.get("room_memory"))
+    rect, out = room_rect(cfg, view)
+    w, h = rc.capture_size
+    fb = FrameBuffer(device, ring_s=rc.ring_s, opener=lambda src: open_camera(src, w, h))
+    print(f"room view {view!r}: camera {w}x{h}, rect {list(rect)} -> {out[0]}x{out[1]}")
+    return TableView(fb, rect, out)
 
 
 def write_qa(data: Path, names: list[str], prefix: str = "cap", out: str = "qa_capture.jpg",
@@ -255,6 +313,12 @@ def main(argv=None) -> int:
     ap.add_argument("--hand-len", type=int, default=Params.hand_len_px,
                     help="px of an arm kept as the hand box (about 18 cm of arm at this camera height)")
     ap.add_argument("--qa", action="store_true", help="only rebuild qa_capture.jpg")
+    ap.add_argument("--scene", type=float, metavar="SECONDS",
+                    help="only record the demo layout's frames (unlabelled) into <data>/scene/ for the go/no-go")
+    ap.add_argument("--room", metavar="VIEW",
+                    help="capture what the room build's detector sees (room_memory: in config.local.yaml): "
+                         "'table' = the table view cut from the full frame, or a zone name (its crop). "
+                         "One --data dir per view; merge them with merge_sets.py")
     a = ap.parse_args(argv)
     cfg = load_config()
     names = class_names(cfg)
@@ -269,14 +333,21 @@ def main(argv=None) -> int:
     if bad:
         print(f"unknown names {sorted(bad)}; choose from {names} or --distractors", file=sys.stderr)
         return 2
-    from core.capture import FrameBuffer
-    fb = FrameBuffer(int(a.device) if a.device.isdigit() else a.device)
+    device = int(a.device) if a.device.isdigit() else a.device
+    if a.room:
+        fb = room_source(cfg, device, a.room)
+    else:
+        from core.capture import FrameBuffer
+        fb = FrameBuffer(device)
     try:
         cap = Capture(fb, Path(a.data), names, poses=a.poses, params=Params(hand_len_px=a.hand_len,
                                   roi_px=tuple(int(v) for v in a.roi.split(",")) if a.roi else None),
                       display=cfg.get("display_names") or {}, distractors=a.distractors,
                       distractor_poses=a.distractor_poses)
-        cap.run(a.only, hands=not a.no_hands, hand_seconds=a.hand_seconds)
+        if a.scene:
+            cap.capture_scene(a.scene)
+        else:
+            cap.run(a.only, hands=not a.no_hands, hand_seconds=a.hand_seconds)
     finally:
         fb.stop()
     return 0
