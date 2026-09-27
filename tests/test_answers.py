@@ -448,6 +448,18 @@ def test_changes_named_things_come_before_guesses():
                                 "Something that looks like glasses was picked up 50 seconds ago.")
 
 
+def test_changes_say_the_same_thing_twice_once():
+    # live check: "Something that looks like a tape dispenser was covered up, then covered up just now."
+    fw = _things(FakeWorld([]), {"thing:4": None}, {"thing:4": ("tape dispenser", 0.9)})
+    now = time.time()
+    fw.events.add(Event(t=1.0, wall=now - 90, obj="thing:4", type="COVERED"))
+    fw.events.add(Event(t=2.0, wall=now - 2, obj="thing:4", type="COVERED"))
+    assert changed(fw, now) == "Something that looks like a tape dispenser was covered up just now."
+    fw.events.add(Event(t=3.0, wall=now - 1, obj="thing:4", type="UNCOVERED"))
+    assert changed(fw, now) == ("Something that looks like a tape dispenser was covered up, then uncovered "
+                                "just now.")
+
+
 def test_changes_in_a_busy_room_are_short_and_useful():
     # the rig's room had hundreds of nameless things: the spoken answer ran to 21,000 characters, then
     # (capped) "The thing I haven't been told about was first seen, then found again... 295 other things"

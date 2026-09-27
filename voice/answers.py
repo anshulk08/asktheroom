@@ -438,6 +438,8 @@ def _changes(events, cfg: dict, now: float, since: Optional[float]) -> Answer:
     for o in order[:3] if len(order) <= 3 else order[:2]:
         subj, g = said[o]
         pair = g if len(g) == 1 else [g[0], g[-1]]
+        if len(pair) == 2 and _event_phrase(pair[0], cfg) == _event_phrase(pair[1], cfg):
+            pair = pair[1:]             # 'covered up, then covered up': said once, with the latest time
         ph = _chain(pair, cfg, now) if len(pair) == 1 else \
             f"{_event_phrase(pair[0], cfg)}, then {_event_phrase(pair[1], cfg)} {ago(pair[1].wall, now)}"
         s = f"{subj[:1].upper()}{subj[1:]} {_be(_pk(cfg, o), True)} {ph}."
