@@ -1,14 +1,17 @@
 """Point the stepper turret at imaginary objects through TurretActuator and check it by eye.
 
-    python scripts/turret_point_test.py /dev/ttyACM0        # Jetson; the Mac shows /dev/cu.usbmodem*
+    python scripts/turret_point_test.py /dev/ttyACM0          # Jetson; the Mac shows /dev/cu.usbmodem*
+    python scripts/turret_point_test.py /dev/ttyACM0 --laser  # beam on while holding each pose
 
 Line the mount up level and facing forward first: opening the port makes that 0,0. Each object
 is held HOLD_S seconds; picture it at the stated spot. The board's reported position must match
 the pointing math to within one microstep, and your eyes check the real angles (a steady error
 on one axis means its gear ratio in firmware/turret/turret.ino is off). Ends parked at 0,0.
+With --laser the beam is on only while holding a pose, never while moving.
 """
 from __future__ import annotations
 
+import argparse
 import sys
 import time
 from pathlib import Path
@@ -32,7 +35,7 @@ OBJECTS = [
 ]
 
 
-def main(port: str) -> int:
+def main(port: str, laser: bool = False) -> int:
     cfg = {"servo_limits": {"pan": [1500 - 1700, 1500 + 1700], "tilt": [1500 - 450, 1500 + 900]},
            "turret": {"port": port}}   # the firmware's own limits, at 10 us/deg
     act = TurretActuator(cfg)
@@ -40,6 +43,7 @@ def main(port: str) -> int:
     try:
         for name, xyz in OBJECTS:
             want = solve_aim(xyz)
+            act.laser(False)
             act.point_at(*xyz)
             pan, tilt, moving, _ = act._turret.position()
             ok = (abs(pan - want.pan) <= STEP_DEG[0] and abs(tilt - want.tilt) <= STEP_DEG[1]
@@ -47,7 +51,10 @@ def main(port: str) -> int:
             failures += not ok
             print(f"{'ok ' if ok else 'BAD'} {name:44s} want pan {want.pan:7.2f} tilt {want.tilt:6.2f}"
                   f"  board {pan:7.2f} {tilt:6.2f}")
+            if laser:
+                act.laser(True)
             time.sleep(HOLD_S)
+        act.laser(False)
     finally:
         act.close()
         print("parked at 0,0")
@@ -55,6 +62,8 @@ def main(port: str) -> int:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        sys.exit(__doc__)
-    sys.exit(1 if main(sys.argv[1]) else 0)
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("port")
+    ap.add_argument("--laser", action="store_true", help="beam on while holding each pose")
+    args = ap.parse_args()
+    sys.exit(1 if main(args.port, args.laser) else 0)
