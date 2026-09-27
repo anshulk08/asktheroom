@@ -29,6 +29,7 @@ from pathlib import Path
 import os
 JETSON = os.environ.get("ASKROOM_JETSON", "guru@10.90.84.178")            # Wi-Fi; guru@192.168.55.1 over USB
 DEVICE = os.environ.get("ASKROOM_CAMERA", "/dev/v4l/by-id/usb-046d_Logitech_BRIO_3675F8D2-video-index0")
+REMOTE = os.environ.get("ASKROOM_REMOTE_DIR", "askroom")   # the Jetson copy that records, under ~ (its table_cal.json, config)
 PROPS = {"A": "wallet", "B": "small object", "C": "phone", "NB": "notebook", "BOX": "box"}   # B: keys or any small solid object; BOX: any open container
 ALL_ON_TABLE = {p: {"state": "on_table"} for p in PROPS}
 
@@ -157,23 +158,25 @@ def say(text: str) -> subprocess.Popen:
     return subprocess.Popen(["say", "-r", "185", text])
 
 
-def run_clip(name: str, clip_id: str, exposure: int = 333, gain: int = 96, setup: bool = True) -> Path:
+def run_clip(name: str, clip_id: str, exposure: int = 166, gain: int = 80, setup: bool = True) -> Path:
     clip = CLIPS[name]
     git = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
-    cam = f"cd ~/askroom && scripts/camera_setup.sh {exposure} {DEVICE} {gain} >/dev/null" if setup else "true"
-    ssh("C=$(docker ps -q --filter ancestor=askroom:latest); [ -n \"$C\" ] && docker stop $C >/dev/null; " + cam,
+    # the Brio's focus 10, zoom 160, 3200 K (scripts/camera_setup.sh); cameras without them skip those
+    cam = f"cd ~/{REMOTE} && scripts/camera_setup.sh {exposure} {DEVICE} {gain} 10 160 3200 >/dev/null" if setup else "true"
+    ssh("C=$(docker ps -q --filter ancestor=askroom:latest --filter volume=/dev/v4l); "   # the app on the camera,
+        "[ -n \"$C\" ] && docker stop $C >/dev/null; " + cam,                               # not a replay
         timeout=90)
     offset = clock_offset()
     controls = camera_controls()
     out = f"data/clips/{clip_id}"
-    ssh(f"rm -rf ~/askroom/{out}; mkdir -p ~/askroom/{out}")    # ours, so truth.json can be added after
-    rec = subprocess.Popen(["ssh", JETSON, "cd ~/askroom && scripts/dock.sh python3 -m eval.raw_record "
+    ssh(f"rm -rf ~/{REMOTE}/{out}; mkdir -p ~/{REMOTE}/{out}")    # ours, so truth.json can be added after
+    rec = subprocess.Popen(["ssh", JETSON, f"cd ~/{REMOTE} && scripts/dock.sh python3 -m eval.raw_record "
                             f"--out {out} --device {DEVICE} --seconds {clip['seconds']} "
                             f"--controls {shlex.quote(json.dumps(controls))} --git {git} --clock-offset {offset:.6f}"],
                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
     say("Get ready.").wait()
     for _ in range(120):                                  # the container starts, the camera settles
-        if ssh(f"test -f ~/askroom/{out}/READY && echo y").strip() == "y":
+        if ssh(f"test -f ~/{REMOTE}/{out}/READY && echo y").strip() == "y":
             break
         time.sleep(0.5)
     else:
@@ -189,13 +192,13 @@ def run_clip(name: str, clip_id: str, exposure: int = 333, gain: int = 96, setup
         print(f"  {cues[-1] - t_zero:5.1f} s  {s['say']}", flush=True)
     rec.wait(timeout=clip["seconds"] + 60)
     say("Done.")
-    frames = json.loads(ssh(f"cat ~/askroom/{out}/frames.json"))
+    frames = json.loads(ssh(f"cat ~/{REMOTE}/{out}/frames.json"))
     truth = truth_from(clip, cues, frames["wall"][0], offset)
-    subprocess.run(["ssh", JETSON, f"cat > ~/askroom/{out}/truth.json"], input=json.dumps(truth, indent=1),
+    subprocess.run(["ssh", JETSON, f"cat > ~/{REMOTE}/{out}/truth.json"], input=json.dumps(truth, indent=1),
                    text=True, check=True)
     local = Path("data/clips") / clip_id
     local.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["rsync", "-a", f"{JETSON}:askroom/{out}/", str(local) + "/"], check=True)
+    subprocess.run(["rsync", "-a", f"{JETSON}:{REMOTE}/{out}/", str(local) + "/"], check=True)
     n, dur = len(frames["wall"]), frames["t"][-1]
     print(f"{clip_id}: {n} frames, {dur:.1f} s ({(n - 1) / max(dur, 1e-6):.1f} fps), clock offset {offset:+.3f} s -> {local}")
     return local
@@ -206,7 +209,7 @@ def main(argv=None) -> int:
     ap.add_argument("clip", nargs="?", choices=sorted(CLIPS))
     ap.add_argument("--id")
     ap.add_argument("--list", action="store_true")
-    ap.add_argument("--gain", type=int, default=96)
+    ap.add_argument("--gain", type=int, default=80)
     ap.add_argument("--no-setup", action="store_true", help="keep the camera's current settings (a tuned camera)")
     a = ap.parse_args(argv)
     if a.list or not a.clip:

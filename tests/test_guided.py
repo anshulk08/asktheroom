@@ -33,3 +33,32 @@ def test_cue_times_become_seconds_since_the_first_frame():
     assert round(t["questions"][0]["t"], 2) == round(start + 12, 2)
     assert round(t["checkpoints"][0]["t"], 2) == round(start + 10, 2)
     assert t["props"] == {"A": "wallet"} and t["steps"][1]["obj"] == "A"
+
+
+def test_recording_uses_the_remote_copy_and_stops_only_the_app_on_the_camera(monkeypatch):
+    """ASKROOM_REMOTE_DIR: record in a scratch copy on the Jetson, not the teammate's ~/askroom; stop only a
+    container with /dev/v4l mounted (the app), never a replay; set the Brio's controls."""
+    import pytest
+
+    from eval import guided
+    calls = []
+
+    class Stop(Exception):
+        pass
+
+    def popen(args, **kw):
+        calls.append(args[-1])
+        raise Stop
+
+    monkeypatch.setattr(guided, "REMOTE", "askroom_rig")
+    monkeypatch.setattr(guided, "ssh", lambda cmd, timeout=60: calls.append(cmd) or "")
+    monkeypatch.setattr(guided, "clock_offset", lambda: 0.0)
+    monkeypatch.setattr(guided, "camera_controls", lambda: {})
+    monkeypatch.setattr(guided.subprocess, "run", lambda *a, **kw: type("R", (), {"stdout": "abc123\n"})())
+    monkeypatch.setattr(guided.subprocess, "Popen", popen)
+    with pytest.raises(Stop):
+        guided.run_clip("still", "brio_still_1")
+    stop, mkdir, rec = calls
+    assert "--filter volume=/dev/v4l" in stop and "camera_setup.sh 166" in stop and " 80 10 160 3200" in stop
+    assert "~/askroom_rig/data/clips/brio_still_1" in mkdir and "~/askroom/" not in mkdir
+    assert rec.startswith("cd ~/askroom_rig && ")
