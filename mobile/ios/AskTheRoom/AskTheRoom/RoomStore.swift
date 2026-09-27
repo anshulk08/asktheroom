@@ -53,7 +53,6 @@ enum LinkState: Equatable {
 final class RoomStore {
     static let historyLimit = 10
     static let voiceAnswersKey = "showRoomVoiceAnswers"
-    static let rigNoticeLimit = 3
 
     var link: LinkState = .searching
     private(set) var isMock = false
@@ -70,12 +69,8 @@ final class RoomStore {
     private(set) var highlight: Highlight?
     /// Latest answer to a question someone else asked the rig (PROTOCOL.md 6a).
     private(set) var heardInRoom: Answer?
-    /// Reminders and morning reports the rig fired while connected, newest first.
-    private(set) var rigNotices: [Notice] = []
     /// What changed since the app connected, newest first (Home, "Recently").
     private(set) var activity: [ActivityEvent] = []
-    /// Notices the person has put away; each comes back if its situation changes.
-    private(set) var dismissedNotices: Set<String> = []
     /// How the Bluetooth link is doing (helper settings, "Connection"). Nil until the transport reports.
     private(set) var linkStats: LinkStats?
     /// The last room layout the rig sent (state `lay`), and its hash (`lh`). The rig sends the layout
@@ -102,9 +97,6 @@ final class RoomStore {
     private var highlightTask: Task<Void, Never>?
 
     var current: Exchange? { exchanges.first }
-    var notices: [Notice] {
-        (rigNotices + (snapshot.map(Dashboard.notices(in:)) ?? [])).filter { !dismissedNotices.contains($0.id) }
-    }
     var history: ArraySlice<Exchange> { exchanges.dropFirst() }
     /// The kept layout is the one the latest state names (or the rig doesn't send hashes).
     var layoutIsCurrent: Bool { layout != nil && (snapshot?.lh == nil || snapshot?.lh == layoutHash) }
@@ -144,10 +136,8 @@ final class RoomStore {
         status = nil
         highlight = nil
         heardInRoom = nil
-        rigNotices = []
         exchanges = []
         activity = []
-        dismissedNotices = []
         linkStats = nil
         layout = nil
         layoutHash = nil
@@ -231,9 +221,9 @@ final class RoomStore {
 
     func receive(answer: Answer) {
         guard let id = answer.id else {
-            if answer.isNotice {
-                receive(notice: answer)
-            } else if answer.isRoomAnswer, showRoomVoiceAnswers {
+            // The rig's own notices ("Room noticed …", src "notice") are not shown on the phone:
+            // no card, no banner, no map pulse. Answers to questions asked in the room still are.
+            if answer.isRoomAnswer, showRoomVoiceAnswers {
                 heardInRoom = answer
                 setHighlight(highlight(for: answer))
             }
@@ -244,15 +234,6 @@ final class RoomStore {
         timeoutTask?.cancel()
         exchanges[0].answer = answer
         exchanges[0].timedOut = false
-        setHighlight(highlight(for: answer))
-    }
-
-    /// A reminder always shows on Home, even with room answers off: it's meant for the person.
-    private func receive(notice answer: Answer) {
-        let notice = Notice(rig: answer)
-        rigNotices.removeAll { $0.id == notice.id }
-        rigNotices.insert(notice, at: 0)
-        if rigNotices.count > Self.rigNoticeLimit { rigNotices.removeLast(rigNotices.count - Self.rigNoticeLimit) }
         setHighlight(highlight(for: answer))
     }
 
@@ -286,15 +267,6 @@ final class RoomStore {
 
     func receive(linkStats: LinkStats) {
         if self.linkStats != linkStats { self.linkStats = linkStats }
-    }
-
-    func dismiss(_ notice: Notice) {
-        dismissedNotices.insert(notice.id)
-    }
-
-    /// Brings back every notice put away with "Got it" (helper settings).
-    func restoreNotices() {
-        dismissedNotices = []
     }
 
     /// Sends the helper's voice to the rig, after a change in helper settings.

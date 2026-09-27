@@ -36,7 +36,12 @@ struct RoomView: View {
     /// and the card aren't squeezed out.
     private var compact: Bool { typeSize.isAccessibilitySize }
 
+    /// The map tile's share of the tab's height, so the conversation always has room below it
+    /// (about 38% of an iPhone 16 Pro's screen).
+    static let mapShare: CGFloat = 0.45
+
     var body: some View {
+        GeometryReader { geo in
         VStack(spacing: 0) {
             HStack {
                 Text("Ask the Room").font(.title2.bold()).minimumScaleFactor(0.6)
@@ -80,7 +85,8 @@ struct RoomView: View {
                         .padding(.horizontal, 4)
                     }
                 }
-                // The map keeps its full width; the card area below scrolls instead.
+                // A compact tile: the map fits inside it, and the conversation below always shows.
+                .frame(maxWidth: .infinity, maxHeight: geo.size.height * Self.mapShare)
                 .layoutPriority(1)
                 if !compact {
                     legend(for: snapshot)
@@ -108,13 +114,18 @@ struct RoomView: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.top, 4)
                     }
+                    // The rest of the conversation, newest first, under the latest answer.
+                    ForEach(store.history) { exchange in
+                        AnswerCard(exchange: exchange)
+                    }
                     if store.showRoomVoiceAnswers, let heard = store.heardInRoom {
                         HeardInRoomCard(answer: heard)
                     }
                     if compact, let snapshot = store.snapshot {
                         legend(for: snapshot)
                     }
-                    if compact {
+                    // In the scrolling area, not the ask bar, so they never push the conversation off.
+                    if store.snapshot != nil {
                         SuggestionChips { question in
                             selected = nil
                             store.ask(question)
@@ -129,10 +140,11 @@ struct RoomView: View {
             }
             .scrollDismissesKeyboard(.interactively)
 
-            AskPanel(showSuggestions: !compact) { question in
+            AskPanel(showSuggestions: false) { question in
                 selected = nil
                 store.ask(question)
             }
+        }
         }
         .entityDetail($details, store: store)
     }

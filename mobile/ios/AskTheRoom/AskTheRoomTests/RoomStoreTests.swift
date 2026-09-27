@@ -174,27 +174,22 @@ final class RoomStoreTests: XCTestCase {
         return a
     }
 
-    /// Reminders show on Home first, even with room answers off, and light up what they point at.
-    func testRigNoticesComeFirstWhateverTheSetting() {
-        store.showRoomVoiceAnswers = false
-        store.receive(answer: notice(12, "It's 9 and the pill bottle hasn't been picked up yet."))
-        XCTAssertNil(store.heardInRoom)
-        XCTAssertEqual(store.notices.first?.id, "rig|12")
-        XCTAssertEqual(store.notices.first?.kind, .rig("reminder"))
-        XCTAssertEqual(store.notices.first?.entity, "pill_bottle")
-        XCTAssertEqual(store.highlight?.entity, "pill_bottle")
-    }
-
-    func testRigNoticesAreKeptShortAndCanBePutAway() {
-        for nid in 1...5 { store.receive(answer: notice(nid, "Reminder \(nid)", pointAt: nil, kind: "morning")) }
-        store.receive(answer: notice(5, "Reminder 5", pointAt: nil, kind: "morning"))
-        XCTAssertEqual(store.rigNotices.map(\.rigID), [5, 4, 3], "newest first, no repeats, at most three")
-        XCTAssertEqual(store.rigNotices.first?.entity, "")
-
-        store.dismiss(store.rigNotices[0])
-        XCTAssertFalse(store.notices.contains { $0.rigID == 5 })
-        store.restoreNotices()
-        XCTAssertTrue(store.notices.contains { $0.rigID == 5 })
+    /// The rig's notices ("Room noticed …") are dropped: nothing to show, nothing lit on the map,
+    /// whatever the setting, and the conversation is untouched.
+    func testRigNoticesAreNotShown() {
+        for on in [false, true] {
+            store.showRoomVoiceAnswers = on
+            store.receive(answer: notice(12, "It's 9 and the pill bottle hasn't been picked up yet."))
+            XCTAssertNil(store.heardInRoom)
+            XCTAssertNil(store.highlight)
+            XCTAssertTrue(store.exchanges.isEmpty)
+        }
+        // A question asked out loud in the room still shows.
+        store.showRoomVoiceAnswers = true
+        var heard = answer(nil, "Your keys are in the box.")
+        heard.src = "voice"
+        store.receive(answer: heard)
+        XCTAssertEqual(store.heardInRoom?.text, "Your keys are in the box.")
     }
 
     func testDropAfterConnectingShowsReconnecting() {

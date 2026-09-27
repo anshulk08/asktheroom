@@ -63,17 +63,6 @@ struct HelperSettings: View {
                     }
                 }
 
-                Section {
-                    Button("Show them again") { store.restoreNotices() }
-                        .disabled(store.dismissedNotices.isEmpty)
-                } header: {
-                    Text("Notices")
-                } footer: {
-                    Text(store.dismissedNotices.isEmpty
-                         ? "No notices have been put away."
-                         : "\(store.dismissedNotices.count) put away with “Got it”.")
-                }
-
                 if let stats = store.linkStats {
                     ConnectionSection(stats: stats)
                 }

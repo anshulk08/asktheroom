@@ -53,7 +53,7 @@ struct MainView: View {
     }
 }
 
-/// The start screen: the day, what the room noticed, and where each thing is.
+/// The start screen: the day and where each thing is.
 /// Everything is a big tap target that asks the room.
 struct HomeView: View {
     let store: RoomStore
@@ -73,16 +73,6 @@ struct HomeView: View {
             VStack(alignment: .leading, spacing: 22) {
                 DayHeader(store: store)
                 Banners(store: store)
-
-                if !store.notices.isEmpty {
-                    HomeSection(title: "The room noticed") {
-                        ForEach(store.notices) { notice in
-                            NoticeCard(notice: notice, now: store.snapshot?.time ?? Date(),
-                                       onShow: { notice.question.map(ask) ?? show(notice.entity) },
-                                       onDismiss: { withAnimation { store.dismiss(notice) } })
-                        }
-                    }
-                }
 
                 HomeSection(title: "Your things") {
                     if let snapshot = store.snapshot {
@@ -105,7 +95,6 @@ struct HomeView: View {
             .padding(.horizontal, 16)
             .padding(.top, 8)
             .padding(.bottom, 16)
-            .animation(.easeOut(duration: 0.25), value: store.notices)
         }
         .scrollDismissesKeyboard(.interactively)
         .safeAreaInset(edge: .top, spacing: 0) {
@@ -176,70 +165,6 @@ private struct DayHeader: View {
                 .padding(.top, 2)
             }
         }
-    }
-}
-
-private struct NoticeCard: View {
-    let notice: Notice
-    let now: Date
-    let onShow: () -> Void
-    let onDismiss: () -> Void
-    @Environment(\.dynamicTypeSize) private var typeSize
-
-    private var icon: (String, HierarchicalShapeStyle) {
-        switch notice.kind {
-        case .leftTable: return ("arrow.left.square", .secondary)
-        case .lostTrack: return ("questionmark.circle", .secondary)
-        case .unnamed: return ("sparkles", .secondary)
-        case .rig(let kind): return (kind == "morning" ? "sun.max" : "bell", .secondary)
-        }
-    }
-
-    private var showWords: String {
-        switch notice.kind {
-        case .leftTable, .lostTrack: return "Help me find it"
-        case .unnamed, .rig: return "Show me"
-        }
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top, spacing: 12) {
-                Image(systemName: icon.0)
-                    .font(.title2)
-                    .foregroundStyle(icon.1)
-                    .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(notice.text)
-                        .font(.title3.weight(.semibold))
-                    if let detail = notice.detail(now: now) {
-                        Text(detail).font(.body)
-                    }
-                }
-                .fixedSize(horizontal: false, vertical: true)
-            }
-            // Stacked at the largest text sizes so neither button gets squeezed.
-            let layout = typeSize.isAccessibilitySize ? AnyLayout(VStackLayout(spacing: 10)) : AnyLayout(HStackLayout(spacing: 10))
-            layout {
-                // A reminder that doesn't point at anything only needs "Got it".
-                if !notice.entity.isEmpty {
-                    Button(action: onShow) {
-                        Label(showWords, systemImage: "scope")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.borderedProminent)
-                }
-                Button(action: onDismiss) {
-                    Text("Got it").frame(maxWidth: typeSize.isAccessibilitySize ? .infinity : nil)
-                }
-                .buttonStyle(.bordered)
-                .tint(.primary)
-            }
-            .controlSize(.extraLarge)
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 18))
     }
 }
 

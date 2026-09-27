@@ -208,7 +208,7 @@ final class DashboardTests: XCTestCase {
 
 @MainActor
 final class RoomStoreActivityTests: XCTestCase {
-    func testStoreLogsChangesNewestFirstAndDismissesNotices() {
+    func testStoreLogsChangesNewestFirst() {
         let store = RoomStore()
         let first = MockData.sampleSnapshot
         store.receive(state: first)
@@ -222,15 +222,9 @@ final class RoomStoreActivityTests: XCTestCase {
         store.receive(state: third)
         XCTAssertEqual(store.activity.map(\.text), ["Wallet was put down", "Wallet was picked up"])
 
-        let guessed = store.notices.first { $0.kind == .unnamed }!
-        XCTAssertNil(guessed.question, "the room's guess isn't a name it answers to; show it instead")
-        store.showOnMap(guessed.entity)
+        store.showOnMap("thing:11")
         XCTAssertEqual(store.highlight?.entity, "thing:11")
         XCTAssertEqual(store.highlight?.target, TablePoint(x: 45, y: 24))
-
-        let phone = store.notices.first { $0.entity == "phone" }!
-        store.dismiss(phone)
-        XCTAssertFalse(store.notices.contains { $0.entity == "phone" })
     }
 
     func testRecentTabLeavesOutNamelessThings() {
@@ -248,17 +242,5 @@ final class RoomStoreActivityTests: XCTestCase {
             if case .change(let e) = entry { return e.entity } else { return nil }
         }
         XCTAssertEqual(Set(shown), ["keys", "thing:11"])
-    }
-
-    func testShowThemAgainBringsBackDismissedNotices() {
-        let store = RoomStore()
-        store.receive(state: MockData.sampleSnapshot)
-        let all = store.notices
-        all.forEach(store.dismiss)
-        XCTAssertTrue(store.notices.isEmpty)
-        XCTAssertEqual(store.dismissedNotices.count, all.count)
-
-        store.restoreNotices()
-        XCTAssertEqual(store.notices, all)
     }
 }

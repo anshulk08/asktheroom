@@ -19,7 +19,6 @@ import Foundation
 ///   -mockConnection YES  with -mockSettings: open the Connection section (link diagnostics)
 ///   -mockIconPicker YES  with -mockSelect: open the picture picker over the detail sheet
 ///   -mockIcons "remote=📺"  show these pictures instead of the usual ones (not saved)
-///   -mockNotice "text" a second after launch, the rig fires this reminder about the pill bottle
 @MainActor
 final class MockRoom: RoomTransport {
     static let stepInterval: Duration = .seconds(5)
@@ -62,17 +61,6 @@ final class MockRoom: RoomTransport {
                     try? await Task.sleep(for: Self.stepInterval)
                     self?.advance()
                 }
-            })
-        }
-        if let text = defaults.string(forKey: "mockNotice") {
-            tasks.append(Task { [weak store] in
-                try? await Task.sleep(for: .seconds(1))
-                var notice = Answer(id: nil, ok: true, text: text, point_at: "pill_bottle", action: "point",
-                                    target: TablePoint(x: 30.2, y: 12))
-                notice.src = "notice"
-                notice.nid = 1
-                notice.kind = "reminder"
-                store?.receive(answer: notice)
             })
         }
         if let script = defaults.string(forKey: "mockAsk") {
