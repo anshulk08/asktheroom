@@ -219,7 +219,7 @@
 
   // One view: the image window win (image px) drawn "contain" into the canvas, with the objects in it.
   // labelsIn(o): whether this view labels o (the room view leaves the table's labels to the close-up).
-  function drawView(canvas, ctx, win, labelsIn) {
+  function drawView(canvas, ctx, win, labelsIn, only) {
     const dpr = fit(canvas);
     const W = canvas.width, H = canvas.height;
     ctx.fillStyle = "#000";
@@ -234,7 +234,7 @@
     ctx.drawImage(img, win[0] * sx, win[1] * sx, ww * sx, wh * sx, ox, oy, ww * k, wh * k);
     const P = (x, y) => [ox + (x - win[0]) * k, oy + (y - win[1]) * k];
     const t = now();
-    const objs = S.objs.filter((o) => o.box && shown(o));
+    const objs = S.objs.filter((o) => o.box && shown(o) && (!only || only(o)));
     for (const o of objs) {                                    // trails under the boxes
       const tr = S.trails.get(o.key);
       if (!tr || tr.length < 2) continue;
@@ -286,18 +286,18 @@
     const win = tableWindow();
     const full = S.meta ? [0, 0, S.meta.image_size[0], S.meta.image_size[1]] : null;
     drawView(cam, cctx, full, (o) => !win || !inside(o.box, S.meta.table_view_rect));
-    drawView(tcam, tctx, win || full, () => true);
+    drawView(tcam, tctx, win || full, () => true, (o) => o.zone === "table");   // the table's own objects only
   }
 
   function label(ctx, W, H, o, x1, y1, x2, y2, dpr, ghost, placed) {
-    const nameF = 700 + " " + Math.round(21 * dpr) + "px " + FONT;
-    const badgeF = 600 + " " + Math.round(16 * dpr) + "px " + FONT;
+    const nameF = 700 + " " + Math.round(23 * dpr) + "px " + FONT;
+    const badgeF = 600 + " " + Math.round(18 * dpr) + "px " + FONT;
     ctx.font = nameF;
     const nw = ctx.measureText(o.name).width;
     ctx.font = badgeF;
     const b = badge(o);
     const bw = ctx.measureText(b).width;
-    const padX = 9 * dpr, lh1 = 25 * dpr, lh2 = 20 * dpr;
+    const padX = 9 * dpr, lh1 = 27 * dpr, lh2 = 22 * dpr;
     const w = Math.max(nw, bw) + 2 * padX, h = lh1 + lh2 + 8 * dpr;
     const top = ctx === cctx ? 84 * dpr : 44 * dpr;            // clear of the clock and the panel tag
     const hits = (x, y) => placed.some((p) => x < p.x + p.w && p.x < x + w && y < p.y + p.h && p.y < y + h);
@@ -503,16 +503,18 @@
         mctx.fill();
       }
       mctx.globalAlpha = o.state === "last_seen" ? 0.6 : 1;
-      mctx.font = 600 + " " + Math.round(16 * dpr) + "px " + FONT;
+      mctx.font = 600 + " " + Math.round(18 * dpr) + "px " + FONT;
       mctx.fillStyle = COL.ink;
       mctx.textBaseline = "middle";
       if (!o.guessed || o.zone !== "table") {                 // table clutter: a dot; named things and rooms: a name
         const tw = mctx.measureText(o.name).width;
         const lx = px + r + 5 * dpr;
         let ly = py;
-        for (let n = 0; n < 4 && labels.some((q) => Math.abs(q.y - ly) < 18 * dpr && lx < q.x + q.w && q.x < lx + tw); n++) ly += 18 * dpr;
-        labels.push({ x: lx, y: ly, w: tw });
-        mctx.fillText(o.name, lx, ly);
+        for (let n = 0; n < 4 && labels.some((q) => Math.abs(q.y - ly) < 20 * dpr && lx < q.x + q.w && q.x < lx + tw); n++) ly += 20 * dpr;
+        if (ly < H - 10 * dpr && lx + tw < W) {             // no label past the panel's edge
+          labels.push({ x: lx, y: ly, w: tw });
+          mctx.fillText(o.name, lx, ly);
+        }
       }
       mctx.globalAlpha = 1;
     });
@@ -609,7 +611,7 @@
     const text = document.createElement("span");
     text.textContent = clean(caption(ev));
     cap.append(tag, text);
-    if (ev.clock || ev.t) {
+    if (!ev.caption && (ev.clock || ev.t)) {             // WS5's caption already says when
       const when = document.createElement("span");
       when.className = "time";
       when.textContent = ev.clock || clockText(ev.t, true);   // WS5: the rig's own clock text
@@ -776,6 +778,16 @@
     try { drawMap(); } catch (e) { console.error(e); }
     requestAnimationFrame(frame);
   }
+
+  // The page is a 1920x1080 stage (demo.css) scaled to fit the window, centred: nothing clips or scrolls.
+  function fitStage() {
+    const st = document.querySelector(".demo");
+    const k = Math.min(window.innerWidth / 1920, window.innerHeight / 1080);
+    st.style.transform = "translate(" + Math.max(0, (window.innerWidth - 1920 * k) / 2) + "px," +
+      Math.max(0, (window.innerHeight - 1080 * k) / 2) + "px) scale(" + k + ")";
+  }
+  window.addEventListener("resize", fitStage);
+  fitStage();
 
   setInterval(tickClock, 250);
   setInterval(loadLayout, 30000);
