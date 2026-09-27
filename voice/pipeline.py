@@ -49,6 +49,8 @@ def make_ask(cfg: dict, world, events, net=None, other: Optional[Callable] = Non
             return ans
         intent = interpret(text)
         ans = _from_room_tracks(intent)
+        if ans is None:
+            ans = _from_room_pick(intent, text, online)
         if ans is None and visual is not None:
             try:
                 ans = visual.route(intent, text, online)
@@ -96,6 +98,24 @@ def make_ask(cfg: dict, world, events, net=None, other: Optional[Callable] = Non
                                       fresh_s, tentative)
         except Exception:
             log.exception("room track answer failed")
+            return None
+
+    def _from_room_pick(intent: Intent, text: str, online: bool):
+        """'Point to the backpack' that no named room track answers: Grok picks among the tracked room things."""
+        if (visual is None or not online or room_tracks is None or not aim_tracks or intent.kind != "WHERE"
+                or not (intent.name or intent.obj)):
+            return None
+        try:
+            from voice.answers import _target
+            from voice.intents import asks_to_point
+            from voice.room_tracks import world_has_place
+            if not asks_to_point(text) or world_has_place(world, _target(intent, world, cfg)):
+                return None
+            tracks, zone_say, _ = room_tracks()
+            return visual.point_room((intent.name or intent.obj).replace("_", " "), text, tracks, zone_say,
+                                     clock() if clock is not None else None)
+        except Exception:
+            log.exception("room pick failed")
             return None
 
     return ask

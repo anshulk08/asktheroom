@@ -1023,6 +1023,29 @@ class VisualQA:
         from core.auto_name import match_score
         return match_score(said, g) <= 0
 
+    def point_room(self, said: str, question: str, tracks, zone_say: dict,
+                   now_wall: Optional[float] = None) -> Optional[Answer]:
+        """'Point to the backpack' with no named room track: Grok picks among the room's tracked things on a sheet
+        of numbered close-ups (voice.room_tracks.ROOM_PICK_SYSTEM), and the pick is aimed at. None when room
+        memory is off, nothing is tracked, the cap is reached, the call fails or the pick doesn't hold."""
+        from voice.room_tracks import ROOM_PICK_SYSTEM, answer_from_pick, room_pick_candidates
+        if not self._room_on() or self._capped():
+            return None
+        cands = room_pick_candidates(tracks, time.time() if now_wall is None else now_wall)
+        f = self._room_frame()
+        if not cands or f is None or getattr(f, "img", None) is None:
+            return None
+        sheet, _ = _jpeg(pick_sheet(f.img, [tuple(tr.box_px) for tr in cands]), self.c.look_px)
+        listed = ", ".join(f"{i} = {(tr.guess or {}).get('name') or NEW_THING} on "
+                           f"{zone_say.get(tr.zone) or tr.zone.replace('_', ' ')}" for i, tr in enumerate(cands, 1))
+        parts: list = [("image", sheet), ("text", f"Close-ups: {listed}.\nFind: {said}\nQuestion: {question}")]
+        try:
+            d = self._vlm(ROOM_PICK_SYSTEM, parts, PICK_SCHEMA)
+        except (ProviderError, NarrationError) as ex:
+            log.warning("room pick failed: %s", ex)
+            return None
+        return answer_from_pick(said, d, cands, zone_say)
+
     def _pick_sheet(self, ob, shown: dict, said: str, question: str) -> dict:
         """The pick again on a sheet of the marked things' close-ups (the first SHEET_MAX marks); {} if the
         call fails or the cap is reached."""

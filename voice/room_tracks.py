@@ -123,3 +123,51 @@ def answer_from_tracks(said: str, tracks: Iterable, zone_say: dict, now_wall: Op
     from voice.answers import _hedge      # a Grok-name match, not an identity (spec 0010): hedged
     return Answer(_hedge(f"Your {said} {verb} on {where}.", said),
                   action=f"room:{(x1 + x2) / 2:.0f},{(y1 + y2) / 2:.0f},{x1:.0f},{y1:.0f},{x2:.0f},{y2:.0f}")
+
+
+# ----- 'point to X' with no named track: Grok picks among the room's tracked things ---------------------
+
+ROOM_PICK_SYSTEM = """You find one object among the things around a room. The image is a grid of numbered close-ups, one per object a tracker follows on the room's furniture and floor, cut from one camera mounted high in a corner of the room (things across the room are small, so a close-up can be blurry). Your only job is to say which numbered close-up shows the object the person asks about and what that object is.
+
+Rules:
+- mark: the number of the close-up whose main object is the one asked about; null if none clearly shows it. If the person says a colour, the object must be that colour.
+- label: what the object in that close-up is, the way a person would say it: 1 to 4 plain words, colour first ("blue cup", "black backpack"). Null if mark is null. For any medicine container say only "pill bottle".
+- confidence: 0 to 1; below 0.5 if you aren't sure.
+Reply with the JSON object only."""
+ROOM_PICK_FRESH_S = 30.0  # a track matched this recently can be shown to Grok (seconds)
+ROOM_PICK_CONF = 0.6      # Grok's confidence a pick needs to be aimed at
+ROOM_PICK_MAX = 20        # close-ups on the sheet (voice.visual.SHEET_MAX)
+ROOM_PICK_FIT = 1.5       # match_score(said, label) a pick needs: Grok's label must name what was said
+
+
+def room_pick_candidates(tracks: Iterable, now_wall: float, fresh_s: float = ROOM_PICK_FRESH_S) -> list:
+    """Tracks Grok may pick from: seen on their zone's latest visit within fresh_s, a box, never named like a
+    person or a body part; newest first, at most ROOM_PICK_MAX. Unnamed and unconfirmed tracks count: the
+    pick itself says what they are."""
+    out = [tr for tr in tracks if getattr(tr, 'box_px', None) is not None and tr.misses == 0
+           and now_wall - tr.last_wall <= fresh_s and not worn_or_person(tr.guess or {})]
+    return sorted(out, key=lambda tr: -tr.last_wall)[:ROOM_PICK_MAX]
+
+
+def answer_from_pick(said: str, d: dict, cands: list, zone_say: dict) -> Optional[Answer]:
+    """Grok's pick ({mark, label, confidence}) over cands as a hedged, aimed answer, or None: no mark, a mark
+    out of range, too unsure, a label that doesn't name what was said (colour included), or a person."""
+    try:
+        mark, conf = d.get('mark'), float(d.get('confidence') or 0.0)
+    except (TypeError, ValueError, AttributeError):
+        return None
+    label = str(d.get('label') or '').strip().lower()
+    if not isinstance(mark, int) or not 1 <= mark <= len(cands) or conf < ROOM_PICK_CONF or not label:
+        return None
+    guess = {'name': label, 'also': []}
+    if worn_or_person(guess) or match_score(said, with_synonyms(guess), colours=True) < ROOM_PICK_FIT:
+        log.info("room pick: mark %s is %r, not %r; not aimed at", mark, label, said)
+        return None
+    tr = cands[mark - 1]
+    x1, y1, x2, y2 = (float(v) for v in tr.box_px)
+    where = zone_say.get(tr.zone) or f'the {tr.zone.replace("_", " ")}'
+    verb = 'are' if said.endswith('s') and not said.endswith('ss') else 'is'
+    log.info("room pick: %s in %s (%r, %.2f) answers for %r", tr.tid, tr.zone, label, conf, said)
+    from voice.answers import _hedge
+    return Answer(_hedge(f"Your {said} {verb} on {where}.", said),
+                  action=f"room:{(x1 + x2) / 2:.0f},{(y1 + y2) / 2:.0f},{x1:.0f},{y1:.0f},{x2:.0f},{y2:.0f}")

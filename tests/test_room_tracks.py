@@ -209,3 +209,66 @@ def test_the_blue_cup_on_the_table_wins_over_the_orange_one_and_a_white_counter_
     assert [n for n, _ in world.find_guess('blue cup')] == ['thing:1']
     a = ask_for(world, [track(zone='counter', name='white cup')])('Point to the blue cup.')
     assert 'counter' not in a.text and not (a.action or '').startswith('room:')
+
+
+# ----- Grok picks among the room's tracked things for 'point to X' ------------------------------------
+
+from voice.room_tracks import answer_from_pick, room_pick_candidates  # noqa: E402
+
+
+def test_pick_candidates_are_fresh_seen_and_never_people_newest_first():
+    a = track(tid='r:1', name=None, last=NOW - 5.0)
+    b = track(tid='r:2', name='backpack', last=NOW - 1.0)
+    stale, missed, leg = track(tid='r:3', last=NOW - 60.0), track(tid='r:4', misses=1), track(tid='r:5', name='left leg')
+    assert [t.tid for t in room_pick_candidates([a, b, stale, missed, leg], NOW)] == ['r:2', 'r:1']
+
+
+def test_a_confident_pick_that_names_what_was_said_is_aimed_at():
+    cands = [track(tid='r:1', name=None, box=(1000, 1100, 1100, 1200))]
+    a = answer_from_pick('backpack', {'mark': 1, 'label': 'black backpack', 'confidence': 0.8}, cands, SAYS)
+    assert a.text == 'Your backpack, I think, is on the couch.' and a.action == 'room:1050,1150,1000,1100,1100,1200'
+
+
+@pytest.mark.parametrize('d', [
+    {'mark': None, 'label': None, 'confidence': 0.9}, {'mark': 2, 'label': 'backpack', 'confidence': 0.9},
+    {'mark': 1, 'label': 'backpack', 'confidence': 0.4}, {'mark': 1, 'label': 'laptop', 'confidence': 0.9},
+    {'mark': 1, 'label': 'toes', 'confidence': 0.9}, {'mark': '1', 'label': 'backpack', 'confidence': 0.9},
+])
+def test_no_mark_out_of_range_unsure_wrong_label_or_a_person_is_not_aimed_at(d):
+    assert answer_from_pick('backpack', d, [track(tid='r:1', name=None)], SAYS) is None
+
+
+def test_a_pick_of_the_wrong_colour_is_not_aimed_at():
+    d = {'mark': 1, 'label': 'white cup', 'confidence': 0.9}
+    assert answer_from_pick('blue cup', d, [track(tid='r:1', name=None)], SAYS) is None
+
+
+class Picker:
+    def __init__(self, ans=None):
+        self.ans, self.calls = ans, []
+
+    def point_room(self, said, question, tracks, zone_say, now_wall=None):
+        self.calls.append(said)
+        return self.ans
+
+    def route(self, intent, text, online):
+        return None
+
+    describe_where = None
+
+
+class Online:
+    online = True
+
+
+def test_a_point_question_no_named_track_answers_goes_to_the_room_pick(world):
+    from core.types import Answer
+    raw = copy.deepcopy(RAW)
+    raw['room'] = dict(raw.get('room') or {}, aim_tracks=True)
+    p = Picker(Answer('Your backpack, I think, is on the couch.', action='room:1,2,0,0,4,4'))
+    ask = make_ask(raw, world, world.events, net=Online(), clock=lambda: NOW, visual=p,
+                   room_tracks=lambda: ([], SAYS, lambda n: False))
+    assert ask('point to the backpack').action == 'room:1,2,0,0,4,4' and p.calls == ['backpack']
+    p.calls.clear()
+    ask('where is the backpack')                      # no point cue: the look answers, nothing picked
+    assert p.calls == []

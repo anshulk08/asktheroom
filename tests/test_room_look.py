@@ -563,3 +563,25 @@ def test_offline_such_a_where_says_it_needs_the_connection_or_passes(log):
     assert "offline" in q.route(Intent("OTHER", None, "where's the TV?"), "where's the TV?", online=False).text.lower()
     assert q.route(Intent("WHERE", None, "where's the TV?"), "where's the TV?", online=False) is None
     assert prov.calls == []
+
+
+# ----- 'point to the backpack': Grok picks among the room's tracked things (voice.room_tracks) --------
+
+def test_point_room_sends_a_sheet_of_the_room_tracks_and_aims_at_the_pick(log):
+    from tests.test_room_tracks import track
+    q, prov = room_qa(log, json.dumps({"mark": 1, "label": "black backpack", "confidence": 0.85}))
+    tracks = [track(tid="r:1", name="laptop", box=(100, 100, 200, 180), last=T0 - 2),
+              track(tid="r:2", name=None, box=(900, 600, 1000, 700), last=T0 - 1)]
+    a = q.point_room("backpack", "point to the backpack", tracks, {"couch": "the couch"}, now_wall=T0)
+    assert a.text == "Your backpack, I think, is on the couch." and a.action == "room:950,650,900,600,1000,700"
+    call = prov.calls[-1]
+    assert len(images(call)) == 1 and "1 = something new on the couch, 2 = laptop on the couch" in texts(call)
+
+
+def test_point_room_without_room_memory_or_tracks_asks_nothing(log):
+    from tests.test_room_tracks import track
+    q, prov = room_qa(log)
+    assert q.point_room("backpack", "point to the backpack", [], {}, now_wall=T0) is None
+    q.room_zones = []
+    assert q.point_room("backpack", "point to the backpack", [track(last=T0)], {}, now_wall=T0) is None
+    assert not prov.calls
