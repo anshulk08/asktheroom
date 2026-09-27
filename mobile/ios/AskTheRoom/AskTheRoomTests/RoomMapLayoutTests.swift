@@ -245,12 +245,17 @@ final class RoomMapLayoutTests: XCTestCase {
         let expected = l.point(CGPoint(x: 103.4, y: 255.8))
         XCTAssertEqual(you.midX, expected.x, accuracy: 0.01)
         XCTAssertEqual(you.midY, expected.y, accuracy: 0.01)
+        let map = CGRect(origin: .zero, size: l.size)
         for z in l.zones {
             XCTAssertFalse(z.labelRect.intersects(you), "\(z.id)'s label clear of You")
-            XCTAssertTrue(z.rect.contains(z.labelRect), z.id)
+            // Just outside the zone, above it (or below), inside the map: the zone is all pins.
+            XCTAssertTrue(abs(z.labelRect.maxY - (z.rect.minY - 1)) < 0.5 || abs(z.labelRect.minY - (z.rect.maxY + 1)) < 0.5, z.id)
+            XCTAssertFalse(z.labelRect.intersects(z.rect.insetBy(dx: 0, dy: 0.5)), z.id)
+            XCTAssertTrue(map.contains(z.labelRect), z.id)
+            for p in l.pins {
+                XCTAssertFalse(p.dotRect.intersects(z.labelRect), "\(p.id) under \(z.id)'s label")
+            }
         }
-        XCTAssertTrue(zone("doorway", in: l).labelVertical || zone("doorway", in: l).rect.width > 80,
-                      "a narrow door's label runs up its side")
     }
 
     func testOnlyNamedThingsAreLabelledOnTheTableInset() {
@@ -263,5 +268,15 @@ final class RoomMapLayoutTests: XCTestCase {
         XCTAssertTrue(RoomMapLayout.namedOnTable(named))
         XCTAssertTrue(RoomMapLayout.namedOnTable(taught))
         XCTAssertFalse(RoomMapLayout.namedOnTable(guessed))
+    }
+
+    func testASmallZoneWithYouStillShowsAPinBesideItsCount() {
+        let l = layout(size: CGSize(width: 300, height: 340))     // the compact tile on an iPhone
+        let couch = zone("couch", in: l)
+        let pinsInCouch = l.pins.filter { couch.rect.contains(CGPoint(x: $0.dotRect.midX, y: $0.dotRect.midY)) }
+        if let over = l.overflows.first(where: { $0.id == "couch" }) {
+            XCTAssertFalse(pinsInCouch.isEmpty, "the couch shows a pin, not only +\(over.count)")
+            for p in pinsInCouch { XCTAssertFalse(p.frame.intersects(over.rect), p.id) }
+        }
     }
 }

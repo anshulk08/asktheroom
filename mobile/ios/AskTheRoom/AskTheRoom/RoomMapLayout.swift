@@ -274,24 +274,16 @@ struct RoomMapLayout: Equatable {
         CGFloat(text.count) * (onTable ? 5.8 : 6.8) + 4
     }
 
-    /// The label at the zone's top left, or its bottom left if "You" sits there, or up the
-    /// left edge when the zone is too narrow for it.
+    /// The label just outside the zone, above its top left (below it when the map has no room above), kept
+    /// inside the map: the whole zone stays free for pins, which at the compact map size a label inside
+    /// the zone covered (rig phone, 27 Sep 06:27: "TV STAND" over "book", "+3" over "COUCH").
     private func box(_ zone: RoomPlan.Zone) -> ZoneBox {
         let r = rect(zone.rect)
-        let width = Self.labelWidth(zone.label)
-        let vertical = width > r.width - 2 * Self.inset && r.height > r.width
-        if vertical {
-            let label = CGRect(x: r.minX + 3, y: r.minY + Self.inset, width: Self.labelHeight,
-                               height: min(width, r.height - 2 * Self.inset))
-            return ZoneBox(id: zone.id, label: zone.label, kind: zone.kind, rect: r, labelRect: label, labelVertical: true)
-        }
-        let w = min(width, r.width - 2 * Self.inset - 2)
-        // Top left, unless "You" is there: then bottom left, top right, bottom right.
-        let left = r.minX + Self.inset + 2, right = r.maxX - Self.inset - 2 - w
-        let top = r.minY + 4, bottom = r.maxY - 4 - Self.labelHeight
-        let spots = [CGPoint(x: left, y: top), CGPoint(x: left, y: bottom), CGPoint(x: right, y: top), CGPoint(x: right, y: bottom)]
-            .map { CGRect(origin: $0, size: CGSize(width: w, height: Self.labelHeight)) }
-        let label = spots.first { spot in you.map { !$0.intersects(spot.insetBy(dx: -2, dy: -2)) } ?? true } ?? spots[0]
+        let w = min(Self.labelWidth(zone.label), size.width - 4)
+        let x = min(max(2, r.minX + 2), size.width - 2 - w)
+        let above = r.minY - Self.labelHeight - 1
+        let y = above >= 1 ? above : min(r.maxY + 1, size.height - Self.labelHeight - 1)
+        let label = CGRect(x: x, y: y, width: w, height: Self.labelHeight)
         return ZoneBox(id: zone.id, label: zone.label, kind: zone.kind, rect: r, labelRect: label, labelVertical: false)
     }
 
@@ -363,12 +355,17 @@ struct RoomMapLayout: Equatable {
             }
         }
         let sorted = (things.map(Placed.thing) + sightings.map(Placed.sighting)).sorted { key($0) < key($1) }
-        let fits = sorted.count <= cells.count ? sorted.count : cells.count - 1
+        // One cell for several (a small zone with "You" in it): its first pin and "+N" share the cell, so
+        // the zone never shows only a count.
+        let shared = cells.count == 1 && sorted.count > 1
+        let fits = sorted.count <= cells.count ? sorted.count : shared ? 1 : cells.count - 1
+        let countWidth: CGFloat = 30
         for (item, cell) in zip(sorted.prefix(fits), cells) {
             let d = Self.pinSize
             let dot = CGPoint(x: cell.minX + d / 2 + 1, y: cell.midY)
             let labelX = dot.x + d / 2 + Self.labelGap
-            let label = CGRect(x: labelX, y: cell.midY - 8, width: max(0, cell.maxX - labelX - 2), height: 16)
+            let labelEnd = cell.maxX - 2 - (shared ? countWidth : 0)
+            let label = CGRect(x: labelX, y: cell.midY - 8, width: max(0, labelEnd - labelX), height: 16)
             switch item {
             case .thing(let e):
                 pins.append(pin(e, at: dot, diameter: d, zone: zone.id, label: label, snapshot: snapshot))
@@ -377,7 +374,9 @@ struct RoomMapLayout: Equatable {
             }
         }
         if sorted.count > fits {
-            overflows.append(Overflow(id: zone.id, count: sorted.count - fits, rect: cells[fits]))
+            let rect = shared ? CGRect(x: cells[0].maxX - countWidth, y: cells[0].minY, width: countWidth,
+                                       height: cells[0].height) : cells[fits]
+            overflows.append(Overflow(id: zone.id, count: sorted.count - fits, rect: rect))
         }
     }
 
