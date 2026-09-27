@@ -249,3 +249,97 @@ def test_a_refit_swaps_h_and_hinv_together():
     assert not bad and t.Hinv is t._cal[1]
     t.H = b                                          # assigning H refits Hinv too
     assert np.allclose(t.H @ t.Hinv, np.eye(3))
+
+
+# ----- the view a calibration was made at (demo_check check 17) ------------------------------------
+
+ROOM_1440 = {"enabled": True, "capture_size": [2560, 1440], "zoom": 100, "table_view_rect": [0, 980, 817, 1440]}
+ROOM_1080 = {"enabled": True, "capture_size": [1920, 1080], "zoom": 100, "table_view_rect": [0, 735, 613, 1080]}
+
+
+def test_calibration_records_its_view_and_a_thumbnail_beside_it(table, tmp_path):
+    import hashlib
+
+    from core.table import SIDECAR, THUMB_W
+    assert table.calibrate(render(true_h()))
+    d = json.loads((tmp_path / "table_cal.json").read_text())
+    assert d["view"] == {"capture_size": [1280, 720], "zoom": None, "rect": None, "frame_px": [1280, 720]}
+    patch = d["tag_patch"]
+    assert patch["file"] == SIDECAR and patch["mask"] is None               # four markers stay on the table
+    x1, y1, x2, y2 = patch["box"]
+    for c in d["markers_px"].values():                                       # the box spans the markers
+        assert x1 <= c[0] <= x2 and y1 <= c[1] <= y2
+    png = tmp_path / SIDECAR
+    raw = png.read_bytes()
+    img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_UNCHANGED)
+    assert img.ndim == 2 and img.shape == (180, THUMB_W)                     # grey, small
+    assert patch["sha1"] == hashlib.sha1(raw).hexdigest()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["table_cal.json", SIDECAR]   # no .tmp left
+
+
+def test_the_thumbnail_and_the_json_are_written_atomically(table, tmp_path, monkeypatch):
+    import os
+
+    import core.table
+    moves = []
+    real = os.replace
+    monkeypatch.setattr(core.table.os, "replace", lambda a, b: (moves.append((str(a), str(b))), real(a, b))[1])
+    assert table.calibrate(render(true_h()))
+    names = [(os.path.basename(a), os.path.basename(b)) for a, b in moves]
+    assert names == [("table_cal_view.png.tmp", "table_cal_view.png"), ("table_cal.json.tmp", "table_cal.json")]
+
+
+@needs_new_cv
+def test_tag_calibration_records_the_table_around_the_tag(tmp_path):
+    t = Table(tag_cfg(tmp_path))
+    assert calibrate_tag(t, true_h())
+    d = json.loads((tmp_path / "table_cal.json").read_text())
+    quad = np.array(d["markers_px"]["tag"])
+    x1, y1, x2, y2 = d["tag_patch"]["box"]
+    mask = np.array(d["tag_patch"]["mask"])
+    assert x1 < quad[:, 0].min() and x2 > quad[:, 0].max() and y1 < quad[:, 1].min() and y2 > quad[:, 1].max()
+    assert cv2.contourArea(np.float32(mask)) > 3 * cv2.contourArea(np.float32(quad))   # the tag and its sheet
+    assert (x2 - x1) > np.ptp(mask[:, 0]) and (y2 - y1) > np.ptp(mask[:, 1])          # a ring of table left
+    assert (tmp_path / "table_cal_view.png").exists()
+
+
+def test_room_memory_records_the_view_as_fractions_of_the_capture(tmp_path):
+    cfg = dict(CFG, room_memory=ROOM_1440)
+    t = Table(cfg, cal_path=str(tmp_path / "table_cal.json"))
+    assert t.calibrate(render(true_h()))
+    v = json.loads((tmp_path / "table_cal.json").read_text())["view"]
+    assert v["capture_size"] == [2560, 1440] and v["zoom"] == 100 and v["frame_px"] == [1280, 720]
+    assert v["rect"] == pytest.approx([0, 980 / 1440, 817 / 2560, 1.0], abs=1e-4)
+
+
+def test_1080p_and_1440p_of_the_same_crop_are_one_view():
+    from core.table import config_view, same_view
+    a = config_view(dict(CFG, room_memory=ROOM_1080))
+    b = config_view(dict(CFG, room_memory=ROOM_1440))
+    assert same_view(a, b) == (True, "")
+    moved = config_view(dict(CFG, room_memory=dict(ROOM_1440, table_view_rect=[0, 900, 817, 1440])))
+    ok, why = same_view(a, moved)
+    assert not ok and "table_view_rect" in why
+    zoomed = config_view(dict(CFG, room_memory=dict(ROOM_1440, zoom=130)))
+    ok, why = same_view(b, zoomed)
+    assert not ok and "zoom 100 vs 130" in why
+    ok, why = same_view(b, config_view(CFG))                                  # room memory off: the whole frame
+    assert not ok and "whole frame" in why
+    four_three = config_view(dict(CFG, room_memory=dict(ROOM_1440, capture_size=[1920, 1440],
+                                                        table_view_rect=[0, 980, 613, 1440])))
+    ok, why = same_view(b, four_three)
+    assert not ok and "capture" in why
+    ok, why = same_view(config_view(CFG), config_view(CFG, (1920, 1080)))     # H is in frame px
+    assert not ok and "frame" in why
+
+
+def test_an_old_calibration_file_without_a_view_still_loads(tmp_path):
+    """table_cal.json from before 27 Sep (the rig's, 18:30): no view, no tag_patch."""
+    path = tmp_path / "table_cal.json"
+    H = [[0.0750580, 0.1427103, 0.0], [0.0043077, 0.1884587, 0.0], [9.066e-05, 0.0011885, 1.0]]
+    path.write_text(json.dumps({"H": H, "markers_px": {"tag": [[912.5, 59.0], [722.4, 160.4], [529.1, 122.3],
+                                                              [725.5, 28.5]]}, "size_cm": [100.8, 73.1], "t": 1.0}))
+    t = Table(tag_cfg(tmp_path))
+    assert t.ok and t.size_cm == (100.8, 73.1) and np.allclose(t.H, H)
+    assert t.cm_to_px(t.px_to_cm([[640, 360]])) == pytest.approx(np.float32([[640, 360]]), abs=1e-3)
+    assert not (tmp_path / "table_cal_view.png").exists()

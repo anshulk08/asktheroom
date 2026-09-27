@@ -161,3 +161,62 @@ def test_cli_scales_corners_read_off_a_smaller_dashboard_frame(cli, tmp_path, ca
     saved = json.loads((tmp_path / 'table_area.json').read_text())
     assert np.allclose(saved['polygon_cm'], RECT)
     assert (tmp_path / 'frame_outline.jpg').exists()
+
+
+# ----- --outline-full: corners read off the full room frame -----------------------------------------
+
+ROOM = {'enabled': True, 'capture_size': [2560, 1440], 'zoom': 100, 'table_view_rect': [0, 980, 817, 1440]}
+VIEW_PX = [(50, 20), (1050, 20), (1050, 620), (50, 620)]                  # table-view px of RECT (H above)
+
+
+def full_px(pts, scale=1.0):
+    """Table-view px -> full camera px (TableView's cut of the rig's 1440p frame), times scale."""
+    return [f'{x * 817 / 1280 * scale:.4f},{(980 + y * 460 / 720) * scale:.4f}' for x, y in pts]
+
+
+@pytest.fixture
+def room_cli(tmp_path, monkeypatch):
+    cfg = dict(rig(tmp_path), room_memory=dict(ROOM), frame_size_px=[1280, 720])
+    monkeypatch.setattr(core.config, 'load_config', lambda *a, **k: cfg)
+    return cfg
+
+
+def test_full_frame_px_map_through_the_table_view_rect(room_cli):
+    from core.table_area import full_to_view
+    got = full_to_view(room_cli, [(0, 980), (817, 1440), (408.5, 1210)])
+    assert np.allclose(got, [(0, 0), (1280, 720), (640, 360)])
+    with pytest.raises(ValueError):
+        full_to_view(dict(room_cli, room_memory={'enabled': False}), [(0, 0)])
+
+
+def test_cli_converts_corners_read_off_the_full_frame(room_cli, tmp_path, capsys):
+    assert table_main(['--outline-full', *full_px(VIEW_PX)]) == 0
+    saved = json.loads((tmp_path / 'table_area.json').read_text())
+    assert np.allclose(saved['polygon_cm'], RECT, atol=0.01)
+    assert np.allclose(saved['polygon_px'], VIEW_PX, atol=0.01)              # table-view px, as --outline-px
+    assert np.allclose(saved['polygon_full_px'][0], [50 * 817 / 1280, 980 + 20 * 460 / 720], atol=0.01)
+    assert 'full camera px' in capsys.readouterr().out
+    fresh = dict(room_cli, table_area={})
+    apply_saved_area(fresh)                                                  # valid for this calibration
+    assert np.allclose(fresh['table_area']['polygon_cm'], RECT, atol=0.01)
+
+
+def test_cli_full_scales_the_dashboard_full_jpg_and_draws_the_check_image(room_cli, tmp_path, capsys):
+    """/full.jpg is 1280 px wide: its px are half the 2560 x 1440 capture's."""
+    import cv2
+    img = str(tmp_path / 'full.jpg')
+    cv2.imwrite(img, np.zeros((720, 1280, 3), np.uint8))
+    corners = VIEW_PX[:2] + [(1300, 620), (50, 620)]                         # the third right of the view
+    assert table_main(['--outline-full', *full_px(corners, 0.5), '--image', img]) == 0
+    saved = json.loads((tmp_path / 'table_area.json').read_text())
+    assert np.allclose(saved['polygon_px'], corners, atol=0.05)
+    out = capsys.readouterr().out
+    assert 'outside the table view' in out and 'full_outline.jpg' in out
+    drawn = cv2.imread(str(tmp_path / 'full_outline.jpg'))
+    assert drawn is not None and drawn[..., 1].max() == 255                  # the green outline is on it
+
+
+def test_cli_full_needs_room_memory(cli, tmp_path, capsys):
+    assert table_main(['--outline-full', '10,10', '100,10', '100,100']) == 2
+    assert '--outline-px' in capsys.readouterr().out
+    assert not (tmp_path / 'table_area.json').exists()
