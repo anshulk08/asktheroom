@@ -263,8 +263,8 @@ stt:
   prompt_synonyms: true       # Whisper prompt also lists the synonyms (fixed 'meds' -> 'mids')
   # The prompt for a question (after the wake word or a click; overheard speech keeps the one above): questions
   # as the demo hears them. Whisper writes a prompt's questions back on babble, so it is never used overheard.
-  question_prompt: "Hey Room! Okay Room. Room, what do you see? What color is my pill bottle? Where are my keys?
-    What's on the kitchen counter? What changed? Where did I leave my wallet, glasses, phone, remote, meds, specs?"
+  question_prompt: "Hey Room! Okay Room. Room, what do you see? Room, point to the pill bottle. Room, show me the remote.
+    What color is my pill bottle? Where are my keys? What's on the kitchen counter? What changed? Where did I leave my wallet, glasses, phone, remote, meds, specs?"
   end_drop_db: 10             # crowd noise: after speech, blocks this far below the asker's level are quiet; null = Silero only
   threads: 4
   max_s: 6

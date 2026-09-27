@@ -321,6 +321,8 @@ def test_put_is_a_where_question_only_about_what_i_did(text, kind):
     ("what's on the kitchen counter?", False), ("can you show the remote", False), ("my appointment", False),
     ("don't point at my keys", False), ("stop pointing at the remote", False), ("never point at people", False),
     ("do not show me that", False),
+    ("Quite to the pill bottle.", True), ("pint to the remote", True), ("joint at my keys", True),
+    ("paint to the glasses", True), ("point it to the remote", True), ("don't quite to the remote", False),
 ])
 def test_asks_to_point(text, cue):
     from voice.intents import asks_to_point

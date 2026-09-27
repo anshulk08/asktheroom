@@ -94,8 +94,9 @@ YOU_REQUEST = re.compile(r"\b(?:can|could|would|will|did|do|should)\s+you\s+(?!(
 SHOW = re.compile(r"\b(?:show|point|pointing|light up|highlight|shine|flash|aim|where\s*abouts)\b")
 # Asks for the laser in so many words (room.aim_cue: point): 'point to/at X', 'can you point to X', 'point out X',
 # 'point it out', 'show me X', 'where is X, point to it'. Matched on normalize()d text.
-POINT_CUE = re.compile(r"\bpoint(?:ing)?\s+(?:to|at|out|towards?)\b|\bpoint\s+(?:it|them|that|those)\s+out\b"
-                       r"|\bshow\s+me\b")
+# Whisper hears 'point to' as 'quite to' / 'pint to' / 'joint to' / 'paint to' (rig, 06:57): those count too.
+POINT_CUE = re.compile(r"\b(?:point(?:ing)?|quite|pint|joint|paint)\s+(?:it\s+)?(?:to|at|towards?)\b"
+                       r"|\bpoint(?:ing)?\s+out\b|\bpoint\s+(?:it|them|that|those)\s+out\b|\bshow\s+me\b")
 # 'don't point at my keys', 'stop pointing at the remote', 'never point at people': never a cue (fails closed:
 # 'no, point to the remote' doesn't aim either)
 NO_POINT = re.compile(r"\b(?:dont|do not|never|stop|no|quit|cease|not)\b")
