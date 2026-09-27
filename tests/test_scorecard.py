@@ -321,3 +321,53 @@ def test_room_placement_false_handoff_and_occlusion():
     o = r["occlusions"]["rows"][0]
     assert o["ok"] and o["before"] == "thing:2" == o["after"] and o["while_hidden"] == "UNKNOWN"
     assert crit(r, "identity through occlusion")["result"] == "PASS"
+
+
+def shell_clip(wrong_from=None):
+    """Keys under the first cup, the cup slid and swapped with the second, then lifted. wrong_from: from then
+    on the world has the keys under the second cup."""
+    steps = [{"t": 0.0, "event": "hands_out"}, {"t": 1.0, "event": "place", "obj": "CUP1"},
+             {"t": 3.0, "event": "place", "obj": "CUP2"}, {"t": 5.0, "event": "place", "obj": "B"},
+             {"t": 10.0, "event": "cover", "obj": "B", "parent": "CUP1"},
+             {"t": 20.0, "event": "move", "obj": "CUP1"}, {"t": 30.0, "event": "move", "obj": "CUP1"},
+             {"t": 30.01, "event": "move", "obj": "CUP2"},
+             {"t": 40.0, "event": "uncover", "obj": "B", "parent": "CUP1"}, {"t": 40.01, "event": "move", "obj": "CUP1"}]
+    truth = _truth(steps, {"CUP1": "cup", "CUP2": "cup", "B": "keys"})
+    C1, C2, K = (20.0, 20.0), (60.0, 20.0), (40.0, 40.0)
+
+    def world(t):
+        ents = {}
+        c1 = C1 if t < 20.0 else ((30.0, 30.0) if t < 30.0 else C2)       # the covering cup, slid then swapped
+        c2 = C2 if t < 30.0 else (30.0, 30.0)
+        if t >= 2.0:
+            ents["thing:1"] = ("VISIBLE", None, c1 if t < 40.0 else (10.0, 50.0))
+        if t >= 4.0:
+            ents["thing:2"] = ("VISIBLE", None, c2)
+        if 6.0 <= t < 11.0:
+            ents["thing:3"] = ("VISIBLE", None, K)
+        elif 11.0 <= t < 41.0:
+            parent = "thing:2" if (wrong_from is not None and t >= wrong_from) else "thing:1"
+            ents["thing:3"] = ("UNDER", parent, c1)
+        elif t >= 41.0:
+            ents["thing:3"] = ("VISIBLE", None, C2)
+        return ents, {}, {}
+    trace = _trace(50.0, world, [_appeared("thing:1", 2.0, C1), _appeared("thing:2", 4.0, C2),
+                                 _appeared("thing:3", 6.0, K)])
+    return trace, _clip(truth, 50.0)
+
+
+def test_keys_under_the_shuffled_cup_are_scored_against_the_cup_that_carries_them():
+    from eval.track import trace_to_track
+    trace, clip = shell_clip()
+    for r in (sc.scorecard(trace, clip), sc.score_track(trace_to_track(trace, "shell"), clip)):
+        row = r["covers"]["rows"][0]
+        assert row["entity"] == "thing:3" and row["rate"] == 1.0 and row["same_after"] and row["ok"]
+        assert crit(r, "under the right cover")["result"] == "PASS"
+
+
+def test_keys_believed_under_the_wrong_cup_fail_the_parent_check():
+    trace, clip = shell_clip(wrong_from=30.0)
+    r = sc.scorecard(trace, clip)
+    row = r["covers"]["rows"][0]
+    assert row["under"] == row["frames"] and row["rate"] < 0.8 and row["wrong_parents"] == {"CUP2": 101}
+    assert not row["ok"] and crit(r, "under the right cover")["result"] == "FAIL"

@@ -48,6 +48,10 @@ scorer's mapping; "mapping" adds why) and "identity" (the headline identity numb
   identity through occlusion each block step (a person hides a resting prop, then unblock): hidden, not gone
                              (its entity is never GONE or missing from settle_s after the block to unblock),
                              and the same entity, visible, after unblock as before the block
+  under the right cover      each cover step (keys under the notebook, under a cup): from hide_s after the cue
+                             to the uncover cue the keys' identity is UNDER with its parent the entity bound to
+                             the covering prop then (a shuffled cup is followed), in >= under_rate of the frames,
+                             and the entity that arrives at the uncover is that identity
   identity after return      each putdown with expect_same (brought back after carry_to / remove): the
                              entity that arrives is the one the prop had before it was taken
   removed, not ghosted       each remove step: from ghost_s after it, no visible entity at the prop's spot
@@ -94,6 +98,8 @@ class CardBars:
     pos_cm: float = 5.0                 # a resting prop's entity stays this close to its spot
     handoff_s: float = 30.0             # a carried prop is in its zone within this (or before its next step)
     ghost_s: float = 8.0                # a removed prop's spot is empty from this long after the cue
+    hide_s: float = 4.0                 # a covered prop is scored UNDER its cover from this long after the cue
+    under_rate: float = 0.8             # ... in at least this share of the frames until it is uncovered
     name_min: float = 2.0               # match_score a name needs (room_memory.name_match_min)
     entities_per_object: int = 1
     still_births_per_min: float = 0.0
@@ -459,6 +465,49 @@ class _Card:
                          "ok": before is not None and before == after and bool(v and v[0] == "VISIBLE") and gone == 0})
         return {"rows": rows, "n": len(rows), "ok": sum(r["ok"] for r in rows)}
 
+    def covers(self) -> dict:
+        """cover steps (obj goes under parent): from hide_s after the cue until the uncover cue, the prop's
+        identity from before the cover is hidden (UNDER, or a tracker's plain hidden) with its parent the
+        entity bound to the covering prop at that moment (so a slid or shuffled cup is followed); after the
+        uncover, the entity that arrives is that same identity."""
+        rows = []
+        merged = self.tr.merged
+        for s in self.sc.steps:
+            if s["event"] != "cover" or not s.get("obj") or not s.get("parent"):
+                continue
+            p, c, t = s["obj"], s["parent"], float(s["t"])
+            unc = next((x for x in self.sc.steps if x["event"] == "uncover" and x.get("obj") == p
+                        and float(x["t"]) > t), None)
+            t_un = float(unc["t"]) if unc else self.t1
+            ent = _survivor(self.sc.mapped(p, t - 1e-6), merged)
+            frames = under = right = 0
+            wrong: dict = {}
+            for smp in self.sc.between(t + self.b.hide_s, t_un):
+                frames += 1
+                v = smp.ents.get(ent) if ent else None
+                if v is None or v[0] not in ("UNDER", "HIDDEN"):
+                    continue
+                under += 1
+                want = _survivor(self.sc.mapped(c, smp.t), merged)
+                got = _survivor(v[1], merged) if v[1] else None
+                if want is not None and got == want:
+                    right += 1
+                else:
+                    k = self.sc.as_prop(got, smp.t) if got else None
+                    wrong[str(k)] = wrong.get(str(k), 0) + 1
+            after = None
+            if unc is not None:
+                row_p = next((r for r in self.sc.placements if r["prop"] == p and abs(r["t"] - t_un) < 1e-6), None)
+                after = _survivor(row_p["entity"], merged) if row_p and row_p["entity"] else None
+            rate = right / frames if frames else None
+            rows.append({"t": round(t, 2), "prop": p, "cover": c, "uncover_t": round(t_un, 2) if unc else None,
+                         "entity": ent, "frames": frames, "under": under, "right_parent": right,
+                         "rate": round(rate, 3) if rate is not None else None, "wrong_parents": wrong,
+                         "after": after, "same_after": (after == ent) if unc is not None else None,
+                         "ok": bool(ent and rate is not None and rate >= self.b.under_rate
+                                    and (unc is None or after == ent))})
+        return {"rows": rows, "n": len(rows), "ok": sum(r["ok"] for r in rows)}
+
     def removals(self) -> dict:
         rows = []
         for s in self.sc.steps:
@@ -491,6 +540,7 @@ class _Card:
         hand, rem = self.handoffs(), self.removals()
         placed = self.room_placements()
         false_h, occl, back = self.false_handoffs(placed), self.occlusions(), self.returns()
+        cov = self.covers()
         room_ran = bool(self.tr.room) or any(smp.zones for smp in self.samples)
         crit = [
             _row("entities per real object", _epo(epo), f"{b.entities_per_object}",
@@ -517,6 +567,11 @@ class _Card:
                                                              + (f" '{r['name']}'" if r["name"] else "")
                                                              for r in false_h["rows"]]),
                  "0", false_h["n"] == 0 if room_ran else None),
+            _row("under the right cover", f"{cov['ok']}/{cov['n']}" + _few(
+                [f"{r['prop']} under {r['cover']}: {r['rate'] if r['rate'] is not None else '-'} of frames"
+                 + ("" if r["same_after"] is not False else f", back as {r['after'] or 'none'}")
+                 for r in cov["rows"] if not r["ok"]]),
+                 f">= {b.under_rate:.0%}, same after", cov["ok"] == cov["n"] if cov["n"] else None),
             _row("identity through occlusion", f"{occl['ok']}/{occl['n']}" + _few(
                 [f"{r['prop']}: {r['before']} -> {r['after'] or 'none'}" for r in occl["rows"] if not r["ok"]]),
                  "all", occl["ok"] == occl["n"] if occl["n"] else None),
@@ -541,11 +596,13 @@ class _Card:
                              "phantom_people_per_min": births[PEOPLE]["per_min"],
                              "body_things": body["n"] if body["names_seen"] else None,
                              "false_handoffs": false_h["n"], "handoffs_ok": [hand["ok"], hand["n"]],
-                             "occlusions_ok": [occl["ok"], occl["n"]], "returns_ok": [back["ok"], back["n"]]},
+                             "occlusions_ok": [occl["ok"], occl["n"]], "returns_ok": [back["ok"], back["n"]],
+                             "covers_ok": [cov["ok"], cov["n"]]},
                 "segments": [{"from": round(a, 2), "to": round(b_, 2), "kind": k} for a, b_, k in self.segs],
                 "entities_per_object": epo, "things": things, "phantom_births": births, "body_things": body,
                 "position_still": pos, "handoffs": hand, "removals": rem, "naming": naming,
                 "room_placements": placed, "false_handoffs": false_h, "occlusions": occl, "returns": back,
+                "covers": cov,
                 "overrides": list(getattr(rp, "overrides", None) or []),
                 "bars": asdict(b), "criteria": crit,
                 "pass": all(c["result"] != "FAIL" for c in crit)}
