@@ -367,3 +367,27 @@ def test_unknown_cutouts_still_fail_unless_marked_distractor(tmp_path):
     write_cut(tmp_path / "clash", "phone", distractor=True)             # a distractor can't be a class
     with pytest.raises(ValueError):
         synthesize.synthesize(tmp_path / "clash", NAMES, n=2)
+
+
+def test_capture_opens_the_camera_as_the_detector_sees_it():
+    """With room memory on (spec 0009) the capture source is the 1080p frame cut to table_view_rect and resized
+    to 1280x720 (what core.detect gets on the rig); off, the plain FrameBuffer. --full-frame skips the cut."""
+    from core.room_view import TableView
+    from scripts.finetune import capture as cap
+    made = []
+
+    class Buf:
+        def __init__(self, src, **kw):
+            made.append((src, kw))
+            self.src, self.kw = src, kw
+
+    cfg = {"frame_size_px": [1280, 720],
+           "room_memory": {"enabled": True, "capture_size": [1920, 1080], "table_view_rect": [0, 735, 613, 1080],
+                           "ring_s": 1.0}}
+    src = cap.open_source(cfg, "/dev/video9", make_buffer=Buf)
+    assert isinstance(src, TableView) and src.rect == (0, 735, 613, 1080) and src.out_size == (1280, 720)
+    assert made[0][0] == "/dev/video9" and made[0][1]["ring_s"] == 1.0 and callable(made[0][1]["opener"])
+    plain = cap.open_source(cfg, 0, make_buffer=Buf, full_frame=True)
+    assert isinstance(plain, Buf) and plain.kw.get("opener") is not None      # still 1080p, uncut
+    off = cap.open_source({"room_memory": {"enabled": False}}, 0, make_buffer=Buf)
+    assert isinstance(off, Buf) and off.kw == {}
