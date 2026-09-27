@@ -4,8 +4,9 @@ Answers are spoken: 1-2 short sentences, no markdown. Pill bottle wording is del
 no template says a pill or medication was taken ('taken out of' is phrased 'lifted out of').
 
 Open world: a question may name a thing taught with 'this is my charger' (or a name not taught yet).
-Names resolve through world.find; a thing is spoken by its alias (or as the thing I haven't been
-told about), and a thing that left while something similar came back is hedged, never asserted.
+Names resolve through world.find; a thing is spoken by its alias, else as what it looks like (Grok's
+guess, hedged), else as a new thing, and never by its number. A thing that left while something similar
+came back is hedged, never asserted.
 TEACH itself is answered by voice/teach.py.
 """
 from __future__ import annotations
@@ -24,9 +25,12 @@ __all__ = ["Answer", "answer", "ago", "clock", "area"]
 PLURAL = {"keys", "glasses", "pills"}
 NEAR_CM = 25.0          # 'near the X' only when another visible object is this close
 CHANGES_WINDOW_S = 600  # default look-back for 'what changed'
-ALSO_NAMED_MAX = 3      # 'what changed': other changed things named, the rest counted
+ALSO_NAMED_MAX = 3      # 'what changed': other changed things named, the rest 'a few other things'
 PUT_DOWN = ("PUT_BACK", "MOVED", "PUT_INSIDE", "COVERED", "EXITED_VIEW")
-UNNAMED = "thing I haven't been told about"
+TOUCHED = PUT_DOWN + ("PICKED_UP", "UNCOVERED", "TAKEN_OUT")    # a hand did it, not the tracker
+UNNAMED = "new thing"   # a thing with no taught name and no confident guess (never its number)
+GUESS_MIN = 0.5         # an automatic guess below this confidence is not spoken
+YOUNG_S = 30.0          # 'what changed' leaves out a thing seen for less than this that no hand touched
 
 
 # ---------- wording helpers ----------
@@ -45,15 +49,39 @@ def _your(cfg: dict, obj: str) -> str:
 
 
 def _dn(cfg: dict, obj: str) -> str:
-    """display_name, except a thing id is never spoken: an unlabelled thing is the UNNAMED phrase."""
-    if obj.startswith("thing:") and obj not in (cfg.get("display_names") or {}):
-        return UNNAMED
+    """display_name, except a thing id is never spoken: an unlabelled thing is what it looks like
+    ('thing that looks like a mug'), else the UNNAMED phrase."""
+    if obj.startswith("thing:") and (cfg.get("display_names") or {}).get(obj, UNNAMED) == UNNAMED:
+        g = (cfg.get("thing_guesses") or {}).get(obj)
+        return f"thing that looks like {_a(g)}" if g else UNNAMED
     return display_name(cfg, obj)
 
 
 def _pk(cfg: dict, obj: str) -> str:
     """The word whose number decides 'is' / 'are': a thing's spoken name ('headphones'), else obj."""
-    return _dn(cfg, obj) if obj.startswith("thing:") else obj
+    if obj.startswith("thing:"):
+        n = _dn(cfg, obj)
+        return "thing" if n.startswith("thing that looks like") else n
+    return obj
+
+
+def _a(name: str) -> str:
+    """'a mug', 'an apple', 'glasses'."""
+    return name if _plural(name) else f"{'an' if name[:1] in 'aeiou' else 'a'} {name}"
+
+
+def _named_thing(cfg: dict, obj: str) -> bool:
+    """A prop, or a thing with a taught (or Grok-bound) name: what 'what changed' leads with."""
+    return not obj.startswith("thing:") or (cfg.get("display_names") or {}).get(obj, UNNAMED) != UNNAMED
+
+
+def _subject(cfg: dict, obj: str) -> Optional[str]:
+    """How 'what changed' names something: 'the keys', 'something that looks like a pill bottle', or
+    None for a thing with neither a name nor a confident guess (left out: it's noise to a listener)."""
+    if _named_thing(cfg, obj):
+        return f"the {_dn(cfg, obj)}"
+    g = (cfg.get("thing_guesses") or {}).get(obj)
+    return f"something that looks like {_a(g)}" if g else None
 
 
 def _it(obj: str) -> str:
@@ -150,13 +178,13 @@ def _clause(e: Entity, world, cfg: dict) -> Optional[str]:
 
 def _event_phrase(ev: Event, cfg: dict) -> str:
     """Passive participle phrase for an event: 'picked up', 'put inside the box'."""
-    p = _dn(cfg, ev.parent) if ev.parent and not ev.parent.startswith("hand") \
-        and ev.parent != "unknown" else None
+    p = ev.parent if ev.parent and not ev.parent.startswith("hand") and ev.parent != "unknown" else None
+    cover = _pn(cfg, p) if p else "a container"
     return {
         "PICKED_UP": "picked up",
         "PUT_BACK": "put back down",
         "MOVED": "moved",
-        "COVERED": f"covered by the {p}" if p else "covered up",
+        "COVERED": f"covered by {cover}" if cover != "a container" else "covered up",
         "UNCOVERED": "uncovered",
         "PUT_INSIDE": f"put inside {_pn(cfg, ev.parent)}" if p else "put inside something",
         "TAKEN_OUT": f"lifted out of {_pn(cfg, ev.parent)}" if p else "lifted out of something",
@@ -386,38 +414,57 @@ def _handled(obj: str, world, events, cfg: dict, now: float) -> Answer:
 
 
 def _changes(events, cfg: dict, now: float, since: Optional[float]) -> Answer:
+    """'What changed?': named things first, then things Grok has a confident guess for ('something that
+    looks like a pill bottle'), most recent first. A thing with neither is left out, as is a thing seen for
+    under YOUNG_S that no hand touched (a busy room births hundreds of both). Never a number: past the
+    first few, 'and a few other things'."""
     t0 = since if since is not None else now - CHANGES_WINDOW_S
     evs = events.since(t0) if events is not None else []
+    when = f"since {clock(t0)}" if since is not None else "in the last 10 minutes"
     if not evs:
-        when = f"since {clock(t0)}" if since is not None else "in the last 10 minutes"
         return Answer(f"Nothing has changed {when}.")
     groups: dict[str, list[Event]] = {}
     for ev in evs:
         groups.setdefault(ev.obj, []).append(ev)
-    order = sorted(groups, key=lambda o: groups[o][-1].wall, reverse=True)
-    sents = []
+    said: dict[str, tuple[str, list[Event]]] = {}      # obj -> (subject, the events worth saying)
+    for o, g in groups.items():
+        subj, touched = _subject(cfg, o), [ev for ev in g if ev.type in TOUCHED]
+        if subj is None:
+            continue
+        if not _named_thing(cfg, o):        # a guessed thing: what a hand did to it, else that it arrived
+            born = next((ev for ev in g if ev.type == "APPEARED"), None)
+            if touched:
+                g = touched
+            elif born is not None and now - born.wall >= YOUNG_S:
+                g = [born]
+            else:
+                continue
+        said[o] = (subj, g)
+    if not said:
+        return Answer(f"Nothing I can name has changed {when}.")
+    order = sorted(said, key=lambda o: (not _named_thing(cfg, o), -said[o][1][-1].wall))
+    sents: list[str] = []
     for o in order[:3] if len(order) <= 3 else order[:2]:
-        g = groups[o]
+        subj, g = said[o]
         pair = g if len(g) == 1 else [g[0], g[-1]]
         ph = _chain(pair, cfg, now) if len(pair) == 1 else \
             f"{_event_phrase(pair[0], cfg)}, then {_event_phrase(pair[1], cfg)} {ago(pair[1].wall, now)}"
-        s = f"The {_dn(cfg, o)} {_be(_pk(cfg, o), True)} {ph}."
-        if s not in sents:              # two unnamed things first seen together read the same
+        s = f"{subj[:1].upper()}{subj[1:]} {_be(_pk(cfg, o), True)} {ph}."
+        if s not in sents:              # two look-alikes put down together read the same
             sents.append(s)
     if len(order) > 3:
-        # A busy room changes hundreds of unnamed things: name a few, count the rest (a spoken list of
-        # every one ran to 21,000 characters on the rig and took the app down with it)
+        # A busy room changes hundreds of things: name a few, then 'a few other things' (a spoken list
+        # of every one ran to 21,000 characters on the rig and took the app down with it)
         names: list[str] = []
         for o in order[2:]:
-            n = _dn(cfg, o)
-            if n != UNNAMED and n not in names:
+            n = f"the {_dn(cfg, o)}" if _named_thing(cfg, o) else None
+            if n and n not in names and len(names) < ALSO_NAMED_MAX:
                 names.append(n)
-        names = names[:ALSO_NAMED_MAX]
-        others = len(order) - 2 - len(names)
-        if others:
-            names.append(f"{others} other thing" + ("s" if others > 1 else ""))
+        rest = len(order) - 2 - len(names)
+        if rest:
+            names.append("a few other things" if rest > 1 else "something else")
         lst = names[0] if len(names) == 1 else ", ".join(names[:-1]) + f" and {names[-1]}"
-        sents.append(f"{'The ' if names[0][0].isalpha() else ''}{lst} also changed.")
+        sents.append(f"{lst[:1].upper()}{lst[1:]} also changed.")
     return Answer(" ".join(sents))
 
 
@@ -601,13 +648,15 @@ def _with_things(cfg: dict, world) -> dict:
 
 
 def _thing_guesses(world) -> dict:
-    """Thing -> its automatic name guess (core/auto_name.py adds 'guess' to state_json), for naming a
-    thing that holds others: 'inside the plastic tub'."""
+    """Thing -> its automatic name guess at GUESS_MIN or above (core/auto_name.py adds 'guess' to
+    state_json), for naming a thing that holds others ('inside the plastic tub') and for 'what changed'
+    ('something that looks like a pill bottle')."""
     try:
         out = {}
         for e in world.state_json().get("entities") or []:
             g = e.get("guess") if isinstance(e, dict) else None
-            if isinstance(g, dict) and g.get("name") and str(e.get("name", "")).startswith("thing:"):
+            if isinstance(g, dict) and g.get("name") and str(e.get("name", "")).startswith("thing:") \
+                    and float(g.get("confidence", 1.0)) >= GUESS_MIN:
                 out[e["name"]] = str(g["name"])
         return out
     except Exception:
@@ -751,14 +800,16 @@ def _narrations_text(rows, now: float, third: bool = False) -> str:
 
 
 def _events_text(evs: list[Event], cfg: dict) -> str:
-    """'the keys were picked up at 2:02 PM and put inside the box' for up to two objects."""
+    """'the keys were picked up at 2:02 PM and put inside the box' for up to two objects ('' if none has
+    a name or a confident guess: see _subject)."""
     groups: dict[str, list[Event]] = {}
     for ev in sorted(evs, key=lambda e: e.wall):
-        groups.setdefault(ev.obj, []).append(ev)
+        if _subject(cfg, ev.obj):
+            groups.setdefault(ev.obj, []).append(ev)
     parts = []
     for o in sorted(groups, key=lambda o: groups[o][-1].wall)[-2:]:
         g = groups[o]
-        s = f"the {_dn(cfg, o)} {_be(_pk(cfg, o), True)} {_event_phrase(g[0], cfg)} at {clock(g[0].wall)}"
+        s = f"{_subject(cfg, o)} {_be(_pk(cfg, o), True)} {_event_phrase(g[0], cfg)} at {clock(g[0].wall)}"
         if len(g) > 1:
             s += f" and {_event_phrase(g[-1], cfg)}"
             if clock(g[-1].wall) != clock(g[0].wall):
@@ -783,8 +834,9 @@ def _what_doing(intent: Intent, events, cfg: dict, now: float) -> Answer:
             return Answer(_narrations_text(rows, now))
         t0, t1, none = w.t0, w.t1, f"I didn't see anything happen on the table {w.label}."
     evs = [e for e in (events.since(t0) if events is not None else []) if e.wall <= t1]
-    if evs:
-        return Answer(f"I don't have a description of that, but {_events_text(evs, cfg)}.")
+    said = _events_text(evs, cfg)
+    if said:
+        return Answer(f"I don't have a description of that, but {said}.")
     return Answer(none)
 
 

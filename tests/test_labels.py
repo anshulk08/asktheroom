@@ -19,7 +19,8 @@ CFG = load_config()
 
 
 def test_thing_label():
-    assert thing_label('thing:7') == 'unnamed object 7'
+    assert thing_label('thing:7') == 'something new'
+    assert thing_label('thing:7', guess='mug') == 'mug?'
     assert thing_label('thing:7', 'charger') == 'charger'
     assert thing_label('keys') == 'keys'
 
@@ -27,15 +28,23 @@ def test_thing_label():
 def test_thing_labels_follow_merges_and_skip_configured_objects():
     st = {'entities': [{'name': 'keys'}, {'name': 'thing:1', 'label': 'charger'}, {'name': 'thing:4', 'label': None}],
           'merged': {'thing:2': 'thing:1', 'thing:3': 'thing:2'}}
-    assert thing_labels(st) == {'thing:1': 'charger', 'thing:4': 'unnamed object 4',
+    assert thing_labels(st) == {'thing:1': 'charger', 'thing:4': 'something new',
                                 'thing:2': 'charger', 'thing:3': 'charger'}
     assert thing_labels(None) == {}
+
+
+def test_thing_labels_never_number_a_thing_but_keep_each_name_unique():
+    # Grok picks a thing by its name (tool enum, point_at), so two look-alikes can't share one
+    st = {'entities': [{'name': f'thing:{i}', 'label': None} for i in (3, 8, 12)]
+                      + [{'name': 'thing:5', 'guess': {'name': 'mug'}}, {'name': 'thing:6', 'guess': {'name': 'mug'}}]}
+    assert thing_labels(st) == {'thing:3': 'something new', 'thing:8': 'something new (2)',
+                                'thing:12': 'something new (3)', 'thing:5': 'mug?', 'thing:6': 'mug? (2)'}
 
 
 def test_spoken():
     labels = {'thing:1': 'charger'}
     assert spoken('thing:1', labels) == 'charger'
-    assert spoken('thing:9', labels) == 'unnamed object 9'
+    assert spoken('thing:9', labels) == 'something new'
     assert spoken('pill_bottle', labels) == 'pill bottle'
     assert spoken('hand:2', labels) == 'hand 2'
     assert spoken(None, labels) == ''
@@ -69,7 +78,7 @@ def test_overlay_labels_use_taught_names(world):
     labels = thing_labels(st)
     ents = {e['name']: e for e in st['entities']}
     assert overlay._label(ents['thing:2'], labels) == 'charger: on table'
-    assert overlay._label(ents['thing:1'], labels) == 'unnamed object 1: on table'
+    assert overlay._label(ents['thing:1'], labels) == 'something new: on table'
     assert overlay._label(ents['pill_bottle'], labels).startswith('pill bottle: ')
     inside = dict(ents['keys'], status='INSIDE', parent='thing:2')
     assert overlay._label(inside, labels) == 'keys: inside charger'
@@ -84,7 +93,7 @@ def test_grok_world_state_says_names_not_ids(world):
     text = json.dumps(s)
     assert 'thing:' not in text
     names = [e['name'] for e in s]
-    assert 'charger' in names and 'unnamed object 1' in names and 'keys' in names
+    assert 'charger' in names and 'something new' in names and 'keys' in names
 
 
 def test_grok_maybe_same_as_and_parents_use_names():
@@ -97,8 +106,8 @@ def test_grok_maybe_same_as_and_parents_use_names():
                  'label': 'charger', 'candidates': ['thing:3']},
                 {'name': 'keys', 'status': 'UNDER', 'parent': 'thing:1', 'confidence': 0.85}]}
     s = {e['name']: e for e in llm.compact_state(W(), CFG)}
-    assert s['unnamed object 3']['maybe_same_as'] == ['charger']
-    assert s['charger']['candidates'] == ['unnamed object 3']
+    assert s['something new']['maybe_same_as'] == ['charger']
+    assert s['charger']['candidates'] == ['something new']
     assert s['keys']['parent'] == 'charger'
 
 
@@ -106,7 +115,7 @@ def test_grok_tools_and_pointing_accept_the_names(world):
     tools = llm._Tools(world, world.events, CFG)
     loc = tools.call('locate', {'object': 'charger'})
     assert loc['object'] == 'charger' and loc['status'] == 'VISIBLE' and 'thing:' not in json.dumps(loc)
-    assert tools.call('locate', {'object': 'unnamed object 1'})['object'] == 'unnamed object 1'
+    assert tools.call('locate', {'object': 'something new'})['object'] == 'something new'
     assert tools.call('history', {'object': 'charger'})['object'] == 'charger'
     assert 'thing:' not in json.dumps(tools.call('changes_since', {'iso_time': '2000-01-01T00:00:00Z'}))
 
@@ -114,7 +123,7 @@ def test_grok_tools_and_pointing_accept_the_names(world):
     labels = llm._labels(world)
     a = llm.to_answer('Your charger is on the left.', 'charger', names, CFG, labels)
     assert a.point_at == 'thing:2' and a.action == 'point'          # the laser gets the entity id
-    assert llm.to_answer('It is there.', 'unnamed object 1', names, CFG, labels).point_at == 'thing:1'
+    assert llm.to_answer('It is there.', 'something new', names, CFG, labels).point_at == 'thing:1'
     assert llm.to_answer('Keys.', 'keys', names, CFG, labels).point_at == 'keys'
 
 
@@ -134,4 +143,4 @@ def test_grok_request_lists_names_in_the_prompt_and_enum(monkeypatch, world):
     system = seen['messages'][0]['content']
     assert 'thing:' not in system and 'charger' in system
     enum = seen['tools'][0]['function']['parameters']['properties']['object']['enum']
-    assert 'charger' in enum and 'unnamed object 1' in enum and not any(n.startswith('thing:') for n in enum)
+    assert 'charger' in enum and 'something new' in enum and not any(n.startswith('thing:') for n in enum)

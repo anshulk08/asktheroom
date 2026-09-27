@@ -248,11 +248,16 @@ def test_history_of_a_taught_thing(scene, world):
     assert a.text.startswith("Your charger was first seen")
 
 
-def test_changes_mentions_unnamed_things_without_internal_names(scene, world):
+def test_changes_leave_out_a_nameless_thing_and_say_it_once_named(scene, world):
     put(scene, world, 'lamp', (60, 30))
     a = ask(world, "what changed while I was gone?", since=scene.t - 60)
     spoken_ok(a)
-    assert "haven't been told about" in a.text
+    assert a.text.startswith("Nothing I can name has changed since"), a.text
+    lamp = next(n for n, label in world.thing_labels().items() if label is None)
+    world.bind_alias(lamp, 'lamp')
+    a = ask(world, "what changed while I was gone?", since=scene.t - 60)
+    spoken_ok(a)
+    assert a.text.startswith("The lamp was first seen"), a.text
 
 
 def exit_left(scene, world, at=(10, 50)):

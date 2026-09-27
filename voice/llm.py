@@ -52,7 +52,7 @@ Rules:
 - If an object's confidence is below {plain}, hedge with "probably". If its status is UNKNOWN, say "I lost track of" it and where it was last seen.
 - Status meanings: VISIBLE on the table; HELD in a hand; INSIDE a container (parent); UNDER a cover (parent); GONE left the camera view (edge tells which side); UNKNOWN lost track.
 - Say object names with spaces (pill bottle, not pill_bottle). Times: say "a minute ago", "about 5 minutes ago", etc.
-- The objects are: {objects}. Things the person named appear by that name; "unnamed object N" is one nobody has named yet (describe it by where it is, not by its number). maybe_same_as lists objects that may be the same physical object.
+- The objects are: {objects}. Things the person named appear by that name; "mug?" is a thing nobody has named that looks like a mug (say "what looks like a mug"), and "something new" is one with no name and no guess (describe it by where it is; never say a number in brackets). maybe_same_as lists objects that may be the same physical object.
 - Always finish by calling respond(text, point_at). Set point_at to the object the answer is about when pointing at it helps (for hidden objects, point at the object itself; the laser follows it to its container), otherwise leave it empty.
 - You may call locate, history, or changes_since first, but only if the state below is not enough. Be quick.
 
@@ -103,7 +103,7 @@ def _ago(wall: Optional[float], now: float) -> Optional[int]:
 
 def compact_state(world, cfg: dict) -> list[dict]:
     """world.state_json() minus noise (fps, laser, raw coordinates, redundant edges). Open-world
-    things go by their taught name or 'unnamed object N', never the internal id (core/labels.py)."""
+    things go by their taught name, else 'mug?' or 'something new', never the internal id (core/labels.py)."""
     now = time.time()
     out = []
     st = world.state_json()
@@ -178,7 +178,7 @@ class _Tools:
 
     def _name(self, raw: Any) -> str:
         n = str(raw or "").strip().lower()
-        if n in self.ids:                     # a thing by its taught name / 'unnamed object N'
+        if n in self.ids:                     # a thing by its taught name / 'mug?' / 'something new (2)'
             return self.ids[n]
         find = getattr(self.world, "find", None)
         hit = find(n) if callable(find) and n else None     # 'my charger', plurals, taught aliases
