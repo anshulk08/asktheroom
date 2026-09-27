@@ -43,29 +43,35 @@ def make_ask(cfg: dict, world, events, net=None, other: Optional[Callable] = Non
     def ask(text: str, source: str = "voice") -> Answer:
         t0 = time.perf_counter()
         online = bool(net and net.online)
+        log.info("asked (%s): %r", source, text, extra={"live": {"stage": "asked", "text": text, "source": source,
+                                                                 "online": online}})
         ans = _from_zones(text)
         if ans is not None:              # 'point to the couch': the zone itself, no interpreter or Grok needed
-            _log(text, "WHERE", None, ans, online, t0)
+            _log(text, "WHERE", None, ans, online, t0, "zone point")
             return ans
         intent = interpret(text)
-        ans = _from_room_tracks(intent)
+        ans, path = _from_room_tracks(intent), "room track"
         if ans is None:
-            ans = _from_room_pick(intent, text, online)
+            ans, path = _from_room_pick(intent, text, online), "room pick (Grok close-ups)"
         if ans is None and visual is not None:
             try:
-                ans = visual.route(intent, text, online)
+                ans, path = visual.route(intent, text, online), "visual (Grok with the frame)"
             except Exception:
                 log.exception("visual route failed")
         if ans is None and intent.kind == "OTHER":
-            ans = other(text, world, events, cfg, online=online)
+            ans, path = other(text, world, events, cfg, online=online), "other (templates, then Grok)"
         elif ans is None:
             describe = visual.describe_where if visual is not None and online else None
             ans = answer(intent, world, events, cfg, now=clock() if clock is not None else None, describe=describe)
-        _log(text, intent.kind, intent.obj, ans, online, t0)
+            path = "world model templates"
+        _log(text, intent.kind, intent.obj, ans, online, t0, path)
         return ans
 
-    def _log(text: str, kind: str, obj, ans: Answer, online: bool, t0: float) -> None:
+    def _log(text: str, kind: str, obj, ans: Answer, online: bool, t0: float, path: str) -> None:
         latency_ms = int((time.perf_counter() - t0) * 1000)
+        log.info("answer via %s in %d ms: %r", path, latency_ms, ans.text,     # the /live timeline's route stage
+                 extra={"live": {"stage": "answer", "path": path, "intent": kind, "obj": obj, "answer": ans.text,
+                                 "action": ans.action, "point_at": ans.point_at, "ms": latency_ms}})
         try:
             events.log_question(text, kind, obj, ans.text, online, latency_ms)
         except Exception:

@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ask the Room · live state</title>
+  <link rel="stylesheet" href="/static/live.css">
+</head>
+<body>
+  <div id="lock" class="lock" hidden></div>
+  <header class="top">
+    <h1>Ask the Room · live state</h1>
+    <span id="link" class="pill" data-state="wait">connecting</span>
+    <span id="net" class="pill">network ?</span>
+    <span id="fps" class="pill">fps ?</span>
+    <span id="clock" class="clock">--:--:--</span>
+  </header>
+  <main class="grid">
+    <section class="col timeline">
+      <h2>Questions <span class="sub">newest first · every stage with its time</span></h2>
+      <div class="legend">
+        <span class="chip hit">hit</span><span class="chip miss">miss</span><span class="chip refused">refused</span>
+        <span class="chip no_cue">no point cue</span><span class="chip spoken">spoken only</span>
+        <span class="chip pending">pending</span>
+      </div>
+      <ol id="questions" class="questions"></ol>
+      <p id="no-q" class="empty">No questions since the app started. Say &ldquo;Room, point to the couch.&rdquo;</p>
+      <h2>Earlier answers <span class="sub">events.db, survives restarts</span></h2>
+      <table id="history" class="tbl"></table>
+    </section>
+    <section class="col side">
+      <div class="panel">
+        <h2>Camera <span class="sub">zones in green, room places in red</span></h2>
+        <img id="cam" class="cam" alt="the rig's camera">
+      </div>
+      <div class="panel">
+        <h2>Laser</h2>
+        <dl id="laser" class="kv"></dl>
+        <h3>Last aim</h3>
+        <dl id="last-aim" class="kv small"></dl>
+      </div>
+      <div class="panel">
+        <h2>Room tracks <span class="sub">by zone · Grok's name · age since last match</span></h2>
+        <div id="zones"></div>
+      </div>
+      <div class="panel">
+        <h2>Table things</h2>
+        <table id="things" class="tbl"></table>
+      </div>
+      <div class="panel">
+        <h2>Naming <span class="sub">room tracks and table things, as Grok names them</span></h2>
+        <ol id="naming" class="feed"></ol>
+      </div>
+      <div class="panel">
+        <h2>Other events <span class="sub">locks, re-homes, warnings</span></h2>
+        <ol id="ambient" class="feed"></ol>
+      </div>
+      <p id="errors" class="errors" hidden></p>
+    </section>
+  </main>
+  <script src="/static/live.js"></script>
+</body>
+</html>

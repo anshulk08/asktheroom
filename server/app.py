@@ -198,7 +198,8 @@ def canned_ask(cfg: dict, world) -> AskFn:
 def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = None,
                table=None, care=None, voice_fn: Optional[Callable[..., Any]] = None,
                listening_fn: Optional[Callable[[], bool]] = None,
-               rehome_fn: Optional[Callable[[str], dict]] = None) -> FastAPI:
+               rehome_fn: Optional[Callable[[str], dict]] = None,
+               live_fn: Optional[Callable[[], dict]] = None) -> FastAPI:
     apply_saved(cfg)                     # the seat the phone chose last time (data/viewer.json), into cfg
     scfg = cfg.get("server") or {}
     push_period = 1.0 / float(scfg.get("push_hz", 5) or 5)
@@ -208,6 +209,8 @@ def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = 
     snap_root = snap_dir.resolve()
     ask = ask_fn or canned_ask(cfg, world)
 
+    from server import live as live_log
+    live_ring = live_log.install()        # the /live timeline: this process's log, grouped into questions
     app = FastAPI(title="Ask the Room", docs_url=None, redoc_url=None)
     app.state.last_answer = None
     app.state.answers = collections.deque(maxlen=10)   # recent answers from every source, for the phone
@@ -669,6 +672,41 @@ def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = 
         if jpg is None:
             raise HTTPException(404, "no such image")
         return Response(jpg, media_type="image/jpeg", headers={"Cache-Control": "max-age=3600"})
+
+    # -- live engineering view: every stage of every answer, the laser, the room tracks. Read only.
+    @app.get("/live", response_class=HTMLResponse)
+    def live_page():
+        return FileResponse(WEB_DIR / "live.html", media_type="text/html", headers={"Cache-Control": "no-cache"})
+
+    @app.get("/live/state")
+    async def live_state():
+        def gather() -> dict:
+            out: dict = {"server_t": time.time(), "errors": {}}
+            for key, fn in (("timeline", live_ring.snapshot), ("rig", live_fn),
+                            ("history", lambda: events.recent_questions(20)), ("world", live_world)):
+                if fn is None:
+                    continue
+                try:
+                    v = fn()
+                except Exception as ex:                    # one failing source leaves the others
+                    log.exception("/live %s failed", key)
+                    out["errors"][key] = repr(ex)
+                    continue
+                if key == "timeline":
+                    out.update(v)
+                else:
+                    out[key] = v
+            return out
+        return Response(dumps(await asyncio.to_thread(gather)), media_type="application/json",
+                        headers={"Cache-Control": "no-store"})
+
+    def live_world() -> dict:
+        st = world.state_json() or {}
+        ents = [{"name": e.get("name"), "status": e.get("status"), "zone": e.get("zone"), "parent": e.get("parent"),
+                 "confidence": e.get("confidence"), "last_seen": e.get("last_seen"), "pos_cm": e.get("pos_cm")}
+                for e in st.get("entities") or [] if e.get("status") not in (None, "UNKNOWN") or e.get("last_seen")]
+        return {"online": st.get("online"), "fps": st.get("fps"), "laser": st.get("laser"),
+                "perception": st.get("perception"), "entities": ents, "room": st.get("room")}
 
     @app.get("/room_layout")
     async def room_layout_route():

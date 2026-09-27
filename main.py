@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import difflib
 import logging
+import math
 import os
 import signal
 import tempfile
@@ -150,6 +151,35 @@ def _rules_answer(text: str, world, events, cfg: dict) -> Answer:
 
 CUE_AFTER_VERDICT_S = 0.3      # overheard: after the model accepts, the answer gets this long before the cue
 
+
+
+def _num(v):
+    """A float for JSON (None for NaN or inf)."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return round(f, 2) if math.isfinite(f) else None
+
+
+def _aim_json(d) -> dict:
+    """A laser state or last_aim dict as plain JSON values (arrays to lists, NaN to None) for /live."""
+    out = {}
+    for k, v in dict(d or {}).items():
+        if isinstance(v, (bool, str)) or v is None:
+            out[k] = v
+        elif isinstance(v, dict):
+            out[k] = _aim_json(v)
+        elif isinstance(v, (int, float)) or hasattr(v, "__float__") and not hasattr(v, "__len__"):
+            out[k] = _num(v)
+        elif hasattr(v, "__len__"):
+            try:
+                out[k] = [_num(x) if not isinstance(x, str) else x for x in v]
+            except Exception:
+                out[k] = str(v)
+        else:
+            out[k] = str(v)
+    return out
 
 class Room:
     """Owns every part and thread. build() wires the rig or the fake; run() starts the threads."""
@@ -404,7 +434,8 @@ class Room:
                     la = getattr(self.laser, "last_aim", None) or {}
                     self._note_drift(la.get("first_err_cm"), la.get("reason"), self.drift_cm)
                 log.info("laser -> %s at (%.1f, %.1f) via %s%s", ans.point_at, pos[0], pos[1],
-                         ">".join(chain), f", err {err:.1f} cm" if err is not None else "")
+                         ">".join(chain), f", err {err:.1f} cm" if err is not None else "",
+                         extra={"live": {"laser": _aim_json(getattr(self.laser, "last_aim", None))}})
         except (RuntimeError, ValueError) as ex:
             log.warning("laser not aimed: %s", ex)
             self._safe_off()
@@ -591,7 +622,11 @@ class Room:
         r = self.laser.aim_px(uv, box, check=lambda: self._unsafe(uv, box))
         log.info("laser -> %sroom px (%.0f, %.0f): %s after %d tries, err %.1f px%s", f"{name} at " if name else "",
                  uv[0], uv[1], r.reason, r.tries, r.err_px,
-                 f" ({self.laser.last_aim.get('unsafe')})" if r.reason == "unsafe" else "")
+                 f" ({self.laser.last_aim.get('unsafe')})" if r.reason == "unsafe" else "",
+                 extra={"live": {"laser": {**_aim_json(getattr(self.laser, "last_aim", None)),
+                                           "first_raw_px": getattr(r, "first_raw_px", None),
+                                           "first_err_px": getattr(r, "first_err_px", None),
+                                           "box_px": list(box) if box is not None else None}}})
         if r.on_target and name:
             self.laser.state["target"] = name
         if not r.on_target:                   # never leave the dot somewhere it wasn't confirmed
@@ -661,6 +696,44 @@ class Room:
                 return {"ok": False, "why": f"step must be release or zero, not {step!r}"}
         log.warning("laser re-home: %s", step)
         return {"ok": True, "step": step, "locked": self.laser_locked}
+
+    def live_state(self) -> dict:
+        """What /live shows besides the question timeline (server/live.py): the laser (lock, drift, last aim,
+        learned bias, room map), room memory's zones and tracks, and the network. Read only; every part is
+        best effort, so one failing source leaves the others."""
+        out: dict = {"t": time.time()}
+        try:
+            las = self.laser
+            rm = getattr(las, "room_map", None)
+            bias = getattr(las, "px_bias", None)
+            out["laser"] = {
+                "present": las is not None, "locked": self.laser_locked, "drift_n": self._drift_n,
+                "drift_aims": self.drift_aims, "state": _aim_json(getattr(las, "state", None)),
+                "last_aim": _aim_json(getattr(las, "last_aim", None)),
+                "px_bias": [round(float(v), 1) for v in bias] if bias is not None else None,
+                "room_enabled": bool(self.room_enabled), "aim_cue": self.aim_cue,
+                "room_map": None if rm is None else {"dots": int(rm.n_seen), "points": int(len(rm.pulses)),
+                                                     "spacing_px": _num(rm.spacing_px), "zones": sorted(rm.zones)}}
+        except Exception as ex:
+            out["laser"] = {"error": repr(ex)}
+        try:
+            out["online"] = bool(self.netmon.online) if self.netmon is not None else None
+        except Exception:
+            out["online"] = None
+        try:
+            mem = self.room_memory
+            if mem is not None:
+                now = time.time()
+                zones = [{"name": z.name, "say": z.say} for z in mem.zones.zones.values()]
+                tracks = [{"tid": tr.tid, "zone": tr.zone, "cls": tr.cls, "name": (tr.guess or {}).get("name"),
+                           "confidence": (tr.guess or {}).get("confidence"), "confirmed": bool(tr.confirmed),
+                           "role": tr.role, "entity": tr.entity, "hits": tr.hits, "misses": tr.misses,
+                           "age_s": round(now - tr.last_wall, 1), "box_px": [round(float(v)) for v in tr.box_px]}
+                          for tr in mem.tracker.tracks()]
+                out["room"] = {"zones": zones, "tracks": sorted(tracks, key=lambda d: (d["zone"], d["age_s"]))}
+        except Exception as ex:
+            out["room"] = {"error": repr(ex)}
+        return out
 
     def _note_drift(self, first, reason, limit: float) -> None:
         """Count aims whose first seen dot landed over `limit` from the target, or that lit and looked but never
@@ -1236,7 +1309,7 @@ class Room:
                          ask_fn=self.ask_and_act, table=self.table, care=getattr(self, "care", None),
                          voice_fn=getattr(self.tts, "set_voice", None),
                          listening_fn=lambda: bool(getattr(self.indicator, "lit", False)),
-                         rehome_fn=self.laser_rehome)
+                         rehome_fn=self.laser_rehome, live_fn=self.live_state)
         self.record_answer = app.state.record_answer
         self.server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level="warning",
                                                     timeout_graceful_shutdown=2))
