@@ -333,3 +333,24 @@ def test_a_trace_reaches_its_start_dark_and_stops_at_the_budget(cal, monkeypatch
     reach = [w for w in rig.act.writes if t0 <= w[0] < first_lit]
     assert reach                                              # the head reached the start before lighting
     assert rig.act.laser_on is False and laser.state["on"] is False and laser.last_aim["lit_s"] < 0.5
+
+
+@pytest.mark.parametrize("color", ["red", "green"])
+def test_the_dot_detector_finds_the_configured_laser_colour_only(color):
+    """The turret's module may be green: a red-only detector scored a green dot negative and never saw it."""
+    import numpy as np
+    from act.laser import dot_px_diff, dot_px_hsv
+    off = np.full((120, 160, 3), 90, np.uint8)
+    on = off.copy()
+    bgr = {"red": (40, 60, 255), "green": (60, 255, 40)}
+    on[50:54, 70:74] = bgr[color]
+    other = "green" if color == "red" else "red"
+    assert dot_px_diff(off, on, color=color) == pytest.approx((71.5, 51.5), abs=0.6)
+    assert dot_px_diff(off, on, color=other) is None
+    assert dot_px_hsv(on, color=color) is not None
+
+
+def test_an_unknown_laser_colour_is_refused():
+    from act.laser import Laser
+    with pytest.raises(ValueError):
+        Laser(object(), None, None, "", cfg={"laser_room": {"color": "blue"}})

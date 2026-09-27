@@ -61,17 +61,22 @@ def _largest_blob(mask: np.ndarray, weight: np.ndarray, min_area: int, max_area:
     return float((xs * wt).sum() / s), float((ys * wt).sum() / s)
 
 
-def dot_score(off: np.ndarray, on: np.ndarray) -> np.ndarray:
-    """Red rise minus half the green/blue rise (a saturated white core still scores; a hand or
-    lighting change, which moves all channels, doesn't)."""
+LASER_CHANNEL = {"red": 2, "green": 1}     # BGR index of the laser's colour (laser_room.color)
+
+
+def dot_score(off: np.ndarray, on: np.ndarray, color: str = "red") -> np.ndarray:
+    """The laser colour's rise minus half the other channels' (a saturated white core still scores; a
+    hand or lighting change, which moves all channels, doesn't)."""
     d = on.astype(np.int16) - off.astype(np.int16)
-    return d[..., 2] - (np.maximum(d[..., 0], d[..., 1]) >> 1)
+    c = LASER_CHANNEL[color]
+    o1, o2 = (k for k in (0, 1, 2) if k != c)
+    return d[..., c] - (np.maximum(d[..., o1], d[..., o2]) >> 1)
 
 
 def dot_px_diff(off: np.ndarray, on: np.ndarray, thr: int = 40, min_area: int = 2,
-                max_area: int = 3000) -> Optional[tuple[float, float]]:
+                max_area: int = 3000, color: str = "red") -> Optional[tuple[float, float]]:
     """Laser dot from an off/on BGR pair (see dot_score)."""
-    score = dot_score(off, on)
+    score = dot_score(off, on, color)
     mask = (score > thr).astype(np.uint8)
     return _largest_blob(mask, score, min_area, max_area)
 
@@ -107,12 +112,17 @@ def _dot_blob(mask: np.ndarray, weight: np.ndarray, min_area: int, max_area: int
     return x, y
 
 
-def dot_px_hsv(on: np.ndarray, min_area: int = 2, max_area: int = 1500) -> Optional[tuple[float, float]]:
+def dot_px_hsv(on: np.ndarray, min_area: int = 2, max_area: int = 1500,
+               color: str = "red") -> Optional[tuple[float, float]]:
     """Fallback on a single frame: bright saturated red (hue wraps at 0/180). Can false-fire on
     warm, brightly lit surfaces, so find_dot uses it only when no off frame arrived."""
     hsv = cv2.cvtColor(on, cv2.COLOR_BGR2HSV)
-    lo = cv2.inRange(hsv, (0, 120, 230), (8, 255, 255))
-    hi = cv2.inRange(hsv, (172, 120, 230), (180, 255, 255))
+    if color == "green":                   # OpenCV hue 0-180: green ~ 60
+        lo = cv2.inRange(hsv, (40, 120, 230), (85, 255, 255))
+        hi = np.zeros_like(lo)
+    else:
+        lo = cv2.inRange(hsv, (0, 120, 230), (8, 255, 255))
+        hi = cv2.inRange(hsv, (172, 120, 230), (180, 255, 255))
     mask = ((lo | hi) > 0).astype(np.uint8)
     return _largest_blob(mask, hsv[..., 2], min_area, max_area)
 
@@ -313,6 +323,9 @@ class Laser:
         # Eye safety (laser_room:): an aim's laser is never lit longer than this, counted from its first light;
         # blinks and re-lights don't reset it (the actuator and the firmware timers alone would).
         self.max_on_s = float((cfg.get("laser_room") or {}).get("max_on_s", 4.0))
+        self.color = str((cfg.get("laser_room") or {}).get("color", "red")).lower()   # the dot's colour
+        if self.color not in LASER_CHANNEL:
+            raise ValueError(f"laser_room.color must be one of {sorted(LASER_CHANNEL)}, got {self.color!r}")
         self.fit: Optional[LaserFit] = None
         self.disabled: Optional[str] = None   # why the hardware isn't usable (set by the app); aims refuse
         self.state = {"on": False, "target": None, "err_cm": None}
@@ -418,7 +431,7 @@ class Laser:
                 if on is None:
                     break
                 if off is not None:
-                    sc = dot_score(off.img, on.img).astype(np.float32)
+                    sc = dot_score(off.img, on.img, self.color).astype(np.float32)
                     acc = sc if acc is None else acc + sc
                     n += 1
             self.last_frames = (off, on)
@@ -433,7 +446,7 @@ class Laser:
             if acc is None:
                 # Fallback only without an off frame: when the diff is possible and empty, the dot
                 # really isn't visible, and a single-frame red mask would fire on warm surfaces.
-                d = dot_px_hsv(on.img[y0:y1, x0:x1], max_area=self.max_dot_px // 2)
+                d = dot_px_hsv(on.img[y0:y1, x0:x1], max_area=self.max_dot_px // 2, color=self.color)
                 return None if d is None else (d[0] + x0, d[1] + y0)
             score = acc / n
             mask = (score > self.diff_thr / math.sqrt(n)).astype(np.uint8)

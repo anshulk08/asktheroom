@@ -727,6 +727,7 @@ laser_room:
   max_frame_age_s: 0.5        # an older camera frame (a stalled camera) proves nothing: refused
   allow_hog: false            # HOG as the fallback person detector (it misses seated people)
   allow_sweep: false          # 'carried off' edge sweeps run down the edge the person walked out by
+  color: red                  # the dot's colour: red | green (the detector looks for this channel's rise)
 
 # Stepper turret (actuator: turret; act/actuator.py TurretActuator, act/turret.py, firmware/turret).
 # An Arduino Uno drives two MKS SERVO42D closed-loop steppers; wiring and driver menu settings are in

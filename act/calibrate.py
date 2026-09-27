@@ -179,7 +179,7 @@ def measure_latency(laser: Laser, trials: int = 5, wait_s: float = 0.5) -> dict:
             f = laser.frames.latest()
             if f is not None and f.idx != last_idx:
                 last_idx = f.idx
-                if ref is not None and dot_px_diff(ref.img, f.img) is not None:
+                if ref is not None and dot_px_diff(ref.img, f.img, color=getattr(laser, "color", "red")) is not None:
                     seen.append(f.t - t_cmd)
                     break
             laser.clock.sleep(0.002)
