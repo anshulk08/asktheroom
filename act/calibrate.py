@@ -390,6 +390,21 @@ def note_centre(before: np.ndarray, after: np.ndarray, table, min_cm2: float = 9
     return float(c[0]), float(c[1])
 
 
+SATURATED = 215     # red channel level (0-255) above which a surface leaves the dot too little headroom
+
+
+def surface_red(laser: Laser, cm, img: Optional[np.ndarray], r_cm: float = 2.0) -> Optional[float]:
+    """Median red level of the surface around cm with the laser off (the dot is found as a red rise, so a
+    surface already near 255, white or yellow under bright light, can hide it)."""
+    if img is None:
+        return None
+    c = np.asarray(cm, dtype=np.float64)
+    box = laser.table.cm_to_px(c + np.array([[-r_cm, -r_cm], [r_cm, r_cm]]))
+    (x0, y0), (x1, y1) = np.floor(box.min(axis=0)).astype(int), np.ceil(box.max(axis=0)).astype(int)
+    patch = img[max(0, y0):max(0, y1), max(0, x0):max(0, x1), 2]
+    return float(np.median(patch)) if patch.size else None
+
+
 def _fresh(laser: Laser) -> Optional[np.ndarray]:
     """A frame taken after the laser's current state has reached the camera."""
     laser.clock.sleep(laser.latency_s + 0.2)
@@ -402,7 +417,10 @@ def spot_check(laser: Laser, ask: Callable[[str], str], n: int = 10, out: Callab
     """Ruler check: the person puts a sticky note (a cross drawn at its centre) somewhere new, the camera
     finds it, the laser aims at it, and the person measures the dot to the cross with a ruler. That is
     the demo's question (does the dot land on what the camera sees?) answered without trusting the
-    camera's own dot. Returns {'spots', 'ruler_cm', 'pass'} (ruler median < 1.5 cm and max < 3 cm)."""
+    camera's own dot. Put at least one note ON the box's top face (and the notebook's cover if it is
+    light): a surface whose red channel is near 255 leaves the dot no headroom, and the fix for that is
+    lower exposure or gain (scripts/camera_setup.sh), not code. Each spot records that red level.
+    Returns {'spots', 'ruler_cm', 'pass'} (ruler median < 1.5 cm and max < 3 cm)."""
     region = region or Region(laser.table_size)
     laser._need_fit()
     laser.off()
@@ -410,8 +428,8 @@ def spot_check(laser: Laser, ask: Callable[[str], str], n: int = 10, out: Callab
     spots: list[dict] = []
     while len(spots) < n:
         i = len(spots) + 1
-        a = ask(f"Spot {i}/{n}: put a sticky note down somewhere new (spread them over the table), take your "
-                "hand out of view, press Enter (q to stop) ")
+        a = ask(f"Spot {i}/{n}: put a sticky note down somewhere new (spread them over the table; one on top of "
+                "the box), take your hand out of view, press Enter (q to stop) ")
         if a.strip().lower() == "q":
             break
         after = _fresh(laser)
@@ -420,10 +438,16 @@ def spot_check(laser: Laser, ask: Callable[[str], str], n: int = 10, out: Callab
             out("  no new note found on the tabletop: is your hand out of view? Try again.")
             before = after
             continue
+        red = surface_red(laser, c, after)
         cam = laser.aim(c)
         first = laser.last_aim.get("first_err_cm")
         out(f"  note at ({c[0]:.1f}, {c[1]:.1f}) cm; camera says the dot is "
-            f"{'not seen' if math.isinf(cam) else f'{cam:.1f} cm'} from it")
+            f"{'not seen' if math.isinf(cam) else f'{cam:.1f} cm'} from it"
+            + ("" if red is None else f" (surface red {red:.0f}/255)"))
+        if red is not None and red >= SATURATED:
+            out(f"  the surface here is near saturation (red {red:.0f} >= {SATURATED}): if the camera misses the "
+                "dot on the box or notebook, lower the gain (scripts/camera_setup.sh 166 <brio> 40 10 160 3200), "
+                "then recalibrate the laser")
         ruler = None
         while ruler is None:
             r = ask("  Ruler: dot centre to the note's cross, in cm (Enter lights the dot again, x = no dot) ")
@@ -441,6 +465,7 @@ def spot_check(laser: Laser, ask: Callable[[str], str], n: int = 10, out: Callab
         spots.append({"spot": i, "x_cm": round(c[0], 1), "y_cm": round(c[1], 1),
                       "camera_cm": None if math.isinf(cam) else round(cam, 2),
                       "open_loop_cm": None if first is None else round(first, 2),
+                      "surface_red": None if red is None else round(red),
                       "ruler_cm": None if math.isinf(ruler) else ruler})
         before = _fresh(laser)                  # the new note is part of the scene now
     r = np.array([math.inf if s["ruler_cm"] is None else s["ruler_cm"] for s in spots], dtype=np.float64)
@@ -456,11 +481,13 @@ def spot_table(rep: dict) -> str:
     """Markdown results table (paste it into docs/RIG_RUNBOOK.md's evidence)."""
     def f(v):
         return "-" if v is None else f"{v:.1f}"
-    rows = ["| spot | x cm | y cm | camera cm | open-loop cm | ruler cm | ok (< 3 cm) |",
-            "|---|---|---|---|---|---|---|"]
+    rows = ["| spot | x cm | y cm | surface red | camera cm | open-loop cm | ruler cm | ok (< 3 cm) |",
+            "|---|---|---|---|---|---|---|---|"]
     for s in rep["spots"]:
         ok = s["ruler_cm"] is not None and s["ruler_cm"] < MAX_CENTRE_CM
-        rows.append(f"| {s['spot']} | {s['x_cm']:.1f} | {s['y_cm']:.1f} | {f(s['camera_cm'])} | "
+        red = s.get("surface_red")
+        rows.append(f"| {s['spot']} | {s['x_cm']:.1f} | {s['y_cm']:.1f} | {'-' if red is None else red} | "
+                    f"{f(s['camera_cm'])} | "
                     f"{f(s['open_loop_cm'])} | {f(s['ruler_cm'])} | {'yes' if ok else 'NO'} |")
     rc = rep.get("ruler_cm")
     if rc:
