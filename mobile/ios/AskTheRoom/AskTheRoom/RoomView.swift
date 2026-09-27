@@ -21,7 +21,16 @@ struct RoomView: View {
     /// The thing tapped on the map; MainView sets it for "Show the whole table".
     @Binding var selected: String?
     @State private var details: String?
+    /// Room or Table, when the rig has sent a room layout. `-mockMap table` starts on the table.
+    @State private var mapMode: MapMode = UserDefaults.standard.string(forKey: "mockMap") == "table" ? .table : .room
     @Environment(\.dynamicTypeSize) private var typeSize
+
+    enum MapMode: String { case room, table }
+
+    /// The room map shows only for a layout the latest state names; otherwise the table map, as always.
+    private var roomPlan: RoomPlan? {
+        store.layoutIsCurrent ? RoomPlan(store.layout) : nil
+    }
 
     /// At the largest text sizes the key and suggestions scroll with the card, so the map
     /// and the card aren't squeezed out.
@@ -45,11 +54,32 @@ struct RoomView: View {
                 .padding(.top, 8)
 
             if let snapshot = store.snapshot {
-                TableMapView(snapshot: snapshot, highlight: store.highlight,
-                             greyed: store.isRoomAppDown || store.isMapStale, selected: selected) { name in
-                    selected = selected == name ? nil : name
+                let plan = roomPlan
+                if plan != nil {
+                    Picker("Map", selection: $mapMode) {
+                        Text("Room").tag(MapMode.room)
+                        Text("Table").tag(MapMode.table)
+                    }
+                    .pickerStyle(.segmented)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+                    .padding(.bottom, 4)
                 }
-                .padding(.horizontal, 4)
+                Group {
+                    if let plan, mapMode == .room {
+                        RoomMapView(plan: plan, snapshot: snapshot,
+                                    greyed: store.isRoomAppDown || store.isMapStale, selected: selected) { name in
+                            selected = selected == name ? nil : name
+                        }
+                        .padding(.horizontal, 12)
+                    } else {
+                        TableMapView(snapshot: snapshot, highlight: store.highlight,
+                                     greyed: store.isRoomAppDown || store.isMapStale, selected: selected) { name in
+                            selected = selected == name ? nil : name
+                        }
+                        .padding(.horizontal, 4)
+                    }
+                }
                 // The map keeps its full width; the card area below scrolls instead.
                 .layoutPriority(1)
                 if !compact {
@@ -107,9 +137,16 @@ struct RoomView: View {
         .entityDetail($details, store: store)
     }
 
-    private func legend(for snapshot: Snapshot) -> some View {
-        MapLegend(entries: MapLayout.legend(for: MapLayout.items(for: snapshot)))
-            .frame(maxWidth: .infinity, alignment: .leading)
+    @ViewBuilder private func legend(for snapshot: Snapshot) -> some View {
+        if let plan = roomPlan, mapMode == .room {
+            RoomMapLegend(styles: RoomMapLayout.legend(
+                for: RoomMapLayout(plan: plan, snapshot: snapshot, size: CGSize(width: 390, height: 480)).pins))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 6)
+        } else {
+            MapLegend(entries: MapLayout.legend(for: MapLayout.items(for: snapshot)))
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 }
 

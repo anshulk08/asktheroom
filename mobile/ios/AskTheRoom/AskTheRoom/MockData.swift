@@ -28,21 +28,20 @@ enum MockData {
         Wire.decode(Snapshot.self, from: Data(sampleSnapshotJSON.utf8))!
     }
 
-    /// The real room seen from the couch (the rig turns it to the seat, front = camera right):
-    /// the couch along the near side with you on it, the TV stand (camera left, past the far
-    /// edge) across the far wall, the doorway (far back) on the right wall, and the counter
-    /// (camera far right) in the near right corner. Centimetres, schematic. The table is the
-    /// sample's 90 x 60, and `origin` is its top-left, so a table thing sits at origin + r.
+    /// The real room from the rig (GET /room_layout, turned to the couch seat, front = camera
+    /// right): the couch nearest you, the TV stand at the far wall, the counter behind you and
+    /// the doorway to the right, behind you. Size, table, couch and "you" are the rig's; the
+    /// other rects are drawn to fit those words. Centimetres, schematic.
     static let sampleLayoutJSON = """
-    {"v":1,"size":[320,280],"front":"right",
-     "table":{"rect":[105,100,90,60],"origin":[105,100]},
+    {"v":1,"size":[420,520],"front":"right",
+     "table":{"rect":[66.9,110,73.1,100.8],"origin":[66.9,110]},
      "zones":[
-      {"id":"side_table","say":"the TV stand","rect":[92,8,136,38],"kind":"surface"},
-      {"id":"doorway","say":"the doorway","rect":[276,20,36,104],"kind":"door"},
-      {"id":"counter","say":"the counter","rect":[246,170,66,102],"kind":"surface"},
-      {"id":"couch","say":"the couch","rect":[24,198,206,74],"kind":"seat"}
+      {"id":"side_table","say":"the TV stand","rect":[40,14,220,48],"kind":"surface"},
+      {"id":"couch","say":"the couch","rect":[20,240,160,80],"kind":"seat"},
+      {"id":"counter","say":"the counter","rect":[20,420,250,60],"kind":"surface"},
+      {"id":"doorway","say":"the doorway","rect":[296,420,110,80],"kind":"door"}
      ],
-     "you":[184,254]}
+     "you":[103.4,255.8]}
     """
 
     static var sampleLayout: RoomLayout {
