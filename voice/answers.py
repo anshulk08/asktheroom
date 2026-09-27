@@ -285,7 +285,7 @@ def _placed_when(ans: Answer, obj: str, world, events, cfg: dict, now: float) ->
         e = world.get(obj)
         if e.status != Status.VISIBLE or events is None:
             return ans
-        ev = events.last_of_type(obj, ["PUT_BACK", "MOVED", "TAKEN_OUT", "APPEARED", "FOUND", "CORRECTED"])
+        ev = events.last_of_type(obj, evidence.PLACED)        # the same event the receipt shows
     except Exception:
         return ans
     if ev is None:

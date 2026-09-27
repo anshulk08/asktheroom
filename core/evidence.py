@@ -32,7 +32,10 @@ MAX_ITEMS = 3
 SNAP_REL_RE = re.compile(r"^(?:archive/\d{8}-\d{2}/)?[A-Za-z0-9][A-Za-z0-9._:-]*\.(?:jpg|jpeg|png)$")   # thing:N
 
 # The event that put an object where it is, by its status (WHERE); any logged event as a last resort.
-PLACED = ["PUT_BACK", "MOVED", "APPEARED", "FOUND", "CORRECTED", "TAKEN_OUT", "UNCOVERED"]
+# Not UNCOVERED: on the rig a thing flickers COVERED/UNCOVERED every few seconds (people's arms), so its
+# latest UNCOVERED is a random moment, not when it got there. The spoken time (answers._placed_when) uses the
+# same list, so the receipt is the moment the answer names.
+PLACED = ["PUT_BACK", "MOVED", "TAKEN_OUT", "APPEARED", "FOUND", "CORRECTED"]
 BY_STATUS = {"VISIBLE": PLACED, "INSIDE": ["PUT_INSIDE"], "UNDER": ["COVERED"], "GONE": ["EXITED_VIEW"],
              "HELD": ["PICKED_UP"]}
 

@@ -239,3 +239,15 @@ def test_a_room_place_cites_the_arrival_nearest_its_arrival_time_with_camera_px(
 
 def test_thing_snapshots_have_urls():
     assert evidence.snapshot_url("/s/1_thing:52_APPEARED.jpg", "/s") == "/snapshots/1_thing:52_APPEARED.jpg"
+
+
+def test_the_receipt_is_the_moment_the_answer_names_not_a_cover_flicker(log):
+    """Rig 27 Sep 03:10: 'They showed up there at 2:49 AM.' came with an UNCOVERED photo from later."""
+    w = FakeWorld([Entity("wallet", "target", Status.VISIBLE, pos_cm=(20.0, 20.0), last_seen=NOW)], log)
+    logged(log, "wallet", "APPEARED", NOW - 1300)
+    for i in range(3):                                   # arms passing: COVERED / UNCOVERED churn
+        logged(log, "wallet", "COVERED", NOW - 600 + 100 * i, parent="unknown")
+        logged(log, "wallet", "UNCOVERED", NOW - 590 + 100 * i)
+    a = ask(w, log, "WHERE", "wallet")
+    assert a.text.endswith(f"showed up there at {clock(NOW - 1300)}.")
+    assert [(e["type"], e["t"]) for e in a.evidence] == [("APPEARED", round(NOW - 1300, 3))]
