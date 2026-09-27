@@ -5,8 +5,12 @@ The firmware speaks one command per line at 115200 baud, in degrees at the axis 
 'POS <pan> <tilt> <moving> <laser>'; the full list is at the top of firmware/turret/turret.ino.
 
 Opening the port resets the Uno, which prints 'READY' and calls wherever the mount points 0,0.
-The firmware switches the laser off after 2 s without a command, so while the laser is on this
+The firmware switches the laser off after 1 s without a command, so while the laser is on this
 client sends 'P' every HEARTBEAT_S: the laser stays on only while this process is alive.
+
+The port is opened exclusively, and a 'READY' after that first one means the Uno reset mid-run
+(USB glitch, its watchdog, another program opening the port): it re-zeroed wherever it stood, so
+the pose is unknown and the laser and moves are refused until this process restarts.
 
 Most code uses it through act.actuator.TurretActuator (actuator: turret). By hand:
     python -m act.turret /dev/ttyACM0          type raw commands (A 10 5, L 1, P, H ...)
@@ -14,13 +18,17 @@ Most code uses it through act.actuator.TurretActuator (actuator: turret). By han
 """
 from __future__ import annotations
 
+import logging
 import sys
 import threading
 import time
 from typing import Optional
 
+log = logging.getLogger(__name__)
+
 HEARTBEAT_S = 0.5
 REPLY_TIMEOUT_S = 2.0
+_NEED_KNOWN_ZERO = ("A", "R", "Z")      # refused after a board reset, with "L 1"
 
 
 class TurretError(IOError):
@@ -33,13 +41,17 @@ class Turret:
         if ser is None:
             import serial  # lazy: pyserial, only where hardware is used
 
-            ser = serial.Serial(port, baud, timeout=0.1)
+            # exclusive: a second opener (another askroom, a serial monitor) would reset the Uno under us
+            ser = serial.Serial(port, baud, timeout=0.1, exclusive=True)
         self._ser = ser
         self._lock = threading.Lock()
         self._done = threading.Event()
         self._laser_on = False
         self._closed = False
+        self._booted = False
+        self.reset_seen = False     # the board rebooted after the open: pose unknown, laser locked out
         self._wait_for_line("READY", boot_timeout_s)
+        self._booted = True
         self._heartbeat = threading.Thread(target=self._heartbeat_loop, name="turret-heartbeat",
                                            daemon=True)
         self._heartbeat.start()
@@ -63,6 +75,7 @@ class Turret:
         return float(pan), float(tilt)
 
     def laser(self, on: bool) -> None:
+        """Raises TurretError for on=True after a board reset; on=False always goes through."""
         self._command(f"L {1 if on else 0}", "OK L")
         self._laser_on = bool(on)
 
@@ -130,6 +143,7 @@ class Turret:
             raise TurretError("turret closed")
         with self._lock:
             self._drain()
+            self._refuse_after_reset(line)
             if expect == "OK A":
                 self._done.clear()
             self._ser.write((line + "\n").encode())
@@ -139,10 +153,26 @@ class Turret:
                 if reply is None:
                     continue
                 if reply.startswith(expect):
+                    # A reset seen mid-exchange: the fresh board may have taken the command.
+                    self._refuse_after_reset(line, sent=True)
                     return reply
                 if reply.startswith("ERR"):
                     raise TurretError(f"{line!r}: {reply}")
+            self._refuse_after_reset(line, sent=True)
             raise TurretError(f"no reply to {line!r}")
+
+    def _refuse_after_reset(self, line: str, sent: bool = False) -> None:
+        """After a board reset its 0,0 is wherever the head happened to be, so a lit laser or an aim
+        could land anywhere (eyes included). Only a process restart (re-homing by hand) clears it."""
+        if not self.reset_seen:
+            return
+        if line.startswith("L 1"):
+            if sent:                            # make sure the fresh board did not light it
+                self._ser.write(b"L 0\n")
+                self._laser_on = False
+            raise TurretError("board reset: laser locked out until restart")
+        if line.split()[0] in _NEED_KNOWN_ZERO:
+            raise TurretError(f"board reset: pose unknown, {line!r} refused until restart")
 
     def _readline(self) -> Optional[str]:
         raw = self._ser.readline()
@@ -154,6 +184,13 @@ class Turret:
             return None
         if line in ("LASER TIMEOUT", "LASER MAX ON"):     # the firmware turned it off by itself
             self._laser_on = False
+            return None
+        if line.startswith("READY") and self._booted:
+            if not self.reset_seen:
+                log.error("TURRET BOARD RESET mid-run (%r): its 0,0 is now wherever the head stood. "
+                          "Laser and moves refused until askroom restarts.", line)
+            self.reset_seen = True
+            self._laser_on = False              # the Uno drives the laser LOW from reset
             return None
         return line or None
 

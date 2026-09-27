@@ -61,6 +61,11 @@ class FakeBoard:
             else:
                 self._say(f"ERR unknown {op}")
 
+    def reset(self) -> None:
+        """The Uno rebooting mid-run: laser LOW, wherever it stands is 0,0 again."""
+        self.laser, self.pan, self.tilt = 0, 0.0, 0.0
+        self._say("READY turret")
+
     def commands(self, op: str) -> list[str]:
         return [ln for ln in self.lines if ln.split()[0] == op]
 
@@ -80,14 +85,14 @@ def test_make_actuator_opens_the_port_through_pyserial(monkeypatch):
     board = FakeBoard()
     opened = []
 
-    def Serial(port, baud, timeout):
-        opened.append((port, baud))
+    def Serial(port, baud, timeout, exclusive=False):
+        opened.append((port, baud, exclusive))
         return board
 
     monkeypatch.setitem(sys.modules, "serial", types.SimpleNamespace(Serial=Serial))
     a = make_actuator(CFG, clock=SimClock())
     assert isinstance(a, TurretActuator)
-    assert opened == [("/dev/fake", 115200)]
+    assert opened == [("/dev/fake", 115200, True)]   # exclusive: a second opener would reset the Uno
     assert (a.pan, a.tilt) == (1500.0, 1500.0)       # the firmware's 0,0 at power-up
     a.close()
 
@@ -139,9 +144,10 @@ def test_point_at_corrects_for_the_laser_offset():
 
 def test_laser_and_timeout():
     a, board = turret_act()
+    assert a.laser_timeout_s == 4.0                   # CFG's 10 s capped at laser_room.max_on_s
     a.laser(True)
     assert board.laser == 1
-    a.clock.sleep(11)
+    a.clock.sleep(4.1)
     a.poll()
     assert board.laser == 0 and not a.laser_on
 
@@ -153,6 +159,34 @@ def test_close_turns_the_laser_off_parks_and_closes_the_port():
     a.close()
     assert board.laser == 0
     assert (board.pan, board.tilt) == (0.0, 0.0)
+    assert board.closed
+
+
+class ErrLaserBoard(FakeBoard):
+    """'L' fails: the board answers ERR, or the port raises mid-write."""
+
+    def __init__(self, mode: str):
+        super().__init__()
+        self.mode = mode
+
+    def write(self, data: bytes) -> None:
+        if data.startswith(b"L"):
+            if self.mode == "raise":
+                raise OSError("write failed")
+            self.lines.append(data.decode().strip())
+            self._say("ERR laser")
+            return
+        super().write(data)
+
+
+@pytest.mark.parametrize("mode", ["err", "raise"])
+def test_close_does_not_park_when_the_laser_off_fails(mode):
+    """Swinging the head with the laser possibly lit could sweep it across someone's eyes."""
+    a, board = turret_act(ErrLaserBoard(mode))
+    a.move(1800, 1600)
+    with pytest.raises(IOError):
+        a.close()
+    assert (board.pan, board.tilt) == (30.0, 10.0)    # not parked
     assert board.closed
 
 
@@ -187,6 +221,56 @@ def test_heartbeat_keeps_the_laser_alive(monkeypatch):
     assert len(board.commands("P")) >= 3
     t.close()
     assert board.laser == 0
+
+
+def test_a_board_reset_mid_run_locks_out_the_laser_and_moves(caplog):
+    """An unexpected READY: the Uno re-zeroed wherever it stood, so no aim can be trusted until restart."""
+    board = FakeBoard()
+    t = Turret("/dev/fake", ser=board)
+    t.laser(True)
+    board.reset()                                 # USB glitch / watchdog reset / another opener
+    t.position()                                  # any exchange reads the unsolicited line first
+    assert t.reset_seen and not t._laser_on
+    assert "RESET" in caplog.text
+    with pytest.raises(TurretError, match="laser locked out"):
+        t.laser(True)
+    with pytest.raises(TurretError, match="board reset"):
+        t.aim(10, 0)
+    with pytest.raises(TurretError, match="board reset"):
+        t.nudge(1, 0)
+    assert board.commands("A") == [] and board.commands("R") == []
+    assert board.laser == 0
+    t.laser(False)                                # switching off always works
+    t.close()
+    assert board.closed
+
+
+def test_a_reset_during_the_laser_on_exchange_switches_it_back_off():
+    class ResetOnLaserBoard(FakeBoard):
+        def write(self, data: bytes) -> None:
+            if data == b"L 1\n":
+                self.reset()                      # the fresh board then takes the L 1
+            super().write(data)
+
+    board = ResetOnLaserBoard()
+    t = Turret("/dev/fake", ser=board)
+    with pytest.raises(TurretError, match="laser locked out"):
+        t.laser(True)
+    assert board.laser == 0 and board.lines[-1] == "L 0" and not t._laser_on
+    t.close()
+
+
+def test_the_turret_actuator_refuses_after_a_board_reset():
+    a, board = turret_act()
+    board.reset()
+    a._turret.position()
+    with pytest.raises(TurretError):
+        a.laser(True)
+    with pytest.raises(TurretError):
+        a.move(1600, 1500)
+    assert board.laser == 0 and board.commands("A") == []
+    a.close()                                     # L 0 goes through; the park is refused and logged
+    assert board.closed
 
 
 def test_client_errors():
