@@ -190,3 +190,33 @@ before it goes on the rig.
   registers the object) is not in the first cut.
 - The DINOv2 TensorRT engine is not built on the rig yet (a WS7 job); ONNX Runtime CPU on the Jetson is the
   fallback, and its speed decides `every_n`.
+
+## 9. Deploying behind the flag (rig owner only)
+
+1. **The DINOv2 TensorRT engine first.** The registry embeds with the `reid:` model. On the Mac's CPU at the rig's 2
+   threads a busy view costs ~0.7 s (`bench/permanence_bench.py`); the step runs on the perception thread, so it is
+   capped (`max_embed_per_view` 6, `embed_budget_ms` 60: the rest go to later looks), but re-finds slow down. Build
+   `models/cache/reid` inside the app container (only it has ORT's TensorRT provider) and confirm with
+   `python -m bench.permanence_bench --image <raw 1440p frame>` (and `--providers cpu` for the fallback).
+2. **Enroll the props** from one raw 1440p still with the props in view (`/full.jpg?raw=1`):
+   `python -m core.permanence enroll-auto --image still.jpg --names keys wallet pill_bottle`: YOLOE proposes, Grok
+   picks each name in every tile, a closed "is it a <name>" question confirms, and each pick is saved to
+   `data/registry/<name>/` with its context patch. **Check the contact sheet** (`data/registry/enrolled.jpg`); a
+   name printed NOT FOUND is enrolled by hand: `python -m core.permanence enroll --name wallet --image still.jpg
+   --box x1 y1 x2 y2`. Taught things ("Room, this is my lucky mug") register themselves.
+3. **Turn it on** in `config.local.yaml`: `permanence: {mode: registry}` (zones come from `room_zones.json`, the
+   table from `room_memory.capture_size` / `table_view_rect`; `room_memory.enabled` may stay as it is: registry
+   mode doesn't build the zone round-robin). Restart the app. The log says `permanence: registry of N objects,
+   M reference views`.
+4. **Check** `/state`: `permanence` (views, `last_ms`, `embed_ms`) and `registry` (one entry per object). Put a
+   prop on the couch and ask "where is my <prop>". Turning it off is `mode: "off"` and a restart.
+
+## 10. Demo acceptance (the video, "The Room Remembers")
+
+`tests/test_permanence_demo.py`, one test per shot, painted frames through the registry, the world adapter and
+the spoken templates: (1) keys put straight on the couch, "on the couch" with a time; (2) the wallet carried out,
+"picked up ... haven't seen where it went", then found again on the couch, hedged; (3) someone sits in front of
+the pill bottle: "probably still on the couch, behind someone", visible when they leave, no events; (4) "this is
+my lucky mug", carried across the room, found by name; (5) "when did I last pick up my pills": "picked up at
+<time>, 2 minutes ago", never "taken". The same shots are scored on the guided clips with
+`eval/permanence_replay.py` and WS2's scorecard.
