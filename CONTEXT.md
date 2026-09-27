@@ -37,7 +37,8 @@ the name, so the next ask needs no Grok call.
 - icSpring USB camera mounted overhead: MJPG 1280x720 at 30 fps, manual exposure,
   `CAP_PROP_BUFFERSIZE=2` (a value of 1 halves the fps). `scripts/camera_setup.sh` locks these settings. It needs a lamp in dim rooms.
 - Four ArUco markers (0–3, DICT_4X4_50) on the table corners define table centimetres.
-- Pan-tilt servo head with a laser diode (PCA9685 or serial/bus-servo driver).
+- Pan-tilt servo head with a laser diode (PCA9685 or serial/bus-servo driver), or the stepper turret:
+  Arduino Uno + two MKS SERVO42D steppers running `firmware/turret` (`actuator: turret`).
 - Microphone (always on), speaker, and a presentation clicker ("listen now" and interrupt).
 
 ## Data flow
@@ -100,10 +101,11 @@ rules can't read and of open questions (with a compact world state).
 | `mobile/` | BLE bridge (`bridge/`), wire protocol (`PROTOCOL.md`), iPhone app (`ios/`). |
 | `assets/` | Small licensed data files the code needs (CLIP BPE vocabulary). `models/` is never committed. |
 | `voice/` | `visual` (Grok look/recall, routing), `teach` ("this is my X"), `care` + `conversation` (reminders, profile, follow-ups), `intents` (rule parser), `answers` (spoken templates), `understand` (overheard filter + Grok reads what the rules can't), `local_llm` (optional local Qwen answers, not deployed), `pipeline` (router), `tts`, `stt` (Silero VAD + whisper.cpp), `trigger` (clicker), `llm` (Grok open answers, world-state helpers, pill filter). |
-| `act/` | `actuator` (servo drivers + fake), `laser` (poly2 fit + closed-loop aim; `aim_px` for room pointing), `calibrate`, `room_map` (room dot map, zones, beam gate; spec 0006, off by default), `sim` (simulated rig and room). |
+| `act/` | `actuator` (servo drivers, stepper `TurretActuator`, fake), `turret` (serial client for `firmware/turret`), `pointing` (3D point to pan/tilt degrees, parallax, cameras), `laser` (poly2 fit + closed-loop aim; `aim_px` for room pointing), `calibrate`, `room_map` (room dot map, zones, beam gate; spec 0006, off by default), `sim` (simulated rig and room). |
 | `server/` | FastAPI dashboard (`app.py`), frame overlay, `sim.py` (full demo on a synthetic camera). |
 | `eval/` | Trial recording, synthetic trials, replay against baselines (last-seen, nearest-object, current-frame) and the report. `score_clip`: replay a guided clip (`data/clips/<id>`) through the production pipeline and score it (false births, identity changes, checkpoints, questions); on the Jetson `scripts/dock.sh python3 -m eval.score_clip data/clips/<id>`. |
 | `net.py` | Online/offline monitor. Readers check `.online`, which never blocks. |
+| `firmware/` | Arduino sketches: `turret` (stepper pan-tilt head, degrees over serial) and `servo42d_test` (bring-up); wiring and driver settings in `firmware/README.md`. |
 | `scripts/` | `dock.sh` (run inside the Jetson Ultralytics container), camera setup, markers PDF, servo sweep, `qwen_server.sh`, `eval_understand.py` (interpreter accuracy per model), `overheard_test.py` (false triggers on a hall recording), `gen_n8n_workflow.py`. |
 | `tests/` | About 1,300 tests. None need hardware. `understand_eval.json`: 64 spoken-style commands for the interpreter. |
 | `n8n/` | `ask-the-room.json`: a live log of every spoken question plus a 5-minute health check. `ask-the-repo.json`: a chat bot about this repo. See `n8n/README.md`. |
