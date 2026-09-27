@@ -6,6 +6,8 @@ clip's truth.json, so anyone can replay a recording and read PASS / FAIL without
     python -m eval.score_clip data/clips/<id> --config config.yaml  # today's thresholds, not the recorded ones
     python -m eval.score_clip data/clips/<id> --no-model            # Mac, no models: change proposer only
     python -m eval.score_clip data/clips/<id> --detect-model my.pt --proposals change   # Mac, a local .pt
+    python -m eval.score_clip data/clips/<id> --hands-off --yoloe-model models/yoloe-26s-seg-pf.pt
+                                          # Mac with only the YOLOE .pt: no fixed-class detector, so no hands
 
 On the Jetson, run it inside the app's container (the TensorRT engines only load there):
 
@@ -18,7 +20,13 @@ meta.json in a temp file plus core.table.apply_saved_size, core.detect.Detector 
 proposer), core.hands.HandTracker, World(cfg, events, embed=core.embed.make_embedder(cfg)) on an
 in-memory EventLog, and main.Room.perceive for every frame the live loop would have taken
 (main.perception_max_fps by video time; --live-timing also drops the frames a slow detector misses).
-Frames are video.mp4 with frames.json's t / wall. truth.commands and truth.questions go at their t
+Frames are video.mp4 with frames.json's t / wall; a clip recorded with room memory on holds full camera
+frames (e.g. 2560x1440), and the replay puts them behind core.room_view.TableView exactly as
+main.open_frames does (eval/clip.clip_view: the recorded table_view_rect, resized to frame_size_px), so the
+table pipeline sees the live cut. When the replay config has room memory on and the clip recorded its
+zones (meta.json room_zones, or --zones), main.make_room_memory runs it on the full frames, as the app does;
+room things are named by Grok only with --grok (live calls, background thread, so not deterministic).
+truth.commands and truth.questions go at their t
 through Room.ask: the care layer and voice.pipeline.make_ask (both clocked by the clip's wall time, so
 'put there 20 seconds ago' is measured on the clip) with voice.understand.Understander offline (the
 rule parser) -> voice.answers, so "this is my X" binds an
@@ -107,7 +115,8 @@ log = logging.getLogger("askroom.score_clip")
 STATE = {"VISIBLE": "on_table", "HELD": "held", "INSIDE": "inside", "UNDER": "under", "GONE": "gone",
          "UNKNOWN": "unknown"}
 AFTER = {"place": "on_table", "putdown": "on_table", "uncover": "on_table", "move": "on_table",
-         "pickup": "held", "put_inside": "inside", "cover": "under", "exit_edge": "gone"}
+         "pickup": "held", "put_inside": "inside", "cover": "under", "exit_edge": "gone",
+         "carry_to": "room", "remove": "gone"}      # carry_to: into truth step 'zone' (room demo, spec 0010)
 RESOLVE = ("place", "putdown", "uncover", "move")       # the prop comes to rest in view: find its entity
 MISSABLE = ("place", "putdown")
 NEW_SPOT = ("place", "putdown", "move")     # an unrelated entity found again in place is no arrival for these
@@ -147,6 +156,8 @@ class Sample:
     ents: dict                          # entity -> (status, parent, pos_cm or None)
     hands: list                         # hand boxes, table cm
     seen: dict                          # detected class -> [centre cm] ('thing' for proposals)
+    zones: dict = field(default_factory=dict)   # entity -> room zone, for entities off the table
+    names: dict = field(default_factory=dict)   # thing -> {"label", "aliases", "guess"} when it has any
 
 
 @dataclass
@@ -165,6 +176,8 @@ class Trace:
     max_fps: float = 0.0
     live_timing: bool = False
     detector: str = ""
+    view: Optional[list] = None                     # [table_view_rect, out_size] the frames were cut to
+    room: bool = False                              # room memory ran
 
 
 def make_detector(cfg: dict, table):
@@ -204,19 +217,38 @@ def prepare_config(clip: Clip, cfg: Optional[dict], workdir: str) -> dict:
     reid = cfg.get("reid") or {}
     if reid.get("enabled"):
         cfg["reid"] = dict(reid, background=False)
+    rm = cfg.get("room_memory") or {}
+    if rm.get("enabled"):           # the recorded zones, never whatever room_zones.json this checkout has
+        zones = Path(workdir) / "room_zones.json"
+        if clip.meta.get("room_zones"):
+            zones.write_text(json.dumps(clip.meta["room_zones"]))
+        cfg["room_memory"] = dict(rm, zones_path=str(zones))
     return cfg
 
 
+def make_hands_off_detector(cfg: dict, table):
+    """--hands-off: no fixed-class detector (so no hands and no prop labels, which the rig's conf_threshold
+    0.99 turns off anyway), the configured proposer (YOLOE .pt on a Mac). Runs with only the YOLOE model."""
+    import core.detect
+    return core.detect.Detector(cfg, table, backend=NoBoxes())
+
+
 def replay_clip(clip: Clip, cfg: Optional[dict] = None, detector=None, max_fps: Optional[float] = None,
-                live_timing: bool = False, overheard: bool = False, no_model: bool = False) -> Trace:
+                live_timing: bool = False, overheard: bool = False, no_model: bool = False,
+                hands_off: bool = False, grok: bool = False) -> Trace:
     """Every frame the live perception loop would have taken, through Room.perceive; truth.commands and
-    truth.questions through Room.ask at their t. Returns what the world believed after each frame."""
+    truth.questions through Room.ask at their t. Returns what the world believed after each frame.
+    A clip recorded with room memory on is cut to the table view as live (clip.view()), and room memory
+    runs on the full frames when the config has it on and the zones were recorded. grok: Grok names new
+    things (table and room, auto_name) with live calls, as the app does online."""
     import core.table
     from core.embed import make_embedder
     from core.events import EventLog
     from core.hands import HandTracker
+    from core.room_view import TableView
     from core.world import World
-    from main import Room
+    from eval.clip import FrameSlot
+    from main import Room, make_room_memory
     from voice.pipeline import make_ask
     from voice.understand import Understander
 
@@ -228,34 +260,59 @@ def replay_clip(clip: Clip, cfg: Optional[dict] = None, detector=None, max_fps: 
         try:
             world = World(cfg, events, embed=make_embedder(cfg))
             if detector is None:
-                detector = make_model_free_detector(cfg, table) if no_model else make_detector(cfg, table)
+                detector = (make_model_free_detector(cfg, table) if no_model else
+                            make_hands_off_detector(cfg, table) if hands_off else make_detector(cfg, table))
+            namer = None
+            if grok:                                    # main.build: auto names, and world.online from NetMonitor
+                import core.auto_name
+                world.online = True
+                namer = core.auto_name.from_config(cfg, world, online=lambda: True)
+            view = clip.view()
+            slot = FrameSlot()
+            frames = TableView(slot, view[0], view[1]) if view is not None else None
             hands = HandTracker(frame_size=tuple(cfg.get("frame_size_px") or (1280, 720)))
             interpret = Understander(cfg, online=lambda: False)       # offline: the rule parser
             clock = {"wall": clip.wall[0] if clip.wall else time.time()}
             ask = make_ask(cfg, world, events, net=None, interpret=interpret, visual=None,
                            clock=lambda: clock["wall"])                # 'ago' on clip time
-            room = Room(cfg, world, events, table, None, None, ask, detector=detector, hands=hands,
+            room = Room(cfg, world, events, table, frames, None, ask, detector=detector, hands=hands,
                         interpret=interpret)
+            if view is not None and (cfg.get("room_memory") or {}).get("enabled") \
+                    and getattr(detector, "backend", None) is not None:
+                room.room_memory = make_room_memory(cfg, world, detector, view[0])
             if (cfg.get("care") or {}).get("enabled", True):          # main.build's attach_care, on clip time
                 from voice.care import Care
                 care = Care(cfg, world, events, room.base_ask, clock=lambda: clock["wall"], online=lambda: False)
                 room.base_ask, room.care = care.ask, care
             fps = max_fps or float((cfg.get("main") or {}).get("perception_max_fps", 15))
             pc = cfg.get("proposals") or {}
+            model = "none (hands off)" if hands_off else (cfg.get("detect") or {}).get("model")
+            kind = pc.get("kind") if pc.get("enabled") else "off"
+            pmodel = (pc.get(kind) or {}).get("model") if kind == "yoloe" else None
             trace = Trace(objects=dict(cfg.get("objects") or {}), max_fps=fps, live_timing=live_timing,
                           detector="model-free (no YOLO, change proposer)" if no_model else
-                          f"{type(detector).__name__}: {(cfg.get('detect') or {}).get('model')}, proposals "
-                          f"{pc.get('kind') if pc.get('enabled') else 'off'}")
-            _run(clip, room, world, interpret, trace, 1.0 / fps if fps > 0 else 0.0, clock, overheard)
+                          f"{type(detector).__name__}: {model}, proposals {kind}"
+                          + (f" ({pmodel})" if pmodel else "") + (", Grok names" if grok else ""),
+                          view=[list(view[0]), list(view[1])] if view is not None else None,
+                          room=room.room_memory is not None)
+            try:
+                _run(clip, room, world, interpret, trace, 1.0 / fps if fps > 0 else 0.0, clock, overheard,
+                     slot if frames is not None else None, frames)
+            finally:
+                for x in (room.room_memory, namer):
+                    if x is not None:
+                        x.stop()
             return trace
         finally:
             events.close()
 
 
-def _run(clip: Clip, room, world, interpret, trace: Trace, period: float, clock: dict, overheard: bool) -> None:
+def _run(clip: Clip, room, world, interpret, trace: Trace, period: float, clock: dict, overheard: bool,
+         slot=None, view=None) -> None:
     """The perception loop on video time. It is ready again max(period, the step's time with
     --live-timing) after it started a step, and then takes the NEWEST frame (the camera thread keeps
-    only the latest), or waits for the next one. Speech goes in at its t, between steps."""
+    only the latest), or waits for the next one. Speech goes in at its t, between steps. slot / view: the
+    FrameSlot and TableView of a clip the app cut a table view from (Room.frames is the view)."""
     said = sorted([("command", c) for c in clip.truth["commands"]]
                   + [("question", q) for q in clip.truth["questions"]], key=lambda x: float(x[1]["t"]))
     k, ready, t0 = 0, -math.inf, time.perf_counter()
@@ -271,6 +328,9 @@ def _run(clip: Clip, room, world, interpret, trace: Trace, period: float, clock:
         say_until(start)
         s0 = time.perf_counter()
         try:
+            if view is not None:
+                slot.cur = f
+                f = view.at(f.t)
             out = room.perceive(f)
         except Exception:
             log.exception("perception step failed at t=%.2f", f.t)
@@ -300,15 +360,21 @@ def _run(clip: Clip, room, world, interpret, trace: Trace, period: float, clock:
 
 def _sample(trace: Trace, world, t: float, dets, evs) -> None:
     st = world.state_json()
-    ents = {}
+    ents, zones, names = {}, {}, {}
     for e in st["entities"]:
         ents[e["name"]] = (e["status"], e["parent"], tuple(e["pos_cm"]) if e["pos_cm"] is not None else None)
         trace.kinds[e["name"]] = e["kind"]
+        if e.get("zone") not in (None, "table"):
+            zones[e["name"]] = e["zone"]
+        got = {k: e[k] for k in ("label", "aliases", "guess") if e.get(k)}
+        if got:
+            names[e["name"]] = got
     trace.merged = dict(st.get("merged") or {})
     seen: dict = defaultdict(list)
     for d in dets.items:
         seen[d.cls].append(tuple(d.center_cm))
-    trace.samples.append(Sample(t=t, ents=ents, hands=[tuple(h.box_cm) for h in dets.hands], seen=dict(seen)))
+    trace.samples.append(Sample(t=t, ents=ents, hands=[tuple(h.box_cm) for h in dets.hands], seen=dict(seen),
+                                zones=zones, names=names))
     for ev in evs:
         trace.events.append({"t": ev.t, "obj": ev.obj, "type": str(ev.type), "parent": ev.parent,
                              "to_cm": list(ev.to_cm) if ev.to_cm is not None else None,
@@ -740,6 +806,7 @@ class _Scorer:
                        "wall_s": round(tr.wall_s, 2),
                        "fps": round(len(self.samples) / tr.wall_s, 1) if tr.wall_s > 0 else None,
                        "max_fps": tr.max_fps, "live_timing": tr.live_timing, "detector": tr.detector,
+                       "view": tr.view, "room_memory": tr.room,
                        "detect_ms_median": round(median(tr.detect_ms), 1) if tr.detect_ms else None,
                        "git": clip.meta.get("git"), "models": clip.meta.get("models"),
                        "clock_offset_s": clip.meta.get("clock_offset_s")},
@@ -939,6 +1006,9 @@ def print_report(r: dict) -> None:
           f"{rp['errors']} errors, {rp['wall_s']} s to replay"
           + (f", detector median {rp['detect_ms_median']} ms" if rp["detect_ms_median"] is not None else ""))
     print(f"  detector: {rp['detector']}")
+    if rp.get("view"):
+        print(f"  table view: {rp['view'][0]} of the full frame, resized to {rp['view'][1][0]}x{rp['view'][1][1]}"
+              f"; room memory {'on' if rp.get('room_memory') else 'off'}")
     if r.get("scene"):
         print(f"  scene: {r['scene']}")
     print(f"  initial scene: {r['initial_scene']['count']} identities admitted at the start "
@@ -963,11 +1033,8 @@ def print_report(r: dict) -> None:
     print(f"OVERALL: {'PASS' if r['pass'] else 'FAIL'}")
 
 
-def main(argv=None) -> int:
-    from core.config import load_config
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("clip", help="clip directory (video.mp4, frames.json, meta.json, truth.json)")
-    ap.add_argument("--json", help="also write the full report here")
+def add_replay_args(ap: argparse.ArgumentParser) -> None:
+    """The replay options score_clip and eval.scorecard share."""
     ap.add_argument("--config", help="replay with this config.yaml instead of the one recorded in meta.json")
     ap.add_argument("--fps", type=float, help="perception cap (default: the config's main.perception_max_fps)")
     ap.add_argument("--live-timing", action="store_true",
@@ -976,10 +1043,48 @@ def main(argv=None) -> int:
                     help="speech goes through the always-on mic's filter (default: asked with the clicker)")
     ap.add_argument("--no-model", action="store_true",
                     help="no YOLO / YOLOE (a Mac without the models): only the model-free change proposer")
+    ap.add_argument("--hands-off", action="store_true",
+                    help="no fixed-class detector (no hands, no prop labels): only the configured proposer, "
+                         "e.g. YOLOE .pt on a Mac (with --yoloe-model)")
     ap.add_argument("--detect-model", help="detector weights instead of the config's detect.model (e.g. a .pt "
                                            "on the Mac; the .engine only loads in the Jetson container)")
     ap.add_argument("--proposals", choices=["config", "change", "yoloe", "off"], default="config",
                     help="proposer instead of the recorded one (change needs no model)")
+    ap.add_argument("--yoloe-model", help="YOLOE weights instead of proposals.yoloe.model (the rig's reduced "
+                                          ".engine only loads on the Jetson; models/yoloe-26s-seg-pf.pt on a Mac)")
+    ap.add_argument("--zones", help="room_zones.json for a room clip recorded without its zones in meta.json")
+    ap.add_argument("--grok", action="store_true",
+                    help="name new things with Grok as the app does online (needs XAI_API_KEY; live calls on a "
+                         "background thread, so two replays can differ)")
+
+
+def replay_config(clip: Clip, a: argparse.Namespace) -> dict:
+    """The replay config from the command line: the recorded one (or --config) with the overrides."""
+    from core.config import load_config
+    cfg = copy.deepcopy(load_config(a.config) if a.config else (clip.meta.get("config") or load_config()))
+    if a.detect_model:
+        cfg["detect"] = dict(cfg.get("detect") or {}, model=a.detect_model)
+    if a.proposals != "config":
+        cfg["proposals"] = dict(cfg.get("proposals") or {}, enabled=a.proposals != "off",
+                                **({"kind": a.proposals} if a.proposals != "off" else {}))
+    if a.yoloe_model:
+        pc = cfg.get("proposals") or {}
+        cfg["proposals"] = dict(pc, yoloe=dict(pc.get("yoloe") or {}, model=a.yoloe_model))
+    return cfg
+
+
+def replay_from_args(clip: Clip, a: argparse.Namespace) -> Trace:
+    if a.zones:
+        clip.meta["room_zones"] = json.loads(Path(a.zones).read_text())
+    return replay_clip(clip, replay_config(clip, a), max_fps=a.fps, live_timing=a.live_timing,
+                       overheard=a.overheard, no_model=a.no_model, hands_off=a.hands_off, grok=a.grok)
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("clip", help="clip directory (video.mp4, frames.json, meta.json, truth.json)")
+    ap.add_argument("--json", help="also write the full report here")
+    add_replay_args(ap)
     ap.add_argument("--initial-s", type=float, default=Bars.initial_s,
                     help="identities admitted this soon after the first frame are the initial scene")
     ap.add_argument("--resolve-s", type=float, default=Bars.resolve_s,
@@ -994,14 +1099,7 @@ def main(argv=None) -> int:
     if not clip.video.exists():
         print(f"no video.mp4 in {a.clip}")
         return 2
-    cfg = copy.deepcopy(load_config(a.config) if a.config else (clip.meta.get("config") or load_config()))
-    if a.detect_model:
-        cfg["detect"] = dict(cfg.get("detect") or {}, model=a.detect_model)
-    if a.proposals != "config":
-        cfg["proposals"] = dict(cfg.get("proposals") or {}, enabled=a.proposals != "off",
-                                **({"kind": a.proposals} if a.proposals != "off" else {}))
-    trace = replay_clip(clip, cfg, max_fps=a.fps, live_timing=a.live_timing, overheard=a.overheard,
-                        no_model=a.no_model)
+    trace = replay_from_args(clip, a)
     r = score(trace, clip, Bars(initial_s=a.initial_s, resolve_s=a.resolve_s, match_cm=a.match_cm))
     print_report(r)
     if a.json:
