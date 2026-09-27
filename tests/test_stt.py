@@ -521,3 +521,9 @@ def test_prompt_can_include_synonyms():
     assert "meds" not in stt.initial_prompt(CFG)
     assert STT(CFG, backend=FakeBackend(), vad=AmpVAD()).prompt == stt.initial_prompt(
         CFG, synonyms=bool(CFG["stt"].get("prompt_synonyms")))
+
+
+def test_prompt_leads_with_the_wake_word():
+    p = stt.initial_prompt(CFG)
+    assert p.startswith("Room, where are my ") and "keys" in p
+    assert stt.initial_prompt(dict(CFG, listen={"wake_words": ["jarvis"]})).startswith("Jarvis, where")
