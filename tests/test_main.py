@@ -1,3 +1,4 @@
+import logging
 import tempfile
 import threading
 import time
@@ -1101,3 +1102,21 @@ def test_wake_mode_ignores_room_in_chatter(tmp_path, cal_path):
     time.sleep(0.2)
     stop_voice(room, t)
     assert room.tts.said == []
+
+
+def test_the_bare_wake_log_line_says_how_much_speech_and_if_it_was_the_prompt(tmp_path, cal_path, caplog):
+    """With listen.log_overheard off, the log must still tell a real "Room!" from Whisper writing its prompt back
+    on noise: the speech span, the clip length and echoes_prompt, never the transcript."""
+    from voice.stt import initial_prompt
+    stt = FakeSTT("", overheard=["Hey Room! Okay Room.", "Okay, room."])
+    stt.prompt, stt.last_speech_s, stt.last_clip_s = initial_prompt(CFG), 0.35, 1.2
+    room, _ = make_room(tmp_path, cal_path, stt=stt, clicker=FakeClicker())
+    with caplog.at_level(logging.INFO, logger="askroom.main"):
+        t = always_on(room)
+        assert wait_for(lambda: not stt.overheard)
+        time.sleep(0.2)
+        stop_voice(room, t)
+    lines = [r.getMessage() for r in caplog.records if "wake word alone" in r.getMessage()]
+    assert lines[0].endswith("(speech 350 ms, clip 1.20 s, prompt echo True)")
+    assert lines[1].endswith("prompt echo False)")
+    assert not any("Room" in m for m in lines)

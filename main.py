@@ -627,7 +627,7 @@ class Room:
         if not text:
             return
         if self._bare_wake(text):               # "Room!" ... pause ... the question: listen for it now
-            log.info("heard the wake word alone; listening for the question")
+            self._log_wake(text)
             self._asked(t_heard, after_wake=True)
             return
         if not self._for_rig(text):
@@ -667,6 +667,17 @@ class Room:
         voice.understand.bare_wake has the rules."""
         from voice.understand import bare_wake
         return bare_wake(text, self.cfg)
+
+    def _log_wake(self, text: str, again: bool = False) -> None:
+        """Log a bare wake word with the clip's speech span, its length and whether it is the Whisper prompt
+        written back (voice.stt.echoes_prompt; logged only, not acted on), never the transcript: tells a real
+        "Room!" from Whisper on noise with listen.log_overheard off."""
+        from voice.stt import echoes_prompt
+        stt = self.stt
+        num = lambda v: v if isinstance(v, (int, float)) else float("nan")   # noqa: E731 (a fake STT)
+        log.info("heard the wake word alone%s; listening for the question (speech %.0f ms, clip %.2f s, prompt echo %s)",
+                 " again" if again else "", 1000 * num(getattr(stt, "last_speech_s", None)),
+                 num(getattr(stt, "last_clip_s", None)), echoes_prompt(text, str(getattr(stt, "prompt", "") or "")))
 
     def _addressed(self, text: str) -> bool:
         """The wake word said to the rig (voice.understand.has_wake_word, the rule answering uses): the ack
@@ -717,7 +728,7 @@ class Room:
             self.indicator.off()
         t_heard = time.monotonic()
         if after_wake and text and self._bare_wake(text) and again < 2:   # "Hey Drew!" ... "Okay, room."
-            log.info("heard the wake word alone again; listening for the question")
+            self._log_wake(text, again=True)
             return self._asked(t_heard, after_wake=True, again=again + 1)
         if after_wake and (not text or not self._after_wake(text)):
             self._ignored += 1                  # not for the rig after all: dropped, not logged or said
