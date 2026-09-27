@@ -625,7 +625,7 @@ class Room:
             return
         if self._bare_wake(text):               # "Room!" ... pause ... the question: listen for it now
             log.info("heard the wake word alone; listening for the question")
-            self._asked(t_heard)
+            self._asked(t_heard, after_wake=True)
             return
         if not self._for_rig(text):
             self._ignored += 1                  # dropped: not logged, not stored, not sent
@@ -662,11 +662,20 @@ class Room:
         from voice.intents import normalize
         from voice.understand import wake_words
         words = normalize(text).split()
-        wake = set(wake_words(self.cfg))
-        return bool(words) and any(w in wake for w in words) and all(w in wake or w in WAKE_FILLER for w in words)
+        while words and words[0] in WAKE_FILLER:
+            words.pop(0)
+        while words and words[-1] in WAKE_FILLER:
+            words.pop()
+        said = " ".join(words)                  # "hey ask the room um" -> "ask the room": a whole wake phrase
+        return bool(said) and (said in set(wake_words(self.cfg))
+                               or all(w in set(wake_words(self.cfg)) for w in words))
 
-    def _asked(self, t_press: float) -> None:
-        """Clicker press, or the wake word alone: stop the current answer, listen for one question, answer it."""
+    def _asked(self, t_press: float, after_wake: bool = False) -> None:
+        """Clicker press, or the wake word alone: stop the current answer, listen for one question, answer it.
+        after_wake (a bare "Room!" heard by the always-on mic, which chatter or a mishearing can produce too):
+        the question must still pass the overheard checks that need no model (Understander.screen: a thing
+        named, what changed, a follow-up; RESET still needs the wake word in the same sentence), and nothing
+        heard is let go quietly instead of "Sorry, I didn't catch that"."""
         if self.tts is not None:
             self.tts.stop()                     # a click interrupts the previous answer
         if self.clicker is not None:
@@ -678,6 +687,9 @@ class Room:
             self._speak("Sorry, the microphone isn't working.")
             return
         t_heard = time.monotonic()
+        if after_wake and (not text or not self._for_rig(text)):
+            self._ignored += 1                  # not for the rig after all: dropped, not logged or said
+            return
         if not text:
             self._speak(NOT_HEARD)
             self.report({"heard": "", "answer": NOT_HEARD, "mode": "asked",

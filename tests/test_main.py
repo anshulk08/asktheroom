@@ -1010,3 +1010,43 @@ def test_overheard_transcripts_are_logged_only_with_the_debug_switch(tmp_path, c
     assert wait_for(lambda: not stt.overheard)
     assert stt.log_text is True
     stop_voice(room, t)
+
+
+# -- the bare wake word (review): it opens the mic like a click, but chatter still doesn't get answered
+
+def test_chatter_after_a_bare_wake_word_is_not_answered(tmp_path, cal_path, monkeypatch):
+    """A lone 'Room.' in hall chatter (or a mishearing) opened the mic, and the next sentence skipped every
+    chatter check: 'we built this in twenty hours' was answered as a question, and silence got 'Sorry, I
+    didn't catch that.'"""
+    posted = []
+    monkeypatch.setattr(main.requests, "post", lambda url, json, timeout, headers=None: posted.append(json))
+    for follow in ["we built this in like twenty hours", "where are you guys from", "let's reset after this", ""]:
+        stt = FakeSTT(follow, overheard=["Room."])
+        room, _ = make_room(tmp_path, cal_path, stt=stt, clicker=FakeClicker())
+        room.webhook_url = "http://n8n/webhook/ask-the-room"
+        resets = []
+        room.world.reset = lambda: resets.append(1)
+        t = always_on(room)
+        assert wait_for(lambda: not stt.overheard)
+        time.sleep(0.2)
+        stop_voice(room, t)
+        assert room.tts.said == [] and posted == [] and resets == [], follow
+
+
+def test_a_bare_wake_phrase_of_several_words_opens_the_mic(tmp_path, cal_path):
+    cfg = dict(CFG, listen=dict(CFG["listen"], wake_words=["ask the room", "askroom", "room"]))
+    room, _ = make_room(tmp_path, cal_path)
+    room.cfg = cfg
+    for text in ["Ask the room!", "hey, ask the room", "askroom", "Room!", "ok room um"]:
+        assert room._bare_wake(text), text
+    for text in ["the room", "ask the room where my keys are", "ask the", "room b", "living room"]:
+        assert not room._bare_wake(text), text
+
+
+def test_a_question_after_a_bare_wake_word_is_still_answered(tmp_path, cal_path):
+    stt = FakeSTT("did anything change while I was gone", overheard=["Ask the room."])
+    room, _ = make_room(tmp_path, cal_path, stt=stt, clicker=FakeClicker())
+    t = always_on(room)
+    assert wait_for(lambda: room.tts.said)
+    stop_voice(room, t)
+    assert len(room.tts.said) >= 1 and room.tts.said[0] != main.NOT_HEARD
