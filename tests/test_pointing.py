@@ -46,8 +46,9 @@ class KnownGeometry(unittest.TestCase):
             self.assertAim((0.5 * scale, 0.2 * scale, 1 * scale), *direction_angles((0.5, 0.2, 1)))
 
     def test_limits_flag(self):
-        self.assertFalse(solve_aim((0, -1, 0.1)).reachable)   # needs about -84 deg tilt
-        self.assertFalse(solve_aim((-0.1, 0, -1)).reachable)  # needs about -174 deg pan
+        self.assertFalse(solve_aim((0, -1, -0.1)).reachable)  # needs pan 180 (behind)
+        self.assertFalse(solve_aim((-1, 0, -0.1)).reachable)  # needs about -96 deg pan
+        self.assertTrue(solve_aim((0, -1, 0.1)).reachable)    # about -84 deg tilt: within -90
         self.assertTrue(solve_aim((0.3, 0.1, 2)).reachable)
 
 

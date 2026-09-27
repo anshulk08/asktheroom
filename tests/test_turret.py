@@ -14,7 +14,7 @@ from act.turret import Turret, TurretError
 
 class FakeBoard:
     """Line-level stand-in for the Uno running firmware/turret: moves finish instantly."""
-    LIMITS = ((-170.0, 170.0), (-45.0, 90.0))
+    LIMITS = ((-90.0, 90.0), (-90.0, 90.0))
 
     def __init__(self, boot: bytes = b"READY turret\n"):
         self.out = deque([boot] if boot else [])
@@ -117,8 +117,8 @@ def test_firmware_clamp_is_what_the_actuator_reports():
     cfg = dict(CFG, servo_limits={"pan": [0, 3000], "tilt": [0, 3000]})
     a = TurretActuator(cfg, clock=SimClock(), turret=Turret("/dev/fake", ser=board))
     a.move(1500, 0)                                   # asks for -150 deg tilt
-    assert board.tilt == -45.0
-    assert a.tilt == pytest.approx(1500 - 45 * 10)
+    assert board.tilt == -90.0
+    assert a.tilt == pytest.approx(1500 - 90 * 10)
 
 
 def test_us_per_deg_scales():

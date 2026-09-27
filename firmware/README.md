@@ -27,8 +27,8 @@ colour: its red wire is V+ (battery voltage), not 5 V.
 | DIR | D7 | D4 |
 
 The pan driver is on D5–D7 and tilt on D2–D4. The original diagram had them the other way round,
-and the firmware follows the wiring as built. The laser module's signal goes to D9 (a placeholder
-until the module is wired; `LASER_PIN` in `turret.ino`).
+and the firmware follows the wiring as built. The laser module's signal (S) goes to D8 (`LASER_PIN` in
+`turret.ino`); D8 has no PWM, so `B` brightness is on/off only there.
 
 **Power.** The battery powers the two drivers only. The Uno takes its power over USB from the
 host. Keep the Uno GND ↔ battery − wire, and leave the Uno's VIN pin unconnected: with battery +
@@ -56,8 +56,8 @@ Run CAL on each driver with the belt off before first use, and again after any m
 | Pan | 20T → 80T, 4:1 | right | measured: ±90° swings exact |
 | Tilt | 20T → 64T, 3.2:1 | up | direction confirmed; ratio from the build guide, not yet measured |
 
-These live in `GEAR_RATIO` and `INVERT_DIR` in `turret.ino`. The firmware's soft limits are pan
-±170° and tilt −45° to +90° (`MIN_DEG`/`MAX_DEG`); `act/pointing.py` `FIRMWARE_LIMITS_DEG` mirrors
+These live in `GEAR_RATIO` and `INVERT_DIR` in `turret.ino`. The firmware's soft limits are the
+mount's travel, ±90° on both axes (`MIN_DEG`/`MAX_DEG`); `act/pointing.py` `FIRMWARE_LIMITS_DEG` mirrors
 them. Opening the serial port resets the Uno, and wherever the mount points then becomes 0,0, so
 line it up level and facing forward first.
 
