@@ -66,21 +66,46 @@ TAG = re.compile(r"\[[^\]]*\]|\([^)]*\)")    # [BLANK_AUDIO], (music), ...
 
 # ---------------------------------------------------------------- audio seam
 
+def _to_block(x: np.ndarray, block: int) -> np.ndarray:
+    """One device block resampled to exactly `block` samples: an average over each group when the
+    ratio is whole (48 kHz -> 16 kHz: 3 samples, which also filters what would alias), else linear."""
+    n = len(x)
+    if n == block:
+        return x
+    if n % block == 0:
+        return x.reshape(block, n // block).mean(axis=1).astype(np.float32)
+    return np.interp(np.linspace(0, n - 1, block), np.arange(n), x).astype(np.float32)
+
+
 class AudioIn:
-    """float32 mono blocks from the default input device (sounddevice/PortAudio)."""
+    """float32 mono blocks of `block` samples at `rate` from an input device (sounddevice/PortAudio).
+    A device that refuses `rate` (an ALSA hw device on the Jetson often takes only 44.1 / 48 kHz) is
+    opened at its own default rate, and each block is resampled to `block` samples at `rate` (the VAD
+    needs exactly 512 at 16 kHz)."""
 
     def __init__(self, rate: int, block: int, device=None):
         import sounddevice as sd
         self._q: "queue.Queue[np.ndarray]" = queue.Queue()
         self.overflows = 0
+        self.device_rate = rate
 
         def cb(indata, frames, t, status):
             if status.input_overflow:
                 self.overflows += 1
-            self._q.put(indata[:, 0].copy())
+            x = indata[:, 0].copy()
+            self._q.put(x if len(x) == block else _to_block(x, block))
 
-        self.stream = sd.InputStream(samplerate=rate, blocksize=block, channels=1, dtype="float32",
-                                     device=device, callback=cb)
+        try:
+            self.stream = sd.InputStream(samplerate=rate, blocksize=block, channels=1, dtype="float32",
+                                         device=device, callback=cb)
+        except sd.PortAudioError:
+            dev_rate = int(sd.query_devices(device, "input")["default_samplerate"])
+            if dev_rate == rate:
+                raise
+            log.info("input device refuses %d Hz; recording at its %d Hz, resampled", rate, dev_rate)
+            self.device_rate = dev_rate
+            self.stream = sd.InputStream(samplerate=dev_rate, blocksize=round(block * dev_rate / rate),
+                                         channels=1, dtype="float32", device=device, callback=cb)
         self.stream.start()
 
     def read(self, timeout: float = 1.0) -> Optional[np.ndarray]:
@@ -98,6 +123,34 @@ class AudioIn:
 
 def open_input(rate: int, block: int, device=None) -> AudioIn:
     return AudioIn(rate, block, device)
+
+
+def input_devices() -> list[dict]:
+    """sounddevice devices that can record (max_input_channels > 0), each with its 'index'."""
+    import sounddevice as sd
+    return [dict(d, index=i) for i, d in enumerate(sd.query_devices()) if d.get("max_input_channels", 0) > 0]
+
+
+def resolve_input_device(spec) -> Optional[int]:
+    """stt.input_device -> a sounddevice index, or None for the default mic: like tts.output_device, an int
+    (or digits) is the index, any other string the first input device whose name contains it (case
+    insensitive; a warning names them all when several do, where sounddevice would refuse). No match: the
+    default mic, with a warning."""
+    if spec is None or (isinstance(spec, str) and not spec.strip()):
+        return None
+    if isinstance(spec, int) or (isinstance(spec, str) and spec.strip().isdigit()):
+        return int(spec)
+    want = str(spec).strip().lower()
+    hits = [d for d in input_devices() if want in str(d.get("name", "")).lower()]
+    if not hits:
+        log.warning("stt.input_device %r: no input device matches; using the default mic "
+                    "(python -m voice.stt --devices lists them)", spec)
+        return None
+    if len(hits) > 1:
+        log.warning("stt.input_device %r: several input devices match (%s); using %d. Set a longer part "
+                    "of the name, or the index.", spec, "; ".join(f"{d['index']}: {d['name']}" for d in hits),
+                    hits[0]["index"])
+    return int(hits[0]["index"])
 
 
 # ---------------------------------------------------------------- VAD
@@ -479,6 +532,14 @@ class STT:
         self.log_text = True                # always-on mic: main.py turns this off, so chatter isn't logged
         self.last_ms: dict[str, float] = {}
 
+    def _input(self):
+        """stt.input_device resolved now (a replugged mic may have a new index); None on any error."""
+        try:
+            return resolve_input_device(self.device)
+        except Exception:
+            log.exception("input device lookup failed; using the default mic")
+            return None
+
     @property
     def vad(self) -> SileroVAD:
         if self._vad is None:
@@ -521,7 +582,7 @@ class STT:
         stop = "max_s"
         was_quiet = not self._tts_speaking()    # the rig's voice counts once it has been off
         t0 = time.monotonic()
-        src = open_input(RATE, BLOCK, self.device)
+        src = open_input(RATE, BLOCK, self._input())
         try:
             while len(blocks) * block_s < max_s:
                 b = src.read(timeout=1.0)
@@ -614,10 +675,25 @@ def main(argv=None) -> int:
     ap.add_argument("--wav", nargs="*", help="transcribe these files instead of the microphone")
     ap.add_argument("--record-questions", metavar="DIR",
                     help="read out tests/stt_questions.json and save 01.wav ... into DIR")
+    ap.add_argument("--devices", action="store_true", help="list input devices (* = stt.input_device, d = default)")
+    ap.add_argument("--level", type=float, metavar="SECONDS",
+                    help="mic level and speech probability every half second (the 2 m check), then quit")
     ap.add_argument("--config")
     a = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     cfg = load_config(a.config)
+    if a.devices:
+        import sounddevice as sd
+        spec = (cfg.get("stt") or {}).get("input_device")
+        chosen, default_in = resolve_input_device(spec), sd.default.device[0]
+        print(f"stt.input_device: {spec!r}")
+        for d in input_devices():
+            mark = ("*" if d["index"] == chosen else " ") + ("d" if d["index"] == default_in else " ")
+            print(f"{mark} {d['index']:3d}  {d['name']}  ({d['max_input_channels']} ch, "
+                  f"{int(d['default_samplerate'])} Hz)")
+        return 0
+    if a.level:
+        return level_meter(STT(cfg), a.level)
     if a.record_questions:
         return record_questions(cfg, Path(a.record_questions))
     if a.wav:
@@ -638,6 +714,36 @@ def main(argv=None) -> int:
         it = parse(text, cfg)
         print(f"{text!r} -> {it.kind} {it.obj}  (record {stt.last_ms.get('record', 0):.0f} ms, "
               f"transcribe {stt.last_ms.get('transcribe', 0):.0f} ms)")
+
+
+def level_meter(stt: "STT", seconds: float, out=print) -> int:
+    """Print the mic level (dBFS) and the VAD's highest speech probability every half second for `seconds`.
+    Stand where the judge will and talk: speech should reach stt.vad_threshold with the room's noise below
+    it. Nothing is recorded or kept."""
+    src = open_input(RATE, BLOCK, stt._input())
+    vad = stt.vad
+    vad.reset()
+    per = max(1, RATE // BLOCK // 2)
+    out(f"input at {getattr(src, 'device_rate', RATE)} Hz; speech threshold {stt.threshold:.2f}")
+    try:
+        t, n, sq, pmax = 0.0, 0, 0.0, 0.0
+        while t < seconds:
+            x = src.read(timeout=1.0)
+            if x is None:
+                out("no audio from the input device")
+                return 1
+            sq += float(np.mean(x.astype(np.float64) ** 2))
+            pmax = max(pmax, vad(x))
+            n += 1
+            if n == per:
+                t += n * BLOCK / RATE
+                db = 10 * np.log10(sq / n + 1e-12)
+                out(f"{t:5.1f} s  level {db:6.1f} dBFS  speech {pmax:.2f} {'#' * int(pmax * 20):20s}"
+                    f"{'  SPEECH' if pmax >= stt.threshold else ''}")
+                n, sq, pmax = 0, 0.0, 0.0
+    finally:
+        src.close()
+    return 0
 
 
 def record_questions(cfg: dict, out: Path) -> int:
