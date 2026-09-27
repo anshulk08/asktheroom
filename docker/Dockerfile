@@ -1,7 +1,9 @@
 # Ask the Room runtime: the Ultralytics JetPack 6 image (CUDA, TensorRT 10.7, torch) + the app's packages,
 # installed offline from wheels downloaded on the Mac (no numpy/onnxruntime wheels: the image's own are kept;
-# piper-tts goes in with --no-deps because the image ships onnxruntime as onnxruntime-gpu). Build on the Jetson:
-#   docker build -t askroom:latest docker/
+# piper-tts goes in with --no-deps because the image ships onnxruntime as onnxruntime-gpu). Build on the Jetson
+# under a new tag, so askroom:latest stays as the rollback, and run it by name:
+#   docker build -t askroom:demo docker/
+#   ASKROOM_IMAGE=askroom:demo scripts/dock.sh python3 main.py      # promote: docker tag askroom:demo askroom:latest
 # The servo driver (actuator: pca9685) is adafruit-circuitpython-servokit; with Blinka's deps and Jetson.GPIO
 # every wheel is pure Python or has a cp310 aarch64 build, fetched on the Mac with:
 #   pip3 download adafruit-circuitpython-servokit==1.3.24 Jetson.GPIO==2.1.11 --platform manylinux2014_aarch64 \
