@@ -70,12 +70,34 @@ def report(r: dict) -> str:
     return "\n".join(lines)
 
 
+def image_frames(folder) -> Iterable[Frame]:
+    """The .jpg files of a folder in name order, as frames 0.1 s apart (capture.py --scene writes them)."""
+    import cv2
+    from pathlib import Path
+    for i, p in enumerate(sorted(Path(folder).glob("*.jpg"))):
+        img = cv2.imread(str(p))
+        if img is not None:
+            yield Frame(t=i / 10, wall=i / 10, img=img, idx=i)
+
+
+def gate(r: dict, required: list[str], cut: float, min_rate: float) -> list[str]:
+    """Why the required classes fail the go/no-go: each must reach `cut` in at least min_rate of the frames.
+    A cut not swept is measured at the nearest lower one swept."""
+    c = max([x for x in r["cuts"] if x <= cut + 1e-9] or [min(r["cuts"])])
+    return [f"{obj} {100 * r['rates'].get(obj, {}).get(c, 0.0):.0f}% < {100 * min_rate:.0f}% at {c}"
+            for obj in required if r["rates"].get(obj, {}).get(c, 0.0) < min_rate]
+
+
 def main(argv: Optional[list] = None) -> int:
     from core.config import load_config
     from core.detect import UltralyticsBackend, class_list
     from eval.clip import load_clip
     ap = argparse.ArgumentParser(description="detector hit rate per class per confidence cut-off")
-    ap.add_argument("clip")
+    ap.add_argument("clip", nargs="?", help="a clip dir (video.mp4 + frames.json); or use --images")
+    ap.add_argument("--images", help="a folder of frames instead (capture.py --scene)")
+    ap.add_argument("--require", nargs="*", default=[], help="go/no-go: these classes must reach --require-conf")
+    ap.add_argument("--require-conf", type=float, default=0.6)
+    ap.add_argument("--min-rate", type=float, default=0.8, help="... in at least this share of the frames")
     ap.add_argument("--config")
     ap.add_argument("--detect-model")
     ap.add_argument("--max-fps", type=float)
@@ -84,19 +106,28 @@ def main(argv: Optional[list] = None) -> int:
     a = ap.parse_args(argv)
     cfg = load_config(a.config)
     cfg.setdefault("detect", {})["min_conf"] = min(CUTS)
-    clip = load_clip(a.clip)
+    if bool(a.clip) == bool(a.images):
+        ap.error("give a clip dir or --images, not both")
     backend = UltralyticsBackend(cfg, a.detect_model)
     _, to_obj = class_list(cfg)
-    fps = a.max_fps if a.max_fps is not None else float((cfg.get("main") or {}).get("perception_max_fps", 15))
-    per_frame = [(f.t, best_confs(backend.infer(f.img), to_obj)) for f in paced(clip.frames(), fps)]
-    r = sweep(per_frame, list(cfg.get("objects") or {}), clip.truth["steps"], step_s=a.step_s)
-    r.update(clip=clip.name, model=backend.info)
-    print(f"{clip.name}: {backend.info['path']}")
+    if a.images:
+        name, frames, steps = a.images, image_frames(a.images), []
+    else:
+        clip = load_clip(a.clip)
+        fps = a.max_fps if a.max_fps is not None else float((cfg.get("main") or {}).get("perception_max_fps", 15))
+        name, frames, steps = clip.name, paced(clip.frames(), fps), clip.truth["steps"]
+    per_frame = [(f.t, best_confs(backend.infer(f.img), to_obj)) for f in frames]
+    r = sweep(per_frame, list(cfg.get("objects") or {}), steps, step_s=a.step_s)
+    r.update(clip=name, model=backend.info)
+    print(f"{name}: {backend.info['path']}")
     print(report(r))
+    if a.require:
+        r["gate_fail"] = gate(r, a.require, a.require_conf, a.min_rate)
+        print("GO" if not r["gate_fail"] else "NO-GO: " + "; ".join(r["gate_fail"]))
     if a.json:
         with open(a.json, "w") as f:
             json.dump(r, f, indent=1)
-    return 0
+    return 1 if r.get("gate_fail") else 0
 
 
 if __name__ == "__main__":
