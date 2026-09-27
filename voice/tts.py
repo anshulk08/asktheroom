@@ -149,7 +149,8 @@ def output_devices() -> list[dict]:
 def resolve_output_device(spec) -> Optional[int]:
     """tts.output_device -> a sounddevice index, or None for the default device. An int (or digits)
     is taken as the index; any other string picks the output device whose name contains it (case
-    insensitive), the first if several do (with a warning naming them). No match: the default device,
+    insensitive), the first if several do (with a warning naming them); a device whose whole name it is
+    wins ("default" is not "sysdefault"). No match: the default device,
     with a warning, so an unplugged speaker costs the voice its device, not the answer."""
     if spec is None or (isinstance(spec, str) and not spec.strip()):
         return None
@@ -157,6 +158,9 @@ def resolve_output_device(spec) -> Optional[int]:
         return int(spec)
     want = str(spec).strip().lower()
     hits = [d for d in output_devices() if want in str(d.get("name", "")).lower()]
+    exact = [d for d in hits if str(d.get("name", "")).strip().lower() == want]
+    if exact:                   # "pulse" / "default" (the host PulseAudio: a Bluetooth speaker) are whole names;
+        hits = exact[:1]        # "default" is also inside "sysdefault", which PortAudio lists first
     if not hits:
         log.warning("tts.output_device %r: no output device matches; using the default "
                     "(python -m voice.tts --devices lists them)", spec)

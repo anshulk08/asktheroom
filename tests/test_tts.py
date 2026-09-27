@@ -400,3 +400,12 @@ def test_audio_out_interrupt_does_not_close(monkeypatch):
     assert calls == ["abort"]
     out.abort()
     assert calls == ["abort", "abort", "close"]
+
+
+@pytest.mark.parametrize("chars", [10, 28, 82, 114, 200, 400])
+def test_the_playback_deadline_leaves_room_for_a_bluetooth_speaker(chars):
+    """Piper (en_US-lessac-medium) measured 16-19 characters a second on answers of 28-114 characters
+    (laptop). A Bluetooth speaker through PulseAudio adds ~0.15-0.3 s, and the pulse plugin's buffer drains
+    after the last write: with a second for both, the deadline still never cuts off a real answer."""
+    speech_s = chars / 15.0                                     # slower than any measured answer
+    assert tts.playback_budget_s("x" * chars) >= speech_s + 0.3 + 1.0
