@@ -1520,8 +1520,12 @@ def build(cfg: dict, fake: bool = False, camera: int = 0, with_voice: bool = Tru
         says = {z.name: z.say for z in rm.zones.zones.values()}
         return rm.tracker.tracks(), says, lambda n: bool((world.room_json().get(n) or {}).get("tentative"))
 
+    def room_zones():                   # 'point to the couch': room memory's drawn zones, aimed at themselves
+        rm = getattr(room, "room_memory", None)
+        return [] if rm is None else [(z.name, z.say, z.poly) for z in rm.zones.zones.values()]
+
     ask = voice.pipeline.make_ask(cfg, world, events, net=netmon, interpret=interpret, visual=visual,
-                                  room_tracks=room_tracks)
+                                  room_tracks=room_tracks, room_zones=room_zones)
     tts = voice.tts.TTS(cfg, net=netmon).attach(world)     # /state: speaker connected, the phone's voice
     tts.warm()
     cleanup.append(tts.stop)
