@@ -152,7 +152,7 @@ class Turret:
         if line == "DONE":
             self._done.set()
             return None
-        if line == "LASER TIMEOUT":
+        if line in ("LASER TIMEOUT", "LASER MAX ON"):     # the firmware turned it off by itself
             self._laser_on = False
             return None
         return line or None

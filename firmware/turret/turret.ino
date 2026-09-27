@@ -18,9 +18,14 @@
 // Boot prints "READY". Opening the port resets the Uno, so position 0,0 is
 // wherever the mount is at that moment.
 //
-// Safety: the laser turns itself off if no command arrives for
-// LASER_TIMEOUT_MS. A host that wants it to stay on sends P as a heartbeat.
+// Safety: the laser is LOW from reset, and turns itself off
+//   - if no command arrives for LASER_TIMEOUT_MS (a host that wants it on sends P as a heartbeat),
+//   - LASER_MAX_ON_MS after it was switched on, heartbeat or not ("LASER MAX ON"; L 0 then L 1 re-lights),
+//   - on any ERR reply, and on X.
+// A hardware watchdog resets the Uno (laser LOW again) if the loop ever stalls for WDT_TIMEOUT.
+// Wire a 10k pull-down on the laser switch's gate/base: during reset and the bootloader the pin floats.
 
+#include <avr/wdt.h>
 #include <util/atomic.h>
 
 // ---- Wiring -----------------------------------------------------------------
@@ -50,7 +55,8 @@ const float MIN_STEP_RATE = 100;            // creep speed so every move finishe
 const float ARRIVE_STEPS = 4;
 const uint16_t PLAN_US = 1000;              // velocity planner period
 const uint16_t ENABLE_SETTLE_MS = 10;
-const uint32_t LASER_TIMEOUT_MS = 2000;
+const uint32_t LASER_TIMEOUT_MS = 1000;       // host heartbeat is 0.5 s (act/turret.py HEARTBEAT_S)
+const uint32_t LASER_MAX_ON_MS = 5000;        // host caps each aim at 4 s (laser_room.max_on_s)
 
 float maxSpeedDeg = 120;   // deg/s at the axis
 float accelDeg = 600;      // deg/s^2 at the axis
@@ -73,6 +79,7 @@ bool moveActive = false;
 bool laserOn = false;
 uint8_t laserBrightness = 255;
 uint32_t lastCommandMs = 0;
+uint32_t laserOnSinceMs = 0;
 
 char line[48];
 uint8_t lineLen = 0;
@@ -207,6 +214,9 @@ void haltPulses() {
 }
 
 void setLaser(bool on) {
+  if (on && !laserOn) {
+    laserOnSinceMs = millis();         // the max-on clock runs from off -> on; re-sending L 1 doesn't extend it
+  }
   laserOn = on;
   if (on) {
     analogWrite(LASER_PIN, laserBrightness);
@@ -293,6 +303,7 @@ void handleCommand(char *cmd) {
   switch (op) {
     case 'A':
       if (n < 2) {
+        setLaser(false);
         Serial.println(F("ERR A needs pan and tilt"));
         return;
       }
@@ -300,6 +311,7 @@ void handleCommand(char *cmd) {
       break;
     case 'R':
       if (n < 2) {
+        setLaser(false);
         Serial.println(F("ERR R needs dpan and dtilt"));
         return;
       }
@@ -307,6 +319,7 @@ void handleCommand(char *cmd) {
       break;
     case 'L':
       if (n < 1) {
+        setLaser(false);
         Serial.println(F("ERR L needs 0 or 1"));
         return;
       }
@@ -315,6 +328,7 @@ void handleCommand(char *cmd) {
       break;
     case 'B':
       if (n < 1) {
+        setLaser(false);
         Serial.println(F("ERR B needs 0-255"));
         return;
       }
@@ -340,6 +354,7 @@ void handleCommand(char *cmd) {
       break;
     case 'E':
       if (n < 1) {
+        setLaser(false);
         Serial.println(F("ERR E needs 0 or 1"));
         return;
       }
@@ -351,6 +366,7 @@ void handleCommand(char *cmd) {
       break;
     case 'Z':
       if (isMoving()) {
+        setLaser(false);
         Serial.println(F("ERR busy"));
         return;
       }
@@ -362,6 +378,7 @@ void handleCommand(char *cmd) {
     case 'V':
     case 'C':
       if (n < 1 || v[0] <= 0) {
+        setLaser(false);
         Serial.println(F("ERR needs a positive number"));
         return;
       }
@@ -386,6 +403,7 @@ void handleCommand(char *cmd) {
       printHelp();
       break;
     default:
+      setLaser(false);
       Serial.print(F("ERR unknown "));
       Serial.println(op);
   }
@@ -407,6 +425,7 @@ void pollSerial() {
     }
     line[lineLen] = '\0';
     if (lineOverflow) {
+      setLaser(false);
       Serial.println(F("ERR line too long"));
     } else {
       handleCommand(line);
@@ -417,6 +436,10 @@ void pollSerial() {
 }
 
 void setup() {
+  MCUSR = 0;                           // after a watchdog reset: stop it before anything else
+  wdt_disable();
+  digitalWrite(LASER_PIN, LOW);
+  pinMode(LASER_PIN, OUTPUT);
   for (uint8_t i = 0; i < 2; i++) {
     digitalWrite(EN_PIN[i], HIGH);  // set levels before switching to output
     digitalWrite(STEP_PIN[i], HIGH);
@@ -438,9 +461,11 @@ void setup() {
 
   Serial.begin(115200);
   Serial.println(F("READY turret"));
+  wdt_enable(WDTO_500MS);
 }
 
 void loop() {
+  wdt_reset();
   pollSerial();
 
   static uint32_t lastPlanUs = micros();
@@ -461,5 +486,9 @@ void loop() {
   if (laserOn && millis() - lastCommandMs > LASER_TIMEOUT_MS) {
     setLaser(false);
     Serial.println(F("LASER TIMEOUT"));
+  }
+  if (laserOn && millis() - laserOnSinceMs > LASER_MAX_ON_MS) {
+    setLaser(false);
+    Serial.println(F("LASER MAX ON"));
   }
 }

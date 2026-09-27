@@ -205,3 +205,27 @@ def test_missing_board_falls_back_to_fake(monkeypatch):
     a, why = make_actuator_or_fake(CFG, clock=SimClock())
     assert type(a).__name__ == "FakeActuator"
     assert "turret" in why and "no such port" in why
+
+
+@pytest.mark.parametrize("why", ["LASER TIMEOUT", "LASER MAX ON"])
+def test_the_firmware_turning_the_laser_off_by_itself_is_noted(why):
+    """firmware/turret: off after 1 s without a command, and 5 s after it was lit whatever the host sends."""
+    board = FakeBoard()
+    t = Turret("/dev/fake", ser=board)
+    t.laser(True)
+    assert t._laser_on
+    board._say(why)
+    t.position()                                  # any exchange reads the unsolicited line first
+    assert not t._laser_on
+    t.close()
+
+
+def test_the_firmware_keeps_its_laser_safety():
+    """The sketch the user flashes: LOW from reset, silence and max-on cut-offs, off on ERR, a watchdog."""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "firmware" / "turret" / "turret.ino").read_text()
+    assert "LASER_TIMEOUT_MS = 1000" in src and "LASER_MAX_ON_MS = 5000" in src
+    assert "wdt_enable(WDTO_500MS)" in src and "wdt_reset();" in src
+    setup = src[src.index("void setup()"):]
+    assert setup.index("digitalWrite(LASER_PIN, LOW)") < setup.index("pinMode(LASER_PIN, OUTPUT)")
+    assert src.count('Serial.println(F("ERR') + src.count('Serial.print(F("ERR') <= src.count("setLaser(false);")
