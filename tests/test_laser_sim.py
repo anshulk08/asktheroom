@@ -354,3 +354,17 @@ def test_an_unknown_laser_colour_is_refused():
     from act.laser import Laser
     with pytest.raises(ValueError):
         Laser(object(), None, None, "", cfg={"laser_room": {"color": "blue"}})
+
+
+def test_the_dot_finder_never_looks_in_the_ignored_boxes(cal):
+    """The turret's laser module glows at the frame's bottom edge: that is never the dot."""
+    rig, laser, _, _ = cal
+    laser.aim((45.0, 30.0))
+    d = laser.find_dot_px(1)
+    assert d is not None
+    laser.ignore_px = [(d[0] - 40, d[1] - 40, d[0] + 40, d[1] + 40)]
+    try:
+        assert laser.find_dot_px(1) is None
+    finally:
+        laser.ignore_px = []
+        laser.off()

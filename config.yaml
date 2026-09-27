@@ -728,6 +728,8 @@ laser_room:
   allow_hog: false            # HOG as the fallback person detector (it misses seated people)
   allow_sweep: false          # 'carried off' edge sweeps run down the edge the person walked out by
   color: red                  # the dot's colour: red | green (the detector looks for this channel's rise)
+  ignore_px: []               # [[x1, y1, x2, y2], ...] full-frame px the dot finder never looks in: the laser
+                              # module itself, if the camera sees it (rig: [[850, 1250, 1300, 1440]])
 
 # Stepper turret (actuator: turret; act/actuator.py TurretActuator, act/turret.py, firmware/turret).
 # An Arduino Uno drives two MKS SERVO42D closed-loop steppers; wiring and driver menu settings are in

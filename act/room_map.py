@@ -169,14 +169,18 @@ def sweep(laser, grid: tuple[int, int] = (20, 15), n_pairs: int = 2, refine: boo
           jump_k: float = 2.5, stop: Optional[Callable[[], bool]] = None,
           progress: Optional[Callable[[int, int], None]] = None,
           checkpoint: Optional[Callable[["RoomMap"], None]] = None, every: int = 10,
-          done: Optional[dict] = None) -> RoomMap:
+          done: Optional[dict] = None, ranges: Optional[tuple] = None) -> RoomMap:
     """Record the dot map over the laser's full servo range. stop() is checked before every point
     (return True when a person is in view) and raises SweepAborted. The laser ends off.
     checkpoint(partial map) runs every `every` points and on any exit (an abort, a crash), so minutes of
     dots are never lost; done ({(pan, tilt) rounded to 0.001: px or None}, from a partial map) skips
-    points already visited (python -m act.room_map --sweep --resume)."""
+    points already visited (python -m act.room_map --sweep --resume). ranges ((pan lo, hi), (tilt lo, hi))
+    sweeps only that part of the servo range, clipped to the limits (--densify)."""
     done = dict(done or {})
     (plo, phi), (tlo, thi) = laser.act.limits()
+    if ranges is not None:
+        (a, b), (c, d) = ranges
+        plo, phi, tlo, thi = max(plo, a), min(phi, b), max(tlo, c), min(thi, d)
     gx, gy = int(grid[0]), int(grid[1])
     pans, tilts = np.linspace(plo, phi, gx), np.linspace(tlo, thi, gy)
     step = (float(pans[1] - pans[0]) if gx > 1 else 1.0, float(tilts[1] - tilts[0]) if gy > 1 else 1.0)
@@ -299,6 +303,61 @@ def beam_blocked(target_px, box_px, blockers, head_px=None, margin_px: float = 2
     return False
 
 
+def densify_ranges(rm: "RoomMap", zones: list[str], target_px: float = 40.0) -> tuple:
+    """((pan lo, hi), (tilt lo, hi)) covering the seen dots inside these zones, grown by one sweep step, and
+    the grid (nx, ny) that samples it about target_px apart: a second sweep there fills in the zones a coarse
+    sweep only touched (the rig's side table got 1 dot of 91)."""
+    import cv2 as _cv2
+    P = []
+    for z in zones:
+        if z not in rm.zones:
+            raise ValueError(f"no zone {z!r} in the map; zones: {sorted(rm.zones)}")
+        poly = np.array(rm.zones[z], np.float32).reshape(-1, 1, 2)
+        P += [p for p, x in zip(rm._p, rm._x) if _cv2.pointPolygonTest(poly, (float(x[0]), float(x[1])), False) >= 0]
+    if not P:
+        raise ValueError(f"no swept dot lies in {zones}: sweep the whole range first")
+    P = np.array(P)
+    sp, st = np.asarray(rm.step_us, float), rm.spacing_px if math.isfinite(rm.spacing_px) else target_px
+    (plo, tlo), (phi, thi) = P.min(axis=0) - sp, P.max(axis=0) + sp
+    k = max(1.0, st / target_px)                  # how much finer than the first sweep
+    nx = int(np.clip(round((phi - plo) / (sp[0] / k)) + 1, 2, 30))
+    ny = int(np.clip(round((thi - tlo) / (sp[1] / k)) + 1, 2, 30))
+    return ((float(plo), float(phi)), (float(tlo), float(thi))), (nx, ny)
+
+
+def merged(a: "RoomMap", b: "RoomMap") -> "RoomMap":
+    """Two sweeps of the same view as one map (zones from a)."""
+    return RoomMap(np.vstack([a.pulses, b.pulses]), np.vstack([a.px, b.px]),
+                   (min(a.step_us[0], b.step_us[0]), min(a.step_us[1], b.step_us[1])),
+                   a.size_px if a.size_px != (0, 0) else b.size_px, zones=a.zones, t=time.time(), grid=a.grid)
+
+
+def abort_snapshot(frames, reason: str, part: str, out_dir: str = "data") -> Optional[str]:
+    """The newest frame with HOG's person boxes (red), the dots found so far (green) and the reason, saved as
+    <out_dir>/sweep_abort_HHMMSS.jpg, so a stopped sweep says what it saw."""
+    try:
+        f = frames.latest()
+        if f is None or f.img is None:
+            return None
+        img = f.img.copy()
+        for b in people_boxes_hog(img) or []:
+            cv2.rectangle(img, (int(b[0]), int(b[1])), (int(b[2]), int(b[3])), (0, 0, 255), 6)
+        if os.path.exists(part):
+            with open(part) as fh:
+                for x in json.load(fh).get("px") or []:
+                    if x is not None:
+                        cv2.circle(img, (int(x[0]), int(x[1])), 18, (0, 255, 0), 4)
+        cv2.putText(img, f"{time.strftime('%H:%M:%S')} {reason}", (30, 60), cv2.FONT_HERSHEY_SIMPLEX, 1.6,
+                    (0, 0, 255), 4)
+        os.makedirs(out_dir, exist_ok=True)
+        path = os.path.join(out_dir, time.strftime("sweep_abort_%H%M%S.jpg"))
+        cv2.imwrite(path, cv2.resize(img, (img.shape[1] // 2, img.shape[0] // 2)))
+        return path
+    except Exception:
+        log.exception("abort snapshot failed")
+        return None
+
+
 def zones_from(path: str, cfg: dict, table: bool = True) -> dict:
     """Room memory's drawn zones (room_zones.json: {"zones": {name: {"poly": [[x, y], ...]}}}, full-frame px)
     as pointable zones, and the table view's rect (room_memory.table_view_rect) as 'table'."""
@@ -387,6 +446,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="--sweep without a person detector (OpenCV 5): you checked nobody is in view")
     ap.add_argument("--out", help="where to write the map (default: config room_map)")
     ap.add_argument("--resume", action="store_true", help="--sweep: skip the points a stopped sweep saved")
+    ap.add_argument("--densify", metavar="ZONES",
+                    help="a second, finer sweep (~40 px) over the pan/tilt range whose dots fell in these zones "
+                         "(comma-separated), merged into the map")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     if args.sim:
@@ -396,7 +458,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     cfg = load_config()
     room = cfg.get("room") or {}
     path = args.out or cfg.get("room_map", "room_map.json")
-    if args.sweep:
+    if args.sweep or args.densify:
+        import signal
+        # docker stop sends SIGTERM: make it an exception, so the finally below turns the laser off and parks
+        signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(SweepAborted("stopped (SIGTERM)")))
         from main import camera_source, default_camera
         laser, frames = _real_rig(cfg, camera_source(args.camera) if args.camera else default_camera(cfg))
         clear_s = float(room.get("person_clear_s", 5))
@@ -414,7 +479,13 @@ def main(argv: Optional[list[str]] = None) -> int:
 
         try:
             old = RoomMap.load(path).zones if os.path.exists(path) else {}
-            part = path.replace(".json", "") + ".partial.json"
+            base, rng, grid = None, None, tuple(args.grid or room.get("grid", (20, 15)))
+            if args.densify:
+                base = RoomMap.load(path)
+                rng, grid = densify_ranges(base, [z.strip() for z in args.densify.split(",") if z.strip()])
+                print(f"densify {args.densify}: pan {rng[0][0]:.0f}-{rng[0][1]:.0f}, "
+                      f"tilt {rng[1][0]:.0f}-{rng[1][1]:.0f} us, grid {grid[0]}x{grid[1]}")
+            part = path.replace(".json", "") + (".densify" if args.densify else "") + ".partial.json"
             done = {}
             if args.resume and os.path.exists(part):
                 with open(part) as f:
@@ -422,16 +493,20 @@ def main(argv: Optional[list[str]] = None) -> int:
                 done = {(round(float(p), 3), round(float(t), 3)): (None if x is None else tuple(x))
                         for (p, t), x in zip(pd["pulses"], pd["px"])}      # to_dict: unseen = null
                 print(f"resuming: {len(done)} points already swept in {part}")
-            rm = sweep(laser, grid=tuple(args.grid or room.get("grid", (20, 15))),
-                       n_pairs=int(room.get("n_pairs", 3)), stop=stop,
+            rm = sweep(laser, grid=grid, n_pairs=int(room.get("n_pairs", 3)), stop=stop,
                        progress=lambda k, n: k % 10 == 0 and log.info("%d/%d", k, n),
-                       checkpoint=lambda m: m.save(part), done=done)
-            rm.zones = old
+                       checkpoint=lambda m: m.save(part), done=done, ranges=rng)
+            if base is not None:
+                rm = merged(base, rm)
+            else:
+                rm.zones = old
             rm.save(path)
             os.remove(part) if os.path.exists(part) else None
             print(f"wrote {path}: {len(rm.pulses)} points, {rm.n_seen} dots seen, zones kept: {list(old)}")
-        except SweepAborted:
-            print("sweep aborted: a person came into view; clear the room and run it again")
+        except SweepAborted as ex:
+            snap = abort_snapshot(frames, str(ex), part)
+            print(f"sweep aborted: {ex}; laser off, head parked. Snapshot: {snap}. Fix that and run it "
+                  f"again (--resume keeps the points so far)")
             return 1
         finally:
             laser.act.close()

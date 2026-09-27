@@ -324,6 +324,8 @@ class Laser:
         # blinks and re-lights don't reset it (the actuator and the firmware timers alone would).
         self.max_on_s = float((cfg.get("laser_room") or {}).get("max_on_s", 4.0))
         self.color = str((cfg.get("laser_room") or {}).get("color", "red")).lower()   # the dot's colour
+        # px boxes of the room frame the dot finder never looks in: the laser module itself glows in view
+        self.ignore_px = [tuple(float(v) for v in b) for b in (cfg.get("laser_room") or {}).get("ignore_px") or []]
         if self.color not in LASER_CHANNEL:
             raise ValueError(f"laser_room.color must be one of {sorted(LASER_CHANNEL)}, got {self.color!r}")
         self.fit: Optional[LaserFit] = None
@@ -432,6 +434,8 @@ class Laser:
                     break
                 if off is not None:
                     sc = dot_score(off.img, on.img, self.color).astype(np.float32)
+                    for x1, y1, x2, y2 in self.ignore_px:
+                        sc[max(0, int(y1)):max(0, int(y2)), max(0, int(x1)):max(0, int(x2))] = 0
                     acc = sc if acc is None else acc + sc
                     n += 1
             self.last_frames = (off, on)
@@ -604,7 +608,10 @@ class Laser:
         target = np.asarray(target_px, dtype=np.float64)
         tol = self.tol_px if tol_px is None else float(tol_px)
         pairs = self.room_n_pairs if n_pairs is None else int(n_pairs)
-        g = rm.pulses_for_px(target, max_gap_px=self.max_map_gap_px)
+        # a target between the sweep's dots is fine: the closed loop finishes (at the rig's 12x9 sweep the
+        # dots were 111 px apart and a 60 px gap refused every aim as 'unmapped')
+        sp = rm.spacing_px if math.isfinite(getattr(rm, "spacing_px", math.nan)) else 0.0
+        g = rm.pulses_for_px(target, max_gap_px=max(self.max_map_gap_px, 3.0 * sp))
         if g is None:
             return PxAim(math.inf, False, False, 0, None, "unmapped")
         J = np.array(g.J, dtype=np.float64)                          # px per µs

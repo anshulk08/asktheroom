@@ -518,3 +518,45 @@ def test_aim_px_stops_dark_when_a_correction_does_not_move_the_dot(mapped, monke
     monkeypatch.setattr(laser, "find_dot_px", lambda *a, **k: (100.0, 100.0))      # never moves
     r = laser.aim_px(center(rig.box_px("table")), room_map=rm, tol_px=0.01)
     assert r.reason == "stalled" and not r.on_target and rig.act.laser_on is False
+
+
+# ----- after the rig run: the map gap follows the sweep, densify, abort snapshots
+
+def test_a_target_between_coarse_sweep_dots_is_still_aimed(monkeypatch):
+    """Rig, 04:25: dots 111 px apart and max_map_gap_px 60 refused every aim as 'unmapped'."""
+    rig = RoomRig(b_cm=3.0, seed=6)
+    laser = rig.make_laser()
+    rm = sweep(laser, grid=(5, 4), n_pairs=1, refine=False)            # coarse: dots far apart
+    laser.max_map_gap_px = 1.0                                         # the config's gap alone would refuse
+    t = center(rig.box_px("table"))
+    r = laser.aim_px(t, room_map=rm)
+    assert r.reason != "unmapped"
+    laser.off()
+
+
+def test_densify_sweeps_only_the_range_whose_dots_fell_in_the_zones_and_merges():
+    from act.room_map import densify_ranges, merged
+    rig = RoomRig(b_cm=3.0, seed=6)
+    laser = rig.make_laser()
+    rm = sweep(laser, grid=(6, 5), n_pairs=1, refine=False)
+    x0, y0 = rm._x[len(rm._x) // 2]                                   # a zone around a few seen dots
+    r = 1.5 * rm.spacing_px
+    rm.zones = {"table": [[x0 - r, y0 - r], [x0 + r, y0 - r], [x0 + r, y0 + r], [x0 - r, y0 + r]]}
+    (pr, tr), grid = densify_ranges(rm, ["table"], target_px=10.0)
+    (plo, phi), (tlo, thi) = laser.act.limits()
+    assert plo <= pr[0] < pr[1] <= phi + rm.step_us[0] and (pr[1] - pr[0]) < (phi - plo)
+    fine = sweep(laser, grid=grid, n_pairs=1, refine=False, ranges=(pr, tr))
+    both = merged(rm, fine)
+    assert len(both.pulses) == len(rm.pulses) + len(fine.pulses) and both.zones == rm.zones
+    with pytest.raises(ValueError):
+        densify_ranges(rm, ["kitchen"])
+
+
+def test_an_aborted_sweep_saves_a_snapshot_of_what_it_saw(tmp_path):
+    import json
+    from act.room_map import abort_snapshot
+    rig = RoomRig(b_cm=3.0, seed=6)
+    part = tmp_path / "room_map.partial.json"
+    part.write_text(json.dumps({"px": [[100, 100], None]}))
+    path = abort_snapshot(rig.frames, "the dot doesn't follow the moves", str(part), out_dir=str(tmp_path))
+    assert path is not None and (tmp_path / path.split("/")[-1]).exists()
