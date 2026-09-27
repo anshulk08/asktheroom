@@ -7,6 +7,7 @@ Qwen via llama-server, scripts/qwen_server.sh), the misses, and the model's medi
 
     python scripts/eval_understand.py                                  # understand.backend from config.yaml
     python scripts/eval_understand.py --backend qwen --url http://127.0.0.1:8082/v1   # a local model
+    python scripts/eval_understand.py --rules                          # offline: the rule parser only
 """
 from __future__ import annotations
 
@@ -29,6 +30,7 @@ def main(argv=None) -> int:
     ap.add_argument("--backend", choices=["grok", "qwen"], help="default: understand.backend")
     ap.add_argument("--url", help="qwen: llama-server base url (default: understand.url)")
     ap.add_argument("--file", default=str(EVAL))
+    ap.add_argument("--rules", action="store_true", help="rules only, as the rig answers offline (no model)")
     a = ap.parse_args(argv)
     cfg = load_config()
     if a.url:
@@ -36,6 +38,8 @@ def main(argv=None) -> int:
     if a.backend:
         cfg["understand"] = dict(cfg["understand"], backend=a.backend)
     items = json.loads(Path(a.file).read_text())
+    if a.rules:
+        return rules_only(cfg, items)
     qwen = Understander(cfg)
     model = qwen._name()
     if not qwen.warm():
@@ -64,6 +68,25 @@ def main(argv=None) -> int:
     print(f"{'all':10s} rules {total['rules']:2d}/{len(items)}   rules+{model} {total['qwen']:2d}/{len(items)}")
     if ms:
         print(f"{model} calls {len(ms)}, median {statistics.median(ms):.0f} ms, max {max(ms):.0f} ms")
+    return 0
+
+
+def rules_only(cfg: dict, items: list[dict]) -> int:
+    """Score the rule parser alone (the offline rig), printing each miss."""
+    rules = Understander(dict(cfg, understand=dict(cfg["understand"], enabled=False)))
+    total = 0
+    for name in dict.fromkeys(q["set"] for q in items):
+        qs = [q for q in items if q["set"] == name]
+        got = 0
+        for q in qs:
+            i = rules(q["text"], name == "overheard")
+            ok = (i.kind, None if i.kind == IGNORE else i.obj) == (q["kind"], q["obj"])
+            got += ok
+            if not ok:
+                print(f"  miss {q['text']!r}: want {q['kind']} {q['obj']}, got {i.kind} {i.obj}")
+        print(f"{name:10s} rules {got:2d}/{len(qs)}")
+        total += got
+    print(f"{'all':10s} rules {total:2d}/{len(items)}")
     return 0
 
 

@@ -230,7 +230,7 @@ tts:
 net:
   check_host: https://api.x.ai
   interval_s: 5
-  timeout_s: 0.3
+  timeout_s: 1.5                # per HEAD; offline takes 2 failed probes in a row (net.py)
 
 server:
   host: 0.0.0.0
@@ -530,3 +530,11 @@ unknown_cover:
   settle_s: 0.5               # the covered band unchanged over this long: a cover at rest, not a moving arm
   adopt_s: 1.0                # the band must look the same this long before it is remembered
   wait_max_s: 2.0             # longest wait on an unclear or settling band before the other rules decide
+
+# Voice path guards (main.py voice_loop / _ask_with_cue). An error answering one question is logged and met
+# with a short sorry, and the loop listens again; a watchdog restarts the loop if it ever exits. A voice answer
+# not ready after answer_limit_s (Wi-Fi stalled mid-Grok) is replaced by the rules' and templates' answer, so
+# the mic never stays shut waiting on the network.
+voice_guard:
+  answer_limit_s: 10          # longest wait for a voice answer before the rules answer instead
+  sorry_every_s: 10           # say "Sorry, something went wrong" at most this often
