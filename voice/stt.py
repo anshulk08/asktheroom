@@ -77,6 +77,9 @@ def _to_block(x: np.ndarray, block: int) -> np.ndarray:
     return np.interp(np.linspace(0, n - 1, block), np.arange(n), x).astype(np.float32)
 
 
+_DEVICE_RATE: dict = {}        # (device, wanted rate) -> the rate it records at instead (one failed open per run)
+
+
 class AudioIn:
     """float32 mono blocks of `block` samples at `rate` from an input device (sounddevice/PortAudio).
     A device that refuses `rate` (an ALSA hw device on the Jetson often takes only 44.1 / 48 kHz) is
@@ -88,6 +91,7 @@ class AudioIn:
         self._q: "queue.Queue[np.ndarray]" = queue.Queue()
         self.overflows = 0
         self.device_rate = rate
+        known = _DEVICE_RATE.get((device, rate))              # this device refused `rate` before
 
         def cb(indata, frames, t, status):
             if status.input_overflow:
@@ -96,13 +100,17 @@ class AudioIn:
             self._q.put(x if len(x) == block else _to_block(x, block))
 
         try:
+            if known:
+                raise sd.PortAudioError("known to refuse this rate")
             self.stream = sd.InputStream(samplerate=rate, blocksize=block, channels=1, dtype="float32",
                                          device=device, callback=cb)
         except sd.PortAudioError:
-            dev_rate = int(sd.query_devices(device, "input")["default_samplerate"])
+            dev_rate = known or int(sd.query_devices(device, "input")["default_samplerate"])
             if dev_rate == rate:
                 raise
-            log.info("input device refuses %d Hz; recording at its %d Hz, resampled", rate, dev_rate)
+            if not known:
+                log.info("input device refuses %d Hz; recording at its %d Hz, resampled", rate, dev_rate)
+                _DEVICE_RATE[(device, rate)] = dev_rate
             self.device_rate = dev_rate
             self.stream = sd.InputStream(samplerate=dev_rate, blocksize=round(block * dev_rate / rate),
                                          channels=1, dtype="float32", device=device, callback=cb)
@@ -131,26 +139,56 @@ def input_devices() -> list[dict]:
     return [dict(d, index=i) for i, d in enumerate(sd.query_devices()) if d.get("max_input_channels", 0) > 0]
 
 
-def resolve_input_device(spec) -> Optional[int]:
-    """stt.input_device -> a sounddevice index, or None for the default mic: like tts.output_device, an int
-    (or digits) is the index, any other string the first input device whose name contains it (case
-    insensitive; a warning names them all when several do, where sounddevice would refuse). No match: the
-    default mic, with a warning."""
+def find_input_device(spec) -> tuple[Optional[int], str, list]:
+    """stt.input_device -> (sounddevice index or None for the default mic, what it is, the matches). Like
+    tts.output_device: an int (or digits) is the index; any other string, the first input device whose name
+    contains it, case insensitive (sounddevice itself refuses a name several devices share: the Brio, a USB
+    mic and a USB speaker are all "USB Audio"). The status is default | index | match | ambiguous | missing;
+    missing means a name was set and no input device has it."""
     if spec is None or (isinstance(spec, str) and not spec.strip()):
-        return None
+        return None, "default", []
     if isinstance(spec, int) or (isinstance(spec, str) and spec.strip().isdigit()):
-        return int(spec)
+        return int(spec), "index", []
     want = str(spec).strip().lower()
     hits = [d for d in input_devices() if want in str(d.get("name", "")).lower()]
     if not hits:
-        log.warning("stt.input_device %r: no input device matches; using the default mic "
-                    "(python -m voice.stt --devices lists them)", spec)
-        return None
-    if len(hits) > 1:
-        log.warning("stt.input_device %r: several input devices match (%s); using %d. Set a longer part "
-                    "of the name, or the index.", spec, "; ".join(f"{d['index']}: {d['name']}" for d in hits),
-                    hits[0]["index"])
-    return int(hits[0]["index"])
+        return None, "missing", []
+    return int(hits[0]["index"]), ("ambiguous" if len(hits) > 1 else "match"), hits
+
+
+def resolve_input_device(spec) -> Optional[int]:
+    """find_input_device's index, logging a missing mic (ERROR: the default mic may be the Brio across the
+    room) or an ambiguous name (every match, and the one used)."""
+    idx, status, hits = find_input_device(spec)
+    if status == "missing":
+        log.error("stt.input_device %r: no input device has that name; using the default mic "
+                  "(python -m voice.stt --devices lists them)", spec)
+    elif status == "ambiguous":
+        log.info("stt.input_device %r matches %s; using %d: %s", spec,
+                 "; ".join(f"{d['index']}: {d['name']}" for d in hits), idx, hits[0]["name"])
+    elif status == "match":
+        log.info("microphone: %d: %s", idx, hits[0]["name"])
+    return idx
+
+
+def record_seconds(seconds: float, spec=None, rate: int = RATE) -> np.ndarray:
+    """`seconds` of float32 mono from the stt.input_device mic, the way the voice loop opens it (by name,
+    resampled if it won't record at `rate`). RuntimeError if a named mic isn't there: demo_check's mic
+    check must fail then, not pass on the default mic."""
+    idx, status, _ = find_input_device(spec)
+    if status == "missing":
+        raise RuntimeError(f"stt.input_device {spec!r}: no input device has that name")
+    src = open_input(rate, BLOCK, idx)
+    out, need = [], int(seconds * rate)
+    try:
+        while sum(len(b) for b in out) < need:
+            b = src.read(timeout=2.0)
+            if b is None:
+                raise RuntimeError("no audio from the microphone")
+            out.append(b)
+    finally:
+        src.close()
+    return np.concatenate(out)[:need] if out else np.zeros(0, np.float32)
 
 
 # ---------------------------------------------------------------- VAD
@@ -525,6 +563,8 @@ class STT:
         drop = s.get("end_drop_db")
         self.end_drop_db = None if drop in (None, "", 0) else float(drop)
         self.device = s.get("input_device")
+        self._dev, self._dev_ok = None, False
+        self.input_status = ""              # default | index | match | ambiguous | missing | error, once resolved
         self.prompt = initial_prompt(cfg or {}, synonyms=bool(s.get("prompt_synonyms", False)))
         self._backend, self._vad = backend, vad
         self.last_speech = False            # did the last recording contain speech?
@@ -533,12 +573,18 @@ class STT:
         self.last_ms: dict[str, float] = {}
 
     def _input(self):
-        """stt.input_device resolved now (a replugged mic may have a new index); None on any error."""
-        try:
-            return resolve_input_device(self.device)
-        except Exception:
-            log.exception("input device lookup failed; using the default mic")
-            return None
+        """stt.input_device as a sounddevice index, resolved once (logged then: the device used, or an
+        ERROR for a named mic that isn't there) and again only after an open failed (a replugged mic may
+        have a new index). None: the default mic."""
+        if not self._dev_ok:
+            try:
+                self._dev = resolve_input_device(self.device)
+                self.input_status = find_input_device(self.device)[1] if self.device not in (None, "") else "default"
+            except Exception:
+                log.exception("input device lookup failed; using the default mic")
+                self._dev, self.input_status = None, "error"
+            self._dev_ok = True
+        return self._dev
 
     @property
     def vad(self) -> SileroVAD:
@@ -582,7 +628,11 @@ class STT:
         stop = "max_s"
         was_quiet = not self._tts_speaking()    # the rig's voice counts once it has been off
         t0 = time.monotonic()
-        src = open_input(RATE, BLOCK, self._input())
+        try:
+            src = open_input(RATE, BLOCK, self._input())
+        except Exception:
+            self._dev_ok = False            # look the name up again next time (unplugged, replugged)
+            raise
         try:
             while len(blocks) * block_s < max_s:
                 b = src.read(timeout=1.0)

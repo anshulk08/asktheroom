@@ -64,12 +64,83 @@ def sd(monkeypatch):
 
 
 def test_input_device_by_name_index_or_default(sd, caplog):
+    import logging
+    caplog.set_level(logging.INFO)
     assert resolve_input_device(None) is None and resolve_input_device("") is None
     assert resolve_input_device(1) == 1 and resolve_input_device("1") == 1
-    assert resolve_input_device("pnp") == 1
+    assert resolve_input_device("pnp") == 1 and "microphone: 1: USB PnP Sound Device" in caplog.text
     assert resolve_input_device("brio") == 0
-    assert resolve_input_device("hdmi") is None and "no input device matches" in caplog.text   # output only
-    assert resolve_input_device("usb") == 0 and "several input devices match" in caplog.text     # sounddevice would refuse
+    caplog.clear()
+    assert resolve_input_device("hdmi") is None                               # output only: missing
+    assert [r.levelname for r in caplog.records] == ["ERROR"] and "no input device has that name" in caplog.text
+    caplog.clear()
+    assert resolve_input_device("usb") == 0                                   # sounddevice would refuse it
+    assert caplog.records[0].levelname == "INFO" and "using 0: BRIO 4K" in caplog.text
+
+
+def test_stt_resolves_the_mic_once_and_again_after_a_failed_open(sd, monkeypatch):
+    calls, fail = [], {"on": False}
+    real = stt.find_input_device
+    monkeypatch.setattr(stt, "find_input_device", lambda spec: (calls.append(spec), real(spec))[1])
+
+    def opener(rate, block, device=None):
+        if fail["on"]:
+            raise sd.PortAudioError("device unavailable")
+        return None
+
+    monkeypatch.setattr(stt, "open_input", opener)
+    vad = types.SimpleNamespace(reset=lambda: None)
+    s = stt.STT({"stt": {"input_device": "pnp"}}, vad=vad, backend=object())
+    for _ in range(3):
+        assert s._input() == 1
+    n = len(calls)
+    assert n <= 2 and s.input_status == "match"                               # once, not per question
+    fail["on"] = True
+    with pytest.raises(sd.PortAudioError):
+        s.record_until_silence()
+    assert s._input() == 1 and len(calls) > n                                # looked up again after the failure
+
+
+def test_a_missing_named_mic_is_reported(sd):
+    s = stt.STT({"stt": {"input_device": "jabra"}}, vad=object(), backend=object())
+    assert s._input() is None and s.input_status == "missing"
+    with pytest.raises(RuntimeError, match="no input device has that name"):
+        stt.record_seconds(0.1, "jabra")
+
+
+def test_record_seconds_resamples_like_the_voice_loop(sd, monkeypatch):
+    sd.rates = {0: 48000}
+    stt._DEVICE_RATE.clear()
+    import threading
+
+    def feed():                                              # the device's callback thread
+        import time as _t
+        while not sd.streams:
+            _t.sleep(0.001)
+        for _ in range(12):
+            _feed(sd.streams[-1], 1536)
+
+    th = threading.Thread(target=feed, daemon=True)
+    th.start()
+    a = stt.record_seconds(0.3, "brio")
+    assert a.shape == (int(0.3 * RATE),) and a.dtype == np.float32
+
+
+def test_a_device_that_refused_16k_is_opened_at_its_rate_next_time(sd):
+    sd.rates = {0: 48000}
+    stt._DEVICE_RATE.clear()
+    opens = []
+    real = sd.InputStream
+
+    class Counting(real):
+        def __init__(self, samplerate, *a, **k):
+            opens.append(samplerate)
+            super().__init__(samplerate, *a, **k)
+
+    sd.InputStream = Counting
+    stt.AudioIn(RATE, BLOCK, 0)
+    stt.AudioIn(RATE, BLOCK, 0)
+    assert opens == [16000, 48000, 48000]                    # the refusal happens once
 
 
 def _feed(stream, n):

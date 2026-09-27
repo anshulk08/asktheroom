@@ -243,11 +243,8 @@ class Rig:
         if self.fake:
             t = np.arange(int(seconds * 16000)) / 16000
             return (0.2 * np.sin(2 * np.pi * 220 * t)).astype(np.float32)
-        import sounddevice as sd
-        dev = (self.cfg.get("stt") or {}).get("input_device")
-        a = sd.rec(int(seconds * 16000), samplerate=16000, channels=1, dtype="float32", device=dev)
-        sd.wait()
-        return a[:, 0]
+        from voice.stt import record_seconds         # by name, resampled; a missing named mic raises
+        return record_seconds(seconds, (self.cfg.get("stt") or {}).get("input_device"))
 
     def play(self, pcm: np.ndarray, rate: int) -> None:
         if self.fake:
