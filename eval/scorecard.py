@@ -31,7 +31,18 @@ Metrics (targets in CardBars):
                              zone within handoff_s (or before the prop's next step)
   naming                     a hook for WS3: the best core.auto_name.match_score of the prop's description
                              against its entity's guess, aliases or label; ok at name_min. n/a without names
+  room placements            each place_room step (a prop put straight into a zone, never on the table):
+                             an entity turns up in that zone within handoff_s. n/a for a zone not drawn
+                             (the floor)
+  false handoffs             an entity in a room zone that no cue explains: a prop resting on the table per
+                             truth, a phantom (a foot handed off as 'sock'), anything but the carried prop or
+                             the first new entity in a place_room zone. Target 0
+  identity through occlusion each block step (a person hides a resting prop, then unblock): the prop has the
+                             same entity, visible, after unblock as before the block
   removed, not ghosted       each remove step: from ghost_s after it, no visible entity at the prop's spot
+
+Config overrides (--set dotted.key=value, --mode M for permanence.mode=M) apply to the replay config, so
+two trackers score the same clips through the same code: the card header lists them.
 """
 from __future__ import annotations
 
@@ -332,6 +343,68 @@ class _Card:
             rows.append(row)
         return {"rows": rows, "n": len(rows), "ok": sum(r["ok"] for r in rows)}
 
+    def _zones_drawn(self) -> Optional[set]:
+        rz = self.clip.meta.get("room_zones") if self.clip.meta else None
+        return set((rz or {}).get("zones") or {}) if rz else None
+
+    def room_placements(self) -> dict:
+        drawn = self._zones_drawn()
+        rows = []
+        for s in self.sc.steps:
+            if s["event"] != "place_room" or not s.get("obj"):
+                continue
+            p, t, want = s["obj"], float(s["t"]), s.get("zone")
+            is_drawn = (want in drawn) if drawn is not None else (want not in (None, "floor"))
+            row = {"t": round(t, 2), "prop": p, "zone": want, "drawn": is_drawn, "entity": None, "delay_s": None,
+                   "ok": None}
+            before = {n for smp in self.sc.between(-math.inf, t - self.sc.bars.pre_s) for n, z in smp.zones.items()
+                      if z == want}
+            for smp in self.sc.between(t - self.sc.bars.pre_s, min(self.t1, t + self.b.handoff_s)):
+                taken = self._others(p, smp.t)
+                new = sorted(n for n, z in (smp.zones or {}).items() if z == want and n not in before and n not in taken)
+                if new:
+                    row.update(entity=new[0], delay_s=round(smp.t - t, 2))
+                    break
+            if is_drawn:
+                row["ok"] = row["entity"] is not None
+            rows.append(row)
+        return {"rows": rows, "n": sum(r["drawn"] for r in rows), "ok": sum(bool(r["ok"]) for r in rows)}
+
+    def false_handoffs(self, placements: dict) -> dict:
+        claimed = {r["entity"] for r in placements["rows"] if r["entity"]}
+        seen: dict = {}
+        for smp in self.samples:
+            for n, z in (smp.zones or {}).items():
+                if n in claimed or (n, z) in seen:
+                    continue
+                props = [p for p in self.sc.props if self.sc.mapped(p, smp.t) in (n, _survivor(n, self.tr.merged))]
+                if any((self.sc.expected(p, smp.t) or ("",))[0] == "room" for p in props):
+                    continue                    # the carried prop, where the truth has it off the table
+                seen[(n, z)] = {"entity": n, "zone": z, "t": round(smp.t, 2), "prop": props[0] if props else None,
+                                "name": (name_phrases(self.names.get(n, {})) or [None])[0]}
+        rows = sorted(seen.values(), key=lambda r: r["t"])
+        return {"rows": rows, "n": len(rows)}
+
+    def occlusions(self) -> dict:
+        rows = []
+        for s in self.sc.steps:
+            if s["event"] != "block" or not s.get("obj"):
+                continue
+            p, t = s["obj"], float(s["t"])
+            un = next((float(x["t"]) for x in self.sc.steps if x["event"] == "unblock" and x.get("obj") == p
+                       and float(x["t"]) > t), t + 15.0)
+            t_after = min(un + self.sc.bars.resolve_s, self._next_step(p, un), self.t1)
+            before = _survivor(self.sc.mapped(p, t - 1e-6), self.tr.merged)
+            after = _survivor(self.sc.mapped(p, t_after), self.tr.merged)
+            smp = self.sc.at(t_after)
+            v = smp.ents.get(after) if (smp is not None and after) else None
+            hidden = [x.ents.get(before, ("-",))[0] for x in self.sc.between(t, un)] if before else []
+            rows.append({"t": round(t, 2), "prop": p, "unblock_t": round(un, 2), "before": before, "after": after,
+                         "visible_after": bool(v and v[0] == "VISIBLE"),
+                         "while_hidden": max(set(hidden), key=hidden.count) if hidden else None,
+                         "ok": before is not None and before == after and bool(v and v[0] == "VISIBLE")})
+        return {"rows": rows, "n": len(rows), "ok": sum(r["ok"] for r in rows)}
+
     def removals(self) -> dict:
         rows = []
         for s in self.sc.steps:
@@ -362,6 +435,9 @@ class _Card:
         epo, things, births = self.entities_per_object(), self.things(), self.births()
         body, naming, pos = self.body_things(), self.naming(), self.positions()
         hand, rem = self.handoffs(), self.removals()
+        placed = self.room_placements()
+        false_h, occl = self.false_handoffs(placed), self.occlusions()
+        room_ran = bool(self.tr.room) or any(smp.zones for smp in self.samples)
         crit = [
             _row("entities per real object", _epo(epo), f"{b.entities_per_object}",
                  None if epo["worst"] is None else epo["worst"] <= b.entities_per_object),
@@ -379,6 +455,17 @@ class _Card:
             _row("room handoffs", f"{hand['ok']}/{hand['n']}" + _few([f"{r['prop']}->{r['zone']}: {r['got'] or 'never'}"
                                                                      for r in hand["rows"] if not r["ok"]]),
                  "all", hand["ok"] == hand["n"] if hand["n"] else None),
+            _row("room placements", f"{placed['ok']}/{placed['n']}" + _few(
+                [f"{r['prop']}->{r['zone']}: never seen" for r in placed["rows"] if r["ok"] is False]), "all",
+                 placed["ok"] == placed["n"] if placed["n"] else None),
+            _row("false handoffs", f"{false_h['n']}" + _few([f"{r['entity']}->{r['zone']}"
+                                                             + (f" ({r['prop']} on the table)" if r["prop"] else "")
+                                                             + (f" '{r['name']}'" if r["name"] else "")
+                                                             for r in false_h["rows"]]),
+                 "0", false_h["n"] == 0 if room_ran else None),
+            _row("identity through occlusion", f"{occl['ok']}/{occl['n']}" + _few(
+                [f"{r['prop']}: {r['before']} -> {r['after'] or 'none'}" for r in occl["rows"] if not r["ok"]]),
+                 "all", occl["ok"] == occl["n"] if occl["n"] else None),
             _row("removed, not ghosted", f"{rem['n'] - rem['ghosts']}/{rem['n']}", "all",
                  rem["ghosts"] == 0 if rem["n"] else None),
             _row("naming (hook)", f"{naming['ok']}/{naming['named']} named props fit" if naming["named"]
@@ -392,6 +479,8 @@ class _Card:
                 "segments": [{"from": round(a, 2), "to": round(b_, 2), "kind": k} for a, b_, k in self.segs],
                 "entities_per_object": epo, "things": things, "phantom_births": births, "body_things": body,
                 "position_still": pos, "handoffs": hand, "removals": rem, "naming": naming,
+                "room_placements": placed, "false_handoffs": false_h, "occlusions": occl,
+                "overrides": list(getattr(rp, "overrides", None) or []),
                 "bars": asdict(b), "criteria": crit,
                 "pass": all(c["result"] != "FAIL" for c in crit)}
 
@@ -449,6 +538,8 @@ def print_card(r: dict) -> None:
           f"{r.get('replay_wall_s', 0):g} s{view}, room memory "
           f"{'on' if r.get('room_memory') else 'off'}")
     print(f"   detector: {r['detector']}")
+    if r.get("overrides"):
+        print(f"   config overrides: {', '.join(r['overrides'])}")
     for p, what in r["props"].items():
         chain = ", ".join(f"{m['entity']}@{m['t']:g}" for m in r["mapping"].get(p, [])) or "never found"
         print(f"   {p:4s} {what:12s} {chain}")
@@ -461,7 +552,7 @@ def print_card(r: dict) -> None:
 def print_summary(cards: list) -> None:
     if len(cards) < 2:
         return
-    print("\nclip                         ent/obj  things  still/min  people/min  body  pos cm  handoffs  PASS")
+    print("\nclip                         ent/obj  things  still/min  people/min  body  pos cm  handoffs  false h/o  PASS")
     for r in cards:
         b = r["phantom_births"]
         f = lambda v, fmt: ("-" if v is None else format(v, fmt))       # noqa: E731
@@ -469,7 +560,7 @@ def print_summary(cards: list) -> None:
               f"{r['things']['identities_created']:7d} {f(b['still']['per_min'], '.2f'):>10s} "
               f"{f(b['people']['per_min'], '.2f'):>11s} {f(r['body_things']['n'] if r['body_things']['names_seen'] else None, 'd'):>5s} "
               f"{f(r['position_still']['max_cm'], '.1f'):>7s} {r['handoffs']['ok']}/{r['handoffs']['n']:<7d} "
-              f"{'yes' if r['pass'] else 'no'}")
+              f"{r['false_handoffs']['n']:9d}  {'yes' if r['pass'] else 'no'}")
 
 
 def main(argv=None) -> int:

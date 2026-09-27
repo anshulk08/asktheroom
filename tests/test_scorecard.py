@@ -182,3 +182,47 @@ def test_traces_round_trip_through_json_and_the_cli_scores_them(tmp_path, capsys
     assert "entities per real object" in printed and "FAIL" in printed
     cards = json.loads(out.read_text())
     assert cards[0]["clip"] == "room_x" and cards[0]["entities_per_object"]["worst"] == 2
+
+
+def test_room_placement_false_handoff_and_occlusion():
+    steps = [{"t": 0.0, "event": "hands_out"}, {"t": 1.0, "event": "place", "obj": "A"},
+             {"t": 3.0, "event": "place", "obj": "PB"}, {"t": 5.0, "event": "hands_out"},
+             {"t": 10.0, "event": "place_room", "obj": "C", "zone": "couch"},
+             {"t": 12.0, "event": "place_room", "obj": "B", "zone": "floor"},
+             {"t": 20.0, "event": "block", "obj": "PB"}, {"t": 30.0, "event": "unblock", "obj": "PB"},
+             {"t": 34.0, "event": "hands_out"}]
+    truth = _truth(steps, {"A": "wallet", "PB": "pill bottle", "C": "phone", "B": "keys"})
+    PB_AT = (60.0, 30.0)
+
+    def world(t):
+        ents, zones, names = {}, {}, {}
+        if t >= 2.0:
+            ents["thing:1"] = ("VISIBLE", None, A_AT) if t < 14.0 else ("VISIBLE", None, None)
+            if t >= 14.0:
+                zones["thing:1"] = "couch"           # the wallet on the table handed to the couch: false
+        if t >= 4.0:
+            ents["thing:2"] = ("UNKNOWN", None, PB_AT) if 21.0 <= t < 31.0 else ("VISIBLE", None, PB_AT)
+        if t >= 13.0:
+            ents["thing:3"] = ("VISIBLE", None, None)
+            zones["thing:3"] = "couch"               # the phone, first new entity on the couch
+        if t >= 25.0:
+            ents["thing:4"] = ("VISIBLE", None, None)
+            zones["thing:4"] = "side_table"          # a foot handed off
+            names["thing:4"] = {"guess": {"name": "sneaker"}}
+        return ents, zones, names
+    trace = _trace(45.0, world, [_appeared("thing:1", 2.0, A_AT), _appeared("thing:2", 4.0, PB_AT)])
+    trace.room = True
+    clip = _clip(truth, 45.0)
+    clip.meta["room_zones"] = {"zones": {"couch": {}, "side_table": {}, "counter": {}}}
+    r = sc.scorecard(trace, clip)
+    rows = r["room_placements"]["rows"]
+    assert rows[0]["ok"] and rows[0]["entity"] == "thing:3" and rows[0]["delay_s"] == pytest.approx(3.0)
+    assert rows[1]["drawn"] is False and rows[1]["ok"] is None and r["room_placements"]["n"] == 1
+    assert crit(r, "room placements")["result"] == "PASS"
+    fh = {(x["entity"], x["zone"]): x for x in r["false_handoffs"]["rows"]}
+    assert set(fh) == {("thing:1", "couch"), ("thing:4", "side_table")}
+    assert fh[("thing:1", "couch")]["prop"] == "A" and fh[("thing:4", "side_table")]["name"] == "sneaker"
+    assert crit(r, "false handoffs")["result"] == "FAIL"
+    o = r["occlusions"]["rows"][0]
+    assert o["ok"] and o["before"] == "thing:2" == o["after"] and o["while_hidden"] == "UNKNOWN"
+    assert crit(r, "identity through occlusion")["result"] == "PASS"
