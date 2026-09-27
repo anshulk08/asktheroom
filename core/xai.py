@@ -10,13 +10,15 @@ the network comes back), so a visitor's first question doesn't pay for the hands
 has the OpenAI SDK's call shape and returns attribute objects (r.choices[0].message.tool_calls[0]
 .function.name, r.usage.prompt_tokens; absent fields read as None). HTTP errors raise XAIError with
 status_code (core/narration.py's retry rules read it); timeouts and connection errors propagate as
-requests exceptions. The key is read from the environment by callers and never logged.
+requests exceptions. The key is read from the environment by callers and never logged. Every call is also
+kept in core/grok_trace's ring (what was sent and said, thumbnails only; never the key or headers).
 """
 from __future__ import annotations
 
 import logging
 import os
 import threading
+import time
 from types import SimpleNamespace
 from typing import Any, Optional
 
@@ -68,12 +70,22 @@ class Client:
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
 
     def _create(self, timeout: Optional[float] = None, **body: Any) -> Any:
+        from core import grok_trace
         s = self._session if self._session is not None else session()
-        r = s.post(f"{self.base_url}/chat/completions", headers={"Authorization": f"Bearer {self.key}"},
-                   json=body, timeout=self.timeout if timeout is None else timeout)
+        t0 = time.perf_counter()
+        try:
+            r = s.post(f"{self.base_url}/chat/completions", headers={"Authorization": f"Bearer {self.key}"},
+                       json=body, timeout=self.timeout if timeout is None else timeout)
+        except requests.RequestException as ex:
+            grok_trace.record(body, None, (time.perf_counter() - t0) * 1000, type(ex).__name__)
+            raise
+        ms = (time.perf_counter() - t0) * 1000
         if r.status_code >= 400:
+            grok_trace.record(body, None, ms, f"HTTP {r.status_code}")
             raise XAIError(f"HTTP {r.status_code}: {(r.text or '')[:300]}", r.status_code)
-        return _obj(r.json())
+        out = r.json()
+        grok_trace.record(body, out, ms)          # the demo's "Grok's eyes" (never the key or headers)
+        return _obj(out)
 
 
 def warm(base_url: str = BASE_URL, timeout: float = 5.0, session: Optional[requests.Session] = None,

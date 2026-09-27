@@ -12,21 +12,27 @@
 <body>
 <main class="demo">
 
-  <section class="cam" aria-label="Live room camera with what the room remembers">
-    <canvas id="cam" aria-hidden="true"></canvas>
-    <div class="cam-top">
-      <div class="live"><span class="rec" aria-hidden="true"></span>LIVE <span class="sep">·</span> Ask the Room</div>
-      <div class="clock"><span id="clock">--:--:--</span><span id="date" class="date"></span></div>
+  <section class="left">
+    <div class="cam" aria-label="Live room camera with what the room remembers">
+      <canvas id="cam" aria-hidden="true"></canvas>
+      <div class="cam-top">
+        <div class="live"><span class="rec" aria-hidden="true"></span><span>Recorded in one take<span class="sub">Ask the Room · the rig&rsquo;s own clock</span></span></div>
+        <div class="clock"><span id="clock">--:--:--</span><span id="date" class="date"></span></div>
+      </div>
+      <div id="listen-cam" class="listen-cam" hidden>Listening&hellip;</div>
+      <p id="cam-off" class="cam-off" hidden>Camera reconnecting&hellip;</p>
     </div>
-    <div id="listen-cam" class="listen-cam" hidden>Listening&hellip;</div>
-    <p id="cam-off" class="cam-off" hidden>Camera reconnecting&hellip;</p>
-    <ul class="legend" aria-label="Legend">
-      <li><span class="sw visible"></span>visible</li>
-      <li><span class="sw hidden"></span>hidden</li>
-      <li><span class="sw carried"></span>carried</li>
-      <li><span class="sw ghost"></span>last seen</li>
-      <li><span class="sw found"></span>found again</li>
-    </ul>
+    <div class="tcam">
+      <canvas id="tcam" aria-hidden="true"></canvas>
+      <div class="tcam-tag">The coffee table, close up</div>
+      <ul class="legend" aria-label="Legend">
+        <li><span class="sw visible"></span>visible</li>
+        <li><span class="sw hidden"></span>hidden</li>
+        <li><span class="sw carried"></span>carried</li>
+        <li><span class="sw ghost"></span>last seen</li>
+        <li><span class="sw found"></span>found again</li>
+      </ul>
+    </div>
   </section>
 
   <section class="map" aria-labelledby="h-map">
@@ -42,6 +48,13 @@
     </div>
     <ol id="answers" class="answers" aria-live="polite"></ol>
     <p id="no-answers" class="empty">Say &ldquo;Room, where are my keys?&rdquo;</p>
+    <div id="eyes" class="eyes" hidden>
+      <div class="eyes-head"><span class="eyes-title">Grok&rsquo;s eyes</span><span id="eyes-meta" class="eyes-meta"></span></div>
+      <div class="eyes-body">
+        <div id="eyes-imgs" class="eyes-imgs"></div>
+        <div class="eyes-text"><div id="eyes-req" class="eyes-req"></div><div id="eyes-reply" class="eyes-reply"></div></div>
+      </div>
+    </div>
   </section>
 
 </main>

@@ -706,7 +706,7 @@ viewer:
 # seat | surface | door. Positions read off the rig's 1440p frame, Sun 27 Sep; only the layout, not scale,
 # matters. Served only while room_memory is enabled.
 room_layout:
-  seat_cm: 45                 # the YOU marker: this far past the table's side nearest the seat
+  seat_cm: 70                 # the YOU marker: this far past the table's side nearest the seat (mid-couch)
   pad_cm: 20
   zones:
     couch: {rect: [130, -40, 80, 160], kind: seat}

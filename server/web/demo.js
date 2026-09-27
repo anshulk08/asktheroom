@@ -14,8 +14,10 @@
 
   const $ = (id) => document.getElementById(id);
   const params = new URLSearchParams(location.search);
-  const FPS = Math.min(10, Math.max(0.5, parseFloat(params.get("fps")) || 3));
-  const FRAME_W = Math.min(2560, Math.max(640, parseInt(params.get("w"), 10) || 1600));
+  // Defaults that keep the rig's perception at >= 4.5 fps (WS7 measures): 2 frames a second, 1280 px wide.
+  const FPS = Math.min(10, Math.max(0.5, parseFloat(params.get("fps")) || 2));
+  const FRAME_W = Math.min(2560, Math.max(640, parseInt(params.get("w"), 10) || 1280));
+  const BOXES_EVERY_MS = 1000;                // table boxes move slowly: at most once a second
   const FONT = '"Atkinson Next", system-ui, sans-serif';
   const COL = {
     visible: "#9ff0b4", hidden: "#8ec5ff", carried: "#ffc24d", last_seen: "#b3c0ba", found: "#fff17a",
@@ -83,7 +85,11 @@
     names = m;
   }
 
-  const nice = (n) => names.get(n) || stripThe(String(n || "").replace(/^hand:\d+$/, "a hand").replace(/_/g, " "));
+  const nice = (n) => names.get(n) ||
+    stripThe(String(n || "").replace(/^thing:\d+$/, "something new").replace(/^hand:\d+$/, "a hand").replace(/_/g, " "));
+  // No internal id ever reaches the screen: 'thing:12' in any text (an answer, a caption, Grok's reply)
+  // becomes the thing's name, else "something new".
+  const clean = (text) => String(text == null ? "" : text).replace(/thing:\d+/g, (m) => names.get(m) || "something new");
 
   // One drawable object per named or registered entity: its state, box (image px), place and times.
   function buildObjects(state) {
@@ -94,11 +100,12 @@
       const name = names.get(e.name);
       if (!name && !e.registry) continue;
       const o = { key: e.name, name: name || nice(e.name), zone: e.zone || "table", pos: e.pos_cm || e.resolved_cm,
-        seen: e.last_seen, parent: e.parent, box: null, say: null, state: null, registered: !!e.registry };
+        seen: e.last_seen, parent: e.parent, box: null, say: null, state: null, registered: !!e.registry,
+        guessed: isThing(e.name) && !e.label && !(e.aliases && e.aliases.length) && !e.registry };
       const r = e.registry;
       if (r && r.state && r.state !== "unknown") {      // WS8's registry (permanence.mode: registry)
         o.state = r.state;
-        o.name = r.display ? r.display.replace(/_/g, " ") : o.name;
+        o.name = r.display ? clean(r.display.replace(/_/g, " ")) : o.name;
         o.zone = r.place || r.zone || o.zone;
         o.say = r.say;
         o.tentative = !!r.tentative;
@@ -138,7 +145,7 @@
     if (o.state === "carried") return (o.since ? "picked up at " + clockText(o.since, false) : "carried") + maybe;
     if (o.state === "hidden") {
       if (o.registered && !o.parent) return "still there, behind someone" + maybe;
-      const p = o.parent ? nice(o.parent) : null;
+      const p = o.parent && o.parent !== "unknown" && !/^hand:/.test(o.parent) ? nice(o.parent) : null;
       return p ? (/box|bag|cup|container/i.test(p) ? "inside the " : "under the ") + stripThe(p) : "hidden";
     }
     return ("last seen " + onPlace(o.say)).trim() + (o.seen ? " · " + ago(o.seen) : "") + maybe;
@@ -170,8 +177,8 @@
 
   // ------------------------------------------------------------------ camera
 
-  const cam = $("cam");
-  const cctx = cam.getContext("2d");
+  const cam = $("cam"), tcam = $("tcam");
+  const cctx = cam.getContext("2d"), tctx = tcam.getContext("2d");
 
   function fit(canvas) {
     const dpr = window.devicePixelRatio || 1;
@@ -190,102 +197,129 @@
     ctx.closePath();
   }
 
-  function drawCam() {
-    const dpr = fit(cam);
-    const W = cam.width, H = cam.height;
-    cctx.fillStyle = "#000";
-    cctx.fillRect(0, 0, W, H);
+  // What the demo is about: taught, registered and configured objects. A guessed thing ("mug?") is shown
+  // while it is visible, and as a ghost only for GUESS_GHOST_S after it was last seen (the table's clutter
+  // would otherwise bury the room in old guesses).
+  const GUESS_GHOST_S = 120;
+  function shown(o) {
+    if (!o.guessed || o.state === "visible" || o.state === "carried") return true;
+    return o.seen && rigNow() - o.seen < GUESS_GHOST_S;
+  }
+
+  function tableWindow() {
+    const r = S.meta && S.meta.table_view_rect;
+    if (!r) return null;
+    const px = (r[2] - r[0]) * 0.04, py = (r[3] - r[1]) * 0.08;
+    return [Math.max(0, r[0] - px), Math.max(0, r[1] - py), r[2] + px, Math.min(S.meta.image_size[1], r[3] + py)];
+  }
+
+  const inside = (b, w) => w && (b[0] + b[2]) / 2 >= w[0] && (b[0] + b[2]) / 2 <= w[2] &&
+    (b[1] + b[3]) / 2 >= w[1] && (b[1] + b[3]) / 2 <= w[3];
+
+  // One view: the image window win (image px) drawn "contain" into the canvas, with the objects in it.
+  // labelsIn(o): whether this view labels o (the room view leaves the table's labels to the close-up).
+  function drawView(canvas, ctx, win, labelsIn) {
+    const dpr = fit(canvas);
+    const W = canvas.width, H = canvas.height;
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0, 0, W, H);
     const img = S.frame;
-    if (!img || !S.meta) return;
-    const iw = S.meta.image_size[0], ih = S.meta.image_size[1];
-    const k = Math.min(W / iw, H / ih);                        // "contain": image px -> canvas px
-    const ox = (W - iw * k) / 2, oy = (H - ih * k) / 2;
-    cctx.drawImage(img, ox, oy, iw * k, ih * k);
-    const P = (x, y) => [ox + x * k, oy + y * k];
+    if (!img || !S.meta || !win) return;
+    const iw = S.meta.image_size[0];
+    const sx = img.naturalWidth / iw;                          // the polled frame may be smaller than image_size
+    const ww = win[2] - win[0], wh = win[3] - win[1];
+    const k = Math.min(W / ww, H / wh);
+    const ox = (W - ww * k) / 2, oy = (H - wh * k) / 2;
+    ctx.drawImage(img, win[0] * sx, win[1] * sx, ww * sx, wh * sx, ox, oy, ww * k, wh * k);
+    const P = (x, y) => [ox + (x - win[0]) * k, oy + (y - win[1]) * k];
     const t = now();
-    // trails under the boxes
-    for (const o of S.objs) {
+    const objs = S.objs.filter((o) => o.box && shown(o));
+    for (const o of objs) {                                    // trails under the boxes
       const tr = S.trails.get(o.key);
       if (!tr || tr.length < 2) continue;
-      cctx.lineCap = "round";
+      ctx.lineCap = "round";
       for (let i = 1; i < tr.length; i++) {
-        const a = Math.max(0, 1 - (t - tr[i].t) / TRAIL_S);
-        cctx.strokeStyle = colour(o);
-        cctx.globalAlpha = 0.65 * a;
-        cctx.lineWidth = 5 * dpr;
-        cctx.beginPath();
-        cctx.moveTo(...P(tr[i - 1].x, tr[i - 1].y));
-        cctx.lineTo(...P(tr[i].x, tr[i].y));
-        cctx.stroke();
+        ctx.strokeStyle = colour(o);
+        ctx.globalAlpha = 0.65 * Math.max(0, 1 - (t - tr[i].t) / TRAIL_S);
+        ctx.lineWidth = 5 * dpr;
+        ctx.beginPath();
+        ctx.moveTo(...P(tr[i - 1].x, tr[i - 1].y));
+        ctx.lineTo(...P(tr[i].x, tr[i].y));
+        ctx.stroke();
       }
-      cctx.globalAlpha = 1;
+      ctx.globalAlpha = 1;
     }
-    // boxes, ghosts and labels (visible last, so they sit on top)
     const order = { last_seen: 0, hidden: 1, carried: 2, visible: 3 };
-    const objs = S.objs.filter((o) => o.box).sort((a, b) => (order[a.state] || 0) - (order[b.state] || 0));
+    objs.sort((a, b) => (order[a.state] || 0) - (order[b.state] || 0) || (a.guessed ? 1 : 0) - (b.guessed ? 1 : 0));
     const placed = [];
+    const labelled = [];
     for (const o of objs) {
       const [x1, y1] = P(o.box[0], o.box[1]);
       const [x2, y2] = P(o.box[2], o.box[3]);
-      const c = colour(o);
+      if (x2 < 0 || y2 < 0 || x1 > W || y1 > H) continue;
       const ghost = o.state !== "visible";
-      const found = badge(o) === "found again";
-      cctx.save();
+      const found = badge(o).indexOf("found again") === 0;
+      ctx.save();
       if (ghost) {
-        cctx.globalAlpha = o.state === "last_seen" ? 0.55 : 0.8;
-        cctx.setLineDash([10 * dpr, 7 * dpr]);
-        cctx.fillStyle = "rgba(179,192,186,0.16)";
-        cctx.fillRect(x1, y1, x2 - x1, y2 - y1);
+        ctx.globalAlpha = o.state === "last_seen" ? 0.55 : 0.85;
+        ctx.setLineDash([10 * dpr, 7 * dpr]);
+        ctx.fillStyle = "rgba(179,192,186,0.16)";
+        ctx.fillRect(x1, y1, x2 - x1, y2 - y1);
       }
-      if (found) {                                              // a soft pulse around what was found again
-        const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 180);
-        cctx.shadowColor = COL.found;
-        cctx.shadowBlur = (10 + 14 * pulse) * dpr;
+      if (found) {                                             // a soft pulse around what was found again
+        ctx.shadowColor = COL.found;
+        ctx.shadowBlur = (10 + 14 * (0.5 + 0.5 * Math.sin(Date.now() / 180))) * dpr;
       }
-      cctx.strokeStyle = c;
-      cctx.lineWidth = (found ? 5 : 3.5) * dpr;
-      cctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
-      cctx.restore();
-      label(o, x1, y1, x2, y2, dpr, ghost, placed);
+      ctx.strokeStyle = colour(o);
+      ctx.lineWidth = (found ? 5 : o.guessed ? 2.5 : 3.5) * dpr;
+      ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+      ctx.restore();
+      if (labelsIn(o)) labelled.push([o, x1, y1, x2, y2, ghost]);
     }
+    // labels last, most important first, so the named objects win the space
+    labelled.sort((a, b) => (a[0].guessed ? 1 : 0) - (b[0].guessed ? 1 : 0) || (order[b[0].state] || 0) - (order[a[0].state] || 0));
+    for (const [o, x1, y1, x2, y2, ghost] of labelled) label(ctx, W, H, o, x1, y1, x2, y2, dpr, ghost, placed);
   }
 
-  function label(o, x1, y1, x2, y2, dpr, ghost, placed) {
-    const W = cam.width, H = cam.height;
-    const nameF = 700 + " " + Math.round(22 * dpr) + "px " + FONT;
-    const badgeF = 600 + " " + Math.round(17 * dpr) + "px " + FONT;
-    cctx.font = nameF;
-    const nw = cctx.measureText(o.name).width;
-    cctx.font = badgeF;
+  function drawCam() {
+    const win = tableWindow();
+    const full = S.meta ? [0, 0, S.meta.image_size[0], S.meta.image_size[1]] : null;
+    drawView(cam, cctx, full, (o) => !win || !inside(o.box, S.meta.table_view_rect));
+    drawView(tcam, tctx, win || full, () => true);
+  }
+
+  function label(ctx, W, H, o, x1, y1, x2, y2, dpr, ghost, placed) {
+    const nameF = 700 + " " + Math.round(21 * dpr) + "px " + FONT;
+    const badgeF = 600 + " " + Math.round(16 * dpr) + "px " + FONT;
+    ctx.font = nameF;
+    const nw = ctx.measureText(o.name).width;
+    ctx.font = badgeF;
     const b = badge(o);
-    const bw = cctx.measureText(b).width;
-    const padX = 9 * dpr, lh1 = 26 * dpr, lh2 = 21 * dpr;
+    const bw = ctx.measureText(b).width;
+    const padX = 9 * dpr, lh1 = 25 * dpr, lh2 = 20 * dpr;
     const w = Math.max(nw, bw) + 2 * padX, h = lh1 + lh2 + 8 * dpr;
-    let x = Math.min(Math.max(4 * dpr, x1), W - w - 4 * dpr);
-    let y = y1 - h - 6 * dpr;
-    if (y < 90 * dpr) y = y2 + 6 * dpr;                         // below the box near the top (clock, badge)
-    for (let i = 0; i < 6; i++) {                               // step past labels already drawn
-      const hit = placed.find((p) => x < p.x + p.w && p.x < x + w && y < p.y + p.h && p.y < y + h);
-      if (!hit) break;
-      y = hit.y + hit.h + 4 * dpr;
-    }
-    y = Math.min(y, H - h - 4 * dpr);
+    const top = ctx === cctx ? 84 * dpr : 44 * dpr;            // clear of the clock and the panel tag
+    const hits = (x, y) => placed.some((p) => x < p.x + p.w && p.x < x + w && y < p.y + p.h && p.y < y + h);
+    const x = Math.min(Math.max(4 * dpr, x1), W - w - 4 * dpr);
+    const tries = [y1 - h - 5 * dpr, y2 + 5 * dpr, y1 - 2 * h - 9 * dpr, y2 + h + 9 * dpr, (y1 + y2 - h) / 2];
+    const y = tries.map((q) => Math.min(Math.max(q, top), H - h - 4 * dpr)).find((q) => !hits(x, q));
+    if (y === undefined) return;                               // no room: the box speaks for itself
     placed.push({ x, y, w, h });
-    cctx.save();
-    cctx.globalAlpha = ghost && o.state === "last_seen" ? 0.85 : 1;
-    cctx.fillStyle = COL.dark;
-    roundRect(cctx, x, y, w, h, 6 * dpr);
-    cctx.fill();
-    cctx.fillStyle = colour(o);
-    cctx.fillRect(x, y, 5 * dpr, h);
-    cctx.textBaseline = "top";
-    cctx.font = nameF;
-    cctx.fillStyle = COL.ink;
-    cctx.fillText(o.name, x + padX, y + 4 * dpr);
-    cctx.font = badgeF;
-    cctx.fillStyle = colour(o);
-    cctx.fillText(b, x + padX, y + 4 * dpr + lh1);
-    cctx.restore();
+    ctx.save();
+    ctx.globalAlpha = ghost && o.state === "last_seen" ? 0.85 : 1;
+    ctx.fillStyle = COL.dark;
+    roundRect(ctx, x, y, w, h, 6 * dpr);
+    ctx.fill();
+    ctx.fillStyle = colour(o);
+    ctx.fillRect(x, y, 5 * dpr, h);
+    ctx.textBaseline = "top";
+    ctx.font = nameF;
+    ctx.fillStyle = COL.ink;
+    ctx.fillText(o.name, x + padX, y + 4 * dpr);
+    ctx.font = badgeF;
+    ctx.fillStyle = colour(o);
+    ctx.fillText(b, x + padX, y + 4 * dpr + lh1);
+    ctx.restore();
   }
 
   // Frames: one undrawn JPEG at a time, the next asked once this one arrived (never a queue of them).
@@ -308,11 +342,14 @@
       frameTimer = setTimeout(pollFrame, 1500);
     };
     img.src = S.meta.image + sep + (S.meta.full ? "w=" + FRAME_W + "&" : "") + "_=" + Date.now();
-    getJSON("/demo/boxes").then((b) => {
-      // boxes come in the full image's px; the polled frame may be smaller: drawCam scales by image_size
-      S.boxes = b.boxes || {};
-      refresh();
-    }).catch(() => {});
+    if (Date.now() - (S.boxesAt || 0) >= BOXES_EVERY_MS) {
+      S.boxesAt = Date.now();
+      getJSON("/demo/boxes").then((b) => {
+        // boxes come in the full image's px; the polled frame may be smaller: drawView scales by image_size
+        S.boxes = b.boxes || {};
+        refresh();
+      }).catch(() => {});
+    }
   }
 
   // ------------------------------------------------------------------ map
@@ -356,10 +393,10 @@
       const xs = poly.map((p) => p[0]), ys = poly.map((p) => p[1]);
       const u = ((o.box[0] + o.box[2]) / 2 - Math.min(...xs)) / Math.max(1, Math.max(...xs) - Math.min(...xs));
       const w = ((o.box[1] + o.box[3]) / 2 - Math.min(...ys)) / Math.max(1, Math.max(...ys) - Math.min(...ys));
-      return [zx + zw * (0.15 + 0.7 * Math.min(1, Math.max(0, u))), zy + zh * (0.2 + 0.65 * Math.min(1, Math.max(0, w)))];
+      return [zx + zw * (0.12 + 0.5 * Math.min(1, Math.max(0, u))), zy + zh * (0.5 + 0.35 * Math.min(1, Math.max(0, w)))];
     }
-    const k = (i % 5) + 1;                                  // no box: fanned out in the zone
-    return [zx + zw * k / 6, zy + zh * (0.35 + 0.15 * (i % 3))];
+    const k = (i % 4) + 1;                                  // no box: fanned out below the zone's title
+    return [zx + zw * k / 8, zy + zh * (0.55 + 0.15 * (i % 3))];
   }
 
   function drawMap() {
@@ -414,6 +451,7 @@
       mctx.font = 800 + " " + Math.round(15 * dpr) + "px " + FONT;
       mctx.fillStyle = COL.ink;
       mctx.textAlign = "center";
+      mctx.textBaseline = "top";
       mctx.fillText("YOU", yx, yy + 11 * dpr);
       mctx.textAlign = "start";
     }
@@ -421,6 +459,7 @@
     const t = now();
     const labels = [];
     S.objs.forEach((o, i) => {
+      if (!shown(o)) return;
       const target = mapPoint(o, L, i);
       if (!target) return;
       let pin = S.pins.get(o.key);
@@ -466,10 +505,14 @@
       mctx.font = 600 + " " + Math.round(16 * dpr) + "px " + FONT;
       mctx.fillStyle = COL.ink;
       mctx.textBaseline = "middle";
-      let ly = py;
-      for (const q of labels) if (Math.abs(q.y - ly) < 17 * dpr && Math.abs(q.x - px) < 120 * dpr) ly = q.y + 18 * dpr;
-      labels.push({ x: px, y: ly });
-      mctx.fillText(o.name, px + r + 5 * dpr, ly);
+      if (!o.guessed || o.zone !== "table") {                 // table clutter: a dot; named things and rooms: a name
+        const tw = mctx.measureText(o.name).width;
+        const lx = px + r + 5 * dpr;
+        let ly = py;
+        for (let n = 0; n < 4 && labels.some((q) => Math.abs(q.y - ly) < 18 * dpr && lx < q.x + q.w && q.x < lx + tw); n++) ly += 18 * dpr;
+        labels.push({ x: lx, y: ly, w: tw });
+        mctx.fillText(o.name, lx, ly);
+      }
       mctx.globalAlpha = 1;
     });
   }
@@ -493,16 +536,17 @@
       const l = S.lastAnswer;
       a = [{ seq: l.t, t: l.t, q: l.question, text: l.text, point_at: l.point_at, evidence: l.evidence }];
     }
-    return a.filter((x) => x.q && x.text).slice(-3).reverse();
+    return a.filter((x) => x.q && x.text).slice(-2).reverse();
   }
 
   function evidenceOf(a) {
     if (Array.isArray(a.evidence) && a.evidence.length) return a.evidence[0];
     if (a.evidence && !Array.isArray(a.evidence) && a.evidence.snapshot_url) return a.evidence;
     const got = S.evidence.get(a.seq);
-    if (got === undefined && a.point_at) {
+    const about = a.obj || a.point_at;                    // WS5: obj, the entity the answer is about
+    if (got === undefined && about) {
       S.evidence.set(a.seq, null);                        // asked once
-      getJSON("/demo/evidence?obj=" + encodeURIComponent(a.point_at)).then((ev) => {
+      getJSON("/demo/evidence?obj=" + encodeURIComponent(about)).then((ev) => {
         if (ev && ev.snapshot_url) {
           S.evidence.set(a.seq, { snapshot_url: ev.snapshot_url, t: ev.t, type: ev.type, obj: ev.obj });
           shownKey = "";
@@ -532,7 +576,8 @@
     const shot = document.createElement("div");
     shot.className = "shot";
     const img = document.createElement("img");
-    img.alt = "The moment the answer is based on";
+    img.alt = "";
+    img.addEventListener("error", () => { shot.remove(); });   // no picture: the caption and time stay
     img.src = ev.snapshot_url;
     shot.appendChild(img);
     if (ev.box && ev.size) {                              // WS5: the object, in the snapshot's own px
@@ -561,12 +606,12 @@
     tag.className = "tag";
     tag.textContent = "Evidence";
     const text = document.createElement("span");
-    text.textContent = caption(ev);
+    text.textContent = clean(caption(ev));
     cap.append(tag, text);
-    if (ev.t) {
+    if (ev.clock || ev.t) {
       const when = document.createElement("span");
       when.className = "time";
-      when.textContent = clockText(ev.t, true);
+      when.textContent = ev.clock || clockText(ev.t, true);   // WS5: the rig's own clock text
       cap.appendChild(when);
     }
     box.append(shot, cap);
@@ -585,19 +630,65 @@
       if (i > 0) li.className = "old";
       const q = document.createElement("div");
       q.className = "q";
-      q.textContent = x.q;
+      q.textContent = clean(x.q);
       const when = document.createElement("span");
       when.className = "when";
       when.textContent = x.t ? clockText(x.t, false) : "";
       q.appendChild(when);
       const ans = document.createElement("div");
       ans.className = "a";
-      ans.textContent = x.text;
+      ans.textContent = clean(x.text);
       li.append(q, ans);
       const ev = i === 0 ? evidenceOf(x) : null;
       if (ev && ev.snapshot_url) li.appendChild(card(ev));
       list.appendChild(li);
     });
+  }
+
+  // ------------------------------------------------------------------ Grok's eyes
+
+  // The newest Grok call that looked at something (core/grok_trace.py via GET /grok/trace): the images
+  // actually sent, the request's text (a hint list, a question) and the raw reply, model and latency.
+  const LOOKS = new Set(["naming", "verify", "pick", "look", "look_room", "recall", "recall_room", "check", "refind", "confirm", "is_a"]);
+  const PURPOSE = { naming: "naming a new object", verify: "is it one of these?", pick: "finding an object",
+    look: "looking at the table", look_room: "looking at the room", recall: "remembering the table",
+    recall_room: "remembering the room", check: "checking the tracker", refind: "re-finding an object",
+    confirm: "same object?", is_a: "is it that kind of thing?" };
+  let eyesId = null;
+
+  function replyText(c) {
+    const raw = String(c.reply || "").trim();
+    try {
+      const d = JSON.parse(raw.replace(/^```(?:json)?\s*|```$/g, ""));
+      const keep = {};
+      for (const k of ["object", "name", "match", "answer", "seen", "mark", "same", "confidence", "also"]) if (k in d) keep[k] = d[k];
+      return JSON.stringify(Object.keys(keep).length ? keep : d).replace(/,"/g, ', "').replace(/":/g, '": ');
+    } catch (e) {
+      return raw || (c.error ? "error: " + c.error : "");
+    }
+  }
+
+  async function pollEyes() {
+    let calls;
+    try { calls = await getJSON("/grok/trace?limit=10"); } catch (e) { return; }
+    const c = (calls || []).find((x) => LOOKS.has(x.purpose) && x.images && x.images.length);
+    if (!c || c.id === eyesId) return;
+    eyesId = c.id;
+    $("eyes").hidden = false;
+    document.querySelector(".talk").classList.add("has-eyes");
+    $("eyes-meta").textContent = (PURPOSE[c.purpose] || c.purpose) + " · " + (c.model || "grok") + " · " +
+      (c.ms / 1000).toFixed(1) + " s · " + clockText(c.t, true);
+    const imgs = $("eyes-imgs");
+    imgs.textContent = "";
+    for (const key of c.images.slice(0, 2)) {
+      const im = document.createElement("img");
+      im.alt = "";
+      im.src = "/grok/img/" + key;
+      im.addEventListener("error", () => im.remove());
+      imgs.appendChild(im);
+    }
+    $("eyes-req").textContent = clean(c.request);
+    $("eyes-reply").textContent = clean(replyText(c));
   }
 
   // ------------------------------------------------------------------ live state
@@ -686,6 +777,7 @@
 
   setInterval(tickClock, 250);
   setInterval(loadLayout, 30000);
+  setInterval(pollEyes, 1500);
   setInterval(() => { if (S.state) renderAnswers(); }, 20000);   // "min ago" and fallbacks stay current
   const fontReady = document.fonts && document.fonts.load
     ? Promise.race([document.fonts.load('700 22px "Atkinson Next"'), new Promise((r) => setTimeout(r, 1500))])
