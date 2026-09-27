@@ -742,6 +742,31 @@ def test_a_servo_driver_that_cannot_import_disables_the_laser_but_not_the_app(tm
     assert "wallet" in room.tts.said[0].lower() and not room.world.laser.get("on")
 
 
+def test_with_aim_cue_point_only_a_question_that_asks_to_point_moves_the_laser(tmp_path, cal_path):
+    """User, 27 Sep 06:20: 'where is X' answers; 'point to X' / 'show me X' also aims."""
+    room, rig = make_room(tmp_path, cal_path)
+    room.aim_cue = "point"
+    aimed = []
+    room.aim = lambda ans: aimed.append(ans.point_at)
+    for q in ("where is my wallet?", "where is it?"):
+        _, aim = room.respond(room.ask(q, "voice"), q)
+        aim.join(2)
+    ans = room.ask_and_act("where is my wallet?", "dashboard")
+    assert ans.point_at == "wallet" and aimed == []           # computed, not aimed
+    for q in ("point to my wallet", "can you point at the wallet", "show me my wallet",
+              "where is my wallet, point to it"):
+        _, aim = room.respond(room.ask(q, "voice"), q)
+        aim.join(2)
+    assert aimed == ["wallet"] * 4
+    _, aim = room.respond(room.ask("point to my wallet", "voice"))       # no question (proactive): no laser
+    aim.join(2)
+    assert len(aimed) == 4
+    room.aim_cue = "any"
+    _, aim = room.respond(room.ask("where is my wallet?", "voice"), "where is my wallet?")
+    aim.join(2)
+    assert len(aimed) == 5
+
+
 def test_the_mic_does_not_wait_forever_for_a_stuck_aim(tmp_path, cal_path):
     room, _ = make_room(tmp_path, cal_path)
     room.aim_join_s = 0.2

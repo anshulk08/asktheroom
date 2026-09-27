@@ -73,7 +73,7 @@ import requests
 from core.config import load_config
 from core.types import INTENT_KINDS, Intent
 from net import call_with_deadline
-from voice.intents import (FILLER, GENERAL, YOU_REQUEST, _spoken_name, _vocab, firm_question, fuzzy_match, matched_exactly,
+from voice.intents import (FILLER, GENERAL, YOU_REQUEST, _spoken_name, _vocab, asks_to_point, firm_question, fuzzy_match, matched_exactly,
                            names_a_person, normalize, parse)
 
 log = logging.getLogger(__name__)
@@ -309,6 +309,8 @@ def rules_sure(i: Intent, cfg: Optional[dict] = None, aliases=()) -> bool:
         return False
     if i.obj is not None:
         return cfg is None or matched_exactly(i.raw, i.obj, cfg, aliases)
+    if i.kind == "WHERE" and i.name and asks_to_point(i.raw):
+        return True            # 'can you point to the paper towels': the model read it as a yes/no look (rig, 06:16)
     return _taught(i.name, aliases)
 
 

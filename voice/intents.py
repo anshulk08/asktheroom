@@ -92,6 +92,17 @@ YOU_REQUEST = re.compile(r"\b(?:can|could|would|will|did|do|should)\s+you\s+(?!(
                          r"locate|light|help|remember|look|check|know|say|guess)\b)[a-z]+")
 # Wants the laser on a named thing: 'show me my keys', 'point at the pills', 'light up the remote'.
 SHOW = re.compile(r"\b(?:show|point|pointing|light up|highlight|shine|flash|aim|where\s*abouts)\b")
+# Asks for the laser in so many words (room.aim_cue: point): 'point to/at X', 'can you point to X', 'point out X',
+# 'point it out', 'show me X', 'where is X, point to it'. Matched on normalize()d text.
+POINT_CUE = re.compile(r"\bpoint(?:ing)?\s+(?:to|at|out|towards?)\b|\bpoint\s+(?:it|them|that|those)\s+out\b"
+                       r"|\bshow\s+me\b")
+
+
+def asks_to_point(text: str) -> bool:
+    """The question asks for the laser ('point to the remote', 'show me my keys'), not just where."""
+    return bool(POINT_CUE.search(normalize(text or "")))
+
+
 GENERAL = re.compile(r"\b(?:anything|something|everything|stuff|things|what happened"
                      r"|whats happened|while i was)\b")
 ARTICLES = {"my", "the", "a", "your", "our"}

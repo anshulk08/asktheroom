@@ -183,6 +183,7 @@ class Room:
         self.room_head_px = room.get("head_px")
         self.room_hand_s = float(room.get("hand_recent_s", 2))
         self.room_person_check = bool(room.get("person_check", True))
+        self.aim_cue = str(room.get("aim_cue", "any"))     # point: the laser only when asked to point (respond)
         self._hand_boxes: deque = deque(maxlen=64)   # (monotonic t, box_px): recent hands block room aims
         lr = cfg.get("laser_room") or {}
         self.person_margin_px = float(lr.get("person_margin_px", 60))   # full-frame px around a person or hand
@@ -305,7 +306,7 @@ class Room:
             log.warning("answer to %r took %.1f s, past the server's %.0f s timeout; not speaking or aiming it",
                         text, late, ANSWER_LATE_S)
         elif source != "sms":
-            self.respond(ans)
+            self.respond(ans, text)
         return ans
 
     def _heard_from_phone(self, text: str) -> bool:
@@ -315,10 +316,18 @@ class Room:
         return any(now - t0 <= PHONE_ECHO_S and difflib.SequenceMatcher(None, t, q).ratio() >= 0.85
                    for t0, q in list(self._phone_qs))
 
-    def respond(self, ans: Answer) -> tuple[threading.Thread, threading.Thread]:
-        """Speak and aim at the same time, on two threads."""
+    def respond(self, ans: Answer, text: Optional[str] = None) -> tuple[threading.Thread, threading.Thread]:
+        """Speak and aim at the same time, on two threads. With room.aim_cue 'point' the laser moves only for
+        a question that asks it to point ('point to the remote', 'show me my keys'; voice.intents.POINT_CUE):
+        a plain 'where is X' is answered, not aimed."""
+        from voice.intents import asks_to_point
         say = threading.Thread(target=self._speak, args=(ans.text,), name="speak", daemon=True)
-        aim = threading.Thread(target=self.aim, args=(ans,), name="aim", daemon=True)
+        if self.aim_cue == "point" and not (text and asks_to_point(text)):
+            if ans.action or ans.point_at or ans.target_cm:
+                log.info("no point cue in the question: answered without the laser")
+            aim = threading.Thread(target=lambda: None, name="aim", daemon=True)
+        else:
+            aim = threading.Thread(target=self.aim, args=(ans,), name="aim", daemon=True)
         say.start()
         aim.start()
         return say, aim
@@ -1112,7 +1121,7 @@ class Room:
                 log.exception("record_answer failed")
         t_ans = time.monotonic()
         intent = self.interpret(text) if not self._answer_late else _rules_intent(text, self.cfg)
-        say, aim = self.respond(ans)
+        say, aim = self.respond(ans, text)
         aim.join(timeout=self.aim_join_s)
         if aim.is_alive():
             log.warning("laser still aiming after %.0f s; listening again without waiting for it", self.aim_join_s)

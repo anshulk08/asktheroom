@@ -312,3 +312,24 @@ def test_a_thing_named_with_a_place_word_is_still_a_thing():
 ])
 def test_put_is_a_where_question_only_about_what_i_did(text, kind):
     assert parse(text, CFG).kind == kind, text
+
+
+@pytest.mark.parametrize("text, cue", [
+    ("point to the remote", True), ("Can you point to the paper towels?", True), ("point out the shoe", True),
+    ("point at my keys", True), ("show me my keys", True), ("where is the remote, point to it", True),
+    ("point it out", True), ("where is the pill bottle?", False), ("Where is it?", False),
+    ("what's on the kitchen counter?", False), ("can you show the remote", False), ("my appointment", False),
+])
+def test_asks_to_point(text, cue):
+    from voice.intents import asks_to_point
+    assert asks_to_point(text) is cue
+
+
+def test_point_to_an_unlisted_thing_is_a_where_the_rules_decide():
+    """Rig, 06:16: 'Can you point to the paper towels?' went to the model, read as a yes/no look, no aim."""
+    from voice.understand import rules_sure
+    cfg = load_config()
+    for q in ("Can you point to the paper towels?", "point out the shoe"):
+        i = parse(q, cfg)
+        assert i.kind == "WHERE" and i.name and rules_sure(i, cfg), q
+    assert not rules_sure(parse("where are the paper towels", cfg), cfg)      # unchanged without the cue
