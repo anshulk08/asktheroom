@@ -5,7 +5,7 @@
 //   A <pan> <tilt>    aim at absolute angles in degrees (both axes move together)
 //   R <dpan> <dtilt>  move relative to the current target
 //   L <0|1>           laser off / on
-//   B <0-255>         laser brightness used while on (PWM)
+//   B <0-255>         laser brightness while on (PWM pins only; elsewhere any level > 0 is full on)
 //   S                 smooth stop (decelerate, keep holding)
 //   X                 emergency stop: pulses stop, laser off, motors released
 //   E <0|1>           release / enable motors
@@ -30,7 +30,7 @@ const uint8_t EN_PIN[2]   = {5, 2};  // pan, tilt
 const uint8_t STEP_PIN[2] = {6, 3};
 const uint8_t DIR_PIN[2]  = {7, 4};
 const uint8_t STEP_MASK[2] = {_BV(PD6), _BV(PD3)};
-const uint8_t LASER_PIN = 9;         // PWM on Timer1; change once the laser is wired
+const uint8_t LASER_PIN = 8;         // laser module signal (S); not a PWM pin, so on/off only
 const char *AXIS_NAME[2] = {"pan", "tilt"};
 
 // ---- Mechanics --------------------------------------------------------------
@@ -208,8 +208,10 @@ void haltPulses() {
 
 void setLaser(bool on) {
   laserOn = on;
-  if (on) {
+  if (on && digitalPinHasPWM(LASER_PIN) && laserBrightness < 255) {
     analogWrite(LASER_PIN, laserBrightness);
+  } else if (on) {
+    digitalWrite(LASER_PIN, laserBrightness ? HIGH : LOW);
   } else {
     digitalWrite(LASER_PIN, LOW);
   }

@@ -27,8 +27,8 @@ colour: its red wire is V+ (battery voltage), not 5 V.
 | DIR | D7 | D4 |
 
 The pan driver is on D5–D7 and tilt on D2–D4. The original diagram had them the other way round,
-and the firmware follows the wiring as built. The laser module's signal goes to D9 (a placeholder
-until the module is wired; `LASER_PIN` in `turret.ino`).
+and the firmware follows the wiring as built. The laser module's signal (S) goes to D8 (`LASER_PIN` in
+`turret.ino`); D8 has no PWM, so `B` brightness is on/off only there.
 
 **Power.** The battery powers the two drivers only. The Uno takes its power over USB from the
 host. Keep the Uno GND ↔ battery − wire, and leave the Uno's VIN pin unconnected: with battery +
