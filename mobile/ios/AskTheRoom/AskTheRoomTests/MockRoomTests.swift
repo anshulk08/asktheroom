@@ -33,6 +33,12 @@ final class MockRoomTests: XCTestCase {
         XCTAssertEqual(ask("where is my phone").pointAt, "phone", "a guessed phone charger isn't the phone")
     }
 
+    func testNamelessContainerTakesNoArticle() {
+        snapshot.e.append(Entity(n: "thing:20", k: .container, s: .visible, xy: TablePoint(x: 70, y: 38)))
+        snapshot.update("keys") { $0.p = "thing:20" }
+        XCTAssertEqual(ask("Where are my keys?").text, "Your keys are inside something new.")
+    }
+
     func testPillWordingStaysNeutral() {
         let a = ask("When did I last pick up my pills?")
         XCTAssertEqual(a.text, "You last picked up your pill bottle 25 minutes ago.")
