@@ -266,6 +266,9 @@ demo_check:
   camera: /dev/v4l/by-id/usb-046d_Logitech_BRIO_3675F8D2-video-index0   # the rig's Brio; an index moves on replug
   home_cm: {}                 # object: [x, y] table cm of the demo layout; empty = check 7 only needs VISIBLE
   home_tol_cm: 5
+  patch_min_ncc: 0.5          # check 17: the table around the tag spot vs table_cal_view.png (normalized correlation,
+                              # light doesn't count); below this the camera or table moved since the calibration
+  view_max_shift: 0.03        # check 17: the whole table view moved more than this fraction of it: the camera moved
 
 understand:
   enabled: true               # false = rule parser only
@@ -637,3 +640,14 @@ presence:
 # null decodes every frame (the old behaviour).
 capture:
   decode_fps: 20
+
+# The user's seat (core/viewframe.py). Table cm are the camera's frame (x left to right across its table view,
+# y from the view's far top edge to its bottom); what a person hears ("on your left", "carried off the far side") and the
+# phone's map are turned to the side of the table they sit at. front is that side, named in the CAMERA's
+# frame: bottom (the camera's side, as before), right, top or left. With an outline (table_area:) the map
+# is the tabletop squared to it. The phone's "I sit here" (POST /orientation) overrides front and is saved in
+# data/viewer.json (paths.viewer, if set), which wins at the next start. The world, the laser and the events
+# stay camera-frame.
+viewer:
+  front: bottom
+  sides: {}                   # optional labels per CAMERA side for the phone's "I sit here", e.g. {right: couch}
