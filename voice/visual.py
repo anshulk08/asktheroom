@@ -1124,9 +1124,10 @@ class VisualQA:
                 if k != "WHERE" or not target:
                     return None
                 seen = self._sighting(ent=target)
-                if seen is not None or not (self._room_default(t) and self._never_placed(target)):
+                if seen is not None or not (self._room_default(t) and (self._never_placed(target)
+                                                                         or self._stale_room_place(target))):
                     return seen
-                how = "room"            # a known thing the tracker has never seen: Grok looks around the room
+                how = "room"            # never seen, or its room place is stale: Grok looks around the room
                 said = []
             elif k == "WHERE":
                 how = "pick"
@@ -1183,6 +1184,15 @@ class VisualQA:
         except Exception:
             return False
         return e.status == "UNKNOWN" and e.pos_cm is None and e.last_seen is None
+
+    def _stale_room_place(self, ent: str) -> bool:
+        """The world places ent in a room zone but hasn't seen it there lately (or sees the spot empty): a
+        look at the room now beats repeating an old place. The tracker text still says where it was."""
+        try:
+            place = self.world.place(ent, self.clock()) if hasattr(self.world, "place") else None
+        except Exception:
+            return False
+        return place is not None and place.kind == "room" and not place.fresh
 
     def _about_table(self, intent: Intent, t: str) -> bool:
         """Whether an OTHER question (t normalized) is about the table or what the camera sees: it says

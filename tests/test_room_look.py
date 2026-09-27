@@ -420,3 +420,27 @@ def test_a_weak_text_match_on_room_frames_still_asks_grok(log, tmp_path):
     q.c.min_sim = 0.99                                    # no room frame matches the words well enough
     a = ask(q, "was there a red mug here earlier?")
     assert a.text.startswith("There was a cup") and len(prov.calls) == 1   # frames over the window, not "I don't remember"
+
+
+def room_placed(log, fresh):
+    from core.fakeworld import FakeWorld
+    from core.room_types import Place
+    from core.types import Entity, Status
+    world = FakeWorld([Entity("glasses", "target", Status.VISIBLE, last_seen=T0 - 600)], log)
+    world.set_place("glasses", Place(kind="room", zone="couch", say="the couch", status=Status.VISIBLE,
+                                     chain=["glasses"], via="glasses", box_px=(1, 1, 5, 5), observed_directly=True,
+                                     fresh=fresh, arrived_wall=T0 - 900, last_seen_wall=T0 - 600))
+    q, prov = qa(log, room_seen_reply("I don't see your glasses on the couch now."), world=world)
+    q.frames, q.room_zones = RoomFrames(), [("couch", "the couch")]
+    return q, prov
+
+
+def test_a_stale_room_place_is_checked_with_a_room_look(log):
+    q, prov = room_placed(log, fresh=False)
+    assert ask(q, "where are my glasses?").text == "I don't see your glasses on the couch now."
+    assert "room" in prov.calls[0].system.lower()
+
+
+def test_a_fresh_room_place_stays_with_the_world_model(log):
+    q, prov = room_placed(log, fresh=True)
+    assert ask(q, "where are my glasses?") is None and prov.calls == []
