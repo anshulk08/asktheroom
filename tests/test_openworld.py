@@ -417,6 +417,65 @@ def test_merge_then_split_keeps_both_identities_and_freezes_their_exemplars(scen
     assert [len(world.exemplars(n)) for n in ('thing:1', 'thing:2')] == [b + 1 for b in before]
 
 
+def test_a_blob_over_things_still_seen_on_their_own_makes_no_new_things(scene, world):
+    """On the rig one proposal over a cable pile covered the things on it while each kept its own
+    proposal too. The blob held them where they were, so their own proposals went unmatched and one was
+    born again every few seconds (100 things at one spot in 40 min). Seen on their own, they are just
+    seen, at full confidence."""
+    appear(scene, world, 'a', (40, 30), seconds=2.0)
+    appear(scene, world, 'b', (50, 30), seconds=2.0)
+    scene.thing('blob', 45, 30, 22, 5)             # over both, while both are still seen
+    events = scene.run(world, 30.0)
+    assert EventType.APPEARED not in types(events)
+    assert things(world) == ['thing:1', 'thing:2']
+    for n, at in (('thing:1', (40, 30)), ('thing:2', (50, 30))):
+        ent = world.get(n)
+        assert (ent.status, ent.confidence) == (Status.VISIBLE, 1.0)
+        assert ent.pos_cm == pytest.approx(at)
+
+
+def test_a_blob_holds_only_the_things_it_hides(scene, world, cfg):
+    appear(scene, world, 'a', (40, 30), seconds=2.0)
+    appear(scene, world, 'b', (50, 30), seconds=2.0)
+    scene.remove('a')                              # a is seen only as part of the blob now
+    scene.thing('blob', 45, 30, 22, 5)
+    assert scene.run(world, 5.0) == []
+    assert world.get('thing:1').confidence == pytest.approx(cfg.ambiguity_penalty)
+    assert world.get('thing:2').confidence == 1.0
+    assert things(world) == ['thing:1', 'thing:2']
+
+
+def test_a_second_box_on_a_thing_in_view_is_not_a_new_thing(scene, world):
+    """Two proposals on one object (the lid and the whole laptop, or two wires of one pile): the thing
+    takes the nearest, and the other is the same thing seen twice, not a birth on top of it."""
+    appear(scene, world, 'laptop', (50, 30), seconds=2.0, w=20, h=14)
+    scene.thing('lid', 56, 34, 16, 12)             # IoU 0.3, its centre on the laptop, a like size
+    events = scene.run(world, 10.0)
+    assert EventType.APPEARED not in types(events)
+    assert things(world) == ['thing:1']
+
+
+def test_a_small_thing_put_on_a_big_one_is_still_new(scene, world):
+    appear(scene, world, 'notebook', (50, 30), seconds=2.0, w=15, h=21)
+    events = appear(scene, world, 'phone', (50, 30), seconds=2.0, w=7, h=15)
+    assert of(events, 'thing:2') == [EventType.APPEARED]
+
+
+def test_one_of_several_things_lost_at_one_spot_comes_back_not_a_new_one(scene, world):
+    """Duplicates lost at one spot (left by the pile-up above) must not breed: a proposal there is the
+    nearest of them again, not one more."""
+    appear(scene, world, 'a', (40, 30), seconds=2.0)
+    appear(scene, world, 'b', (44.5, 30), seconds=2.0)
+    scene.remove('a')
+    scene.remove('b')
+    scene.run(world, 5.0)
+    assert [world.get(n).status for n in ('thing:1', 'thing:2')] == [Status.UNKNOWN, Status.UNKNOWN]
+    events = appear(scene, world, 'c', (44, 30), seconds=2.0)
+    assert EventType.APPEARED not in types(events)
+    assert world.get('thing:2').status == Status.VISIBLE
+    assert things(world) == ['thing:1', 'thing:2']
+
+
 def test_split_with_swapped_positions_is_resolved_by_appearance(scene, world):
     appear(scene, world, 'a', (40, 30), seconds=2.0)
     appear(scene, world, 'b', (50, 30), seconds=2.0)
