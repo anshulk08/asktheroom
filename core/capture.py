@@ -31,6 +31,7 @@ from core.types import Frame
 log = logging.getLogger(__name__)
 
 W, H, FPS = 1280, 720, 30
+SKIPPED = object()          # FrameBuffer._next: a frame grabbed off the camera but not decoded (decode_fps)
 
 
 def open_camera(index: Union[int, str] = 0, width: int = W, height: int = H, fps: int = FPS,
@@ -138,15 +139,15 @@ class FrameBuffer:
         dead_since = None
         while not self._stop.is_set():
             try:
-                ok, img = self._next()          # (True, None): grabbed, not decoded (decode_fps)
+                got = self._next()
             except Exception as ex:
-                ok, img = False, None
+                got = (False, None)
                 if self.failures % 30 == 0:
                     log.warning("camera read raised %s: %s", type(ex).__name__, ex)
-            now, wall = time.monotonic(), time.time()
-            if ok and img is None:              # grabbed, not decoded: a frame nobody would use
-                dead_since = None
+            if got is SKIPPED:                  # grabbed, not decoded (decode_fps): no evidence either way
                 continue
+            ok, img = got
+            now, wall = time.monotonic(), time.time()
             if not ok or img is None:
                 self.failures += 1
                 if self.failures % 30 == 1:
@@ -167,10 +168,11 @@ class FrameBuffer:
                 self._times.append(now)
                 self._fresh.notify_all()
 
-    def _next(self) -> tuple[bool, Optional[np.ndarray]]:
-        """The next camera frame. With decode_period, every frame is grabbed (the driver never backs up)
-        but only one per period is decoded (retrieve: the MJPEG decode, the costly part at 1440p/1080p);
-        the others come back as (True, None). Sources without grab/retrieve (tests, recordings) read()."""
+    def _next(self):
+        """The next camera frame, (ok, img). With decode_period, every frame is grabbed (the driver never backs
+        up) but only one per period is decoded (retrieve: the MJPEG decode, the costly part at 1440p/1080p);
+        the others come back as SKIPPED, which is neither a frame nor a failure (a read giving (True, None)
+        stays a failure, and so does a failed decode). Sources without grab/retrieve (tests, recordings) read()."""
         grab = getattr(self.cap, "grab", None)
         if not self.decode_period or grab is None or not hasattr(self.cap, "retrieve"):
             return self.cap.read()
@@ -179,9 +181,11 @@ class FrameBuffer:
         self.grabbed += 1
         now = time.monotonic()
         if now - self._decoded_t < self.decode_period:
-            return True, None
-        self._decoded_t = now
-        return self.cap.retrieve()
+            return SKIPPED
+        ok, img = self.cap.retrieve()
+        if ok and img is not None:             # a failed decode is retried on the next grab, not a period later
+            self._decoded_t = now
+        return ok, img
 
     def latest(self) -> Optional[Frame]:
         with self._lock:
