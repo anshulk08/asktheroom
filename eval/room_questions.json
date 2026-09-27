@@ -1,0 +1,61 @@
+{
+  "_about": "Room questions on real rig frames (eval/room_look.py). Frames are not in git (people are in them): copy them from the rig into --frames. f1440 = ~/fov1440/out/f1440.jpg (2560x1440, the live pose, 26 Sep 23:05); now/moved/full_z100 = ~/askroom_room/data/room/*.jpg (1920x1080, an earlier pose, 26 Sep 18:17-18:26). 'expect' is what a person sees in the frame, for reading the answers; it is not scored automatically.",
+  "frames": {
+    "f1440": {
+      "file": "f1440.jpg", "wall": "2026-09-26 23:05:00", "table_rect": [0, 980, 817, 1440],
+      "zones": {
+        "couch": {"say": "the couch", "poly": [[973.3, 1053.3], [1320.0, 1053.3], [1320.0, 1440.0], [906.7, 1440.0]]},
+        "side_table": {"say": "the side table", "poly": [[0.0, 740.0], [286.7, 740.0], [286.7, 866.7], [0.0, 866.7]]},
+        "counter": {"say": "the kitchen counter", "poly": [[2240.0, 720.0], [2560.0, 746.7], [2560.0, 886.7], [2240.0, 813.3]]}
+      }
+    },
+    "now": {
+      "file": "now.jpg", "wall": "2026-09-26 18:22:00", "table_rect": [0, 820, 600, 1080],
+      "zones": {
+        "couch": {"say": "the couch", "poly": [[720, 820], [1000, 820], [1060, 1080], [660, 1080]]},
+        "side_table": {"say": "the side table", "poly": [[0, 580], [160, 580], [160, 660], [0, 660]]},
+        "counter": {"say": "the kitchen counter", "poly": [[1680, 540], [1920, 560], [1920, 660], [1680, 620]]}
+      }
+    },
+    "full_z100": {"file": "full_z100.jpg", "wall": "2026-09-26 18:17:00", "table_rect": [0, 820, 600, 1080], "zones": "now"},
+    "moved": {"file": "moved.jpg", "wall": "2026-09-26 18:26:00", "table_rect": [0, 820, 600, 1080], "zones": "now"}
+  },
+  "look": [
+    {"id": "see", "frame": "f1440", "q": "what do you see?", "expect": "two people on the couch, one with a laptop; coffee table with small items; TV on the side table; kitchen"},
+    {"id": "counter", "frame": "f1440", "q": "what's on the kitchen counter?", "expect": "orange cup, spray bottle, wipes canister, paper towel roll, water dispenser"},
+    {"id": "side_table", "frame": "f1440", "q": "what's on the side table?", "expect": "a TV, a small white figurine, stacked clear plastic boxes"},
+    {"id": "couch", "frame": "f1440", "q": "what's on the couch?", "expect": "two people, a laptop, a black/white/red jacket or blanket"},
+    {"id": "mug", "frame": "f1440", "q": "where is my mug?", "expect": "no mug as such: an orange cup on the counter, a black tumbler on the coffee table; either, or 'I don't see a mug'"},
+    {"id": "keys", "frame": "f1440", "q": "where are my keys?", "expect": "absent: 'I don't see keys'"},
+    {"id": "cat", "frame": "f1440", "q": "is there a cat in the room?", "expect": "no"},
+    {"id": "umbrella", "frame": "f1440", "q": "where's my umbrella?", "expect": "absent"},
+    {"id": "glasses", "frame": "f1440", "q": "where are my glasses?", "expect": "absent"},
+    {"id": "paper_towels", "frame": "f1440", "q": "where are the paper towels?", "expect": "on the kitchen counter"},
+    {"id": "tissues", "frame": "f1440", "q": "where is the tissue box?", "expect": "on the floor by the doorway / hallway"},
+    {"id": "orange_cup", "frame": "f1440", "q": "where is the orange cup?", "expect": "on the kitchen counter"},
+    {"id": "pill_bottle", "frame": "f1440", "q": "where's my pill bottle?", "expect": "on the coffee table"},
+    {"id": "tv_on", "frame": "f1440", "q": "is the TV on?", "expect": "yes"},
+    {"id": "people", "frame": "f1440", "q": "how many people are in the room?", "expect": "two"},
+    {"id": "floor", "frame": "f1440", "q": "is there anything on the floor?", "expect": "tissue box by the doorway, a clear bin by the couch"},
+    {"id": "cup_color", "frame": "f1440", "q": "what color is the cup on the counter?", "expect": "orange"},
+    {"id": "coffee_table", "frame": "f1440", "q": "what's on the table?", "expect": "(table look) pill bottle, yellow parts, orange oval, wallet, pliers, black tumbler"},
+    {"id": "now_couch", "frame": "now", "q": "what's on the couch?", "expect": "a person with a laptop, a second laptop, a plastic bag, a jacket"},
+    {"id": "now_side_table", "frame": "now", "q": "what's on the side table?", "expect": "someone working at it, cables, a small white case"},
+    {"id": "now_laptop", "frame": "now", "q": "where is my laptop?", "expect": "on the couch (two laptops there)"},
+    {"id": "now_counter", "frame": "now", "q": "what's on the kitchen counter?", "expect": "orange cup, spray bottle, water dispenser"}
+  ],
+  "recall": {
+    "_about": "The earlier frames are placed at 8:17-8:26 PM (really 6:17-6:26 PM), so 'earlier' (the last 3 hours) spans them all.",
+    "frames": ["full_z100", "now", "moved", "f1440"],
+    "walls": {"full_z100": "2026-09-26 20:17:00", "now": "2026-09-26 20:22:00", "moved": "2026-09-26 20:26:00", "f1440": "2026-09-26 23:05:00"},
+    "now": "2026-09-26 23:10:00",
+    "questions": [
+      {"id": "r_laptop", "q": "was there a laptop on the couch earlier?", "expect": "yes: about 8:17-8:26 PM and 11:05 PM"},
+      {"id": "r_side_table", "q": "was anyone sitting at the side table earlier?", "expect": "yes, about 8:22 PM"},
+      {"id": "r_tv", "q": "when was the TV on?", "expect": "about 11:05 PM (off at 8:17-8:26)"},
+      {"id": "r_counter", "q": "what was on the kitchen counter earlier?", "expect": "orange cup, spray bottle, water dispenser"},
+      {"id": "r_standing", "q": "was someone standing by the side table earlier?", "expect": "yes, about 8:17 PM"},
+      {"id": "r_coffee_table", "q": "what was on the table at 8:20?", "expect": "(table) clear plastic bins of cables and parts"}
+    ]
+  }
+}
