@@ -6,7 +6,8 @@ create_app(cfg, world, events, frames=None, ask_fn=None, table=None, care=None) 
   GET  /video            MJPEG of the latest frame with the world drawn on it (server/overlay.py)
   GET  /frame.jpg, /full.jpg   one frame drawn on like /video (the table view; room memory: the whole frame);
                          ?raw=1 the camera frame as captured, nothing drawn (full.jpg at capture size)
-  WS   /ws             WorldState JSON at server.push_hz plus new events since the last push
+  WS   /ws             WorldState JSON at server.push_hz (?hz=N: fewer, for a page that needs less) plus new
+                         events since the last push
   GET  /events?since=t   events with wall >= t (oldest first), each with a snapshot_url
   GET  /snapshots/{name} one event snapshot jpg (snapshot dir only)
   POST /ask              {"text", "source"?: "dashboard" | "phone"} -> {"text", "point_at", "action", "latency_ms"}
@@ -396,6 +397,13 @@ def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = 
             since = float(websocket.query_params.get("since", 0) or 0)
         except ValueError:
             since = 0.0
+        period = push_period
+        try:                                   # ?hz=: a client may ask for fewer pushes (never more than push_hz):
+            hz = float(websocket.query_params.get("hz", 0) or 0)       # each one builds state_json (~0.2 s on
+            if hz > 0:                                                  # the Jetson), which costs perception fps
+                period = max(push_period, 1.0 / max(0.2, hz))
+        except ValueError:
+            pass
         cursor = EventCursor(since)
         first = True
         try:
@@ -407,7 +415,7 @@ def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = 
                        "initial": first, **meta()}
                 await websocket.send_text(dumps(msg))
                 first = False
-                await asyncio.sleep(max(0.0, push_period - (time.monotonic() - t0)))
+                await asyncio.sleep(max(0.0, period - (time.monotonic() - t0)))
         except Exception:
             # client went away (WebSocketDisconnect / closed transport) or the app is shutting down
             pass
