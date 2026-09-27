@@ -37,6 +37,7 @@ PARTLY_HIDDEN_INSIDE = 0.8  # a smaller box this much inside the box an object r
 THING_COVER_AREA = 1.5      # a thing at least this many times an object's footprint can lie over it
 PERSON_OVER = 0.5           # a person box over this share of an object's box hides its spot (_person_over)
 PERSON_HOLD_S = 20.0        # ... for at most this long (unknown_cover.person_hold_s)
+LASER_SETTLE_S = 1.5        # 'covered by something' waits while the laser dot is lit and this long after
 OUTLINE_IOU = 0.5           # a class-agnostic proposal this much like a configured object's box outlines it
 
 # A rule verdict is (Status, parent, confidence, EventType[, candidates]), or NO_CHANGE: the rule
@@ -137,6 +138,8 @@ class World(ThingRules, RoomRules):
             self._gray_img = None
             self._batch_things = [d for d in dets.items if d.cls == 'thing']
             self._people = [d.box_cm for d in getattr(dets, 'people', None) or ()]
+            if (self.laser or {}).get('on'):
+                self._laser_lit_t = self._now
             out: list[Event] = []
             seen = self._best_detections(dets.items, dets.hands)
             self._track_covers(seen)
@@ -439,12 +442,17 @@ class World(ThingRules, RoomRules):
                 return self._apply_verdict(name, ent, slid_over)
             if self._touched(name):         # a hand holding an unknown cover touches what it covers
                 laid = self._laid_over(name, ent)
+                if laid is not None and laid is not NO_CHANGE and self._laser_unsure(laid):
+                    laid = NO_CHANGE
                 if laid is not None:
                     return self._defer_or_apply(name, ent, laid)
             held = self._picked_up(name, ent)
             if held or ent.status == Status.HELD:
                 return held
         hidden = self._hidden_by(name, ent, ent.box_cm, self._now, self._frame)
+        if hidden is not None and self._laser_unsure(hidden):
+            self._present[name] = True      # re-checked once the dot is off
+            return []
         if hidden is not None:
             return self._apply_verdict(name, ent, hidden)
         if self._now - self._last_evidence(name) < self.cfg.lost_grace_s:
@@ -455,6 +463,9 @@ class World(ThingRules, RoomRules):
         self._waiting.pop(name, None)
         self._depart_anchor = self._last_evidence(name)   # room memory: last seen, not the grace's end
         laid = self._laid_over(name, ent, settled=True)     # untouched, still unseen: an unknown cover?
+        if laid is not None and laid is not NO_CHANGE and self._laser_unsure(laid):
+            self._present[name] = True
+            return []
         if laid is not None and laid is not NO_CHANGE:
             return self._apply_verdict(name, ent, laid)       # (COVERED by 'unknown' is a departure too)
         return self._lose(name, ent)
@@ -494,6 +505,14 @@ class World(ThingRules, RoomRules):
         """UNKNOWN at the last known position; confidence is left as it was."""
         ent.status, ent.parent, ent.candidates, ent.held_since = Status.UNKNOWN, None, [], None
         return [self._emit(name, EventType.LOST_TRACK)]
+
+    def _laser_unsure(self, verdict) -> bool:
+        """WS2 (film build, Sun 27 Sep): 'covered by something' read from pixels is not trusted while the
+        laser dot is lit or within LASER_SETTLE_S of it: the dot (aims landed ~50 px off, beside the props)
+        is a local change in the band around what it points at. The verdict waits; named covers, things
+        laid over and the hand rules are unaffected."""
+        return (isinstance(verdict, tuple) and verdict[1] == 'unknown'
+                and self._now - getattr(self, '_laser_lit_t', -1e18) <= LASER_SETTLE_S)
 
     def _person_over(self, name: str, ent: Entity) -> bool:
         """WS2 proposal (room demo, Sun 27 Sep): a person box (YOLOE 'person', 'arm', a worn shoe; from the
