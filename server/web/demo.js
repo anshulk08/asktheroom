@@ -648,11 +648,11 @@
 
   // The newest Grok call that looked at something (core/grok_trace.py via GET /grok/trace): the images
   // actually sent, the request's text (a hint list, a question) and the raw reply, model and latency.
-  const LOOKS = new Set(["naming", "verify", "pick", "look", "look_room", "recall", "recall_room", "check", "refind", "confirm"]);
+  const LOOKS = new Set(["naming", "verify", "pick", "look", "look_room", "recall", "recall_room", "check", "refind", "confirm", "is_a"]);
   const PURPOSE = { naming: "naming a new object", verify: "is it one of these?", pick: "finding an object",
     look: "looking at the table", look_room: "looking at the room", recall: "remembering the table",
     recall_room: "remembering the room", check: "checking the tracker", refind: "re-finding an object",
-    confirm: "same object?" };
+    confirm: "same object?", is_a: "is it that kind of thing?" };
   let eyesId = null;
 
   function replyText(c) {

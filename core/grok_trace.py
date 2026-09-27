@@ -2,7 +2,7 @@
 (server GET /grok/trace, /grok/img/<id>; the /demo page).
 
 core/xai.Client._create records every chat call here: its time, purpose (from the system prompt: naming,
-verify, pick, look, look_room, recall, recall_room, check, refind, confirm, answer, understand,
+verify, pick, look, look_room, recall, recall_room, check, refind, confirm, is_a, answer, understand,
 narration, other), model, latency, the text parts of the request (hint lists, questions; trimmed), small
 JPEG thumbnails of the images actually sent (at most THUMB_PX on the long side, in memory only) and the
 reply (the message content, trimmed; tool call names). Never the API key, headers or the full images.
@@ -30,6 +30,9 @@ REPLY_MAX = 1500             # reply text kept per call
 # System prompt openings -> purpose, most specific first (core/auto_name, core/room, voice/visual, ...).
 PURPOSES = [
     ("You name one object", "naming"),
+    ("You find one person's object in a room photo", "refind"),                 # core/permanence.py (WS8)
+    ("You compare photos from one room camera", "confirm"),
+    ("You look at one object in a red box in a room photo and say whether it is the named kind", "is_a"),
     ("You look at part of a room seen by a ceiling camera. One object is marked with a red box", "verify"),
     ("You check what an object tracker", "check"),
     ("You answer spoken questions about what the room looked like earlier", "recall_room"),

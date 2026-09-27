@@ -89,6 +89,11 @@ def test_purpose_from_the_system_prompt():
                                             ROOM_RECALL_SYSTEM)] == \
         ["verify", "check", "look", "look_room", "recall", "recall_room"]
     assert grok_trace.purpose("Is the object in mark 2 the same object as the reference?") == "confirm"
+    for start, want in (("You find one person's object in a room photo. The first image(s)", "refind"),
+                        ("You compare photos from one room camera. The first image(s)", "confirm"),
+                        ("You look at one object in a red box in a room photo and say whether it is the named kind of "
+                         "thing.", "is_a")):
+        assert grok_trace.purpose(start) == want
     assert grok_trace.purpose("something else") == "other"
 
 
