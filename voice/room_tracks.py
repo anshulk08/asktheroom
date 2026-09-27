@@ -87,7 +87,7 @@ def pick_track(said: str, tracks: Iterable, now_wall: float, fresh_s: float,
 def answer_from_tracks(said: str, tracks: Iterable, zone_say: dict, now_wall: Optional[float] = None,
                        fresh_s: float = 5.0, tentative: Callable[[str], bool] = lambda n: False
                        ) -> Optional[Answer]:
-    """'Your laptop is on the couch.' with the room aim at the track's full-frame box, or None."""
+    """'Your laptop, I think, is on the couch.' with the room aim at the track's full-frame box, or None."""
     now_wall = time.time() if now_wall is None else now_wall
     hit = pick_track(said, tracks, now_wall, fresh_s, tentative)
     if hit is None:
@@ -97,5 +97,6 @@ def answer_from_tracks(said: str, tracks: Iterable, zone_say: dict, now_wall: Op
     where = zone_say.get(tr.zone) or f'the {tr.zone.replace("_", " ")}'
     verb = 'are' if said.endswith('s') and not said.endswith('ss') else 'is'
     log.info("room track %s in %s (%s) answers for %r", tr.tid, tr.zone, tr.guess.get('name'), said)
-    return Answer(f"Your {said} {verb} on {where}.",
+    from voice.answers import _hedge      # a Grok-name match, not an identity (spec 0010): hedged
+    return Answer(_hedge(f"Your {said} {verb} on {where}.", said),
                   action=f"room:{(x1 + x2) / 2:.0f},{(y1 + y2) / 2:.0f},{x1:.0f},{y1:.0f},{x2:.0f},{y2:.0f}")

@@ -31,7 +31,7 @@ def track(tid='r:387', zone='couch', name='laptop', box=(1200, 700, 1500, 860), 
 
 def test_a_named_couch_track_answers_and_aims_at_its_box():
     a = answer_from_tracks('laptop', [track()], SAYS, NOW)
-    assert a.text == 'Your laptop is on the couch.'
+    assert a.text == 'Your laptop, I think, is on the couch.'
     assert a.action == 'room:1350,780,1200,700,1500,860'
 
 
@@ -52,7 +52,7 @@ def test_a_shoe_is_a_valid_target(said, name):
 @pytest.mark.parametrize('name', ['eyeglasses', 'sunglasses', 'reading glasses', 'spectacles', 'pair of glasses'])
 def test_glasses_answer_to_their_synonyms(name):
     a = answer_from_tracks('glasses', [track(name=name)], SAYS, NOW)
-    assert a is not None and a.text == 'Your glasses are on the couch.'
+    assert a is not None and a.text == 'Your glasses, I think, are on the couch.'
 
 
 @pytest.mark.parametrize('kw', [dict(last=NOW - 30), dict(misses=1), dict(confirmed=False), dict(name=None)])
@@ -93,7 +93,7 @@ def world():
 
 def test_where_asks_the_room_tracks_when_the_world_has_no_place(world):
     a = ask_for(world, [track()])('where is my laptop')
-    assert a.text == 'Your laptop is on the couch.' and a.action.startswith('room:')
+    assert a.text == 'Your laptop, I think, is on the couch.' and a.action.startswith('room:')
 
 
 def test_off_by_default_nothing_changes(world):
@@ -114,7 +114,7 @@ def test_a_table_thing_wins_over_a_room_track(world):
 
 def test_where_are_my_glasses_aims_at_an_eyeglasses_track_on_the_couch(world):
     a = ask_for(world, [track(name='eyeglasses', box=(900, 600, 980, 640))])('where are my glasses?')
-    assert a.text == 'Your glasses are on the couch.' and a.action == 'room:940,620,900,600,980,640'
+    assert a.text == 'Your glasses, I think, are on the couch.' and a.action == 'room:940,620,900,600,980,640'
 
 
 # ----- the aim gate: lone footwear is not a person ------------------------------------------------
