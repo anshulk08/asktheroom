@@ -56,7 +56,7 @@ tail -f data/room/app.log                                            # wait for 
 |---|---|---|---|
 | 1 | Pre-demo check | app stopped, then `scripts/dock.sh python3 demo_check.py --camera $CAM` | every line green (camera, zones drawn at this view, room memory, network, audio, clock) |
 | 2 | Start the app | §2 start | `/healthz` answers: `curl -s $RIG/healthz` |
-| 3 | Reset | `curl -s -X POST $RIG/ask -H 'content-type: application/json' -d '{"text":"room, reset"}'` | answered in < 5 s, then one full run passes |
+| 3 | Reset | `curl -s -X POST $RIG/ask -H 'content-type: application/json' -d '{"text":"ask the room, reset"}'` | answered in < 5 s, then one full run passes |
 | 4 | One full 60-s run with voice | the §1 script of spec 0010, spoken from the judge's spot | spoken answer names the right zone |
 | 5 | One full run with the phone | the iPhone app over BLE | the answer is read aloud on the phone |
 | 6 | Hotspot switch | §5 | answers keep coming; Wi-Fi back after |
