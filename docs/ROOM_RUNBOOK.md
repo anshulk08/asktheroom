@@ -79,9 +79,18 @@ only; this is the Devpost number too, `docs/DEVPOST.md`).
 
 ## 4. Mic and speaker bring-up
 
-*From the room/voice branch: device names into `config.local.yaml` (`stt.input_device`, `tts.output_device`),
-the always-listening / wake-word gate in expo noise (`scripts/overheard_test.py`), and the own-speaker echo
-test. Pasted here when merged.*
+The full procedure (device discovery, level checks, the wake-word gate in expo noise, the own-speaker echo
+test, spoken trials with `scripts/voice_trials.py`) is **`docs/runbooks/room-voice.md`** (room/voice branch;
+in this build once that branch is merged). The rig-side prerequisites, in `~/askroom_room/config.local.yaml`:
+
+```yaml
+stt: {input_device: "<USB mic name part>"}      # not the corner Brio's mic: it can't hear a judge over the hall
+tts: {output_device: "<USB speaker name part>"} # null = HDMI, which is silent on the rig
+listen: {wake_words: [ask the room, askroom, ask room]}
+demo: {hold_notices: true}                      # nothing speaks unasked while judges are there
+```
+
+Then run the app **with voice** (§2 start, without `--no-voice`) and follow the voice runbook's checks.
 
 ## 5. Hotspot switch and restart script
 
