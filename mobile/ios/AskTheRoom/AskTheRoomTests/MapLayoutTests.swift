@@ -122,13 +122,15 @@ final class MapLayoutTests: XCTestCase {
         XCTAssertTrue(body.contains(CGPoint(x: keys.x, y: keys.y)), "still inside the box")
     }
 
-    /// Unnamed things print a short label; the full name stays for VoiceOver and the card.
-    func testUnnamedThingsGetAShortLabel() {
+    /// Nameless things print a short "new", never their number; "something new" stays for
+    /// VoiceOver and the card.
+    func testNamelessThingsGetAShortLabelAndNoNumber() {
         let items = MapLayout.items(for: sample)
-        XCTAssertEqual(item("thing:9", in: items).label, "unnamed")
-        XCTAssertEqual(item("thing:9", in: items).title, "unnamed object 9")
+        XCTAssertEqual(item("thing:9", in: items).label, "new")
+        XCTAssertEqual(item("thing:9", in: items).title, "something new")
         XCTAssertEqual(item("thing:7", in: items).label, "my charger", "named things keep their name")
-        XCTAssertTrue(item("thing:9", in: items).accessibilityLabel.hasPrefix("unnamed object 9"))
+        XCTAssertTrue(item("thing:9", in: items).accessibilityLabel.hasPrefix("something new"))
+        XCTAssertNil(item("thing:9", in: items).accessibilityLabel.rangeOfCharacter(from: .decimalDigits))
     }
 
     /// The room's guesses print with a question mark, on the map and for VoiceOver.

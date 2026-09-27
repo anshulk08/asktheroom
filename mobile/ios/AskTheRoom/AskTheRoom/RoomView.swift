@@ -390,10 +390,9 @@ struct EntityDetailView: View {
                                 }
                             }
                         }
-                        if let guess = entity.hedgedName, let number = entity.thingNumber {
+                        if let guess = entity.hedgedName {
                             Section("Not named yet") {
                                 LabeledContent("Looks like", value: guess)
-                                LabeledContent("Object", value: number)
                             }
                         }
                         if !entity.aliases.isEmpty {

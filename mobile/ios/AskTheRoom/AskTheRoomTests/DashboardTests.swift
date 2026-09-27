@@ -84,7 +84,7 @@ final class DashboardTests: XCTestCase {
         XCTAssertEqual(your("pill_bottle"), "your pill bottle")
         XCTAssertEqual(your("thing:7"), "my charger")
         XCTAssertEqual(your("box"), "the box")
-        XCTAssertEqual(your("thing:9"), "the unnamed object 9")
+        XCTAssertEqual(your("thing:9"), "something new")
     }
 
     func testLastSeenOnlyForThingsOutOfSight() {
@@ -158,6 +158,13 @@ final class DashboardTests: XCTestCase {
         new.e.append(Entity(n: "thing:14", k: .target, s: .visible, p: nil, xy: TablePoint(x: 5, y: 5), r: nil,
                             c: 1, edge: nil, a: nil, m: nil, ls: nil))
         XCTAssertEqual(Dashboard.changes(from: sample, to: new).map(\.text), ["Something new appeared on the table"])
+    }
+
+    func testNamelessParentReadsNaturally() {
+        var s = sample
+        s.e.append(Entity(n: "thing:13", k: .container, s: .visible, xy: TablePoint(x: 5, y: 5)))
+        s.update("wallet") { $0.s = .inside; $0.p = "thing:13" }
+        XCTAssertEqual(Dashboard.whereabouts(s.entity(named: "wallet")!, in: s), "Inside something new")
     }
 
     func testRecentMergesChangesAndQuestionsNewestFirst() {

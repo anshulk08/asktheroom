@@ -220,18 +220,21 @@ enum Dashboard {
         return (all.filter { $0.time >= cutoff }, all.filter { $0.time < cutoff })
     }
 
-    /// "the box", but "my charger" stays as the person named it, and a guess stays hedged.
+    /// "the box", but "my charger" stays as the person named it, a guess stays hedged,
+    /// and "something new" takes no article.
     static func the(_ name: String) -> String {
-        name.hasPrefix("my ") || name.hasPrefix(Entity.hedgePrefix) || name == "something" ? name : "the \(name)"
+        name.hasPrefix("my ") || name.hasPrefix(Entity.hedgePrefix) || name == "something" || name == Entity.namelessName
+            ? name : "the \(name)"
     }
 
-    /// "your keys" for the person's things, "the box" for furniture and nameless things,
-    /// "my charger" as the person named it, "what looks like a tape roll" for the room's guess.
+    /// "your keys" for the person's things, "the box" for furniture, "something new" for
+    /// nameless things, "my charger" as the person named it, "what looks like a tape roll"
+    /// for the room's guess.
     static func your(_ e: Entity) -> String {
         if e.isHedged { return e.phrase }
         let name = e.displayName
         if name.hasPrefix("my ") { return name }
-        return isTheirs(e) ? "your \(name)" : "the \(name)"
+        return isTheirs(e) ? "your \(name)" : the(name)
     }
 
     /// Names that take "are": "Where are my keys?", "Keys were picked up".

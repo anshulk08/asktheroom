@@ -27,7 +27,7 @@ final class ModelsTests: XCTestCase {
     func testDisplayNames() {
         XCTAssertEqual(Entity.displayName(for: "pill_bottle"), "pill bottle")
         XCTAssertEqual(Entity.displayName(for: "thing:7", aliases: ["my charger"]), "my charger")
-        XCTAssertEqual(Entity.displayName(for: "thing:9"), "unnamed object 9")
+        XCTAssertEqual(Entity.displayName(for: "thing:9"), "something new")
     }
 
     private func thing(_ fields: String) throws -> Entity {
@@ -55,18 +55,33 @@ final class ModelsTests: XCTestCase {
         let e = try thing(#","g":"apple","gc":0.5"#)
         XCTAssertEqual(e.displayName, "apple?")
         XCTAssertEqual(e.phrase, "what looks like an apple")
-        XCTAssertEqual(e.thingNumber, "7")
         // Older bridges send no `gc`: 0.6 is enough.
         XCTAssertEqual(try thing(#","g":"cup""#).displayName, "cup?")
     }
 
-    func testWeakOrMissingGuessStaysUnnamed() throws {
+    func testWeakOrMissingGuessIsSomethingNew() throws {
         for fields in [#","g":"cup","gc":0.3"#, "", #","g":"","gc":0.9"#] {
             let e = try thing(fields)
             XCTAssertFalse(e.isHedged, fields)
             XCTAssertTrue(e.isNameless, fields)
-            XCTAssertEqual(e.displayName, "unnamed object 7", fields)
+            XCTAssertEqual(e.displayName, "something new", fields)
+            XCTAssertEqual(e.phrase, "something new", fields)
         }
+    }
+
+    /// The number is the rig's bookkeeping; the person never sees it.
+    func testNamelessThingNeverShowsItsNumber() throws {
+        let e = try thing("")
+        XCTAssertEqual(e.displayName, "something new")
+        XCTAssertNil(e.displayName.rangeOfCharacter(from: .decimalDigits))
+        XCTAssertNil(Entity.displayName(for: "thing:123").rangeOfCharacter(from: .decimalDigits))
+
+        let weak = try thing(#","g":"pill bottle","gc":0.3"#)
+        XCTAssertTrue(weak.isNameless)
+        XCTAssertEqual(weak.displayName, "something new")
+        let confident = try thing(#","g":"pill bottle","gc":0.8"#)
+        XCTAssertFalse(confident.isNameless)
+        XCTAssertEqual(confident.displayName, "pill bottle?")
     }
 
     func testKnownMatchesLeaveOutNamelessAndMissingThings() {
