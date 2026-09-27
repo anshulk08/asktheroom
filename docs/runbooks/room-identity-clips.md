@@ -1,8 +1,8 @@
 # Recording the room-demo identity clips (spec 0010)
 
 Tonight's failure: one real object on the coffee table became dozens of `thing:N` identities (feet at the
-table edge, clutter, people on the couch). These ten guided clips record it once, on the rig, so it can
-be replayed and scored on the Mac as often as needed (`eval/scorecard.py`). Total camera time: about 25
+table edge, clutter, people on the couch). These twelve guided clips record it once, on the rig, so it can
+be replayed and scored on the Mac as often as needed (`eval/scorecard.py`). Total camera time: about 30
 minutes, including stopping and restarting the app.
 
 **Who does what.** The rig owner (WS7) stops and restarts the live app; nobody else touches it. One person
@@ -21,6 +21,8 @@ at the Mac runs the commands (the Mac speaks every cue). One or two people act i
 | `room_straight` | 81 s | wallet and notebook put down; then the phone put straight onto the couch and the keys onto the floor, never on the table | room placement seen, no false handoff of a table prop, no table phantom |
 | `room_block` | 77 s | wallet, phone, pill bottle put down; someone sits or crouches in front of the pill bottle ~15 s, then moves away | hidden, not gone, and the same identity after |
 | `room_keys_off` | 97 s | keys put down, carried straight to the couch (no other zone on the way), back; then to the floor by the doorway (no drawn zone), back | handoff to the couch; no zone at all for the floor; same identity back on the table |
+| `room_under` | 83 s | wallet, notebook, keys put down; the notebook laid over the keys for ~20 s, then lifted off and put beside them | keys UNDER the notebook (parent = the notebook's entity) while covered, then visible with the same identity |
+| `room_shell` | 122 s | three cups put down upside down, then the keys; one cup over the keys, slid to a new spot, swapped with the second cup, then with the third, then lifted | keys UNDER the cup that carries them through every move, then visible with the same identity |
 | `room_return` | 81 s | wallet, phone, notebook put down; the wallet carried out of the room, then brought back to a different spot | found again with the same identity |
 
 Every clip starts by putting each prop down on a spoken cue: that tells the scorer which identity is which
@@ -60,6 +62,8 @@ python -m eval.guided room_straight --id room_straight_1
 python -m eval.guided room_block   --id room_block_1
 python -m eval.guided room_keys_off --id room_keys_off_1
 python -m eval.guided room_return  --id room_return_1
+python -m eval.guided room_under   --id room_under_1
+python -m eval.guided room_shell   --id room_shell_1
 ```
 
 Each run prints the setup and waits for Enter, says "Get ready", then speaks each cue. Each clip lands in
@@ -95,6 +99,16 @@ real times), hundreds means the Jetson could not encode 1440p fast enough; say s
   On the couch cue carry them straight to the couch, the shortest way, not past the side table or counter;
   on the next cue bring them back. On the floor cue put them on the floor by the doorway, away from every
   drawn zone; bring them back when told.
+- **room_under.** Empty table; hold the wallet, notebook and keys. Put each down on its cue (keys at least a
+  notebook's width from the wallet). On the cover cue lay the notebook flat over the keys so none of them
+  shows, pull your hand back, and nobody touches the table for ~20 s. On the next cue lift the notebook off
+  and put it down beside the keys, hands away.
+- **room_shell.** Three opaque cups (mugs or paper cups that fully hide the keys) and the keys. Put each cup
+  down upside down on its cue, a hand-width apart, then the keys away from the cups. One person does every
+  move, slowly, one hand per cup, and keeps track of the cup with the keys: on the cues put the first cup
+  over the keys; slide that cup to a new spot; swap it with the second cup (slide each into the other's
+  place); swap it with the third cup the same way; then lift it and put it beside the keys. Hands away after
+  every move.
 - **room_return.** Put the wallet, phone and notebook down on the cues. On the cue carry the wallet right out
   of the room (round a corner, behind a door); on the next cue bring it back and put it on a different spot
   of the table.
