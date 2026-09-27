@@ -15,7 +15,7 @@ waits: the update hook only copies crops and queues them.
 Naming accuracy (eval/naming.py, 120 hand-labelled rig crops, Sun 27 Sep, mean of 3 runs): the Sat 26 Sep
 namer (a 128 px table-view crop, an overhead-camera prompt) got 44/120 right: it named 48 of 61 hands,
 feet, worn watches and jeans as objects. The corner-camera prompt, the context view, the object flag,
-NOT_OBJECTS and min_confidence 0.65 get 83/120: 50 of 61 rejected, wrong names for real things 26 -> 9 of 59.
+NOT_OBJECTS / PARTS and min_confidence 0.65 get 83/120: 50 of 61 rejected, wrong names for real things 26 -> 9 of 59.
 
 Rules: calls only while online (offline, the job waits); at most max_per_minute calls; one successful
 name per thing; a failed call is retried once, retry_after_s later, then given up; a thing that has a
@@ -55,19 +55,27 @@ log = logging.getLogger(__name__)
 GENERIC = {"object", "objects", "thing", "things", "item", "items", "unknown", "something", "stuff",
            "unclear", "none", "nothing", "table", "tabletop", "unidentified object", "unidentifiable",
            "unidentified", "shape", "blob", "piece"}
-# A name whose last word is one of these is not an object someone would ask about: a body part, a person,
-# worn clothing, the furniture or the room, a trick of the light. Rig logs, Sat 26 Sep: room tracks named
-# hand x97, arm, finger, ear, person, persons leg, shirt, shorts, fabric, wooden table. Shoes, watches and
-# glasses are not here: lying on a table they are objects (the prompt's object flag says when they are worn).
-NOT_OBJECTS = {"hand", "hands", "finger", "fingers", "thumb", "palm", "fist", "arm", "arms", "forearm",
-               "elbow", "wrist", "shoulder", "leg", "legs", "knee", "thigh", "foot", "feet", "toe", "ankle",
-               "face", "head", "hair", "nose", "ear", "eye", "mouth", "lip", "neck", "chin", "skin", "body",
-               "person", "people", "man", "woman", "boy", "girl", "child", "human", "lap",
+# Names that are not objects someone would ask about. Rig logs, Sat 26 Sep: room tracks named hand x97, arm,
+# finger, ear, person, persons leg, shirt, shorts, fabric, wooden table. Shoes, watches and glasses are not
+# here: lying on a table they are objects (the prompt's object flag says when they are worn).
+# A person, clothing or the room: no object, whatever comes before it ('denim jeans', 'grey shirt').
+NOT_OBJECTS = {"skin", "body", "hair", "lap",
+               "person", "people", "man", "woman", "boy", "girl", "child", "human",
                "sleeve", "shirt", "tshirt", "t shirt", "sweater", "hoodie", "sweatshirt", "jeans", "pants",
                "trousers", "shorts", "sock", "socks", "fabric", "clothing",
-               "button", "zipper", "pocket", "collar", "logo", "clothing tag",
+               "zipper", "pocket", "collar", "clothing tag",
                "floor", "wall", "carpet", "rug", "couch", "sofa", "tabletop", "surface", "wooden table",
                "shadow", "reflection", "glare"}
+# A body part, or a part of something worn: no object alone or after only a qualifier ('hand', 'persons leg',
+# 'table leg', 'jeans button'), but the last word of many real things ('robot arm', 'shower head', 'power
+# button', 'microphone arm'), so another word before it keeps the name.
+PARTS = {"hand", "hands", "finger", "fingers", "thumb", "palm", "fist", "arm", "arms", "forearm", "elbow",
+         "wrist", "shoulder", "leg", "legs", "knee", "thigh", "foot", "feet", "toe", "ankle", "face", "head",
+         "nose", "ear", "eye", "mouth", "lip", "neck", "chin", "button", "logo"}
+# Words that leave a PARTS word a body part: whose it is, which one, where, and what it looks like.
+PART_QUALIFIERS = {"persons", "person", "human", "mans", "womans", "childs", "someones", "left", "right",
+                   "bare", "open", "closed", "raised", "partial", "blurry", "dark", "light", "pale", "tan",
+                   "table", "chair", "desk", "couch", "sofa", "bed", "wooden", "metal"}
 MAX_WORDS = 3
 TRAILING = {"of", "with", "and", "for", "on", "in", "or", "a", "the"}      # never the last word of a name
 MAX_ALSO = 3
@@ -107,7 +115,7 @@ class AutoNameConfig:
     context_px: int = 384          # the context view's long side as sent
     context_min_px: int = 240      # the context patch is at least this many source px (and 3x the box)
     max_pending: int = 32          # queued close-ups at most (the oldest go first)
-    rename_after_s: float = 20.0   # a thing whose reply was no usable name gets a fresh close-up this much later ...
+    rename_after_s: float = 20.0   # a thing Grok was unsure of gets a fresh close-up this much later ...
     rename_max: int = 1            # ... at most this many times (0: never), while it is visible on the table
 
     @classmethod
@@ -160,11 +168,20 @@ def clean_name(text) -> Optional[str]:
 
 
 def not_object(name: str) -> bool:
-    """True when a cleaned name is a body part, a person, worn clothing or part of the room (NOT_OBJECTS,
-    by its last word or the whole name, plurals folded): 'hand', 'persons leg', 'table leg', 'grey shirt'."""
+    """True when a cleaned name is a person, clothing or the room (NOT_OBJECTS, by the whole name or its last
+    word: 'grey shirt', 'denim jeans'), or a body part (PARTS) alone or after only qualifiers, colours,
+    other body parts or clothing ('hand', 'persons leg', 'table leg', 'jeans button'). 'robot arm', 'shower
+    head' and 'power button' are objects. Plurals folded."""
     words = norm_name(name).split()
-    return bool(words) and (" ".join(words) in NOT_OBJECTS or words[-1] in NOT_OBJECTS
-                            or _singular(words[-1]) in NOT_OBJECTS)
+    if not words:
+        return False
+    last = words[-1]
+    if " ".join(words) in NOT_OBJECTS or last in NOT_OBJECTS or _singular(last) in NOT_OBJECTS:
+        return True
+    if last not in PARTS and _singular(last) not in PARTS:
+        return False
+    return all(w in PART_QUALIFIERS or w in MODIFIERS or w in PARTS or w in NOT_OBJECTS or _singular(w) in PARTS
+               or _singular(w) in NOT_OBJECTS for w in words[:-1])
 
 
 def _tokens(phrase: str) -> list[str]:
@@ -217,6 +234,18 @@ def judge(d: dict, min_confidence: float) -> Optional[dict]:
         if a and a != name and a not in also and not med_claim(a) and not not_object(a):
             also.append(a)
     return {"name": name, "also": also[:MAX_ALSO], "confidence": round(conf, 3)}
+
+
+def unsure(d: dict, min_confidence: float) -> bool:
+    """A reply worth a second look: no usable name (judge), yet not "no object" and not a name for one (a
+    hand is not asked about twice). Eval (eval/naming.py): 42 of 51 real things with no name were unsure
+    (0.6) and 8 were called no object. Asking again does not name more of them right: the same view asked
+    again gave +2 right names for +3 wrong ones, a view with twice the surroundings +0.3 for +5 (3 runs,
+    Sun 27 Sep), so the second look is only the rename's fresh close-up, once the hand is off it."""
+    if judge(d, min_confidence) is not None or d.get("object") is False:
+        return False
+    name = clean_name(d.get("name"))
+    return name is None or not not_object(name)
 
 
 # ---------------------------------------------------------------- the namer
@@ -397,7 +426,7 @@ class AutoNamer:
         this frame cut at its box. The context view is the same frame's patch around the box with ent in a
         red box (off with context: false, and never for a crop-store view, whose frame is gone)."""
         from core.crops import close_up, marked_view, shrink
-        views = self._views(ent, dets, frame, close_up, marked_view)
+        views = self._views(ent, dets, frame, close_up, lambda img, box: marked_view(img, box, self.c.context_min_px))
         return None if views is None else (shrink(views[0], self.c.crop_px), shrink(views[1], self.c.context_px))
 
     def _views(self, ent, dets, frame, close_up, marked_view):
@@ -408,7 +437,7 @@ class AutoNamer:
             fbox = _to_full(box, self.frames.rect, self.frames.out_size)
             crop = close_up(full, fbox, self.c.margin)
             if crop is not None:
-                return crop, (marked_view(full, fbox, self.c.context_min_px) if self.c.context else None)
+                return crop, (marked_view(full, fbox) if self.c.context else None)
         store = _crop_store()
         if store is not None:
             try:
@@ -423,7 +452,7 @@ class AutoNamer:
         crop = close_up(img, box, self.c.margin)
         if crop is None:
             return None
-        return crop, (marked_view(img, box, self.c.context_min_px) if self.c.context else None)
+        return crop, (marked_view(img, box) if self.c.context else None)
 
     @staticmethod
     def _box(ent, dets):
@@ -484,7 +513,8 @@ class AutoNamer:
             self._calls.append(now)
         job.attempts += 1
         try:
-            g = self._ask(job.img, job.ctx)
+            d = self._reply(job.img, job.ctx)
+            g = judge(d, self.c.min_confidence)
         except Exception as ex:
             log.info("naming %s failed (attempt %d): %s", job.name, job.attempts, ex)
             with self._lock:
@@ -502,17 +532,24 @@ class AutoNamer:
                 self._guesses[job.name] = g
                 self._unnamed.pop(job.name, None)
                 log.info("%s looks like a %s (%.2f)", job.name, g["name"], g["confidence"])
-            elif g is None:
+            elif g is None and unsure(d, self.c.min_confidence):
                 n = self._unnamed.get(job.name, [0.0, 0])[1]
                 self._unnamed[job.name] = [now, n]
                 log.info("naming %s: no usable name (low confidence or 'object')%s", job.name,
                          "; a fresh close-up later" if n < self.c.rename_max else "")
+            elif g is None:
+                self._unnamed.pop(job.name, None)
+                log.info("naming %s: not an object (%s)", job.name, d.get("name") or "no name")
         return True
 
     def _ask(self, img: np.ndarray, ctx: Optional[np.ndarray] = None) -> Optional[dict]:
         """Grok's guess for a close-up (and the context view, when there is one), or None: no object, a
         name that names nothing or no object (clean_name, NOT_OBJECTS), a medical claim, or under
         min_confidence."""
+        return judge(self._reply(img, ctx), self.c.min_confidence)
+
+    def _reply(self, img: np.ndarray, ctx: Optional[np.ndarray] = None) -> dict:
+        """Grok's parsed reply for a close-up and its context view."""
         from core.narration import _parse_json
         q = self.c.jpeg_quality
         parts = [("text", "Close-up of the object:"), ("image", _jpeg(img, self.c.crop_px, q))]
@@ -520,7 +557,7 @@ class AutoNamer:
             parts += [("text", "The same spot, wider; the object is in the red box:"),
                       ("image", _jpeg(ctx, self.c.context_px, q))]
         reply = self.provider.narrate(NAME_SYSTEM, parts + [("text", "What is it called?")], NAME_SCHEMA)
-        return judge(_parse_json(reply.text), self.c.min_confidence)
+        return _parse_json(reply.text)
 
     def _run(self) -> None:
         while not self._stop.is_set():
