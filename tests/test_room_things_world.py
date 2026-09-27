@@ -23,7 +23,7 @@ from tests.test_room_world import COUCH_BOX, SHELF_BOX, appear, depart, missed, 
 ROOT = Path(__file__).resolve().parents[1]
 CFG = load_config()
 REMOTE = {"name": "remote control", "also": ["remote"], "confidence": 0.7}
-SHOE = {"name": "shoe", "also": ["sneaker"], "confidence": 0.8}
+MUG = {"name": "coffee mug", "also": ["mug"], "confidence": 0.8}   # a non-junk name that is not a remote
 COUCH_BOX_2 = (420, 800, 480, 840)
 
 
@@ -120,13 +120,13 @@ def test_a_known_prop_place_is_not_tentative(scene, world):
 
 
 def test_names_that_do_not_match_hand_over_nothing(scene, world):
-    """A shoe left the table; the thing on the couch is a remote: not the shoe."""
-    named_thing_leaves(scene, world, namer_for(world, SHOE), key='shoe', guess=SHOE)
+    """A mug left the table; the thing on the couch is a remote: not the mug."""
+    named_thing_leaves(scene, world, namer_for(world, MUG), key='mug', guess=MUG)
     trk = room_thing(scene, world, 'r:1', guess=REMOTE)
     assert seen(scene, world, trk, zone='couch') == []
     assert (trk.role, trk.entity) == ('ignored', None)
-    shoe = world.get('thing:1')
-    assert (shoe.status, shoe.zone) == (Status.GONE, 'table')
+    mug = world.get('thing:1')
+    assert (mug.status, mug.zone) == (Status.GONE, 'table')
     assert 'thing:1' in world._departures and world._room == {}
 
 
@@ -342,11 +342,11 @@ def test_a_thing_that_barely_sat_on_the_table_does_not_make_the_room_hot(scene, 
     """Rig: a foot at the table edge is born, named 'sneaker' and gone 3 s later. It may still be handed
     off (hints stay), but it must not switch on the fast cadence, which halves the table's fps; a thing
     that sat for handoff_min_dwell_s does, and only for hot_max_s."""
-    namer = namer_for(world, {"name": "sneaker", "also": ["shoe"], "confidence": 0.8}, REMOTE)
-    scene.thing('foot', 40, 30)
+    namer = namer_for(world, {"name": "pen", "also": ["ballpoint"], "confidence": 0.8}, REMOTE)
+    scene.thing('pen', 40, 30)
     scene.run(world, 1.5)
     assert namer.step() is True
-    scene.remove('foot')
+    scene.remove('pen')
     scene.run(world, 3.0)
     assert world.get('thing:1').status != Status.VISIBLE and 'thing:1' in world._departures
     assert len(world.room_handoff_hints(scene.t)) == 1 and world.room_hot(scene.t) is False
@@ -355,3 +355,14 @@ def test_a_thing_that_barely_sat_on_the_table_does_not_make_the_room_hot(scene, 
     assert world.room_hot(scene.t) is True
     world.room_cfg.hot_max_s = 0.5
     assert world.room_hot(scene.t + 1.0) is False and len(world.room_handoff_hints(scene.t + 1.0)) == 2
+
+
+def test_a_departed_thing_named_like_clothing_is_never_handed_off(scene, world):
+    """Rig: the couch-sitter's feet were born on the table edge as 'sock', 'gone', and handed off to
+    their own arrival on the couch. Body and clothing names never open a handoff."""
+    sock = {"name": "white sock", "also": ["sock"], "confidence": 0.8}
+    named_thing_leaves(scene, world, namer_for(world, sock), guess=sock)
+    assert world.room_handoff_hints(scene.t) == [] and world.room_hot(scene.t) is False
+    trk = room_thing(scene, world, 'r:1', guess=dict(sock))
+    assert seen(scene, world, trk, zone='couch') == []
+    assert world.get('thing:1').zone == 'table'
