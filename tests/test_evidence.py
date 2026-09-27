@@ -41,9 +41,8 @@ def logged(log, obj, type_, wall, fr=None, context=None, **kw):
 
 
 def ask(world, log, kind, obj):
-    a = answer(Intent(kind, obj, ""), world, log, CFG, now=NOW)
-    log.flush()
-    return a
+    log.flush()                           # the snapshots are on disk, as seconds after an event on the rig
+    return answer(Intent(kind, obj, ""), world, log, CFG, now=NOW)
 
 
 class BoxWorld(FakeWorld):
@@ -90,13 +89,36 @@ def test_where_in_a_room_zone_shows_the_whole_view_with_the_zone_close_up(log):
     w.set_place("keys", Place(kind="room", zone="couch", say="the couch", status=Status.VISIBLE, chain=["keys"],
                               via="keys", box_px=(1000, 1100, 1100, 1180), observed_directly=True, fresh=True,
                               arrived_wall=arrived, last_seen_wall=NOW - 5, arrival_observed=True))
-    cfg = {**CFG, "room_memory": {**(CFG.get("room_memory") or {}), "capture_size": [2560, 1440]}}
-    a = answer(Intent("WHERE", "keys", ""), w, log, cfg, now=NOW)
+    a = answer(Intent("WHERE", "keys", ""), w, log, room_cfg(log), now=NOW)
     assert a.text == f"Your keys are on the couch. They appeared there at {clock(arrived)}."
     [e] = a.evidence
     assert e["snapshot_url"].endswith("_room.jpg") and e["closeup_url"].endswith("_keys_FOUND.jpg")
     assert e["box"] == [500, 550, 550, 590] and e["size"] == [1280, 720]      # camera px scaled to the saved view
-    assert e["caption"] == f"Your keys, on the couch at {clock(arrived)}"
+    assert e["closeup_box"] == [100, 100, 200, 180] and e["closeup_size"] == [400, 300]   # and in the zone crop
+    assert e["caption"] == f"Your keys, on the couch, confirmed at {clock(arrived)}"
+
+
+def room_cfg(log):
+    """capture 2560x1440, a couch zone whose crop is (900, 1000)-(1300, 1300) of the camera frame."""
+    path = os.path.join(log.snap_dir, "..", "room_zones.json")
+    with open(path, "w") as f:
+        json.dump({"view": "t", "size_px": [2560, 1440], "zones": {"couch": {"say": "the couch", "poly": [
+            [900, 1000], [1299, 1000], [1299, 1299], [900, 1299]]}}}, f)
+    return {**CFG, "room_memory": {**(CFG.get("room_memory") or {}), "capture_size": [2560, 1440],
+                                   "zones_path": path}}
+
+
+def test_an_arrival_logged_before_whole_views_were_saved_shows_the_crop_boxed(log):
+    crop = np.full((300, 400, 3), 200, np.uint8)
+    logged(log, "keys", "FOUND", NOW - 200, fr=Frame(0.0, NOW - 200, crop, -1))          # no context
+    log.flush()
+    w = FakeWorld([Entity("keys", "target", Status.VISIBLE)], log)
+    w.set_place("keys", Place(kind="room", zone="couch", say="the couch", status=Status.VISIBLE, chain=["keys"],
+                              via="keys", box_px=(1000, 1100, 1100, 1180), observed_directly=True, fresh=True,
+                              arrived_wall=NOW - 200, last_seen_wall=NOW - 5, arrival_observed=True))
+    [e] = answer(Intent("WHERE", "keys", ""), w, log, room_cfg(log), now=NOW).evidence
+    assert e["snapshot_url"].endswith("_keys_FOUND.jpg") and e["closeup_url"] is None
+    assert e["box"] == [100, 100, 200, 180] and e["size"] == [400, 300] and e["box_px"] == [1000, 1100, 1100, 1180]
 
 
 def test_handled_cites_the_put_down_then_the_pick_up(log):
@@ -208,8 +230,7 @@ def test_a_room_place_cites_the_arrival_nearest_its_arrival_time_with_camera_px(
     w.set_place("keys", Place(kind="room", zone="couch", say="the couch", status=Status.VISIBLE, chain=["keys"],
                               via="keys", box_px=(1000, 1100, 1100, 1180), observed_directly=True, fresh=True,
                               arrived_wall=NOW - 890, last_seen_wall=NOW - 5, arrival_observed=True))
-    cfg = {**CFG, "room_memory": {**(CFG.get("room_memory") or {}), "capture_size": [2560, 1440]}}
-    a = answer(Intent("WHERE", "keys", ""), w, log, cfg, now=NOW)
+    a = answer(Intent("WHERE", "keys", ""), w, log, room_cfg(log), now=NOW)
     [e] = a.evidence
     assert e["t"] == round(first.wall, 3) and e["clock"] == clock(first.wall)
     assert e["box_px"] == [1000, 1100, 1100, 1180] and e["box"] == [500, 550, 550, 590]

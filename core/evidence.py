@@ -8,6 +8,7 @@ there), for the demo page and the phone. Answer.evidence is a list of items, mos
      "box": [x1, y1, x2, y2] | None,       # the object, in the snapshot image's own pixels
      "size": [w, h] | None,                # that image's size, to scale the box to a displayed <img>
      "box_px": [x1, y1, x2, y2] | None,    # the same box in the camera's full-frame px (room places)
+     "closeup_box": [x1, y1, x2, y2] | None, "closeup_size": [w, h] | None,   # the box in the zone crop
      "clock": "1:42 PM",                   # t as the rig's own clock says it
      "obj": entity | None, "type": event type | None}
 
@@ -74,7 +75,7 @@ def clock(wall: float) -> str:
 
 def item(kind: str, path: Optional[str], t: float, caption: str, snap_dir: Optional[str], *, box=None,
          box_space: Optional[tuple] = None, closeup: Optional[str] = None, obj: Optional[str] = None,
-         type_: Optional[str] = None) -> Optional[dict]:
+         type_: Optional[str] = None, closeup_box=None, closeup_size=None) -> Optional[dict]:
     """One evidence item, or None when the picture has no servable url. box is in box_space px ((w, h) of
     the frame it was measured in; None: the snapshot's own px) and is scaled to the snapshot's pixels."""
     url = snapshot_url(path, snap_dir)
@@ -93,7 +94,7 @@ def item(kind: str, path: Optional[str], t: float, caption: str, snap_dir: Optio
             "clock": clock(t), "caption": caption, "box": out_box,
             "size": list(size) if out_box is not None else None,
             "box_px": [round(float(v)) for v in box] if box is not None and box_space else None,
-            "obj": obj, "type": type_}
+            "closeup_box": closeup_box, "closeup_size": closeup_size, "obj": obj, "type": type_}
 
 
 def room_context(snapshot: Optional[str]) -> Optional[str]:
@@ -105,18 +106,30 @@ def room_context(snapshot: Optional[str]) -> Optional[str]:
 
 
 def from_event(ev, snap_dir: Optional[str], caption: str, kind: str = "event", box=None,
-               box_space: Optional[tuple] = None) -> Optional[dict]:
+               box_space: Optional[tuple] = None, crop_origin: Optional[tuple] = None) -> Optional[dict]:
     """An event's snapshot as evidence: for a room arrival its whole view (box in box_space, the camera
-    frame's px) with the zone crop as the close-up; otherwise the snapshot itself (box in its px)."""
+    frame's px) with the zone crop as the close-up; otherwise the snapshot itself (box in its px).
+    crop_origin: (x1, y1, x2, y2), where a room event's zone crop was cut from the camera frame (native px),
+    so the box is also given in the crop; a room event with no whole view (logged before those were
+    saved) shows the crop itself with that box."""
     snap = getattr(ev, "snapshot", None)
     if not snap:
         return None
+    cbox = csize = None
+    if box is not None and crop_origin is not None:
+        x1, y1, x2, y2 = (int(v) for v in crop_origin)
+        cbox = [round(float(box[0]) - x1), round(float(box[1]) - y1), round(float(box[2]) - x1),
+                round(float(box[3]) - y1)]
+        csize = [x2 - x1, y2 - y1]
     ctx = room_context(snap)
     if ctx is not None:
         return item(kind, ctx, ev.wall, caption, snap_dir, box=box, box_space=box_space, closeup=snap,
-                    obj=ev.obj, type_=str(ev.type))
-    return item(kind, snap, ev.wall, caption, snap_dir, box=None if box_space else box, obj=ev.obj,
-                type_=str(ev.type))
+                    obj=ev.obj, type_=str(ev.type), closeup_box=cbox, closeup_size=csize)
+    it = item(kind, snap, ev.wall, caption, snap_dir, box=None if box_space else box, obj=ev.obj,
+              type_=str(ev.type), closeup_box=cbox, closeup_size=csize)
+    if it is not None and cbox is not None:              # the crop is the picture: box it there
+        it.update(box=cbox, size=csize, box_px=[round(float(v)) for v in box])
+    return it
 
 
 def with_snapshot(events, obj: str, types: Optional[Iterable[str]] = None, n: int = 20):

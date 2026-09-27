@@ -574,8 +574,9 @@ def _proof(k: str, obj: str, world, events, cfg: dict, now: float) -> list:
             if ev is None:
                 return []
             rc = cfg.get("room_memory") or {}
-            return [evidence.from_event(ev, snap, f"{Y} {n}, on {place.say} at {clock(ev.wall)}",
-                                        box=place.box_px, box_space=tuple(rc.get("capture_size") or (1920, 1080)))]
+            size = tuple(rc.get("capture_size") or (1920, 1080))
+            return [evidence.from_event(ev, snap, f"{Y} {n}, on {place.say}, confirmed at {clock(ev.wall)}",
+                                        box=place.box_px, box_space=size, crop_origin=_zone_crop(rc, place.zone, size))]
         e = world.get(obj)
         ev = evidence.with_snapshot(events, obj, evidence.BY_STATUS.get(e.status.value)) or \
             evidence.with_snapshot(events, obj)
@@ -598,6 +599,19 @@ def _proof(k: str, obj: str, world, events, cfg: dict, now: float) -> list:
         shown = [ev for ev in reversed(evs) if ev.type == "MOVED"][:1]
     return [evidence.from_event(ev, snap, f"{Y} {n}, {_event_phrase(ev, cfg)} at {clock(ev.wall)}")
             for ev in shown if ev.snapshot]
+
+
+def _zone_crop(rc: dict, zone: str, size: tuple) -> Optional[tuple]:
+    """Where core/room.py cuts a zone's crop from the camera frame (the zone's box, inside the frame)."""
+    try:
+        from core.room_zones import Zones
+        z = Zones.load(rc.get("zones_path", "room_zones.json")).zones.get(zone)
+    except Exception:
+        return None
+    if z is None:
+        return None
+    x1, y1, x2, y2 = z.bbox()
+    return max(0, x1), max(0, y1), min(size[0], x2), min(size[1], y2)
 
 
 def _target(intent: Intent, world, cfg: dict) -> Optional[str]:
