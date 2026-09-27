@@ -543,9 +543,10 @@
     if (Array.isArray(a.evidence) && a.evidence.length) return a.evidence[0];
     if (a.evidence && !Array.isArray(a.evidence) && a.evidence.snapshot_url) return a.evidence;
     const got = S.evidence.get(a.seq);
-    if (got === undefined && a.point_at) {
+    const about = a.obj || a.point_at;                    // WS5: obj, the entity the answer is about
+    if (got === undefined && about) {
       S.evidence.set(a.seq, null);                        // asked once
-      getJSON("/demo/evidence?obj=" + encodeURIComponent(a.point_at)).then((ev) => {
+      getJSON("/demo/evidence?obj=" + encodeURIComponent(about)).then((ev) => {
         if (ev && ev.snapshot_url) {
           S.evidence.set(a.seq, { snapshot_url: ev.snapshot_url, t: ev.t, type: ev.type, obj: ev.obj });
           shownKey = "";
@@ -607,10 +608,10 @@
     const text = document.createElement("span");
     text.textContent = clean(caption(ev));
     cap.append(tag, text);
-    if (ev.t) {
+    if (ev.clock || ev.t) {
       const when = document.createElement("span");
       when.className = "time";
-      when.textContent = clockText(ev.t, true);
+      when.textContent = ev.clock || clockText(ev.t, true);   // WS5: the rig's own clock text
       cap.appendChild(when);
     }
     box.append(shot, cap);
