@@ -263,8 +263,34 @@ struct RigStatus: Codable, Equatable {
     var online: Bool?
     var cal: Bool?
     var laser_cal: Bool?
+    /// The rig's speaker is connected (PROTOCOL.md section 8). Missing from older rigs.
+    var spk: Bool?
 
     var appIsUp: Bool { app == "up" }
+    /// The room hears answers from the rig, so the phone doesn't read them aloud too.
+    var rigSpeaks: Bool { appIsUp && spk == true }
+}
+
+/// The helper's voice, sent to the rig so its speaker talks the same way (PROTOCOL.md section 5a).
+struct VoiceSettings: Codable, Equatable {
+    struct Choice: Codable, Equatable {
+        /// `Speaker.Engine` raw value.
+        var e: String
+        /// Grok voice id.
+        var v: String
+        /// Speed, 0.7 to 1.5.
+        var s: Double
+    }
+
+    var voice: Choice
+
+    /// The JSON to write to the question characteristic, or nil if it can't fit one write.
+    func encoded() -> Data? {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        guard let data = try? encoder.encode(self), data.count <= Question.maxBytes else { return nil }
+        return data
+    }
 }
 
 struct Question: Codable, Equatable {

@@ -69,6 +69,14 @@ final class RoomLink: NSObject, RoomTransport {
         peripheral.writeValue(data, for: characteristic, type: .withResponse)
     }
 
+    /// Written to the question characteristic (PROTOCOL.md section 5a); no answer comes back.
+    /// Sent on every connect too, so a rig that restarted gets it again.
+    func send(voice: VoiceSettings) {
+        guard let data = voice.encoded(), let peripheral, peripheral.state == .connected,
+              let characteristic = questionCharacteristic else { return }
+        peripheral.writeValue(data, for: characteristic, type: .withResponse)
+    }
+
     func stop() {
         stopped = true
         chooseTask?.cancel()
@@ -213,6 +221,7 @@ final class RoomLink: NSObject, RoomTransport {
             if let c = found[uuid] { p.setNotifyValue(true, for: c) }
         }
         store?.linkChanged(.connected)
+        send(voice: Speaker.voiceSettings)
         if let waiting { send(waiting) }
         watch(p)
     }

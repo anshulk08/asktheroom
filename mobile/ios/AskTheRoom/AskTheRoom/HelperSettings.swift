@@ -35,7 +35,7 @@ struct HelperSettings: View {
                 } header: {
                     Text("Answers")
                 } footer: {
-                    Text("The rig already says its answers out loud. Read aloud is for using the phone away from the table.")
+                    Text("The rig already says its answers out loud. Read aloud is for using the phone away from the table, and stays quiet while the rig's speaker is on.")
                 }
 
                 voiceSection
@@ -72,6 +72,10 @@ struct HelperSettings: View {
             }
             .onDisappear(perform: saveKeys)
             .task(id: hasGrokKey) { voices = await Grok.fetchVoices(key: Speaker.grokKey) }
+            // The rig's speaker uses the same voice (PROTOCOL.md section 5a).
+            .onChange(of: engine) { store.sendVoiceSettings() }
+            .onChange(of: grokVoice) { store.sendVoiceSettings() }
+            .onChange(of: speed) { store.sendVoiceSettings() }
             .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.routeChangeNotification)
                 .receive(on: RunLoop.main)) { _ in route = VoiceRoute.current }
             .navigationTitle("Helper settings")

@@ -35,9 +35,9 @@ struct MainView: View {
         .onChange(of: store.current?.id) { _, id in
             if id != nil, tab != .table { focus = .answer(nil) }
         }
-        // Off unless a helper turns it on; the rig already speaks in the room.
+        // Off unless a helper turns it on, and never while the rig's speaker is on: the room hears the rig.
         .onChange(of: store.current?.answer) { _, answer in
-            if let answer { Speaker.shared.say(answer.text) }
+            if let answer, store.status?.rigSpeaks != true { Speaker.shared.say(answer.text) }
         }
         .task {
             if store.isMock, let name = UserDefaults.standard.string(forKey: "mockFocus") { focus = .thing(name) }

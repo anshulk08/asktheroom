@@ -166,4 +166,23 @@ final class ModelsTests: XCTestCase {
         XCTAssertLessThanOrEqual(long.count, Question.maxBytes)
         XCTAssertNotNil(Wire.decode(Question.self, from: long))
     }
+
+    // MARK: the rig's speaker and the helper's voice (PROTOCOL.md 5a, 8)
+
+    func testRigSpeaksOnlyWhenTheAppIsUpAndTheSpeakerIsOn() throws {
+        func status(_ json: String) throws -> RigStatus {
+            try XCTUnwrap(Wire.decode(RigStatus.self, from: Data(json.utf8)))
+        }
+        XCTAssertTrue(try status(#"{"app":"up","fps":12.0,"online":true,"cal":true,"laser_cal":false,"gk":true,"spk":true}"#).rigSpeaks)
+        XCTAssertFalse(try status(#"{"app":"up","spk":false}"#).rigSpeaks)
+        XCTAssertFalse(try status(#"{"app":"down","spk":true}"#).rigSpeaks)
+        XCTAssertFalse(try status(#"{"app":"up","fps":12.0}"#).rigSpeaks)          // an older rig
+    }
+
+    func testVoiceSettingsAreOneShortWriteTheRigReads() throws {
+        let data = try XCTUnwrap(VoiceSettings(voice: .init(e: "rigVoice", v: "ara", s: 1.1)).encoded())
+        XCTAssertEqual(String(decoding: data, as: UTF8.self), #"{"voice":{"e":"rigVoice","s":1.1,"v":"ara"}}"#)
+        XCTAssertLessThanOrEqual(data.count, Question.maxBytes)
+        XCTAssertNil(VoiceSettings(voice: .init(e: "grok", v: String(repeating: "x", count: 300), s: 1)).encoded())
+    }
 }

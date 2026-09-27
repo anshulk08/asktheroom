@@ -5,7 +5,13 @@ import Observation
 @MainActor
 protocol RoomTransport: AnyObject {
     func send(_ question: Question)
+    /// The helper's voice for the rig's speaker. Only the Bluetooth link carries it.
+    func send(voice: VoiceSettings)
     func stop()
+}
+
+extension RoomTransport {
+    func send(voice: VoiceSettings) {}
 }
 
 /// One question and, once it arrives, its answer.
@@ -250,6 +256,11 @@ final class RoomStore {
     /// Brings back every notice put away with "Got it" (helper settings).
     func restoreNotices() {
         dismissedNotices = []
+    }
+
+    /// Sends the helper's voice to the rig, after a change in helper settings.
+    func sendVoiceSettings() {
+        transport?.send(voice: Speaker.voiceSettings)
     }
 
     func receive(status: RigStatus) {
