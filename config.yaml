@@ -46,7 +46,8 @@ proposals:
     hand_iou: 0.3
     hand_inside: 0.5
     self_iou: 0.5
-    self_inside: 0.8
+    self_inside: 0.8         # nested this much in a bigger proposal: a part of it (a keycap), whatever the scores
+    min_side_px: 12          # narrower boxes are slivers (full-res px; YOLOE boxes are ~19+ px above min_area_frac)
   change:
     work_px: 480             # working long side: Mac 2.3 ms/frame; Orin Nano ~13 ms (320: ~7.5, 640: ~17)
     ref_frames: 10           # empty-table reference = median of this many frames (startup, reset)

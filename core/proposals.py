@@ -87,7 +87,9 @@ class DedupeConfig:
     inside the known box (known_inside of it covered), or it holds the known box (known_contain of the
     known box inside it) while being at most known_grow times its area: a loose box around the same
     object. A larger box that only partly overlaps (an unknown next to the keys) is kept. Hands are
-    stricter (fingers and arms spill past the hand box)."""
+    stricter (fingers and arms spill past the hand box). Among proposals, a box nested in a bigger one
+    is a part of that object (a keycap of a laptop, one wire of a cable pile) whatever the scores, and a
+    box narrower than min_side_px is a sliver, not an object."""
     known_iou: float = 0.5
     known_inside: float = 0.7
     known_contain: float = 0.8
@@ -95,7 +97,8 @@ class DedupeConfig:
     hand_iou: float = 0.3
     hand_inside: float = 0.5
     self_iou: float = 0.5               # two proposals this similar: keep the more confident
-    self_inside: float = 0.8            # a proposal nested this much in a kept one: dropped
+    self_inside: float = 0.8            # a proposal nested this much in a bigger kept one: dropped
+    min_side_px: int = 0                # full-resolution px; 0 = no minimum
 
     @classmethod
     def from_dict(cls, raw: Optional[dict]) -> 'DedupeConfig':
@@ -103,21 +106,29 @@ class DedupeConfig:
 
 
 def dedupe(props: list[Proposal], known: list[BoxPx], hands: list[BoxPx], cfg: DedupeConfig) -> list[Proposal]:
-    """Proposals that are not a known object, a hand or another proposal, most confident first."""
+    """Proposals that are not a known object, a hand, a sliver or another proposal, most confident
+    first. Nesting is decided biggest first, so only the outermost of a chain of nested boxes stays: by
+    confidence, a keycap scoring above its laptop dropped the laptop and kept every key (on the rig, dozens
+    of things on one laptop)."""
     kept: list[Proposal] = []
     for p in sorted(props, key=lambda q: -q.conf):
         b = p.box_px
+        if min(b[2] - b[0], b[3] - b[1]) < cfg.min_side_px:
+            continue
         if any(geom.iou(b, k) >= cfg.known_iou or geom.overlap_frac(k, b) >= cfg.known_inside
                or (geom.overlap_frac(b, k) >= cfg.known_contain and geom.area(b) <= cfg.known_grow * geom.area(k))
                for k in known):
             continue
         if any(geom.iou(b, h) >= cfg.hand_iou or geom.overlap_frac(h, b) >= cfg.hand_inside for h in hands):
             continue
-        if any(geom.iou(b, q.box_px) >= cfg.self_iou or geom.overlap_frac(q.box_px, b) >= cfg.self_inside
-               for q in kept):
+        if any(geom.iou(b, q.box_px) >= cfg.self_iou for q in kept):
             continue
         kept.append(p)
-    return kept
+    outer: list[Proposal] = []
+    for p in sorted(kept, key=lambda q: -geom.area(q.box_px)):
+        if not any(geom.overlap_frac(q.box_px, p.box_px) >= cfg.self_inside for q in outer):
+            outer.append(p)
+    return [p for p in kept if p in outer]
 
 
 # ================================================================================ change proposer
@@ -576,10 +587,14 @@ class _quiet_nan:
 # ================================================================================ YOLOE adapter
 
 # Prompt-free vocabularies name the table, people and hands too; none of them is a thing on the table.
-PEOPLE = ['person', 'man', 'woman', 'child', 'hand', 'arm', 'finger']   # a box mostly inside one: occluded
+# People include what they wear: on the rig, feet up at the coffee table came as 'shoe', 'sock', 'jeans'.
+PEOPLE = ['person', 'man', 'woman', 'child', 'boy', 'girl', 'patient', 'head', 'hair', 'hand', 'arm', 'finger',
+          'glove', 'foot', 'toe', 'leg', 'knee', 'shoe', 'footwear', 'leather shoe', 'running shoe', 'sneaker',
+          'boot', 'cowboy boot', 'sandal', 'slipper', 'sock', 'air sock', 'jeans', 'pants', 'pant', 'sweat pant',
+          'shirt', 'polo shirt']        # a box mostly inside one: occluded
 PERSON_INSIDE = 0.6                     # share of a box inside a person box that flags it occluded
-DEFAULT_IGNORE = ['person', 'man', 'woman', 'child', 'hand', 'arm', 'finger', 'table', 'dining table', 'desk',
-                  'coffee table', 'tabletop', 'countertop', 'floor', 'wall', 'wood', 'wood floor', 'hardwood']
+DEFAULT_IGNORE = PEOPLE + ['table', 'dining table', 'desk', 'office desk', 'coffee table', 'tabletop', 'countertop',
+                           'floor', 'wall', 'wood', 'wood floor', 'hardwood', 'plywood']
 
 
 @dataclass
