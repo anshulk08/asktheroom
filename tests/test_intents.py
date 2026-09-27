@@ -252,3 +252,14 @@ def test_teaching_a_person_is_recognised():
     assert names_a_person(parse("This is my wife Karen", CFG).name)
     assert names_a_person("friend") and not names_a_person("travel charger")
     assert not names_a_person("friends mug", "this is my friend's mug")
+
+
+@pytest.mark.parametrize("text", ["room, this is my mug", "Hey room, this is my mug", "room this is my mug please"])
+def test_a_teaching_sentence_may_open_with_the_wake_word(text):
+    it = parse(text, CFG)
+    assert (it.kind, it.name) == ("TEACH", "mug")
+
+
+def test_the_wake_word_is_only_stripped_at_the_start():
+    assert parse("the room this is my mug", CFG).kind != "TEACH"
+    assert parse("roommate this is my mug", CFG).kind != "TEACH"

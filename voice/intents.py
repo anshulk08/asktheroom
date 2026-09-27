@@ -311,10 +311,19 @@ def matched_exactly(text: str, obj: Optional[str], cfg: dict, aliases=()) -> boo
     return any(phrases[m.group(1)] == obj for m in rx.finditer(_join_split(normalize(text), phrases)))
 
 
+def _without_wake_word(t: str, cfg: dict) -> str:
+    """'room this is my mug' -> 'this is my mug': a teaching sentence may open with the wake word."""
+    for w in (cfg.get("listen") or {}).get("wake_words") or ["room"]:
+        w = normalize(str(w))
+        if w and (t == w or t.startswith(w + " ")):
+            return t[len(w):].strip()
+    return t
+
+
 def parse(text: str, cfg: dict, aliases=()) -> Intent:
     """Classify a transcript into an Intent with a canonical object name (or None). aliases: names
     taught for things (world.alias_phrases()), matched like object names."""
-    taught = _teach_name(normalize(text))
+    taught = _teach_name(_without_wake_word(normalize(text), cfg))
     if taught:
         return Intent(kind="TEACH", obj=taught, raw=text, name=taught)
     phrases, rx = _vocab(cfg, aliases)

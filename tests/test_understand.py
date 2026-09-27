@@ -426,3 +426,10 @@ def test_certain_is_what_the_model_cannot_reject():
     assert u.certain("room, where's my stapler") and u.certain("where are my keys")
     assert u.certain("what about my keys") and u.certain("where's my charger")          # configured / taught
     assert not u.certain("where's my stapler") and not u.certain("where are my kiss")   # the model decides
+
+
+def test_an_overheard_teaching_sentence_after_the_wake_word_teaches():
+    u = Understander(dict(CFG, understand={"enabled": False}))
+    i = u("room, this is my wife's scarf", overheard=True)
+    assert (i.kind, i.name) == ("TEACH", "wifes scarf")
+    assert u("room, this is my wife Karen", overheard=True).kind == "TEACH"   # asked by wake word: the rig answers
