@@ -149,3 +149,20 @@ def test_shot5_when_did_i_last_pick_up_my_pills_never_says_they_were_taken():
     run(p, s, clock)                                                # ... and put back
     a = say(fw, "When did I last pick up my pills?", clock.t + 120)
     assert re.match(rf"The pill bottle was picked up at {AT}, 2 minutes ago\.", a), a
+
+
+def test_a_cover_put_over_it_leaves_the_table_worlds_under_answer_and_no_pick_up():
+    clock, s = Clock(time.time()), Scene()
+    p = demo(clock)
+    fw = FakeWorld([Entity("pill_bottle", "target", Status.VISIBLE, pos_cm=(20.0, 30.0), last_seen=clock.t),
+                    Entity("notebook", "cover", Status.VISIBLE, pos_cm=(20.0, 30.0), last_seen=clock.t),
+                    Entity("keys", "target", Status.UNKNOWN), Entity("wallet", "target", Status.UNKNOWN)])
+    p.events = fw.events
+    attach(p, fw)
+    s.put("pills", PILLS, (200, 520, 240, 570))
+    run(p, s, clock)
+    s.take("pills")                                                 # the notebook laid over it by a hand
+    fw.set("pill_bottle", status=Status.UNDER, parent="notebook", last_seen=clock.t)
+    run(p, s, clock, sweeps=4, blockers=[(190, 500, 260, 590)])
+    assert p.objects["pill_bottle"].state == HIDDEN and fw.history("pill_bottle", 3) == []
+    assert say(fw, "where are my pills", clock.t + 30).startswith("Your pill bottle is under the notebook")

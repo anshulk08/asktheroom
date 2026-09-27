@@ -316,6 +316,7 @@ class Permanence:
         self._stop = threading.Event()
         self._backstop_now: set[str] = set()
         self.last_ms = 0.0
+        self.table_hidden: Callable[[str], bool] = lambda name: False   # the table world believes it UNDER/INSIDE
         self.embedded = 0                                 # candidates embedded in the last look
         self.embed_ms = 0.0                               # measured ms per embedded crop (running average)
         self.sweep_wall: Optional[float] = None           # when the last view of a full sweep was done
@@ -558,6 +559,10 @@ class Permanence:
             if o.state != HIDDEN:
                 o.state, o.since_wall = HIDDEN, wall
             o.contact_wall = wall
+            return []
+        if self.table_hidden(o.name):           # a cover went over it (the table world's rules): hidden, no event
+            if o.state != HIDDEN:
+                o.state, o.since_wall = HIDDEN, wall
             return []
         if o.state == HIDDEN:                   # the person moved away and it's gone: they took it
             o.state, o.since_wall, o.misses = CARRIED, wall, 0
@@ -834,10 +839,19 @@ def attach(p: Permanence, world) -> Permanence:
         return getattr(e, "zone", "table") == "table" and e.status in TABLE_HAS and e.last_seen is not None \
             and now - e.last_seen <= p.c.table_fresh_s
 
+    def under(name: str) -> bool:
+        try:
+            e = world.get(name)
+        except Exception:
+            return False
+        return getattr(e, "zone", "table") == "table" and e.status in (Status.UNDER, Status.INSIDE)
+
+    p.table_hidden = under
+
     def reg_place(name: str, now: Optional[float] = None):
         now = p.clock() if now is None else now
         rp = p.place(name, now)
-        if rp is None or table_has(name, now):
+        if rp is None or table_has(name, now) or (rp.state != VISIBLE and under(name)):
             return place(name, now) if callable(place) else None
         if rp.state != VISIBLE:
             p.request(name)
@@ -855,7 +869,8 @@ def attach(p: Permanence, world) -> Permanence:
             for e in st.get("entities") or []:
                 n = e.get("name") if isinstance(e, dict) else None
                 r = snap.get(n)
-                if r is not None and r["state"] != UNKNOWN and not table_has(n, now):
+                if r is not None and r["state"] != UNKNOWN and not table_has(n, now) \
+                        and not (r["state"] != VISIBLE and under(n)):
                     e["zone"] = r["zone"] if r["zone"] == "table" else (r["zone"] or "room")
                     e["status"] = {VISIBLE: "VISIBLE", HIDDEN: "VISIBLE", CARRIED: "HELD"}.get(r["state"], "UNKNOWN")
                     if r["zone"] != "table":
