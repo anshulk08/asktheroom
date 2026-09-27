@@ -568,7 +568,9 @@ class Room:
         if not r.on_target:                   # never leave the dot somewhere it wasn't confirmed
             self.laser.off()
             self.world.laser = dict(OFF)
-        self._note_drift(getattr(r, "first_err_px", None), getattr(r, "reason", None), self.drift_px)
+        raw = getattr(r, "first_raw_px", None)                  # the map's own miss: a zero shift the learned
+        first = raw if raw is not None else getattr(r, "first_err_px", None)   # bias absorbs still counts
+        self._note_drift(first, getattr(r, "reason", None), self.drift_px)
         return r.on_target
 
     REHOME_JOG_MAX_DEG = 10.0                                  # one jog step at most

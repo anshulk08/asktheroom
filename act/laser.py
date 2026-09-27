@@ -25,7 +25,7 @@ from core.types import Frame, Point
 log = logging.getLogger(__name__)
 
 DEFAULT_LATENCY_S = 0.15       # safe until act.calibrate --rig measures camera_latency_s (too short: stale frames)
-BIAS_MAX_PX = 250.0            # the learned first-guess offset (Laser.px_bias) never exceeds this
+BIAS_MAX_PX = 100.0            # the learned first-guess offset (Laser.px_bias) never exceeds this (rig: 52-60 px)
 FIRST_DOT_CM = 15.0            # a dot further than this from the target is something else (sleeve, reflection)
 MAX_MISSES = 3                 # aim() gives up after this many looks in a row without the dot
 
@@ -264,6 +264,8 @@ class PxAim:
     dot_px: Optional[tuple[float, float]]
     reason: str
     first_err_px: Optional[float] = None
+    first_raw_px: Optional[float] = None    # the first dot's distance from where the map aimed (the bias not
+                                            # subtracted): the zero's own miss, what the drift lock counts
 
 
 def _in_box(p, box, shrink: float = 0.2) -> bool:
@@ -692,9 +694,10 @@ class Laser:
             b = 0.5 * self.px_bias + 0.5 * (np.asarray(first_dot) - asked)
             n_b = float(np.linalg.norm(b))
             self.px_bias = b * (BIAS_MAX_PX / n_b) if n_b > BIAS_MAX_PX else b
+        raw = None if first_dot is None else float(np.linalg.norm(np.asarray(first_dot) - asked))
         res = PxAim(err, ok, seen, n, None if dot is None else (float(dot[0]), float(dot[1])),
-                    reason, first)
-        self.last_aim = {"tries": n, "first_err_px": first, "err_px": err, "reason": reason, "unsafe": unsafe,
+                    reason, first, raw)
+        self.last_aim = {"tries": n, "first_err_px": first, "first_raw_px": raw, "err_px": err, "reason": reason, "unsafe": unsafe,
                          "lit_s": 0.0 if lit_at is None else self.clock.now() - lit_at}
         self.state = {"on": ok, "target": None, "err_cm": None,
                       "err_px": None if math.isinf(err) else round(err, 1)}

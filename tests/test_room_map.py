@@ -585,6 +585,48 @@ def test_two_aims_in_a_row_landing_far_off_lock_the_laser_until_restart(room_mai
     assert len(rig.act.calls) == n
 
 
+def test_a_zero_shift_the_learned_bias_hides_still_counts_as_drift(room_main, monkeypatch):
+    """WS8: with a 240 px shift learned (capped at 100) and a further 100 px, the compensated first error stays
+    under drift_px but the map's own miss (first_raw_px) doesn't: the lock counts the raw one."""
+    from act.laser import PxAim
+    room, rig, Answer = room_main
+    room._speak = lambda text: None
+    t = center(rig.box_px("table"))
+    hidden = PxAim(240.0, False, True, 2, (t[0] + 240, t[1]), "budget", 240.0, 340.0)
+    results = iter([hidden, hidden])
+    monkeypatch.setattr(room.laser, "aim_px", lambda *a, **k: next(results))
+    act = f"room:{t[0]:.0f},{t[1]:.0f}"
+    room.aim(Answer("x", action=act))
+    assert room.laser_locked is None
+    room.aim(Answer("x", action=act))
+    assert room.laser_locked
+
+
+def test_first_raw_px_is_the_miss_from_where_the_map_aimed(mapped, monkeypatch):
+    """The bias moves the ask; first_raw_px measures the first dot from that ask, not from the target."""
+    import numpy as np
+    rig, laser, rm = mapped
+    real = rm.pulses_for_px
+
+    def offset(uv, **kw):
+        g = real(uv, **kw)
+        if g is not None:
+            g.pulses = (g.pulses[0] + 45, g.pulses[1] - 30)
+        return g
+    monkeypatch.setattr(rm, "pulses_for_px", offset)
+    monkeypatch.setattr(laser, "max_on_s", 60.0)
+    laser.px_bias = np.zeros(2)
+    t = center(rig.box_px("table"))
+    box = (t[0] - 12, t[1] - 12, t[0] + 12, t[1] + 12)
+    r0 = laser.aim_px(t, box, room_map=rm)
+    assert abs(r0.first_raw_px - r0.first_err_px) < 1e-6        # no bias yet: the same miss
+    for _ in range(2):
+        r = laser.aim_px(t, box, room_map=rm)
+    assert r.first_err_px < 15 and r.first_raw_px > 15           # compensated hit, the zero still off
+    laser.off()
+    laser.px_bias = np.zeros(2)
+
+
 def test_aims_that_never_see_their_dot_count_toward_the_lock_and_the_lock_stops_every_action(room_main, monkeypatch):
     """A big shift puts the dot out of view: not_seen aims lock too; locked, no table point or sweep runs."""
     from act.laser import PxAim
@@ -658,6 +700,6 @@ def test_a_consistent_small_offset_is_learned_and_the_next_aim_hits_first_try(ma
     for _ in range(2):
         r = laser.aim_px(t, box, room_map=rm)
     assert r.on_target and r.tries == 1, r
-    assert np.linalg.norm(laser.px_bias) <= 250
+    assert np.linalg.norm(laser.px_bias) <= 100
     laser.off()
     laser.px_bias = np.zeros(2)
