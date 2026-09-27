@@ -24,6 +24,7 @@ from core.types import Answer, Status
 log = logging.getLogger(__name__)
 
 MATCH_MIN = 2.0           # core.auto_name.match_score: the head noun shared (room_memory name_match_min)
+FILLER = {'my', 'the', 'a', 'an', 'our', 'your', 'his', 'her', 'their', 'of', 'some', 'that', 'this', 'those', 'these'}
 NOT_OBJECTS = set(PEOPLE) | {'feet', 'legs', 'face', 'torso'}
 SYNONYMS = {'glasses': ('eyeglasses', 'eye glasses', 'sunglasses', 'reading glasses', 'spectacles',
                         'pair of glasses', 'specs'),
@@ -66,6 +67,22 @@ def world_has_place(world, target: Optional[str]) -> bool:
     return e.status not in (Status.UNKNOWN, Status.GONE) or getattr(e, 'zone', 'table') != 'table'
 
 
+def _content(s: str) -> set[str]:
+    """Singular content words: 'my paper towels' -> {'paper', 'towel'}."""
+    return {w[:-1] if len(w) > 3 and w.endswith('s') and not w.endswith('ss') else w
+            for w in _words(s) if w not in FILLER}
+
+
+def words_fit(said: str, guess: dict) -> bool:
+    """Every content word said is in one of the guess's phrases: 'paper towels' fits 'paper towel roll' (whose
+    head noun is 'roll', so match_score says 1.5), 'remote' fits 'remote control'. 'pill bottle' does not fit
+    'water bottle': a lone shared word is not enough."""
+    said_w = _content(said)
+    if not said_w:
+        return False
+    return any(said_w <= _content(str(p)) for p in [guess.get('name') or ''] + list(guess.get('also') or []))
+
+
 def pick_track(said: str, tracks: Iterable, now_wall: float, fresh_s: float,
                tentative: Callable[[str], bool] = lambda n: False):
     """The best confirmed track named like `said`, fresh and not worn: (track, score) or None."""
@@ -78,14 +95,17 @@ def pick_track(said: str, tracks: Iterable, now_wall: float, fresh_s: float,
             continue
         if tr.entity is not None and tentative(tr.entity):
             continue
-        sc = match_score(said, with_synonyms(g))
+        g = with_synonyms(g)
+        sc = match_score(said, g)
+        if sc < MATCH_MIN and words_fit(said, g):
+            sc = MATCH_MIN                   # every word said is in its name (the head noun may differ)
         if sc >= MATCH_MIN and (best is None or (sc, tr.last_wall) > (best[1], best[0].last_wall)):
             best = (tr, sc)
     return best
 
 
 def answer_from_tracks(said: str, tracks: Iterable, zone_say: dict, now_wall: Optional[float] = None,
-                       fresh_s: float = 5.0, tentative: Callable[[str], bool] = lambda n: False
+                       fresh_s: float = 15.0, tentative: Callable[[str], bool] = lambda n: False
                        ) -> Optional[Answer]:
     """'Your laptop, I think, is on the couch.' with the room aim at the track's full-frame box, or None."""
     now_wall = time.time() if now_wall is None else now_wall

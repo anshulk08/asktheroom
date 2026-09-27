@@ -555,7 +555,7 @@ room:
   enabled: false
   aim_tracks: false           # WHERE for a name the world has no place for: a fresh Grok-named room track answers (hedged) and
                               # is aimed at (voice/room_tracks.py; never worn / body-part names, stale or tentative)
-  aim_track_fresh_s: 5        # ... matched this recently
+  aim_track_fresh_s: 15       # ... matched this recently (zone visits come seconds apart and tracks churn: 5 went stale)
   aim_cue: any                # point: the laser moves only when the question asks it to ('point to the remote',
                               # 'show me my keys'); a plain 'where is X' is answered, not aimed. any: every answer
   grid: [20, 15]              # sweep pulse grid (pan x tilt) over servo_limits; ~2-3 min on the rig

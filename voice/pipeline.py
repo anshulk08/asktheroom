@@ -61,7 +61,7 @@ def make_ask(cfg: dict, world, events, net=None, other: Optional[Callable] = Non
         return ans
 
     rc = (cfg.get("room") or {})
-    aim_tracks, fresh_s = bool(rc.get("aim_tracks", False)), float(rc.get("aim_track_fresh_s", 5.0))
+    aim_tracks, fresh_s = bool(rc.get("aim_tracks", False)), float(rc.get("aim_track_fresh_s", 15.0))
 
     def _from_room_tracks(intent: Intent):
         if room_tracks is None or not aim_tracks or intent.kind != "WHERE" or not (intent.name or intent.obj):

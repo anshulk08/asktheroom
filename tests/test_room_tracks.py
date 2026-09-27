@@ -154,3 +154,25 @@ def test_a_lone_shirt_next_to_the_target_always_blocks():
 
 def test_without_footwear_boxes_nothing_changes():
     assert gate([SNEAKER], [], REMOTE) is True
+
+
+# ----- names: every word said, not only the head noun ----------------------------------------------
+
+@pytest.mark.parametrize('said,name', [('paper towels', 'paper towel roll'), ('remote', 'remote control'),
+                                       ('paper towel', 'roll of paper towels')])
+def test_every_word_said_in_the_name_fits(said, name):
+    """Live 07:09: 'show me the paper towels' found the counter's 'paper towel roll' (head noun 'roll',
+    match_score 1.5) unmatched, and nothing was aimed at."""
+    a = answer_from_tracks(said, [track(name=name, zone='side_table')], SAYS, NOW)
+    assert a is not None and a.action.startswith('room:')
+
+
+@pytest.mark.parametrize('said,name', [('pill bottle', 'water bottle'),
+                                       ('tv remote', 'remote control')])
+def test_a_lone_shared_word_does_not_fit(said, name):
+    assert answer_from_tracks(said, [track(name=name)], SAYS, NOW) is None
+
+
+def test_a_track_matched_ten_seconds_ago_still_answers_by_default(world):
+    a = ask_for(world, [track(last=NOW - 10.0)])('where is my laptop')
+    assert (a.action or '').startswith('room:')
