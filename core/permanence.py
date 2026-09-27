@@ -74,8 +74,9 @@ class PermanenceConfig:
     reembed_s: float = 10.0                 # ... embedding for this long (a still room costs no embeddings)
     max_embed_per_view: int = 6             # a busy view embeds at most this many (the rest on later looks):
                                             # candidates at a registered object's spot first, then new arrivals
-    embed_budget_ms: float = 60.0           # ... and no more than fit this time (measured per crop): on the rig's
-                                            # CPU without the TensorRT engine the slow loop must not stall the table
+    embed_budget_ms: float = 60.0           # ... and on average no more than this a view (measured per crop): each
+                                            # view earns this much, embeddings spend it, so a slow model (the rig's
+                                            # CPU, ~300 ms a crop) embeds every few views instead of stalling each
     # Measured on rig crops (spec 0011 section 3.3): the same prop at the same spot scores ~0.85 (p25 0.69),
     # but the same prop elsewhere can score 0.1-0.3 and clutter at one spot up to 0.9. So appearance only
     # keeps an object at its spot; a new spot needs arrival evidence and Grok.
@@ -319,6 +320,7 @@ class Permanence:
         self.table_hidden: Callable[[str], bool] = lambda name: False   # the table world believes it UNDER/INSIDE
         self.embedded = 0                                 # candidates embedded in the last look
         self.embed_ms = 0.0                               # measured ms per embedded crop (running average)
+        self._credit = 0.0                                # embedding time the views have earned (embed_budget_ms each)
         self.sweep_wall: Optional[float] = None           # when the last view of a full sweep was done
 
     # ----- the registry
@@ -461,18 +463,24 @@ class Permanence:
             if iou >= self.c.reuse_iou and prev.emb is not None and wall - prev.emb_wall < self.c.reembed_s:
                 k.emb, k.emb_wall = prev.emb, prev.emb_wall            # a still thing: no new embedding
         todo = [k for k in cands if k.emb is None]
-        cap = min(self.c.max_embed_per_view, max(1, round(self.c.embed_budget_ms / max(0.1, self.embed_ms))))
-        if len(todo) > cap:
+        self._credit = min(self._credit + self.c.embed_budget_ms, 4 * self.c.embed_budget_ms)
+        cap = self.c.max_embed_per_view if self.embed_ms <= 0 else \
+            min(self.c.max_embed_per_view, int(self._credit / max(0.1, self.embed_ms)))
+        if len(todo) > cap and cap > 0:
             with self.lock:
                 spots = [o.box for o in self.objects.values() if o.box is not None and o.state in (VISIBLE, HIDDEN)]
             todo.sort(key=lambda k: (not any(geom.iou(k.box, b) >= 0.3 for b in spots), k.first_wall < wall,
                                      k.in_person, -k.conf))
             todo = todo[:cap]
+        elif cap <= 0:
+            todo = []
         if todo:
             t1 = time.perf_counter()
             for k, e in zip(todo, self.embed(img, [k.box for k in todo]) or []):
                 k.emb, k.emb_wall = (None if e is None else np.asarray(e, np.float32)), wall
-            per = 1000 * (time.perf_counter() - t1) / len(todo)
+            spent = 1000 * (time.perf_counter() - t1)
+            self._credit -= spent
+            per = spent / len(todo)
             self.embed_ms = per if self.embed_ms <= 0 else 0.8 * self.embed_ms + 0.2 * per
         cands = [k for k in cands if k.emb is not None]
         self.embedded = len(todo)

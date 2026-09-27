@@ -561,7 +561,7 @@ def test_a_busy_view_embeds_at_most_max_embed_per_view_spots_first():
     assert p.objects["remote"].state == VISIBLE
 
 
-def test_slow_embeddings_are_limited_to_the_time_budget():
+def test_slow_embeddings_stay_within_the_time_budget_on_average():
     clock, s = Clock(), Scene()
     calls = []
 
@@ -571,16 +571,15 @@ def test_slow_embeddings_are_limited_to_the_time_budget():
         return embed(img, boxes)
 
     c = PermanenceConfig.from_dict({"mode": "registry", "tiles": [1, 1], "zoom": [], "verify": False,
-                                    "embed_budget_ms": 60})
+                                    "embed_budget_ms": 15})       # half a crop's time a view
     p = Permanence(c, detect, slow, places=PLACES, clock=clock)
-    for j, colour in enumerate([MUG, KEYS, (0, 200, 200), REMOTE]):
-        s.put(f"x{j}", colour, (100 + 150 * j, 100, 140 + 150 * j, 140))
-    run(p, s, clock)                                                # first look: the cost isn't known yet
-    for j, colour in enumerate([MUG, KEYS, (0, 200, 200), REMOTE]):
-        s.put(f"x{j}", colour, (100 + 150 * j, 300, 140 + 150 * j, 340))   # all moved: all need embedding
-    run(p, s, clock)
-    assert calls[0] == 4 and 1 <= calls[1] <= 2                      # 60 ms of ~30 ms crops
-
+    for look in range(12):                                          # everything moves every look: all need embedding
+        for j, colour in enumerate([MUG, KEYS, (0, 200, 200), REMOTE]):
+            y = 100 + 60 * (look % 2)
+            s.put(f"x{j}", colour, (100 + 150 * j, y, 140 + 150 * j, y + 40))
+        run(p, s, clock)
+    assert calls[0] == 4                                            # the first look: the cost isn't known yet
+    assert sum(calls[1:]) <= 7                                      # then ~one crop every other look
 
 def test_enroll_auto_saves_only_confirmed_picks_with_their_context(tmp_path):
     from core.permanence import enroll_auto
