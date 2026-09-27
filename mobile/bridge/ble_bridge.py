@@ -25,6 +25,7 @@ Needs only what JetPack 6 ships: python3 (3.10), python3-dbus, python3-gi, BlueZ
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -48,6 +49,11 @@ BUSY_TEXT = "I'm still answering your last question."
 SLOW_TEXT = "Sorry, that took too long. Please ask again."
 FAIL_TEXT = "Sorry, something went wrong answering that."
 CHARS = ("answer", "state", "status")
+# Notification pacing (run_ble): bytes a second the pump hands to bluetoothd, and the burst it may send at once.
+# BlueZ queues notifications without limit and the link carries far less than the old unpaced pump sent
+# (4 chunks every 5 ms), so the queue grew until the phone's link died. With compression a state is 1-4 KB.
+RATE_BPS = 8000
+BURST_BYTES = 2048
 
 
 # ---------------------------------------------------------------- HTTP to the room app
@@ -174,7 +180,8 @@ class BridgeCore:
                  source: str = ASK_SOURCE, clock: Callable[[], float] = time.time,
                  mono: Callable[[], float] = time.monotonic, state_min_s: float = 0.5,
                  heartbeat_s: float = 5.0, status_min_s: float = 1.0, ask_timeout_s: float = 12.0,
-                 default_mtu: int = P.DEFAULT_MTU):
+                 default_mtu: int = P.DEFAULT_MTU, state_max_bytes: int = P.STATE_MAX_BYTES,
+                 layout_every_s: float = 30.0):
         self.http, self.emit = http, emit
         self.table_cm = (float(table_cm[0]), float(table_cm[1]))
         self.table_cal, self.laser_cal = table_cal, laser_cal
@@ -203,7 +210,15 @@ class BridgeCore:
         self.stop_ev = threading.Event()
         self.threads: list[threading.Thread] = []
         self.stats = {"questions": 0, "answers": 0, "state_msgs": 0, "state_bytes": 0, "status_msgs": 0,
-                      "poll_fail": 0}
+                      "poll_fail": 0, "raw_bytes": 0, "wire_bytes": 0, "deferred": 0, "cut": 0}
+        self.state_max_bytes = int(state_max_bytes)
+        self.z_devices: set[str] = set()               # centrals that said {"hello": {"z": 1}}
+        self.sent = {c: 0 for c in CHARS}              # chunks handed to the BLE layer, per characteristic
+        self.pending: Callable[[str], int] = lambda char: 0   # chunks still queued in the BLE layer (run_ble sets it)
+        self.layout: Optional[dict] = None             # GET /room_layout (None: no room map)
+        self.layout_hash: Optional[str] = None
+        self.layout_every_s, self.layout_at = float(layout_every_s), float("-inf")
+        self.last_sent_lh: Optional[str] = None
 
     # -- link facts from the BLE layer
 
@@ -227,6 +242,13 @@ class BridgeCore:
     def forget_device(self, device: str) -> None:
         with self.lock:
             self.mtus.pop(str(device), None)
+            self.z_devices.discard(str(device))
+
+    @property
+    def compress(self) -> bool:
+        """Deflate messages only when every central we know of said it can inflate them."""
+        with self.lock:
+            return bool(self.mtus) and set(self.mtus) <= self.z_devices
 
     def mtu(self) -> int:
         with self.lock:
@@ -248,8 +270,15 @@ class BridgeCore:
     def _send(self, char: str, obj: dict) -> list[bytes]:
         payload = P.dumps(obj)
         with self.lock:
-            chunks = P.frame(self.counter.next(char), payload, self.mtu())
+            z = self.compress and len(payload) > 64
+            wire = P.deflate(payload) if z else payload
+            if len(wire) >= len(payload):
+                wire, z = payload, False
+            chunks = P.frame(self.counter.next(char), wire, self.mtu(), compressed=z)
             self.emit(char, chunks)
+            self.sent[char] += len(chunks)
+            self.stats["raw_bytes"] += len(payload)
+            self.stats["wire_bytes"] += len(wire)
         return chunks
 
     # -- state and status
@@ -274,6 +303,8 @@ class BridgeCore:
                 self.app_up, self.latest_state = True, st
                 self.note_view(body)
             self.room_messages(body)
+            if self.mono() - self.layout_at >= self.layout_every_s:
+                self.fetch_layout()
         except Exception as ex:
             with self.lock:
                 self.stats["poll_fail"] += 1
@@ -281,6 +312,20 @@ class BridgeCore:
                     log.warning("room app unreachable: %s", ex)
                 self.app_up = False
         self.push_updates()
+
+    def fetch_layout(self) -> None:
+        """GET /room_layout (the room map, turned to the user's seat by the app); 404 or an older app: none."""
+        self.layout_at = self.mono()
+        try:
+            lay = self.http.get_json("/room_layout", timeout=3.0)
+        except Exception:
+            lay = None
+        lay = lay if isinstance(lay, dict) and isinstance(lay.get("zones"), list) else None
+        h = hashlib.sha1(P.dumps(lay)).hexdigest()[:10] if lay else None
+        with self.lock:
+            if h != self.layout_hash:
+                log.info("room layout: %s", f"{len(lay['zones'])} zones ({h})" if lay else "none")
+            self.layout, self.layout_hash = lay, h
 
     def note_view(self, body: dict) -> None:
         """Keep GET /state's "view" and "sides" (the user's frame) for the next state and answers."""
@@ -360,14 +405,27 @@ class BridgeCore:
                 self.stats["status_msgs"] += 1
             if not self.notifying["state"]:
                 return
-            cur = self.compact_now()
+            cur = P.cap_state(self.compact_now(), self.state_max_bytes)
+            if self.layout_hash:
+                cur["lh"] = self.layout_hash
             due = self.force_state or now - self.state_sent_at >= self.heartbeat_s or (
                 now - self.state_sent_at >= self.state_min_s and P.state_changed(self.last_sent_state, cur))
-            if due:
-                chunks = self._send("state", cur)
-                self.last_sent_state, self.state_sent_at, self.force_state = cur, now, False
-                self.stats["state_msgs"] += 1
-                self.stats["state_bytes"] = sum(len(c) - P.HEADER_LEN for c in chunks)
+            if not due:
+                return
+            if self.pending("state"):
+                # The last state is still going out: the next one waits for it (and is fresh when it goes),
+                # so the link never carries more than one state behind.
+                self.stats["deferred"] += 1
+                return
+            if self.layout_hash and (self.force_state or self.layout_hash != self.last_sent_lh):
+                cur["lay"] = self.layout
+            cur["tx"] = self.sent["state"]      # state chunks sent before this one: the phone's loss count
+            self.stats["cut"] += int(cur.get("more") or 0) and 1
+            chunks = self._send("state", cur)
+            self.last_sent_state, self.state_sent_at, self.force_state = cur, now, False
+            self.last_sent_lh = cur.get("lh")
+            self.stats["state_msgs"] += 1
+            self.stats["state_bytes"] = sum(len(c) - P.HEADER_LEN for c in chunks)
 
     def status_read(self) -> bytes:
         with self.lock:
@@ -375,9 +433,21 @@ class BridgeCore:
 
     # -- questions
 
-    def on_question(self, value: bytes) -> None:
+    def on_question(self, value: bytes, device: Optional[str] = None) -> None:
         """question write (called on the GLib thread: must not block)."""
         t0 = self.mono()
+        hello = P.parse_hello(bytes(value))
+        if hello is not None:                   # the phone's hello: can it inflate? no answer
+            with self.lock:
+                key = str(device or "?")
+                if hello["z"]:
+                    self.z_devices.add(key)
+                else:
+                    self.z_devices.discard(key)
+                self.force_state = True           # the next snapshot goes out compressed, whole
+            log.info("hello from %s: %s", key, "compressed messages" if hello["z"] else "plain messages")
+            self.push_updates()
+            return
         voice = P.parse_voice(bytes(value))
         if voice is not None:                   # the phone's voice settings, not a question: no answer
             threading.Thread(target=self.set_voice, args=(voice,), name="voice", daemon=True).start()
@@ -423,6 +493,7 @@ class BridgeCore:
             if P.view_of(r):                    # the reply is the new view: no need to wait for a poll
                 self.latest_view = r
             self.force_state = True
+        self.fetch_layout()                     # the room map turns with the seat
         self.push_updates()
 
     def answer(self, qid: int, text: str, t0: Optional[float] = None) -> dict:
@@ -500,9 +571,10 @@ DEVICE_IFACE = "org.bluez.Device1"
 APP_PATH = "/org/askroom"
 
 
-def run_ble(core: BridgeCore, adapter_hint: Optional[str] = None, pump_ms: int = 5,
+def run_ble(core: BridgeCore, adapter_hint: Optional[str] = None, pump_ms: int = 10,
             chunks_per_tick: int = 4, adv_interval_ms: Optional[tuple] = (100, 150),
-            event_mask: Optional[str] = LE_EVENT_MASK) -> int:
+            event_mask: Optional[str] = LE_EVENT_MASK, rate_bps: float = RATE_BPS,
+            burst_bytes: float = BURST_BYTES) -> int:
     import dbus
     import dbus.exceptions
     import dbus.mainloop.glib
@@ -553,7 +625,7 @@ def run_ble(core: BridgeCore, adapter_hint: Optional[str] = None, pump_ms: int =
             core.note_mtu(options.get("device"), options.get("mtu"))
             if self.name != "question":
                 raise NotSupported()
-            core.on_question(bytes(value))
+            core.on_question(bytes(value), options.get("device"))
 
         @dbus.service.method(CHRC_IFACE)
         def StartNotify(self):
@@ -643,17 +715,31 @@ def run_ble(core: BridgeCore, adapter_hint: Optional[str] = None, pump_ms: int =
 
     # -- notifications: core threads -> GLib loop -> Outbox -> paced PropertiesChanged
 
+    pacer = P.Pacer(rate_bps, burst_bytes, time.monotonic)
+    link = {"notified": {c: 0 for c in CHARS}, "bytes": 0, "errors": 0, "idle": {c: 0 for c in CHARS}}
+
+    def send(char: str, value: bytes) -> None:
+        ch = service.by_name[char]
+        if not ch.notifying:
+            return
+        try:
+            ch.notify(value)
+            link["notified"][char] += 1
+            link["bytes"] += len(value)
+        except Exception as ex:                   # noqa: BLE001 - counted and logged, the pump goes on
+            link["errors"] += 1
+            if link["errors"] <= 5 or link["errors"] % 100 == 0:
+                log.warning("notify on %s failed (%d so far): %s", char, link["errors"], ex)
+
     def drain() -> bool:
-        for char, value in outbox.pop(chunks_per_tick):
-            ch = service.by_name[char]
-            if ch.notifying:
-                ch.notify(value)
+        P.pump(outbox, pacer, send, chunks_per_tick)
         if outbox.pending():
             return True
         pump["id"] = None
         return False
 
     def enqueue(char: str, chunks: list) -> bool:
+        link["idle"][char] -= len(chunks)
         if service.by_name[char].notifying:
             outbox.push(char, chunks)
             if pump["id"] is None:
@@ -662,7 +748,12 @@ def run_ble(core: BridgeCore, adapter_hint: Optional[str] = None, pump_ms: int =
                     pump["id"] = GLib.timeout_add(pump_ms, drain)
         return False
 
-    core.emit = lambda char, chunks: GLib.idle_add(enqueue, char, list(chunks))
+    def emit(char: str, chunks: list) -> None:
+        link["idle"][char] += len(chunks)            # handed over, not yet in the Outbox
+        GLib.idle_add(enqueue, char, list(chunks))
+
+    core.emit = emit
+    core.pending = lambda char: outbox.pending(char) + max(0, link["idle"][char])
 
     # -- registration (again whenever bluetoothd restarts)
 
@@ -772,15 +863,28 @@ def run_ble(core: BridgeCore, adapter_hint: Optional[str] = None, pump_ms: int =
         GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, sig, lambda *_: (loop.quit(), False)[1])
     core.start()
 
+    beat = {"n": 0, "bytes": 0, "t": time.monotonic()}
+
     def heartbeat() -> bool:
-        s = core.stats
-        log.info("alive: app=%s mtu=%d subs=%s q=%d a=%d state_msgs=%d (%d B last) status_msgs=%d",
-                 "up" if core.app_up else "down", core.mtu(),
-                 ",".join(c for c in CHARS if core.notifying[c]) or "-", s["questions"], s["answers"],
-                 s["state_msgs"], s["state_bytes"], s["status_msgs"])
+        """Every 10 s while a phone is subscribed (else every 60 s): what went out and what is stuck."""
+        beat["n"] += 1
+        subs = ",".join(c for c in CHARS if core.notifying[c])
+        if not subs and beat["n"] % 6:
+            return True
+        s, now = core.stats, time.monotonic()
+        rate = (link["bytes"] - beat["bytes"]) / max(1e-3, now - beat["t"])
+        beat["bytes"], beat["t"] = link["bytes"], now
+        ratio = s["wire_bytes"] / s["raw_bytes"] if s["raw_bytes"] else 1.0
+        log.info("alive: app=%s mtu=%d z=%s subs=%s q=%d a=%d state_msgs=%d (%d B last) status_msgs=%d | "
+                 "notified answer/state/status=%d/%d/%d %.0f B/s queued=%d replaced=%d deferred=%d errors=%d "
+                 "wire/raw=%.2f cut=%d",
+                 "up" if core.app_up else "down", core.mtu(), "on" if core.compress else "off", subs or "-",
+                 s["questions"], s["answers"], s["state_msgs"], s["state_bytes"], s["status_msgs"],
+                 link["notified"]["answer"], link["notified"]["state"], link["notified"]["status"], rate,
+                 outbox.pending(), outbox.replaced, s["deferred"], link["errors"], ratio, s["cut"])
         return True
 
-    GLib.timeout_add_seconds(60, heartbeat)
+    GLib.timeout_add_seconds(10, heartbeat)
     try:
         loop.run()
     finally:
@@ -807,6 +911,9 @@ def main(argv=None) -> int:
     ap.add_argument("--le-event-mask", default=LE_EVENT_MASK,
                     help="LE event mask to re-apply via hcitool at start and after adapter power-on "
                          "(needs root or CAP_NET_RAW on hcitool); 'none' to skip")
+    ap.add_argument("--rate", type=float, default=RATE_BPS, help="notification bytes a second (pacing)")
+    ap.add_argument("--state-max", type=int, default=P.STATE_MAX_BYTES,
+                    help="largest state message, JSON bytes before compression (the least useful things are cut)")
     ap.add_argument("--log", default=None, help="also append logs to this file")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args(argv)
@@ -819,10 +926,10 @@ def main(argv=None) -> int:
     table_cm, tcal, lcal = read_config(args.repo)
     log.info("bridge starting: api %s, table %gx%g cm, source %r", args.url, *table_cm, args.source)
     core = BridgeCore(RoomHTTP(args.url), emit=lambda c, ch: None, table_cm=table_cm, table_cal=tcal,
-                      laser_cal=lcal, source=args.source, default_mtu=args.mtu)
+                      laser_cal=lcal, source=args.source, default_mtu=args.mtu, state_max_bytes=args.state_max)
     interval = tuple(int(x) for x in args.adv_interval.split(",")) if args.adv_interval else None
     mask = None if str(args.le_event_mask).lower() in ("", "none", "off") else args.le_event_mask
-    return run_ble(core, args.adapter, adv_interval_ms=interval, event_mask=mask)
+    return run_ble(core, args.adapter, adv_interval_ms=interval, event_mask=mask, rate_bps=args.rate)
 
 
 if __name__ == "__main__":

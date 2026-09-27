@@ -2,9 +2,11 @@ import Foundation
 
 enum MockData {
     /// The sample snapshot from spec section 4, plus the bridge's naming hints: thing:9 has a
-    /// weak guess (still "unnamed"), thing:11 a confident one, and Grok named thing:12.
+    /// weak guess (still "something new"), thing:11 a confident one, and Grok named thing:12. The map is
+    /// turned for someone on the couch, the camera's right side, so the "You" marker shows.
     static let sampleSnapshotJSON = """
     {"v":1,"t":1790380000.0,"table":[90,60],"online":true,"laser":{"on":true,"target":"keys"},
+     "view":{"f":"right","o":true,"s":{"right":"couch"}},
      "e":[
       {"n":"keys","k":"t","s":"I","p":"box","xy":[41.2,29.0],"r":[70.4,38.1],"c":0.85,"ls":1790379880.0},
       {"n":"box","k":"c","s":"V","xy":[70.4,38.1],"r":[70.4,38.1],"c":1.0},

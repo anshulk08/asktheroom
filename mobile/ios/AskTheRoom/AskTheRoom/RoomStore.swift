@@ -5,7 +5,16 @@ import Observation
 @MainActor
 protocol RoomTransport: AnyObject {
     func send(_ question: Question)
+    /// The helper's voice for the rig's speaker. Only the Bluetooth link carries it.
+    func send(voice: VoiceSettings)
+    /// Where the person sits, so the rig turns the map to face them.
+    func send(orient: OrientSettings)
     func stop()
+}
+
+extension RoomTransport {
+    func send(voice: VoiceSettings) {}
+    func send(orient: OrientSettings) {}
 }
 
 /// One question and, once it arrives, its answer.
@@ -53,6 +62,8 @@ final class RoomStore {
 
     private(set) var snapshot: Snapshot?
     private(set) var status: RigStatus?
+    /// The map on screen is the one saved last time, and nothing live has come in yet.
+    private(set) var isSavedMap = false
 
     /// Newest first, at most `historyLimit`.
     private(set) var exchanges: [Exchange] = []
@@ -65,6 +76,12 @@ final class RoomStore {
     private(set) var activity: [ActivityEvent] = []
     /// Notices the person has put away; each comes back if its situation changes.
     private(set) var dismissedNotices: Set<String> = []
+    /// How the Bluetooth link is doing (helper settings, "Connection"). Nil until the transport reports.
+    private(set) var linkStats: LinkStats?
+    /// The last room layout the rig sent (state `lay`), and its hash (`lh`). The rig sends the layout
+    /// only when it changes or on subscribe, so it's kept across state messages.
+    private(set) var layout: RoomLayout?
+    private(set) var layoutHash: String?
 
     /// Off by default: the rig already speaks these, and the phone may be in another room.
     var showRoomVoiceAnswers = UserDefaults.standard.bool(forKey: RoomStore.voiceAnswersKey) {
@@ -89,13 +106,29 @@ final class RoomStore {
         (rigNotices + (snapshot.map(Dashboard.notices(in:)) ?? [])).filter { !dismissedNotices.contains($0.id) }
     }
     var history: ArraySlice<Exchange> { exchanges.dropFirst() }
+    /// The kept layout is the one the latest state names (or the rig doesn't send hashes).
+    var layoutIsCurrent: Bool { layout != nil && (snapshot?.lh == nil || snapshot?.lh == layoutHash) }
 
     var isRoomAppDown: Bool { status.map { !$0.appIsUp } ?? false }
+    /// The map is showing, but it isn't live: saved from last time, or the link has dropped.
+    var isMapStale: Bool { !isMock && snapshot != nil && (isSavedMap || link != .connected) }
     /// Cloud voice and extras unavailable; answers still work (handoff decision 2).
     var isOffline: Bool { status?.online == false || snapshot?.online == false }
 
-    init(mock: Bool = false, liveTransport: ((RoomStore) -> RoomTransport)? = nil) {
+    /// Where the last live map is kept, so the app opens on it instead of an empty screen.
+    static var savedMapURL: URL {
+        URL.applicationSupportDirectory.appending(path: "last-map.json")
+    }
+    /// Saving every snapshot is wasteful; one every few seconds is plenty for a map shown at launch.
+    static let saveEvery: TimeInterval = 10
+
+    /// `savedMap`: the file to keep the last live map in; nil keeps nothing (tests, previews).
+    private let savedMapURL: URL?
+    private var lastSaved: Date?
+
+    init(mock: Bool = false, liveTransport: ((RoomStore) -> RoomTransport)? = nil, savedMap: URL? = nil) {
         makeLiveTransport = liveTransport
+        savedMapURL = savedMap
         setMock(mock)
     }
 
@@ -107,6 +140,7 @@ final class RoomStore {
         transport = nil
         isMock = on
         snapshot = nil
+        isSavedMap = false
         status = nil
         highlight = nil
         heardInRoom = nil
@@ -114,6 +148,9 @@ final class RoomStore {
         exchanges = []
         activity = []
         dismissedNotices = []
+        linkStats = nil
+        layout = nil
+        layoutHash = nil
         timeoutTask?.cancel()
         if on {
             link = .connected
@@ -121,7 +158,32 @@ final class RoomStore {
         } else {
             link = .searching
             hasConnected = false
+            loadSavedMap()
             transport = makeLiveTransport?(self)
+        }
+    }
+
+    private func loadSavedMap() {
+        guard let savedMapURL, let data = try? Data(contentsOf: savedMapURL),
+              let saved = try? JSONDecoder().decode(Snapshot.self, from: data) else { return }
+        snapshot = saved
+        isSavedMap = true
+        keepLayout(from: saved)
+    }
+
+    private func saveMap(_ state: Snapshot, now: Date = Date()) {
+        guard !isMock, let savedMapURL else { return }
+        if let lastSaved, now.timeIntervalSince(lastSaved) < Self.saveEvery { return }
+        lastSaved = now
+        // Keep the layout with the map, since the next state may not carry it.
+        var state = state
+        if state.lay == nil, layoutIsCurrent { state.lay = layout }
+        do {
+            try FileManager.default.createDirectory(at: savedMapURL.deletingLastPathComponent(),
+                                                    withIntermediateDirectories: true)
+            try JSONEncoder().encode(state).write(to: savedMapURL, options: .atomic)
+        } catch {
+            lastSaved = nil
         }
     }
 
@@ -195,11 +257,25 @@ final class RoomStore {
     }
 
     func receive(state: Snapshot) {
-        if let old = snapshot {
+        // Changes against a saved map happened at unknown times, so they don't go on Recent.
+        if let old = snapshot, !isSavedMap {
             activity.insert(contentsOf: Dashboard.changes(from: old, to: state).reversed(), at: 0)
             if activity.count > Dashboard.activityLimit { activity.removeLast(activity.count - Dashboard.activityLimit) }
         }
         snapshot = state
+        isSavedMap = false
+        keepLayout(from: state)
+        saveMap(state)
+    }
+
+    private func keepLayout(from state: Snapshot) {
+        guard let lay = state.lay else { return }
+        layout = lay
+        layoutHash = state.lh
+    }
+
+    func receive(linkStats: LinkStats) {
+        if self.linkStats != linkStats { self.linkStats = linkStats }
     }
 
     func dismiss(_ notice: Notice) {
@@ -209,6 +285,18 @@ final class RoomStore {
     /// Brings back every notice put away with "Got it" (helper settings).
     func restoreNotices() {
         dismissedNotices = []
+    }
+
+    /// Sends the helper's voice to the rig, after a change in helper settings.
+    func sendVoiceSettings() {
+        transport?.send(voice: Speaker.voiceSettings)
+    }
+
+    /// Tells the rig where the person sits, after a change in helper settings: the seat, or a
+    /// reset when they went back to the rig's default. Nothing if there's nothing to change.
+    func sendSeat() {
+        guard let orient = Seat.savedOrient else { return }
+        transport?.send(orient: orient)
     }
 
     func receive(status: RigStatus) {

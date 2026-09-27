@@ -20,8 +20,14 @@ final class MapLayoutTests: XCTestCase {
         XCTAssertEqual(item("remote", in: items).glyph, "hand.raised.fill")
         XCTAssertNil(item("wallet", in: items).caption)
         XCTAssertEqual(item("thing:7", in: items).title, "my charger")
-        XCTAssertEqual(item("thing:9", in: items).caption, "probably might be unnamed object 4")
-        XCTAssertTrue(item("thing:9", in: items).linkBadge)
+        // thing:9 might be thing:4, which has no name to tell it by: say nothing.
+        XCTAssertEqual(item("thing:9", in: items).caption, "probably here")
+        XCTAssertFalse(item("thing:9", in: items).linkBadge)
+
+        var s = sample
+        s.update("thing:9") { $0.m = [MaybeSame(name: "thing:7", score: 0.7)] }
+        XCTAssertEqual(item("thing:9", in: MapLayout.items(for: s)).caption, "probably might be my charger")
+        XCTAssertTrue(item("thing:9", in: MapLayout.items(for: s)).linkBadge)
     }
 
     func testLineStyleAndOpacityCarryStatus() {
@@ -116,13 +122,15 @@ final class MapLayoutTests: XCTestCase {
         XCTAssertTrue(body.contains(CGPoint(x: keys.x, y: keys.y)), "still inside the box")
     }
 
-    /// Unnamed things print a short label; the full name stays for VoiceOver and the card.
-    func testUnnamedThingsGetAShortLabel() {
+    /// Nameless things print a short "new", never their number; "something new" stays for
+    /// VoiceOver and the card.
+    func testNamelessThingsGetAShortLabelAndNoNumber() {
         let items = MapLayout.items(for: sample)
-        XCTAssertEqual(item("thing:9", in: items).label, "unnamed")
-        XCTAssertEqual(item("thing:9", in: items).title, "unnamed object 9")
+        XCTAssertEqual(item("thing:9", in: items).label, "new")
+        XCTAssertEqual(item("thing:9", in: items).title, "something new")
         XCTAssertEqual(item("thing:7", in: items).label, "my charger", "named things keep their name")
-        XCTAssertTrue(item("thing:9", in: items).accessibilityLabel.hasPrefix("unnamed object 9"))
+        XCTAssertTrue(item("thing:9", in: items).accessibilityLabel.hasPrefix("something new"))
+        XCTAssertNil(item("thing:9", in: items).accessibilityLabel.rangeOfCharacter(from: .decimalDigits))
     }
 
     /// The room's guesses print with a question mark, on the map and for VoiceOver.
@@ -140,5 +148,62 @@ final class MapLayoutTests: XCTestCase {
         var calm = sample
         calm.e = calm.e.filter { ["wallet", "box", "notebook"].contains($0.n) }
         XCTAssertEqual(MapLayout.legend(for: MapLayout.items(for: calm)), [])
+    }
+
+    // MARK: the "You" marker
+
+    private func fitted(width: CGFloat = 394, showsYou: Bool) -> MapGeometry {
+        let size = CGSize(width: width, height: width / MapGeometry.aspectRatio(for: sample.tableSize, width: width, showsYou: showsYou))
+        return MapGeometry(table: sample.tableSize, size: size, showsYou: showsYou)
+    }
+
+    /// At the aspect ratio it asks for, the table fills the view but for its margins.
+    func testMarginsAndAspectAgree() {
+        for showsYou in [false, true] {
+            let geo = fitted(showsYou: showsYou)
+            let rect = geo.tableRect
+            XCTAssertEqual(rect.minX, MapGeometry.margin, accuracy: 0.001)
+            XCTAssertEqual(geo.size.width - rect.maxX, MapGeometry.margin, accuracy: 0.001)
+            XCTAssertEqual(rect.minY, MapGeometry.margin, accuracy: 0.001)
+            XCTAssertEqual(geo.size.height - rect.maxY, showsYou ? MapGeometry.youMargin : MapGeometry.margin, accuracy: 0.001)
+            XCTAssertEqual(rect.width / rect.height, 1.5, accuracy: 0.001)
+        }
+        XCTAssertLessThan(MapGeometry.aspectRatio(for: sample.tableSize, showsYou: true),
+                          MapGeometry.aspectRatio(for: sample.tableSize), "a little taller for the marker")
+    }
+
+    func testYouSitJustPastTheNearEdge() {
+        let geo = fitted(showsYou: true)
+        let rect = geo.tableRect
+        let you = geo.youPoint
+        XCTAssertEqual(you.x, rect.midX, accuracy: 0.001, "centred")
+        let top = you.y - MapGeometry.youHeight / 2
+        let bottom = you.y + MapGeometry.youHeight / 2
+        let arrowEnd = geo.exitPoint(from: CGPoint(x: rect.midX, y: rect.maxY - 10), through: .bottom)
+        XCTAssertGreaterThan(top, arrowEnd.y, "below the end of a 'left the table' arrow")
+        XCTAssertLessThanOrEqual(bottom, geo.size.height, "inside the view")
+    }
+
+    /// Where the view is taller than the table needs, the table stays centred between its margins.
+    func testTableStaysCentredInASpareView() {
+        let geo = MapGeometry(table: TablePoint(x: 90, y: 60), size: CGSize(width: 390, height: 500), showsYou: true)
+        let rect = geo.tableRect
+        XCTAssertEqual(rect.minY - MapGeometry.margin, geo.size.height - MapGeometry.youMargin - rect.maxY, accuracy: 0.001)
+        XCTAssertGreaterThan(geo.youPoint.y, rect.maxY)
+    }
+
+    /// The rig may report things in the band just past the tabletop; they stay on the map.
+    func testThingsPastTheEdgeStayOnTheTable() throws {
+        var s = sample
+        s.e.append(Entity(n: "mug", k: .target, s: .visible, xy: TablePoint(x: -8, y: 70), r: TablePoint(x: -8, y: 70)))
+        s.e.append(Entity(n: "tray", k: .container, s: .visible, xy: TablePoint(x: 96, y: -4), r: TablePoint(x: 96, y: -4)))
+        let geo = fitted(showsYou: true)
+        let points = MapLayout.placements(for: MapLayout.items(for: s), in: geo)
+        let rect = geo.tableRect
+        for name in ["mug", "tray"] {
+            let p = try XCTUnwrap(points[name])
+            XCTAssertTrue(rect.insetBy(dx: -0.5, dy: -0.5).contains(p), "\(name) at \(p) is on \(rect)")
+        }
+        XCTAssertTrue(rect.insetBy(dx: -0.5, dy: -0.5).contains(geo.pointOnTable(TablePoint(x: 200, y: -50))))
     }
 }

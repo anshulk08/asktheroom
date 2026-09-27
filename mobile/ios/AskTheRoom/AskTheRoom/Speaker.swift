@@ -71,6 +71,11 @@ final class Speaker {
         return min(max(speed, Grok.speeds.lowerBound), Grok.speeds.upperBound)
     }
 
+    /// The voice settings as the rig takes them, so its speaker sounds like this phone would.
+    static var voiceSettings: VoiceSettings {
+        VoiceSettings(voice: .init(e: engine.rawValue, v: grokVoice, s: (speed * 10).rounded() / 10))
+    }
+
     static var voiceID: String {
         UserDefaults.standard.string(forKey: voiceIDKey)?.trimmingCharacters(in: .whitespaces) ?? ""
     }

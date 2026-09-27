@@ -11,27 +11,48 @@ enum RigGATT {
     static let status = CBUUID(string: "8A1E0005-6B7F-4C2B-9E3A-2F5D7C1A0005")
     /// In the order to subscribe: state last, because subscribing to it sends a snapshot at once.
     static let incoming = [answer, status, state]
+
+    static func channel(for uuid: CBUUID) -> LinkChannel? {
+        switch uuid {
+        case answer: return .answer
+        case state: return .state
+        case status: return .status
+        default: return nil
+        }
+    }
 }
 
 /// The Bluetooth link to the rig (spec section 5, "Connect"): scan for the service,
 /// connect to the strongest rig, remember it, and reconnect forever: at once after a drop,
 /// then with backoff up to 5 s.
+///
+/// It keeps going in the background (`bluetooth-central` background mode), and with state
+/// restoration iOS relaunches the app when the rig comes back, so the map is current whenever
+/// the rig is on. The pending connect to the remembered rig never times out.
 @MainActor
 final class RoomLink: NSObject, RoomTransport {
     static let rememberedKey = "rigPeripheralID"
+    static let restoreID = "AskTheRoomCentral"
     /// How long to keep listening after the first rig is heard, to pick the strongest.
     static let chooseWindow: Duration = .milliseconds(800)
     static let maxBackoff = 5.0
     /// The bridge sends state at least every 5 s. Nothing for three heartbeats means the link is up but
     /// the bridge hung or lost our subscription, so reconnect.
     static let staleAfter: Duration = .seconds(15)
+    /// Diagnostics go to the store at most this often, so the settings screen doesn't redraw constantly.
+    static let statsEvery: Duration = .seconds(1)
+    static let watchdogReason = "watchdog: nothing for 15 s"
 
     private let log = Logger(subsystem: "com.asktheroom.app", category: "RoomLink")
     private weak var store: RoomStore?
     private var central: CBCentralManager!
     private var peripheral: CBPeripheral?
     private var questionCharacteristic: CBCharacteristic?
-    private var reassemblers: [CBUUID: Reassembler] = [:]
+    private var meter = LinkMeter()
+    private var statsTask: Task<Void, Never>?
+    private var lastStatsPublish: ContinuousClock.Instant?
+    /// Why we're about to cancel the connection ourselves, for the disconnect that follows.
+    private var disconnectReason: String?
     private var heard: [UUID: (peripheral: CBPeripheral, rssi: Int)] = [:]
     private var chooseTask: Task<Void, Never>?
     private var retryTask: Task<Void, Never>?
@@ -41,12 +62,15 @@ final class RoomLink: NSObject, RoomTransport {
     private var stopped = false
     /// A question asked while the link was down; sent as soon as it's back.
     private var waiting: Question?
+    /// The rig iOS was still connected or connecting to when it relaunched the app.
+    private var restored: CBPeripheral?
 
     init(store: RoomStore) {
         self.store = store
         super.init()
         central = CBCentralManager(delegate: self, queue: nil,
-                                   options: [CBCentralManagerOptionShowPowerAlertKey: false])
+                                   options: [CBCentralManagerOptionShowPowerAlertKey: false,
+                                             CBCentralManagerOptionRestoreIdentifierKey: Self.restoreID])
     }
 
     // MARK: RoomTransport
@@ -61,11 +85,30 @@ final class RoomLink: NSObject, RoomTransport {
         peripheral.writeValue(data, for: characteristic, type: .withResponse)
     }
 
+    /// Written to the question characteristic (PROTOCOL.md section 5a); no answer comes back.
+    /// Sent on every connect too, so a rig that restarted gets it again.
+    func send(voice: VoiceSettings) {
+        guard let data = voice.encoded(), let peripheral, peripheral.state == .connected,
+              let characteristic = questionCharacteristic else { return }
+        peripheral.writeValue(data, for: characteristic, type: .withResponse)
+    }
+
+    /// Where the person sits, written like the voice settings: raw JSON on the question
+    /// characteristic, no answer. The rig pushes a state with the new `view` instead.
+    /// Sent on every connect too, so a rig that restarted turns the map again; a reset to the
+    /// rig's default goes out on one connect only.
+    func send(orient: OrientSettings) {
+        guard let data = orient.encoded(), let peripheral, peripheral.state == .connected,
+              let characteristic = questionCharacteristic else { return }
+        peripheral.writeValue(data, for: characteristic, type: .withResponse)
+    }
+
     func stop() {
         stopped = true
         chooseTask?.cancel()
         retryTask?.cancel()
         watchTask?.cancel()
+        statsTask?.cancel()
         if central.state == .poweredOn { central.stopScan() }
         if let peripheral { central.cancelPeripheralConnection(peripheral) }
         peripheral = nil
@@ -92,6 +135,25 @@ final class RoomLink: NSObject, RoomTransport {
         // Scan as well, in case the rig's identity changed or none is remembered.
         heard = [:]
         central.scanForPeripherals(withServices: [RigGATT.service])
+    }
+
+    /// Picks up where iOS left off after relaunching the app: a live link is set up again,
+    /// a pending connect is left to complete, and anything else starts over.
+    private func adopt(_ p: CBPeripheral) {
+        guard !stopped else { return }
+        switch p.state {
+        case .connected:
+            peripheral = p
+            p.delegate = self
+            store?.linkChanged(.connecting)
+            connected(p)
+        case .connecting:
+            peripheral = p
+            p.delegate = self
+            store?.linkChanged(.connecting)
+        default:
+            findRig()
+        }
     }
 
     private func discovered(_ p: CBPeripheral, rssi: Int) {
@@ -136,11 +198,14 @@ final class RoomLink: NSObject, RoomTransport {
 
     private func lost(_ p: CBPeripheral, error: Error?) {
         guard p.identifier == peripheral?.identifier else { return }
-        log.info("disconnected: \(error?.localizedDescription ?? "no error")")
+        let reason = disconnectReason ?? error?.localizedDescription ?? "the rig disconnected"
+        disconnectReason = nil
+        log.info("disconnected: \(reason, privacy: .public)")
         let wasWorking = questionCharacteristic != nil
         peripheral = nil
         questionCharacteristic = nil
-        reassemblers = [:]
+        meter.disconnected(reason: reason)
+        publishStats(now: true)
         watchTask?.cancel()
         store?.linkChanged(.searching)
         // A working link that dropped: try again straight away. The pending connect to the remembered
@@ -186,8 +251,21 @@ final class RoomLink: NSObject, RoomTransport {
             if let c = found[uuid] { p.setNotifyValue(true, for: c) }
         }
         store?.linkChanged(.connected)
+        meter.connected(mtu: p.maximumWriteValueLength(for: .withoutResponse) + 3)
+        publishStats(now: true)
+        if let question = questionCharacteristic {
+            for data in Self.connectWrites(voice: Speaker.voiceSettings, orient: Seat.orientForConnect()) {
+                p.writeValue(data, for: question, type: .withResponse)
+            }
+        }
         if let waiting { send(waiting) }
         watch(p)
+    }
+
+    /// What to write to the question characteristic on every connect, in order: the hello first,
+    /// so the bridge knows it may compress before it sends anything big, then voice and seat.
+    static func connectWrites(voice: VoiceSettings, orient: OrientSettings?) -> [Data] {
+        [Hello.current.encoded(), voice.encoded(), orient?.encoded()].compactMap { $0 }
     }
 
     /// Reconnects when nothing has arrived for `staleAfter` on a link that still looks connected.
@@ -201,6 +279,7 @@ final class RoomLink: NSObject, RoomTransport {
                 guard let self, !Task.isCancelled, let current = self.peripheral, current.identifier == id else { return }
                 if ContinuousClock.now - self.lastHeard > Self.staleAfter {
                     self.log.info("nothing from the rig for \(Self.staleAfter.components.seconds) s; reconnecting")
+                    self.disconnectReason = Self.watchdogReason
                     self.central.cancelPeripheralConnection(current)
                     return
                 }
@@ -212,34 +291,58 @@ final class RoomLink: NSObject, RoomTransport {
 
     private func received(_ value: Data, on uuid: CBUUID) {
         lastHeard = .now
+        defer { publishStats() }
         // A status read may come back as plain JSON rather than a framed chunk.
         if uuid == RigGATT.status, value.first == UInt8(ascii: "{"), let status = Wire.decode(RigStatus.self, from: value) {
             store?.receive(status: status)
             return
         }
-        let droppedBefore = reassemblers[uuid]?.dropped ?? 0
-        let message = reassemblers[uuid, default: Reassembler()].add(value)
-        if let dropped = reassemblers[uuid]?.dropped, dropped > droppedBefore {
+        guard let channel = RigGATT.channel(for: uuid) else { return }
+        let droppedBefore = meter.stats[channel].dropped
+        let message = meter.receive(value, on: channel)
+        let dropped = meter.stats[channel].dropped
+        if dropped > droppedBefore {
             log.notice("dropped an incomplete message on \(uuid.uuidString, privacy: .public) (\(dropped) so far)")
         }
         guard let message else { return }
-        switch uuid {
-        case RigGATT.answer:
-            guard let answer = Wire.decode(Answer.self, from: message) else { return dropped(message, uuid) }
+        switch channel {
+        case .answer:
+            guard let answer = Wire.decode(Answer.self, from: message.data) else { return malformed(message, channel) }
             store?.receive(answer: answer)
-        case RigGATT.state:
-            guard let state = Wire.decode(Snapshot.self, from: message) else { return dropped(message, uuid) }
+        case .state:
+            guard let state = Wire.decode(Snapshot.self, from: message.data) else { return malformed(message, channel) }
+            meter.stateDecoded(tx: state.tx, chunks: message.chunks)
             store?.receive(state: state)
-        case RigGATT.status:
-            guard let status = Wire.decode(RigStatus.self, from: message) else { return dropped(message, uuid) }
+        case .status:
+            guard let status = Wire.decode(RigStatus.self, from: message.data) else { return malformed(message, channel) }
             store?.receive(status: status)
-        default:
-            break
         }
     }
 
-    private func dropped(_ message: Data, _ uuid: CBUUID) {
-        log.error("dropped malformed JSON on \(uuid.uuidString, privacy: .public) (\(message.count) bytes)")
+    private func malformed(_ message: Reassembler.Message, _ channel: LinkChannel) {
+        meter.malformed(on: channel)
+        log.error("dropped malformed JSON on \(String(describing: channel), privacy: .public) (\(message.data.count) bytes)")
+    }
+
+    /// Hands the diagnostics to the store, at most once per `statsEvery`; a change in between
+    /// goes out when the second is up.
+    private func publishStats(now: Bool = false) {
+        let clock = ContinuousClock.now
+        if now || lastStatsPublish.map({ clock - $0 >= Self.statsEvery }) ?? true {
+            statsTask?.cancel()
+            statsTask = nil
+            lastStatsPublish = clock
+            store?.receive(linkStats: meter.stats)
+            return
+        }
+        guard statsTask == nil, let last = lastStatsPublish else { return }
+        statsTask = Task { [weak self] in
+            try? await Task.sleep(until: last + Self.statsEvery, clock: .continuous)
+            guard let self, !Task.isCancelled else { return }
+            self.statsTask = nil
+            self.lastStatsPublish = .now
+            self.store?.receive(linkStats: self.meter.stats)
+        }
     }
 }
 
@@ -250,16 +353,33 @@ extension RoomLink: CBCentralManagerDelegate {
         let state = central.state
         MainActor.assumeIsolated {
             switch state {
-            case .poweredOn: findRig()
+            case .poweredOn:
+                if let p = restored {
+                    restored = nil
+                    adopt(p)
+                } else {
+                    findRig()
+                }
             case .poweredOff: store?.linkChanged(.bluetoothOff)
             case .unauthorized: store?.linkChanged(.unauthorized)
             case .unsupported: store?.linkChanged(.unsupported)
             default: break
             }
             if state != .poweredOn {
+                meter.disconnected(reason: "Bluetooth turned off")
+                publishStats(now: true)
                 peripheral = nil
                 questionCharacteristic = nil
             }
+        }
+    }
+
+    /// Called before `centralManagerDidUpdateState` when iOS relaunches the app for the rig.
+    nonisolated func centralManager(_ central: CBCentralManager, willRestoreState dict: [String: Any]) {
+        let rig = (dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral])?.first
+        MainActor.assumeIsolated {
+            log.info("restored by iOS: \(rig == nil ? "no rig" : "rig", privacy: .public)")
+            restored = rig
         }
     }
 
@@ -318,7 +438,7 @@ extension RoomLink: CBPeripheralDelegate {
         guard invalidatedServices.contains(where: { $0.uuid == RigGATT.service }) else { return }
         MainActor.assumeIsolated {
             questionCharacteristic = nil
-            reassemblers = [:]
+            meter.resetReassembly()
             peripheral.discoverServices([RigGATT.service])
         }
     }

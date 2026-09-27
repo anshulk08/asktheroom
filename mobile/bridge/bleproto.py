@@ -6,7 +6,9 @@ test client (test_client.py) and tests/test_mobile_protocol.py.
 Framing (every NOTIFY on answer / state / status):
     byte 0  msg_id       u8, per characteristic, increments per message and wraps 255 -> 0
     byte 1  chunk_index  u8, 0, 1, 2, ... within the message
-    byte 2  flags        u8, bit0 = FINAL (last chunk of the message); bits 1-7 are 0
+    byte 2  flags        u8, bit0 = FINAL (last chunk of the message); bit1 = COMPRESSED (set on every chunk of
+                         a message whose bytes are raw DEFLATE of the JSON: only to a central that said
+                         {"hello": {"z": 1}}); bits 2-7 are 0
     3..     payload      UTF-8 JSON bytes, at most MTU - 3 (ATT) - 3 (this header) per chunk
 A message is at most 256 chunks. A receiver keeps one partial message per characteristic; a chunk
 with a different msg_id discards any incomplete previous message.
@@ -19,6 +21,7 @@ from __future__ import annotations
 
 import json
 import math
+import zlib
 from typing import Any, Callable, Optional
 
 # ---------------------------------------------------------------- UUIDs and names
@@ -33,6 +36,8 @@ STATUS_UUID = "8a1e0005-6b7f-4c2b-9e3a-2f5d7c1a0005"
 HEADER_LEN = 3
 ATT_OVERHEAD = 3
 FLAG_FINAL = 0x01
+FLAG_Z = 0x02
+MAX_INFLATED = 256 * 1024
 MAX_CHUNKS = 256
 DEFAULT_MTU = 185            # iOS negotiates ~185; used until a read/write tells us the real one
 MIN_MTU = 23                 # the ATT minimum
@@ -62,8 +67,29 @@ def chunk_payload_size(mtu: int) -> int:
     return max(1, int(mtu) - ATT_OVERHEAD - HEADER_LEN)
 
 
-def frame(msg_id: int, payload: bytes, mtu: int = DEFAULT_MTU) -> list[bytes]:
-    """Split one message into notification values, each <= mtu - 3 bytes."""
+def deflate(data: bytes) -> bytes:
+    """Raw DEFLATE (RFC 1951, no zlib header): what the phone inflates with Apple's .zlib algorithm."""
+    c = zlib.compressobj(9, zlib.DEFLATED, -15)
+    return c.compress(data) + c.flush()
+
+
+def inflate(data: bytes, max_bytes: int = MAX_INFLATED) -> bytes:
+    """deflate()'s inverse; ValueError when it is not raw DEFLATE or inflates past max_bytes."""
+    d = zlib.decompressobj(-15)
+    try:
+        out = d.decompress(data, max_bytes + 1)
+    except zlib.error as ex:
+        raise ValueError(f"not raw DEFLATE: {ex}") from None
+    if len(out) > max_bytes or d.unconsumed_tail:
+        raise ValueError("inflated message too big")
+    if not d.eof:
+        raise ValueError("truncated DEFLATE stream")
+    return out
+
+
+def frame(msg_id: int, payload: bytes, mtu: int = DEFAULT_MTU, compressed: bool = False) -> list[bytes]:
+    """Split one message into notification values, each <= mtu - 3 bytes. compressed: payload is deflate()d
+    (FLAG_Z on every chunk)."""
     size = chunk_payload_size(mtu)
     n = max(1, math.ceil(len(payload) / size))
     if n > MAX_CHUNKS:
@@ -71,7 +97,7 @@ def frame(msg_id: int, payload: bytes, mtu: int = DEFAULT_MTU) -> list[bytes]:
     mid = msg_id & 0xFF
     out = []
     for i in range(n):
-        flags = FLAG_FINAL if i == n - 1 else 0
+        flags = (FLAG_FINAL if i == n - 1 else 0) | (FLAG_Z if compressed else 0)
         out.append(bytes((mid, i, flags)) + payload[i * size:(i + 1) * size])
     return out
 
@@ -97,8 +123,11 @@ class Reassembler:
         self.next_index = 0
         self.parts: list[bytes] = []
         self.size = 0
-        self.dropped = 0             # messages abandoned (new id before FINAL, gap, overflow)
+        self.dropped = 0             # messages abandoned (new id before FINAL, gap, overflow, bad DEFLATE)
         self.completed = 0
+        self.compressed = 0          # completed messages that came deflated
+        self.chunks = 0              # notification values fed
+        self.z = False               # the message in progress is deflated
 
     def _reset(self) -> None:
         self.msg_id, self.next_index, self.parts, self.size = None, 0, [], 0
@@ -108,6 +137,7 @@ class Reassembler:
             mid, idx, final, payload = parse_header(value)
         except ValueError:
             return None
+        self.chunks += 1
         if self.msg_id is not None and mid != self.msg_id:
             self.dropped += 1                      # new message before the old one finished
             self._reset()
@@ -116,6 +146,7 @@ class Reassembler:
                 self.dropped += 1
             self._reset()
             self.msg_id = mid
+            self.z = bool(value[2] & FLAG_Z)
         elif self.msg_id != mid or idx != self.next_index:
             if self.msg_id is not None:
                 self.dropped += 1
@@ -129,8 +160,15 @@ class Reassembler:
             self._reset()
             return None
         if final:
-            msg = b"".join(self.parts)
+            msg, z = b"".join(self.parts), self.z
             self._reset()
+            if z:
+                try:
+                    msg = inflate(msg)
+                except ValueError:
+                    self.dropped += 1
+                    return None
+                self.compressed += 1
             self.completed += 1
             return msg
         return None
@@ -155,6 +193,21 @@ def parse_voice(value: bytes) -> Optional[dict]:
     if not isinstance(v, dict):
         return None
     return {"engine": v.get("e"), "grok_voice": v.get("v"), "speed": v.get("s")}
+
+
+def parse_hello(value: bytes) -> Optional[dict]:
+    """The phone's hello on connect ({"hello": {"z": 1}}, PROTOCOL.md 5c) -> {"z": bool: it inflates FLAG_Z
+    messages}, or None when the write is not one."""
+    if len(value) > MAX_QUESTION_BYTES:
+        return None
+    try:
+        obj = json.loads(bytes(value).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    h = obj.get("hello") if isinstance(obj, dict) else None
+    if not isinstance(h, dict):
+        return None
+    return {"z": h.get("z") in (1, True)}
 
 
 def parse_orient(value: bytes) -> Optional[dict]:
@@ -295,6 +348,7 @@ def _conf2(v: Any) -> Optional[float]:
     return round(float(v), 2)
 
 
+REGISTRY_STATES = ("visible", "hidden", "carried", "last_seen", "unknown")   # core/permanence.py
 NOT_OBJECT = "not an object"          # core/grok_check.py NOT_OBJECT: the belief's clutter label
 
 
@@ -367,6 +421,11 @@ def compact_entity(e: dict, view: Optional[dict] = None) -> dict:
     ls = _r1(e.get("last_seen"))
     if ls is not None:
         out["ls"] = ls
+    reg = e.get("registry")                                # object permanence (spec 0011): the registry's state
+    if isinstance(reg, dict) and reg.get("state") in REGISTRY_STATES:
+        out["rg"] = str(reg["state"])
+        if reg.get("tentative"):
+            out["rt"] = 1
     return out
 
 
@@ -376,8 +435,8 @@ STALE_THING_S = 600.0
 def _stale_thing(e: dict, now: float) -> bool:
     """An unnamed thing:N that is GONE / UNKNOWN and was last seen over STALE_THING_S ago: clutter on
     the phone, so it is left out. Named things and configured objects are always sent."""
-    if not str(e.get("name")).startswith("thing:") or e.get("aliases"):
-        return False
+    if not str(e.get("name")).startswith("thing:") or e.get("aliases") or isinstance(e.get("registry"), dict):
+        return False                                       # named, configured, or in the registry: always sent
     if str(e.get("status") or "UNKNOWN") not in ("GONE", "UNKNOWN"):
         return False
     ls = _r1(e.get("last_seen"))
@@ -411,6 +470,41 @@ def compact_state(state: Optional[dict], table_cm: tuple, now: float, view: Opti
     return out
 
 
+STATE_MAX_BYTES = 12_000
+
+
+def _cut_rank(e: dict) -> tuple:
+    """Which entity goes first when a state is over budget (lower first): unnamed things, then ones with only
+    a guess, each lost or gone first, then hidden, then visible, oldest first; named things, configured
+    objects and registry objects only after all of them."""
+    thing = str(e.get("n", "")).startswith("thing:")
+    named = not thing or bool(e.get("a")) or "rg" in e      # configured, taught or in the registry
+    tier = 2 if named else 1 if e.get("g") else 0           # a Grok guess alone doesn't protect a duplicate
+    status = {"X": 0, "G": 0, "U": 1, "I": 1, "H": 2, "V": 2}.get(e.get("s"), 0)
+    return (tier, status, float(e.get("ls") or 0.0))
+
+
+def cap_state(msg: dict, max_bytes: int = STATE_MAX_BYTES) -> dict:
+    """A state notification no bigger than max_bytes of JSON: the least useful entities (_cut_rank) are
+    left out and "more" says how many (the phone can say "and N more"). Keeps the link from carrying
+    100 duplicate things at 1.5 Hz (rig, 27 Sep: 28 KB states, the phone dropped every minute)."""
+    if len(dumps(msg)) <= max_bytes:
+        return msg
+    ents = list(msg.get("e") or [])
+    order = sorted(range(len(ents)), key=lambda i: _cut_rank(ents[i]))
+    sizes = [len(dumps(e)) + 1 for e in ents]
+    over = len(dumps(msg)) - max_bytes + 16          # room for "more"
+    drop = set()
+    for i in order:
+        if over <= 0:
+            break
+        drop.add(i)
+        over -= sizes[i]
+    out = dict(msg, e=[e for i, e in enumerate(ents) if i not in drop])
+    out["more"] = len(drop)
+    return out
+
+
 POS_DEADBAND_CM = 0.5
 CONF_DEADBAND = 0.05
 
@@ -429,7 +523,7 @@ def state_changed(prev: Optional[dict], cur: dict) -> bool:
     0.05)."""
     if prev is None:
         return True
-    for k in ("table", "online", "laser", "view"):
+    for k in ("table", "online", "laser", "view", "lh"):
         if prev.get(k) != cur.get(k):
             return True
     pe = {e["n"]: e for e in prev.get("e", [])}
@@ -438,7 +532,7 @@ def state_changed(prev: Optional[dict], cur: dict) -> bool:
         return True
     for n, c in ce.items():
         p = pe[n]
-        for k in ("k", "s", "p", "edge", "a", "m", "g", "as"):
+        for k in ("k", "s", "p", "edge", "a", "m", "g", "as", "rg", "rt"):
             if p.get(k) != c.get(k):
                 return True
         if _moved(p.get("xy"), c.get("xy")) or _moved(p.get("r"), c.get("r")):
@@ -500,6 +594,13 @@ class Outbox:
             q[:] = keep
         q.append(list(chunks))
 
+    def peek(self) -> Optional[bytes]:
+        """The chunk pop(1) would return next, or None."""
+        for c in self.ORDER:
+            if self.queues[c]:
+                return self.queues[c][0][0]
+        return None
+
     def pending(self, char: Optional[str] = None) -> int:
         chars = [char] if char else list(self.ORDER)
         return sum(len(m) for c in chars for m in self.queues[c])
@@ -522,6 +623,39 @@ class Outbox:
             if len(out) >= n:
                 break
         return out
+
+
+class Pacer:
+    """A token bucket over notification bytes: the pump sends a chunk only when take(len) allows it, so
+    chunks leave at the link's pace instead of piling up unbounded inside bluetoothd, where no newer
+    state can replace them (the Outbox's latest-wins only works on what is still ours)."""
+
+    def __init__(self, rate_bps: float, burst: float, clock: Callable[[], float]):
+        self.rate, self.burst, self.clock = float(rate_bps), float(burst), clock
+        self.tokens, self.t = float(burst), clock()
+
+    def take(self, n: int) -> bool:
+        now = self.clock()
+        self.tokens = min(self.burst, self.tokens + (now - self.t) * self.rate)
+        self.t = now
+        if self.tokens < n:
+            return False
+        self.tokens -= n
+        return True
+
+
+def pump(outbox: "Outbox", pacer: Pacer, send: Callable[[str, bytes], None], limit: int) -> int:
+    """One pump tick: at most `limit` chunks, each only when the pacer allows its bytes, in the Outbox's
+    priority order; send(char, value) notifies. Returns how many chunks left the Outbox."""
+    n = 0
+    while n < limit:
+        nxt = outbox.peek()
+        if nxt is None or not pacer.take(len(nxt)):
+            break
+        (char, value), = outbox.pop(1)
+        send(char, value)
+        n += 1
+    return n
 
 
 class MsgCounter:

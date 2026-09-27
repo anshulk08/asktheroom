@@ -27,7 +27,7 @@ final class ModelsTests: XCTestCase {
     func testDisplayNames() {
         XCTAssertEqual(Entity.displayName(for: "pill_bottle"), "pill bottle")
         XCTAssertEqual(Entity.displayName(for: "thing:7", aliases: ["my charger"]), "my charger")
-        XCTAssertEqual(Entity.displayName(for: "thing:9"), "unnamed object 9")
+        XCTAssertEqual(Entity.displayName(for: "thing:9"), "something new")
     }
 
     private func thing(_ fields: String) throws -> Entity {
@@ -55,18 +55,41 @@ final class ModelsTests: XCTestCase {
         let e = try thing(#","g":"apple","gc":0.5"#)
         XCTAssertEqual(e.displayName, "apple?")
         XCTAssertEqual(e.phrase, "what looks like an apple")
-        XCTAssertEqual(e.thingNumber, "7")
         // Older bridges send no `gc`: 0.6 is enough.
         XCTAssertEqual(try thing(#","g":"cup""#).displayName, "cup?")
     }
 
-    func testWeakOrMissingGuessStaysUnnamed() throws {
+    func testWeakOrMissingGuessIsSomethingNew() throws {
         for fields in [#","g":"cup","gc":0.3"#, "", #","g":"","gc":0.9"#] {
             let e = try thing(fields)
             XCTAssertFalse(e.isHedged, fields)
             XCTAssertTrue(e.isNameless, fields)
-            XCTAssertEqual(e.displayName, "unnamed object 7", fields)
+            XCTAssertEqual(e.displayName, "something new", fields)
+            XCTAssertEqual(e.phrase, "something new", fields)
         }
+    }
+
+    /// The number is the rig's bookkeeping; the person never sees it.
+    func testNamelessThingNeverShowsItsNumber() throws {
+        let e = try thing("")
+        XCTAssertEqual(e.displayName, "something new")
+        XCTAssertNil(e.displayName.rangeOfCharacter(from: .decimalDigits))
+        XCTAssertNil(Entity.displayName(for: "thing:123").rangeOfCharacter(from: .decimalDigits))
+
+        let weak = try thing(#","g":"pill bottle","gc":0.3"#)
+        XCTAssertTrue(weak.isNameless)
+        XCTAssertEqual(weak.displayName, "something new")
+        let confident = try thing(#","g":"pill bottle","gc":0.8"#)
+        XCTAssertFalse(confident.isNameless)
+        XCTAssertEqual(confident.displayName, "pill bottle?")
+    }
+
+    func testKnownMatchesLeaveOutNamelessAndMissingThings() {
+        var s = MockData.sampleSnapshot
+        s.update("thing:9") { $0.m = [MaybeSame(name: "thing:4", score: 0.9), MaybeSame(name: "thing:13", score: 0.8),
+                                      MaybeSame(name: "thing:7", score: 0.7), MaybeSame(name: "thing:11", score: 0.6)] }
+        s.e.append(Entity(n: "thing:13", k: .target, s: .visible, xy: TablePoint(x: 5, y: 5)))
+        XCTAssertEqual(s.knownMatches(of: s.entity(named: "thing:9")!).map(\.name), ["thing:7", "thing:11"])
     }
 
     func testNamedTargetsIgnoreGuesses() throws {
@@ -165,5 +188,214 @@ final class ModelsTests: XCTestCase {
         let long = try XCTUnwrap(Question(id: 65535, q: String(repeating: "é", count: 300)).encoded())
         XCTAssertLessThanOrEqual(long.count, Question.maxBytes)
         XCTAssertNotNil(Wire.decode(Question.self, from: long))
+    }
+
+    // MARK: the rig's speaker and the helper's voice (PROTOCOL.md 5a, 8)
+
+    func testRigSpeaksOnlyWhenTheAppIsUpAndTheSpeakerIsOn() throws {
+        func status(_ json: String) throws -> RigStatus {
+            try XCTUnwrap(Wire.decode(RigStatus.self, from: Data(json.utf8)))
+        }
+        XCTAssertTrue(try status(#"{"app":"up","fps":12.0,"online":true,"cal":true,"laser_cal":false,"gk":true,"spk":true}"#).rigSpeaks)
+        XCTAssertFalse(try status(#"{"app":"up","spk":false}"#).rigSpeaks)
+        XCTAssertFalse(try status(#"{"app":"down","spk":true}"#).rigSpeaks)
+        XCTAssertFalse(try status(#"{"app":"up","fps":12.0}"#).rigSpeaks)          // an older rig
+    }
+
+    func testVoiceSettingsAreOneShortWriteTheRigReads() throws {
+        let data = try XCTUnwrap(VoiceSettings(voice: .init(e: "rigVoice", v: "ara", s: 1.1)).encoded())
+        XCTAssertEqual(String(decoding: data, as: UTF8.self), #"{"voice":{"e":"rigVoice","s":1.1,"v":"ara"}}"#)
+        XCTAssertLessThanOrEqual(data.count, Question.maxBytes)
+        XCTAssertNil(VoiceSettings(voice: .init(e: "grok", v: String(repeating: "x", count: 300), s: 1)).encoded())
+    }
+
+    // MARK: where the person sits (the "view" key and the orient write)
+
+    func testViewDecodesFromTheSample() throws {
+        let snap = try XCTUnwrap(Wire.decode(Snapshot.self, from: Data(MockData.sampleSnapshotJSON.utf8)))
+        let view = try XCTUnwrap(snap.view)
+        XCTAssertEqual(view, ViewInfo(front: .right, outline: true, sides: [.right: "couch"]))
+        XCTAssertEqual(view.name(at: .bottom), "couch", "the couch is where the person sits")
+        XCTAssertNil(view.name(at: .top))
+        XCTAssertEqual(view.viewerEdge(of: .right), .bottom)
+    }
+
+    func testOlderRigsSendNoView() throws {
+        let snap = try XCTUnwrap(Wire.decode(Snapshot.self, from: Data(#"{"v":1,"table":[90,60],"e":[]}"#.utf8)))
+        XCTAssertNil(snap.view)
+    }
+
+    func testViewIsTolerant() throws {
+        let odd = #"{"e":[],"view":{"f":"diagonal","s":{"upstairs":"x","left":"window"}}}"#
+        let view = try XCTUnwrap(Wire.decode(Snapshot.self, from: Data(odd.utf8))?.view)
+        XCTAssertEqual(view.front, .bottom, "an unknown side reads as the camera's own")
+        XCTAssertFalse(view.outline)
+        XCTAssertEqual(view.sides, [.left: "window"])
+
+        let bare = try XCTUnwrap(Wire.decode(Snapshot.self, from: Data(#"{"e":[],"view":{"f":"top"}}"#.utf8))?.view)
+        XCTAssertEqual(bare, ViewInfo(front: .top))
+    }
+
+    /// The saved map keeps its view.
+    func testViewSurvivesSavingTheMap() throws {
+        let snap = MockData.sampleSnapshot
+        let again = try JSONDecoder().decode(Snapshot.self, from: try JSONEncoder().encode(snap))
+        XCTAssertEqual(again, snap)
+        XCTAssertNotNil(again.view)
+    }
+
+    /// The rig's camera to viewer table, per front, written out in full.
+    private let rigTable: [Side: [Side: Edge]] = [
+        .bottom: [.left: .left, .right: .right, .top: .top, .bottom: .bottom],
+        .top: [.left: .right, .right: .left, .top: .bottom, .bottom: .top],
+        .right: [.right: .bottom, .left: .top, .bottom: .left, .top: .right],
+        .left: [.left: .bottom, .right: .top, .top: .left, .bottom: .right],
+    ]
+
+    func testCameraSidesTurnLikeTheRigsTable() {
+        for front in Side.allCases {
+            for side in Side.allCases {
+                XCTAssertEqual(Seat.viewerEdge(of: side, front: front), rigTable[front]![side]!, "\(side) sitting at \(front)")
+            }
+        }
+    }
+
+    func testViewerEdgesTurnBackToCameraSides() {
+        for front in Side.allCases {
+            for (side, edge) in rigTable[front]! {
+                XCTAssertEqual(Seat.cameraSide(at: edge, front: front), side, "\(edge) sitting at \(front)")
+            }
+        }
+    }
+
+    func testTurningIsARoundTripAndTheSeatIsAlwaysAtTheBottom() {
+        for front in Side.allCases {
+            XCTAssertEqual(Seat.viewerEdge(of: front, front: front), .bottom)
+            XCTAssertEqual(Seat.cameraSide(at: .bottom, front: front), front)
+            for edge in Edge.allCases {
+                XCTAssertEqual(Seat.viewerEdge(of: Seat.cameraSide(at: edge, front: front), front: front), edge)
+                XCTAssertEqual(Seat.cameraSide(at: Seat.viewerEdge(of: edge, front: front), front: front), edge)
+            }
+            XCTAssertEqual(Set(Edge.allCases.map { Seat.cameraSide(at: $0, front: front) }), Set(Side.allCases))
+        }
+    }
+
+    func testOrientIsOneShortWriteTheRigReads() throws {
+        let data = try XCTUnwrap(OrientSettings(front: .right).encoded())
+        XCTAssertEqual(String(decoding: data, as: UTF8.self), #"{"orient":{"front":"right"}}"#)
+        XCTAssertEqual(OrientSettings(front: .left).front, .left)
+    }
+
+    /// The reset must carry an explicit null: a missing key isn't a reset.
+    func testResetSendsAnExplicitNull() throws {
+        let data = try XCTUnwrap(OrientSettings.reset.encoded())
+        XCTAssertEqual(String(decoding: data, as: UTF8.self), #"{"orient":{"front":null}}"#)
+        XCTAssertEqual(data.count, 25)
+        XCTAssertNil(OrientSettings.reset.front)
+        let parsed = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: [String: Any]])
+        XCTAssertTrue(parsed["orient"]?["front"] is NSNull)
+    }
+
+    private func clearSeat() {
+        UserDefaults.standard.removeObject(forKey: Seat.savedKey)
+        UserDefaults.standard.removeObject(forKey: Seat.resetKey)
+    }
+
+    func testSavedSeatIsACameraSideAndGoesOnEveryConnect() {
+        clearSeat()
+        defer { clearSeat() }
+        XCTAssertNil(Seat.savedOrient, "never chosen: the rig's default applies")
+        XCTAssertNil(Seat.orientForConnect())
+        Seat.choose(.top)
+        XCTAssertEqual(Seat.saved, .top)
+        XCTAssertEqual(Seat.savedOrient, OrientSettings(front: .top))
+        XCTAssertEqual(Seat.orientForConnect(), OrientSettings(front: .top))
+        XCTAssertEqual(Seat.orientForConnect(), OrientSettings(front: .top), "again on the next connect")
+    }
+
+    /// Back to the default: a reset now and on the next connect, then nothing.
+    func testResetGoesOutOnOneConnectThenNothing() {
+        clearSeat()
+        defer { clearSeat() }
+        Seat.choose(.left)
+        Seat.choose(nil)
+        XCTAssertNil(Seat.saved)
+        XCTAssertEqual(Seat.savedOrient, .reset, "sent when picked")
+        XCTAssertEqual(Seat.orientForConnect(), .reset, "and on the next connect")
+        XCTAssertNil(Seat.orientForConnect(), "then forgotten")
+        XCTAssertNil(Seat.savedOrient)
+        Seat.choose(nil)
+        Seat.choose(.bottom)
+        XCTAssertEqual(Seat.orientForConnect(), OrientSettings(front: .bottom), "a new seat cancels an owed reset")
+    }
+
+    /// `s` is keyed by camera side, like `f`: it lands wherever that side is on the turned map.
+    func testSideNamesAreKeyedByCameraSide() throws {
+        func view(_ f: String) throws -> ViewInfo {
+            let json = #"{"e":[],"view":{"f":"\#(f)","o":true,"s":{"right":"couch"}}}"#
+            return try XCTUnwrap(Wire.decode(Snapshot.self, from: Data(json.utf8))?.view)
+        }
+        XCTAssertEqual(try view("right").name(at: .bottom), "couch", "on the couch: 'You · Couch'")
+        XCTAssertEqual(try view("top").name(at: .left), "couch")
+        XCTAssertEqual(try view("left").name(at: .top), "couch")
+        XCTAssertEqual(try view("bottom").name(at: .right), "couch")
+        for f in ["right", "top", "left", "bottom"] {
+            XCTAssertEqual(Edge.allCases.compactMap { try? view(f).name(at: $0) }, ["couch"], f)
+        }
+    }
+
+    // MARK: Link additions
+
+    func testStateTxIsOptional() throws {
+        let with = try XCTUnwrap(Wire.decode(Snapshot.self, from: Data(#"{"e":[],"tx":812}"#.utf8)))
+        XCTAssertEqual(with.tx, 812)
+        let without = try XCTUnwrap(Wire.decode(Snapshot.self, from: Data(#"{"e":[]}"#.utf8)))
+        XCTAssertNil(without.tx)
+        XCTAssertNil(try XCTUnwrap(Wire.decode(Snapshot.self, from: Data(MockData.sampleSnapshotJSON.utf8))).tx)
+    }
+
+    func testHelloBytesAreExact() throws {
+        let data = try XCTUnwrap(Hello.current.encoded())
+        XCTAssertEqual(String(decoding: data, as: UTF8.self), #"{"hello":{"z":1}}"#)
+        XCTAssertEqual(data, Data(#"{"hello":{"z":1}}"#.utf8))
+    }
+
+    func testLayoutAndHashDecode() throws {
+        let json = #"""
+        {"e":[],"lh":"a1b2c3","lay":{"v":1,"size":[400,300],"front":"right",
+         "table":{"rect":[150,100,90,60],"origin":[150,100]},
+         "zones":[{"id":"door","say":"the door","rect":[0,0,40,10],"kind":"door"}],
+         "you":[200,280]}}
+        """#
+        let snap = try XCTUnwrap(Wire.decode(Snapshot.self, from: Data(json.utf8)))
+        XCTAssertEqual(snap.lh, "a1b2c3")
+        let lay = try XCTUnwrap(snap.lay)
+        XCTAssertEqual(lay.v, 1)
+        XCTAssertEqual(lay.size, [400, 300])
+        XCTAssertEqual(lay.front, "right")
+        XCTAssertEqual(lay.table, RoomLayout.Table(rect: [150, 100, 90, 60], origin: [150, 100]))
+        XCTAssertEqual(lay.zones, [RoomLayout.Zone(id: "door", say: "the door", rect: [0, 0, 40, 10], kind: "door")])
+        XCTAssertEqual(lay.you, [200, 280])
+
+        let plain = try XCTUnwrap(Wire.decode(Snapshot.self, from: Data(#"{"e":[]}"#.utf8)))
+        XCTAssertNil(plain.lh)
+        XCTAssertNil(plain.lay)
+    }
+
+    /// A layout with odd fields mustn't cost the whole state message.
+    func testLayoutIsTolerant() throws {
+        let json = #"{"e":[{"n":"keys","k":"t","s":"V"}],"lh":"x","lay":{"v":"one","size":[1,"b"],"front":3,"table":[],"zones":[{"id":7,"say":"sofa"},5],"you":null,"extra":{}}}"#
+        let snap = try XCTUnwrap(Wire.decode(Snapshot.self, from: Data(json.utf8)))
+        XCTAssertEqual(snap.entities.count, 1)
+        let lay = try XCTUnwrap(snap.lay)
+        XCTAssertNil(lay.v)
+        XCTAssertNil(lay.size)
+        XCTAssertNil(lay.front)
+        XCTAssertEqual(lay.table, RoomLayout.Table())
+        XCTAssertEqual(lay.zones, [RoomLayout.Zone(say: "sofa"), RoomLayout.Zone()])
+        XCTAssertNil(lay.you)
+
+        let notAnObject = try XCTUnwrap(Wire.decode(Snapshot.self, from: Data(#"{"e":[],"lay":"soon"}"#.utf8)))
+        XCTAssertEqual(notAnObject.lay, RoomLayout())
     }
 }

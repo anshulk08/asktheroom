@@ -1,11 +1,12 @@
 import SwiftUI
 
 /// Connect until the rig first connects, then Room for everything else (spec section 5).
+/// With a map saved from last time, the app opens straight on it while it finds the rig.
 struct RootView: View {
     let store: RoomStore
 
     var body: some View {
-        if store.isMock || store.hasConnected {
+        if store.isMock || store.hasConnected || store.snapshot != nil {
             MainView(store: store)
         } else {
             ConnectView(store: store)
@@ -45,7 +46,7 @@ struct RoomView: View {
 
             if let snapshot = store.snapshot {
                 TableMapView(snapshot: snapshot, highlight: store.highlight,
-                             greyed: store.isRoomAppDown, selected: selected) { name in
+                             greyed: store.isRoomAppDown || store.isMapStale, selected: selected) { name in
                     selected = selected == name ? nil : name
                 }
                 .padding(.horizontal, 4)
@@ -221,6 +222,10 @@ struct Banners: View {
             default:
                 EmptyView()
             }
+            if store.isMapStale, let time = store.snapshot?.time {
+                Banner(icon: "clock.arrow.circlepath", tint: .secondary,
+                       text: "This is the map from \(Banners.when(time)). It updates when the room is back in reach.")
+            }
             if store.isRoomAppDown {
                 Banner(icon: "exclamationmark.triangle", tint: .secondary,
                        text: "The room app isn't running. The map may be out of date.")
@@ -228,6 +233,13 @@ struct Banners: View {
                 Banner(icon: "icloud.slash", tint: .secondary, text: "Offline: using the on-device voice.")
             }
         }
+    }
+
+    /// "1:05 PM" today, "Friday 1:05 PM" before that.
+    static func when(_ date: Date, now: Date = Date(), calendar: Calendar = .current) -> String {
+        calendar.isDate(date, inSameDayAs: now)
+            ? date.formatted(.dateTime.hour().minute())
+            : date.formatted(.dateTime.weekday(.wide).hour().minute())
     }
 }
 
@@ -378,10 +390,9 @@ struct EntityDetailView: View {
                                 }
                             }
                         }
-                        if let guess = entity.hedgedName, let number = entity.thingNumber {
+                        if let guess = entity.hedgedName {
                             Section("Not named yet") {
                                 LabeledContent("Looks like", value: guess)
-                                LabeledContent("Object", value: number)
                             }
                         }
                         if !entity.aliases.isEmpty {
@@ -389,9 +400,10 @@ struct EntityDetailView: View {
                                 ForEach(entity.aliases, id: \.self) { Text($0) }
                             }
                         }
-                        if !entity.maybeSameAs.isEmpty {
+                        let matches = snapshot.knownMatches(of: entity)
+                        if !matches.isEmpty {
                             Section("Might be") {
-                                ForEach(entity.maybeSameAs, id: \.name) { m in
+                                ForEach(matches, id: \.name) { m in
                                     LabeledContent(snapshot.entity(named: m.name)?.displayName ?? Entity.displayName(for: m.name),
                                                    value: "\(Int((m.score * 100).rounded()))% alike")
                                 }

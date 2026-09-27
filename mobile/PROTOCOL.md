@@ -64,9 +64,15 @@ than the one it assumed, it resends the state snapshot, because the earlier one 
 ```
 byte 0     msg_id        u8   per characteristic; +1 per message, wraps 255 → 0
 byte 1     chunk_index   u8   0, 1, 2, … within this message
-byte 2     flags         u8   bit0 = FINAL (last chunk of the message); bits 1–7 are 0
-byte 3..   payload            UTF-8 JSON bytes, ≤ MTU − 6 per chunk
+byte 2     flags         u8   bit0 = FINAL (last chunk of the message); bit1 = COMPRESSED; bits 2–7 are 0
+byte 3..   payload            UTF-8 JSON bytes (or, COMPRESSED, raw DEFLATE bytes), ≤ MTU − 6 per chunk
 ```
+
+- **COMPRESSED** (bit1) is set on every chunk of a message whose concatenated payload is raw DEFLATE
+  (RFC 1951, no zlib header: Apple's `.zlib`, Python `zlib.compressobj(9, zlib.DEFLATED, -15)`) of the JSON.
+  Inflate, then decode and parse. The bridge compresses only once every connected central has said
+  `{"hello": {"z": 1}}` (5c), and only when it makes the message smaller. A message that doesn't inflate is
+  dropped like a gap.
 
 - A message has 1 to 256 chunks. An empty or short message is a single chunk with FINAL set.
 - The JSON is split on byte boundaries, which can fall inside a multi-byte UTF-8 character. Concatenate
@@ -162,6 +168,17 @@ Example: a 100 × 60 cm camera table, `front: right`: the user's `table` is `[60
 view's top-right point (90, 5) is at (55, 90), near the user on their right. With a tabletop outline
 (`table_area.json`) the user's table is the outline's enclosing rectangle, squared to it; the affine `m` in
 `GET /state` `"view"` does both, and the bridge applies it.
+
+## 5c. hello (write to question)
+
+```json
+{"hello": {"z": 1}}
+```
+
+The phone writes this first on every connect (after reading status). `z: 1`: it inflates COMPRESSED
+messages (section 4). No answer comes back; the bridge re-sends the state snapshot compressed. A central
+that never says hello (an older app) gets plain JSON, and while it is connected nobody gets compressed
+messages (notifications go to every subscriber alike).
 
 ## 6. answer (notify)
 
@@ -264,6 +281,12 @@ is kept). Named things and the configured objects are always sent. When a stale 
 | `e[].gc` | float | the confidence of `g`, 0–1, 2 decimals. Only with `g`, and only when the server gave a number |
 | `e[].as` | `grok` | `a[0]` was bound automatically by the Grok settle check, not taught by a person. Show it, but as the rig's name ("stapler (named by Grok)"). Absent: taught. Things only, optional |
 | `e[].ls` | float | last-seen wall time (Unix s, 1 decimal) |
+| `e[].rg` | str | object permanence (spec 0011, `permanence.mode: registry`): the registry's state, `visible`/`hidden`/`carried`/`last_seen`/`unknown`. A registry object is never cut from a capped state. Optional |
+| `e[].rt` | 1 | the registry found it by a re-find (Grok), not by appearance alone: tentative. Optional |
+| `tx` | int | state chunks the bridge sent before this message. Between two states, `tx` grows by the chunks sent; the phone compares that with the chunks it received for its "lost" count |
+| `more` | int | entities left out to keep the message under the bridge's cap (`--state-max`, 12 KB of JSON): unnamed things first (those with only a guess next), lost or gone before hidden before visible, oldest first; named, configured and registry objects last. Optional |
+| `lh` | str | the room layout's hash (`GET /room_layout`, the room map from the user's seat). Absent: no room map |
+| `lay` | object | the room layout itself, `{"v", "size": [W, H], "front", "table": {"rect", "origin"}, "zones": [{"id", "say", "rect", "kind"}], "you": [x, y]}` in the user's frame. Sent on subscribe and when `lh` changes; keep the last one |
 
 Keys whose value is null are **omitted**, except `n`, `k` and `s`. Unknown extra keys may appear in later
 versions and must be ignored. Measured sizes: the live rig with 8 untracked objects is 414 B (3 chunks at
@@ -297,9 +320,10 @@ growing past that.
 | What | Target |
 |---|---|
 | answer | notified as soon as `/ask` returns. Offline template answers take about 10–60 ms on the rig; Grok answers about what the camera sees take about 1–2 s; the bridge gives up at 12 s |
-| state | ≤ 2 Hz, heartbeat 5 s, 1–16 chunks |
+| state | ≤ 2 Hz, heartbeat 5 s, 1–16 chunks (compressed); a new state waits until the last has gone out |
 | status | on change, ≤ 1 Hz |
-| queueing | the bridge sends notifications in priority order answer > status > state, 4 chunks per 5 ms tick. A newer state or status replaces a queued one that hasn't started sending; a message already partly sent is always finished |
+| queueing | the bridge sends notifications in priority order answer > status > state, paced to 8 KB/s (`--rate`, a 2 KB burst): bluetoothd queues notifications without limit, and the old unpaced pump (4 chunks per 5 ms, 28 KB states at 1.5 Hz on 27 Sep) filled it until the phone went 15 s without a chunk and reconnected. A newer state or status replaces a queued one that hasn't started sending; a message already partly sent is always finished |
+| link check | `mobile/bridge/test_client.py --soak 180` from a Mac: chunks lost (from `tx`), dropped partials, longest silence; the bridge log's `alive:` line every 10 s while subscribed: chunks notified per characteristic, B/s, queued, replaced, deferred, notify errors, wire/raw ratio |
 
 ## 10. Rig-specific: Realtek controller workaround
 

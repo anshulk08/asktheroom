@@ -15,6 +15,7 @@ import Foundation
 ///   -mockTab table     open on the Table (or `recent`) tab rather than Home
 ///   -mockScroll YES    scroll Home to the bottom
 ///   -mockSettings YES  open helper settings
+///   -mockConnection YES  with -mockSettings: open the Connection section (link diagnostics)
 ///   -mockIconPicker YES  with -mockSelect: open the picture picker over the detail sheet
 ///   -mockIcons "remote=📺"  show these pictures instead of the usual ones (not saved)
 ///   -mockNotice "text" a second after launch, the rig fires this reminder about the pill bottle
@@ -23,6 +24,10 @@ final class MockRoom: RoomTransport {
     static let stepInterval: Duration = .seconds(5)
     static let laserOnFor: Duration = .seconds(5)
     static let answerDelay: Duration = .milliseconds(700)
+    /// The sample's seat, like a rig configured for the couch.
+    static let defaultFront: Side = .right
+    /// Like an iPhone on the rig's link.
+    static let mtu = 517
 
     private weak var store: RoomStore?
     private(set) var snapshot: Snapshot
@@ -30,12 +35,20 @@ final class MockRoom: RoomTransport {
     private var step = 0
     private var tasks: [Task<Void, Never>] = []
     private var laserTask: Task<Void, Never>?
+    /// State goes through compressed framing and back, like the rig's, and is counted for helper settings.
+    private var meter = LinkMeter()
+    private var msgID: UInt8 = 0
+    private var sentChunks = 0
 
     init(store: RoomStore, defaults: UserDefaults = .standard, autoplay: Bool = true) {
         self.store = store
         snapshot = Self.startingSnapshot()
         snapshot.online = !defaults.bool(forKey: "mockOffline")
+        if let front = defaults.string(forKey: Seat.savedKey).flatMap(Side.init(rawValue:)) {
+            snapshot.view?.front = front
+        }
 
+        meter.connected(mtu: Self.mtu)
         store.receive(status: RigStatus(
             app: defaults.bool(forKey: "mockAppDown") ? "down" : "up",
             fps: 15, online: snapshot.online, cal: true, laser_cal: true))
@@ -82,6 +95,13 @@ final class MockRoom: RoomTransport {
         }
         s.update("pill_bottle") { $0.ls = now.timeIntervalSince1970 - 25 * 60 }
         return s
+    }
+
+    /// Like the rig: no answer, just a fresh state facing the new seat (a reset goes back to the
+    /// sample's couch side). The pretend table isn't turned; only the side names move.
+    func send(orient: OrientSettings) {
+        snapshot.view?.front = orient.front ?? Self.defaultFront
+        publish()
     }
 
     func stop() {
@@ -149,7 +169,23 @@ final class MockRoom: RoomTransport {
     }
 
     private func publish() {
-        store?.receive(state: snapshot)
+        var sending = snapshot
+        sending.tx = sentChunks
+        guard let json = try? JSONEncoder().encode(sending) else {
+            store?.receive(state: snapshot)
+            return
+        }
+        let chunks = Framing.chunks(json, msgID: msgID, mtu: Self.mtu, compressed: true)
+        msgID &+= 1
+        sentChunks += chunks.count
+        let message = chunks.compactMap { meter.receive($0, on: .state) }.last
+        if let message, let state = Wire.decode(Snapshot.self, from: message.data) {
+            meter.stateDecoded(tx: state.tx, chunks: message.chunks)
+            store?.receive(state: state)
+        } else {
+            store?.receive(state: snapshot)
+        }
+        store?.receive(linkStats: meter.stats)
     }
 
     private func laserOff(after delay: Duration) {
@@ -235,7 +271,7 @@ final class MockRoom: RoomTransport {
     }
 
     private static func spokenName(_ e: Entity) -> String {
-        if e.kind != .target { return "the \(e.displayName)" }
+        if e.kind != .target { return the(e) }
         if e.isHedged { return e.phrase }
         if e.isThing {
             guard let alias = e.aliases.first else { return "that object" }
@@ -252,8 +288,13 @@ final class MockRoom: RoomTransport {
     private static func whereHidden(_ e: Entity, in snapshot: Snapshot) -> String {
         let chain = snapshot.chain(from: e.name)
         return zip(chain, chain.dropFirst())
-            .map { child, parent in "\(child.status == .under ? "under" : "inside") the \(parent.displayName)" }
+            .map { child, parent in "\(child.status == .under ? "under" : "inside") \(the(parent))" }
             .joined(separator: ", ")
+    }
+
+    /// "the box", but a nameless thing is just "something new".
+    private static func the(_ e: Entity) -> String {
+        e.isNameless ? e.displayName : "the \(e.displayName)"
     }
 
     private static func capitalized(_ s: String) -> String {
