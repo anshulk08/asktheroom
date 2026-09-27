@@ -24,7 +24,8 @@ from typing import Optional
 
 DegLimits = tuple[tuple[float, float], tuple[float, float]]
 # The firmware's own soft limits (MIN_DEG/MAX_DEG in firmware/turret/turret.ino).
-FIRMWARE_LIMITS_DEG: DegLimits = ((-90.0, 90.0), (-90.0, 90.0))
+FIRMWARE_LIMITS_DEG: DegLimits = ((-90.0, 90.0), (-90.0, -10.0))  # where the beam may be lit (turret.ino
+                                                                  # MIN_DEG / MAX_DEG and LASER_TILT_MAX_DEG)
 
 
 def head_axes(pan_deg, tilt_deg):

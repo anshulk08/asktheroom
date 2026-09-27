@@ -21,7 +21,8 @@
 // Safety: the laser is LOW from reset, and turns itself off
 //   - if no command arrives for LASER_TIMEOUT_MS (a host that wants it on sends P as a heartbeat),
 //   - LASER_MAX_ON_MS after it was switched on, heartbeat or not ("LASER MAX ON"; L 0 then L 1 re-lights),
-//   - on any ERR reply, and on X.
+//   - on any ERR reply, and on X,
+//   - whenever the tilt is (or is heading) above LASER_TILT_MAX_DEG: it can't be lit there ("LASER TILT").
 // A hardware watchdog resets the Uno (laser LOW again) if the loop ever stalls for WDT_TIMEOUT.
 // Wire a 10k pull-down on the laser switch's gate/base: during reset and the bootloader the pin floats.
 
@@ -46,7 +47,10 @@ const float MOTOR_STEPS_PER_REV = 200.0 * 16;
 const float GEAR_RATIO[2] = {4.0, 3.2};
 const bool  INVERT_DIR[2] = {true, true};    // + pans right, + tilts up
 const float MIN_DEG[2] = {-90, -90};   // the mount's travel: 90 deg each way on both axes
-const float MAX_DEG[2] = { 90,  90};
+const float MAX_DEG[2] = { 90,  90};   // the mount's travel: 90 deg each way on both axes
+// Eye safety: the head is mounted high and every target is below it, so the beam is never lit above this tilt
+// (0 = level: line the head up level and facing out before the port opens). Moving there dark (a park) is fine.
+const float LASER_TILT_MAX_DEG = -10;
 
 // ---- Motion -----------------------------------------------------------------
 const uint16_t TICK_HZ = 20000;             // step interrupt rate
@@ -213,7 +217,14 @@ void haltPulses() {
   moveActive = false;
 }
 
+bool tiltTooHigh() {                   // the head is, or is heading, above LASER_TILT_MAX_DEG
+  return stepsToDeg(1, readPos(1)) > LASER_TILT_MAX_DEG + 0.01 || stepsToDeg(1, readTgt(1)) > LASER_TILT_MAX_DEG + 0.01;
+}
+
 void setLaser(bool on) {
+  if (on && tiltTooHigh()) {
+    on = false;
+  }
   if (on && !laserOn) {
     laserOnSinceMs = millis();         // the max-on clock runs from off -> on; re-sending L 1 doesn't extend it
   }
@@ -323,6 +334,11 @@ void handleCommand(char *cmd) {
       if (n < 1) {
         setLaser(false);
         Serial.println(F("ERR L needs 0 or 1"));
+        return;
+      }
+      if (v[0] != 0 && tiltTooHigh()) {
+        setLaser(false);
+        Serial.println(F("ERR L above the laser tilt limit"));
         return;
       }
       setLaser(v[0] != 0);
@@ -488,6 +504,10 @@ void loop() {
   if (laserOn && millis() - lastCommandMs > LASER_TIMEOUT_MS) {
     setLaser(false);
     Serial.println(F("LASER TIMEOUT"));
+  }
+  if (laserOn && tiltTooHigh()) {       // a move (or a retarget) toward the no-beam zone
+    setLaser(false);
+    Serial.println(F("LASER TILT"));
   }
   if (laserOn && millis() - laserOnSinceMs > LASER_MAX_ON_MS) {
     setLaser(false);

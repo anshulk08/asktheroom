@@ -480,6 +480,15 @@ class Laser:
         return float(cm[0]), float(cm[1])
 
     def aim(self, target_cm: tuple, mode: str = "point", check=None) -> float:
+        """_aim, with the laser off if it raises mid-loop (the firmware's 1 s silence cut-off is the backstop)."""
+        try:
+            return self._aim(target_cm, mode, check)
+        except BaseException:
+            with contextlib.suppress(Exception):
+                self.act.laser(False)
+            raise
+
+    def _aim(self, target_cm: tuple, mode: str = "point", check=None) -> float:
         """Point at target_cm. mode 'point' closes the loop on the seen dot (<= 8 tries, stop < tol_cm);
         'open' just moves to the prediction and measures once. Only a dot within first_dot_cm of the
         target counts; if the first look misses, one whole-picture search (find_dot_wide) may find a
@@ -557,8 +566,17 @@ class Laser:
         self.state["target"] = name
         return err
 
-    def aim_px(self, target_px, box_px=None, *, room_map=None, n_pairs: Optional[int] = None,
-               tol_px: Optional[float] = None, check=None) -> PxAim:
+    def aim_px(self, target_px, box_px=None, **kw) -> PxAim:
+        """_aim_px, with the laser off if it raises mid-loop."""
+        try:
+            return self._aim_px(target_px, box_px, **kw)
+        except BaseException:
+            with contextlib.suppress(Exception):
+                self.act.laser(False)
+            raise
+
+    def _aim_px(self, target_px, box_px=None, *, room_map=None, n_pairs: Optional[int] = None,
+                tol_px: Optional[float] = None, check=None) -> PxAim:
         """Point at image pixel target_px anywhere in the room (spec 0006), with no depth: the dot seen
         inside the object's box is on the object. Feedforward from the room dot map, then a P step
         through the local pixel/pulse Jacobian, which a Broyden update corrects after every step

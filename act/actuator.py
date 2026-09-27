@@ -358,6 +358,14 @@ class TurretActuator(BaseActuator):
         self._turret = turret
         self._laser_unknown = False     # the last laser command failed: it may still be lit
         super().__init__(cfg, clock)
+        # Eye safety: the head is mounted high and the targets are below it; the beam never tilts above
+        # turret.tilt_max_deg (default 10 deg below level), whatever servo_limits allow.
+        (plo, phi), (tlo, thi) = self._limits
+        cap = self.deg_to_us(min(float(tc.get("tilt_max_deg", -10.0)), -10.0))   # never above the firmware's
+        if thi > cap:
+            if tlo >= cap:
+                raise ValueError(f"servo_limits tilt {(tlo, thi)} is all above turret.tilt_max_deg")
+            self._limits = ((plo, phi), (tlo, cap))       # type: ignore[assignment]
         if tc.get("max_speed_deg_s"):
             turret.speed(float(tc["max_speed_deg_s"]))
         if tc.get("accel_deg_s2"):

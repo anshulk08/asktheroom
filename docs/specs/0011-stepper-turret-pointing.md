@@ -6,7 +6,7 @@ Status (Sun Sep 27, ~3 AM EDT): the turret hardware, firmware, driver and pointi
 
 | Piece | Where | Checked how |
 |---|---|---|
-| Firmware: degrees over serial, both axes planned together (20 kHz Timer2 step ISR, trapezoidal moves, retarget mid-move), soft limits ±90° on both axes, laser on D8, 2 s laser watchdog | `firmware/turret/turret.ino` | Host simulation of the firmware (moves land on target, ≤5 microsteps of overshoot on long moves); bench runs |
+| Firmware: degrees over serial, both axes planned together (20 kHz Timer2 step ISR, trapezoidal moves, retarget mid-move), soft limits ±90° pan, ±90° tilt, the beam never lit above −10° tilt, laser on D8; laser off after 1 s without a command, 5 s after it was lit, on any ERR, and on a 500 ms watchdog reset | `firmware/turret/turret.ino` | Host simulation of the firmware (moves land on target, ≤5 microsteps of overshoot on long moves); bench runs |
 | Bring-up sketch | `firmware/servo42d_test/servo42d_test.ino` | Bench |
 | Wiring, driver settings, gear ratios, flashing, protocol | `firmware/README.md` | — |
 | Serial client, heartbeat keeps the laser on only while the host talks | `act/turret.py` | `tests/test_turret.py`; bench: the laser stayed on past the 2 s watchdog |

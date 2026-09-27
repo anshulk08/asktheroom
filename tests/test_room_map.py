@@ -428,3 +428,19 @@ def test_aim_px_stops_dark_at_the_on_time_budget(mapped, monkeypatch):
     r = laser.aim_px(center(rig.box_px("table")), room_map=rm, tol_px=0.01)
     assert r.reason == "budget" and not r.on_target and rig.act.laser_on is False
     assert laser.last_aim["lit_s"] >= 0.3
+
+
+def test_an_exception_mid_aim_leaves_the_laser_off(mapped, monkeypatch):
+    rig, laser, rm = mapped
+    looks = iter([(100.0, 100.0)])
+
+    def look(*a, **k):
+        laser.act.laser(True)
+        try:
+            return next(looks)
+        except StopIteration:
+            raise OSError("camera gone")
+    monkeypatch.setattr(laser, "find_dot_px", look)
+    with pytest.raises(OSError):
+        laser.aim_px(center(rig.box_px("table")), room_map=rm, tol_px=0.01)
+    assert rig.act.laser_on is False

@@ -49,7 +49,8 @@ class KnownGeometry(unittest.TestCase):
         self.assertFalse(solve_aim((0, -1, -0.1)).reachable)  # needs pan 180 (behind)
         self.assertFalse(solve_aim((-1, 0, -0.1)).reachable)  # needs about -96 deg pan
         self.assertTrue(solve_aim((0, -1, 0.1)).reachable)    # about -84 deg tilt: within -90
-        self.assertTrue(solve_aim((0.3, 0.1, 2)).reachable)
+        self.assertTrue(solve_aim((0.3, -0.5, 2)).reachable)
+        self.assertFalse(solve_aim((0.3, 0.1, 2)).reachable)  # above -10 deg: the firmware never tilts that high
 
 
 class Parallax(unittest.TestCase):

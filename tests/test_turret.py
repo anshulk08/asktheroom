@@ -14,11 +14,12 @@ from act.turret import Turret, TurretError
 
 class FakeBoard:
     """Line-level stand-in for the Uno running firmware/turret: moves finish instantly."""
-    LIMITS = ((-90.0, 90.0), (-90.0, 90.0))
+    LIMITS = ((-90.0, 90.0), (-90.0, 90.0))    # turret.ino MIN_DEG / MAX_DEG (travel)
+    LASER_TILT_MAX = -10.0                      # turret.ino LASER_TILT_MAX_DEG
 
     def __init__(self, boot: bytes = b"READY turret\n"):
         self.out = deque([boot] if boot else [])
-        self.pan = self.tilt = 0.0
+        self.pan, self.tilt = 0.0, -20.0     # aimed down already: only the tilt-rule test starts level
         self.laser = 0
         self.lines: list[str] = []
         self.closed = False
@@ -49,6 +50,10 @@ class FakeBoard:
                 self._say(f"OK A {self.pan:.2f} {self.tilt:.2f}")
                 self._say("DONE")
             elif op == "L":
+                if nums[0] != 0 and self.tilt > self.LASER_TILT_MAX:
+                    self.laser = 0
+                    self._say("ERR L above the laser tilt limit")
+                    continue
                 self.laser = int(nums[0] != 0)
                 self._say(f"OK L {self.laser}")
             elif op == "P":
@@ -99,10 +104,10 @@ def test_make_actuator_opens_the_port_through_pyserial(monkeypatch):
 
 def test_pulses_map_to_degrees():
     a, board = turret_act()
-    a.move(1600, 1450)
-    assert board.commands("A")[-1] == "A 10.000 -5.000"
-    assert (board.pan, board.tilt) == (10.0, -5.0)
-    assert (a.pan, a.tilt) == (1600.0, 1450.0)
+    a.move(1600, 1350)
+    assert board.commands("A")[-1] == "A 10.000 -15.000"
+    assert (board.pan, board.tilt) == (10.0, -15.0)
+    assert (a.pan, a.tilt) == (1600.0, 1350.0)
 
 
 def test_servo_limits_clamp_before_sending():
@@ -129,17 +134,17 @@ def test_us_per_deg_scales():
 
 def test_aim_deg_and_point_at():
     a, board = turret_act()
-    assert a.aim_deg(30, 15) == (30.0, 15.0)
-    assert a.point_at(1.0, 0.0, 1.0) == pytest.approx((45.0, 0.0))
-    assert a.point_at(0.0, 0.5, 1.0) == pytest.approx((0.0, 26.57), abs=0.01)
+    assert a.aim_deg(30, -15) == (30.0, -15.0)                        # below level: the tilt cap is -10
+    assert a.point_at(1.0, -0.5, 1.0) == pytest.approx((45.0, -19.47), abs=0.01)
+    assert a.point_at(0.0, -0.5, 1.0) == pytest.approx((0.0, -26.57), abs=0.01)
     with pytest.raises(ActuatorError):
         a.point_at(0.0, 0.0, -1.0)                    # behind: pan 180, outside servo_limits
 
 
 def test_point_at_corrects_for_the_laser_offset():
     a, board = turret_act(laser_offset_m=[0, 0.05, 0])
-    a.point_at(0.0, 0.0, 1.0)
-    assert board.tilt == pytest.approx(-2.87, abs=0.01)   # aims down to cancel 5 cm of parallax
+    a.point_at(0.0, -0.5, 1.0)                        # 5 cm of parallax: a bit lower than the straight -26.57
+    assert board.tilt < -26.57
 
 
 def test_laser_and_timeout():
@@ -183,10 +188,10 @@ class ErrLaserBoard(FakeBoard):
 def test_close_does_not_park_when_the_laser_off_fails(mode):
     """Swinging the head with the laser possibly lit could sweep it across someone's eyes."""
     a, board = turret_act(ErrLaserBoard(mode))
-    a.move(1800, 1600)
+    a.move(1800, 1350)
     with pytest.raises(IOError):
         a.close()
-    assert (board.pan, board.tilt) == (30.0, 10.0)    # not parked
+    assert (board.pan, board.tilt) == (30.0, -15.0)   # not parked
     assert board.closed
 
 
@@ -249,7 +254,8 @@ def test_a_reset_during_the_laser_on_exchange_switches_it_back_off():
     class ResetOnLaserBoard(FakeBoard):
         def write(self, data: bytes) -> None:
             if data == b"L 1\n":
-                self.reset()                      # the fresh board then takes the L 1
+                self.reset()                      # the fresh board then takes the L 1 ...
+                self.tilt = -20.0                 # ... (aimed down: the host's lockout, not the tilt rule)
             super().write(data)
 
     board = ResetOnLaserBoard()
@@ -313,3 +319,48 @@ def test_the_firmware_keeps_its_laser_safety():
     setup = src[src.index("void setup()"):]
     assert setup.index("digitalWrite(LASER_PIN, LOW)") < setup.index("pinMode(LASER_PIN, OUTPUT)")
     assert src.count('Serial.println(F("ERR') + src.count('Serial.print(F("ERR') <= src.count("setLaser(false);")
+
+
+def test_the_laser_pin_is_one_fact_in_the_firmware_and_the_docs():
+    """The module is wired to D8. Every cut-off in the firmware switches LASER_PIN: if it named another pin,
+    they'd all switch an empty pin while the laser stayed lit."""
+    import re
+    from pathlib import Path
+    from act.turret import LASER_PIN
+    root = Path(__file__).resolve().parents[1]
+    ino = (root / "firmware" / "turret" / "turret.ino").read_text()
+    assert int(re.search(r"const uint8_t LASER_PIN = (\d+);", ino).group(1)) == LASER_PIN
+    for doc in ("firmware/README.md", "docs/LASER_SAFETY.md"):
+        text = (root / doc).read_text()
+        pins = set(re.findall(r"\bD(\d+)\b", text))
+        laser_lines = [ln for ln in text.splitlines() if "laser" in ln.lower() and re.search(r"\bD\d+\b", ln)]
+        assert laser_lines and all(f"D{LASER_PIN}" in ln for ln in laser_lines), (doc, laser_lines, pins)
+
+
+def test_the_beam_never_tilts_above_level_or_the_configured_cap():
+    from act.pointing import FIRMWARE_LIMITS_DEG
+    from act.turret import TILT_MAX_DEG
+    from pathlib import Path
+    ino = (Path(__file__).resolve().parents[1] / "firmware" / "turret" / "turret.ino").read_text()
+    assert "const float LASER_TILT_MAX_DEG = -10;" in ino and FIRMWARE_LIMITS_DEG[1][1] == TILT_MAX_DEG == -10.0
+    assert "if (on && tiltTooHigh())" in ino and 'println(F("LASER TILT"))' in ino
+    a, _ = turret_act()                                               # servo_limits tilt up to +45 deg
+    assert a.limits_deg()[1][1] == pytest.approx(-10.0)               # capped at tilt_max_deg
+    a.move(1500, 1950)
+    assert a.us_to_deg(a.tilt) <= -10.0 + 1e-9
+    b, _ = turret_act(tilt_max_deg=5)                                 # a config above level is still level
+    assert b.limits_deg()[1][1] <= -10.0
+
+
+def test_the_firmware_never_lights_the_beam_above_its_tilt_limit_but_parks_level_dark():
+    board = FakeBoard()
+    t = Turret("/dev/fake", ser=board)
+    t.aim(0.0, 0.0)                                   # level, dark: allowed (the park)
+    with pytest.raises(TurretError):
+        t.laser(True)
+    assert board.laser == 0
+    t.aim(0.0, -20.0)
+    t.laser(True)
+    assert board.laser == 1
+    t.laser(False)
+    t.close()

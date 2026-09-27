@@ -27,6 +27,9 @@ from typing import Optional
 log = logging.getLogger(__name__)
 
 HEARTBEAT_S = 0.5
+LASER_PIN = 8           # the Uno pin the laser module's signal is wired to: firmware/turret/turret.ino LASER_PIN,
+                        # firmware/README.md and docs/LASER_SAFETY.md must all say this (tests/test_turret.py)
+TILT_MAX_DEG = -10.0    # turret.ino LASER_TILT_MAX_DEG: the firmware never lights the beam above this tilt
 REPLY_TIMEOUT_S = 2.0
 _NEED_KNOWN_ZERO = ("A", "R", "Z")      # refused after a board reset, with "L 1"
 
@@ -182,7 +185,7 @@ class Turret:
         if line == "DONE":
             self._done.set()
             return None
-        if line in ("LASER TIMEOUT", "LASER MAX ON"):     # the firmware turned it off by itself
+        if line in ("LASER TIMEOUT", "LASER MAX ON", "LASER TILT"):     # the firmware turned it off by itself
             self._laser_on = False
             return None
         if line.startswith("READY") and self._booted:

@@ -721,4 +721,6 @@ turret:
   laser_offset_m: [0, 0, 0]   # laser vs. where the axes cross, in the head's x right / y up / z forward
   park_on_close: true
   max_speed_deg_s: null       # null = the firmware default (120 deg/s at the axis)
+  tilt_max_deg: -10           # the beam never tilts above this (0 = level; the firmware stops at -10): keep it below
+                              # eye level, about -atan((mount height - 1.8 m) / room depth) or lower
   accel_deg_s2: null          # null = the firmware default (600 deg/s^2)
