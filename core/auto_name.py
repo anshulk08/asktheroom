@@ -188,21 +188,60 @@ def _tokens(phrase: str) -> list[str]:
     return [_singular(w) for w in norm_name(phrase).split()]
 
 
-def match_score(said: str, guess: dict) -> float:
+COLOURS = {"red", "blue", "green", "black", "white", "yellow", "orange", "purple", "pink", "brown", "grey",
+           "silver", "gold", "clear"}
+COLOUR_SAME = {"gray": "grey", "navy": "blue", "tan": "brown", "beige": "brown", "golden": "gold"}
+COLOUR_BONUS = 0.5        # the colour said is in the guess: the blue cup beats the orange one
+
+
+def said_colours(said: str) -> set[str]:
+    """The colour words in a spoken name ('my blue cup' -> {'blue'}); none when the name is only a colour word
+    ('the orange' is the fruit)."""
+    words = [COLOUR_SAME.get(w, w) for w in _tokens(said)]
+    if all(w in MODIFIERS or w in COLOURS for w in words):
+        return set()
+    return {w for w in words if w in COLOURS}
+
+
+def _colours(tokens: list[str]) -> set[str]:
+    return {COLOUR_SAME.get(w, w) for w in tokens} & COLOURS
+
+
+def guess_colours(guess: dict) -> set[str]:
+    """Every colour word in a guess's name and alternatives."""
+    if not isinstance(guess, dict):
+        return set()
+    return set().union(*[_colours(_tokens(p)) for p in [guess.get("name")] + list(guess.get("also") or [])
+                         if isinstance(p, str)])
+
+
+def match_score(said: str, guess: dict, colours: bool = False) -> float:
     """How well a spoken name fits a guess (0: not at all), plurals folded and a colour or size word in
     what was said ignored ('my blue mug'). The same words: 3 for the guessed name, 2.5 for an
     alternative. Sharing the head noun, one's words all inside the other's ('mug' / 'coffee mug'): 2
     (1.5). The spoken words all inside the guess ('deodorant' in 'deodorant stick'): 1.5 (1). Nothing
-    else: 'phone case' never fits 'phone charger', nor 'glue stick' 'deodorant stick'."""
+    else: 'phone case' never fits 'phone charger', nor 'glue stick' 'deodorant stick'.
+    colours (a person's question, not two guesses compared): a colour said rules out a phrase naming only
+    other colours ('blue cup' never fits 'white cup'), and adds COLOUR_BONUS to one naming it."""
     s = _tokens(said)
     s = [w for w in s if w not in MODIFIERS] or s
     if not s or not isinstance(guess, dict):
         return 0.0
+    want = said_colours(said) if colours else set()
+    if want:                                   # the colour said stays in the words compared: 'blue cup' = 'blue cup'
+        s = [c for c in (COLOUR_SAME.get(w, w) for w in _tokens(said)) if c not in MODIFIERS or c in want]
     best = 0.0
     for phrase, cut in [(guess.get("name"), 0.0)] + [(a, 0.5) for a in (guess.get("also") or [])]:
         g = _tokens(phrase) if isinstance(phrase, str) else []
         if not g:
             continue
+        if want:
+            g = [COLOUR_SAME.get(w, w) for w in g]
+        have = _colours(g)
+        if want and have and not (want & have):
+            continue
+        if want and want <= have:
+            cut -= COLOUR_BONUS
         if s == g:
             sc = 3.0
         elif s[-1] == g[-1] and (set(s) <= set(g) or set(g) <= set(s)):
@@ -337,7 +376,7 @@ class AutoNamer:
         left out."""
         hits: dict[str, tuple] = {}
         for n, g in self.guesses().items():
-            sc = match_score(said, g)
+            sc = match_score(said, g, colours=True)
             if sc <= 0:
                 continue
             try:

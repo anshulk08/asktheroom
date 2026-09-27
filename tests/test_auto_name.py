@@ -515,3 +515,13 @@ def test_a_guessed_answer_receipt_uses_the_asked_for_name(scene, world):
     a = ask(world, "where is my deodorant")
     assert a.text.startswith("Your deodorant, I think,"), a.text
     assert a.evidence and a.evidence[0]["caption"].startswith("Your deodorant, "), a.evidence
+
+
+def test_match_score_with_colours_rules_out_other_colours_and_ranks_the_one_said():
+    from core.auto_name import match_score
+    blue, white, plain = ({'name': n, 'also': []} for n in ('blue cup', 'white cup', 'cup'))
+    assert match_score('blue cup', white) == 2.0                      # two guesses compared: colour ignored
+    assert match_score('blue cup', white, colours=True) == 0.0
+    assert match_score('blue cup', blue, colours=True) > match_score('blue cup', plain, colours=True) > 0
+    assert match_score('gray mug', {'name': 'grey mug', 'also': []}, colours=True) > 2.0
+    assert match_score('orange', {'name': 'orange', 'also': []}, colours=True) == 3.0   # the fruit

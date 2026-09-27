@@ -176,3 +176,36 @@ def test_a_lone_shared_word_does_not_fit(said, name):
 def test_a_track_matched_ten_seconds_ago_still_answers_by_default(world):
     a = ask_for(world, [track(last=NOW - 10.0)])('where is my laptop')
     assert (a.action or '').startswith('room:')
+
+
+# ----- colour: 'blue cup' is not the white cup (rig 27 Sep 09:14) ------------------------------------
+
+def test_a_colour_said_never_picks_a_track_named_another_colour():
+    assert answer_from_tracks('blue cup', [track(zone='counter', name='white cup')], SAYS, NOW) is None
+
+
+def test_a_colour_said_needs_the_colour_in_the_tracks_name():
+    assert answer_from_tracks('green cup', [track(name='stacked cups')], SAYS, NOW) is None
+    a = answer_from_tracks('green cup', [track(guess={'name': 'cup', 'also': ['green mug'], 'confidence': 0.9})],
+                           SAYS, NOW)
+    assert a is not None and a.action.startswith('room:')
+
+
+def test_the_colour_said_picks_among_same_named_tracks():
+    white = track(tid='r:1', zone='counter', name='white cup', box=(2300, 750, 2340, 790))
+    blue = track(tid='r:2', zone='couch', name='blue cup', box=(1000, 1100, 1040, 1140), last=NOW - 10.0)
+    assert 'couch' in answer_from_tracks('blue cup', [white, blue], SAYS, NOW).text
+
+
+def test_the_blue_cup_on_the_table_wins_over_the_orange_one_and_a_white_counter_track(world):
+    s = Scene(Config.load(ROOT / 'config.yaml'), fps=10, t0=1000.0)
+    s.thing('cup', 50, 30, 8, 8)
+    s.thing('cup2', 20, 20, 8, 8)
+    s.run(world, 2.0)
+    namer = AutoNamer(RAW, world, provider=NoGrok(), online=lambda: False, c=AutoNameConfig(enabled=True),
+                      start=False).attach(world)
+    namer._guesses['thing:1'] = {'name': 'blue cup', 'also': [], 'confidence': 0.75}
+    namer._guesses['thing:2'] = {'name': 'orange cup', 'also': [], 'confidence': 0.75}
+    assert [n for n, _ in world.find_guess('blue cup')] == ['thing:1']
+    a = ask_for(world, [track(zone='counter', name='white cup')])('Point to the blue cup.')
+    assert 'counter' not in a.text and not (a.action or '').startswith('room:')

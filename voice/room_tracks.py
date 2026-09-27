@@ -17,7 +17,7 @@ import re
 import time
 from typing import Callable, Iterable, Optional
 
-from core.auto_name import match_score
+from core.auto_name import guess_colours, match_score, said_colours
 from core.proposals import PEOPLE
 from core.types import Answer, Status
 
@@ -96,7 +96,10 @@ def pick_track(said: str, tracks: Iterable, now_wall: float, fresh_s: float,
         if tr.entity is not None and tentative(tr.entity):
             continue
         g = with_synonyms(g)
-        sc = match_score(said, g)
+        want = said_colours(said)
+        if want and not (want & guess_colours(g)):
+            continue                         # 'blue cup': a room aim needs the colour said in the name, not 'white cup'
+        sc = match_score(said, g, colours=True)
         if sc < MATCH_MIN and words_fit(said, g):
             sc = MATCH_MIN                   # every word said is in its name (the head noun may differ)
         if sc >= MATCH_MIN and (best is None or (sc, tr.last_wall) > (best[1], best[0].last_wall)):
