@@ -330,6 +330,34 @@ def test_appeared_event_phrase_and_unnamed_things_in_changes():
     assert a.text == "The thing I haven't been told about was first seen just now."
 
 
+def test_changes_in_a_busy_room_name_a_few_and_count_the_rest():
+    # the rig's room had hundreds of unnamed things: the spoken answer ran to 21,000 characters
+    fw = FakeWorld([Entity("keys", "target", Status.VISIBLE, pos_cm=(10.0, 10.0))])
+    now = time.time()
+    for i in range(400):
+        fw.events.add(Event(t=float(i), wall=now - 300 + i * 0.5, obj=f"thing:{i}", type="APPEARED",
+                            to_cm=(40.0, 30.0)))
+    fw.events.add(Event(t=500.0, wall=now - 1, obj="keys", type="PICKED_UP"))
+    a = answer(Intent("CHANGES", None, "what changed"), fw, fw.events, CFG, now=now)
+    spoken_ok(a)
+    assert len(a.text) < 300 and a.text.count("haven't been told about") == 1
+    assert a.text.startswith("The keys were picked up just now.")
+    assert a.text.endswith("399 other things also changed.")
+
+
+def test_changes_name_other_known_things_before_counting():
+    fw = FakeWorld([Entity(n, "target", Status.VISIBLE, pos_cm=(10.0, 10.0))
+                    for n in ("keys", "wallet", "remote", "phone", "box")])
+    now = time.time()
+    for i, n in enumerate(("box", "phone", "remote", "wallet", "keys")):
+        fw.events.add(Event(t=float(i), wall=now - 60 + i, obj=n, type="MOVED"))
+    for i in range(5):
+        fw.events.add(Event(t=10.0 + i, wall=now - 100 + i, obj=f"thing:{i}", type="APPEARED",
+                            to_cm=(40.0, 30.0)))
+    a = answer(Intent("CHANGES", None, "what changed"), fw, fw.events, CFG, now=now)
+    assert a.text.endswith("The remote, phone, box and 5 other things also changed.")
+
+
 def test_teach_intent_never_mentions_taking_pills(w):
     a = answer(Intent("TEACH", "pills", "this is my pills", name="pills"), w, w.events, CFG)
     assert "taken" not in a.text.lower() and "took" not in a.text.lower()

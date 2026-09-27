@@ -128,6 +128,21 @@ def dumps(obj: Any) -> bytes:
 
 # ---------------------------------------------------------------- question / answer
 
+def parse_voice(value: bytes) -> Optional[dict]:
+    """A voice-settings write ({"voice": {"e", "v", "s"}}, PROTOCOL.md 5a) -> the app's POST /voice body
+    {"engine", "grok_voice", "speed"}, or None when the write is not one (a question)."""
+    if len(value) > MAX_QUESTION_BYTES:
+        return None
+    try:
+        obj = json.loads(bytes(value).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    v = obj.get("voice") if isinstance(obj, dict) else None
+    if not isinstance(v, dict):
+        return None
+    return {"engine": v.get("e"), "grok_voice": v.get("v"), "speed": v.get("s")}
+
+
 def parse_question(value: bytes) -> tuple[int, Optional[str], Optional[str]]:
     """question write -> (id, text, error_text). error_text is set when it must be rejected."""
     qid = 0
@@ -351,14 +366,15 @@ def status_msg(app_up: bool, state: Optional[dict], cal: bool, laser_cal: bool) 
     online = bool(st.get("online")) if app_up else False
     gc = st.get("grok_check")                 # GrokCheck.status(); only present when the check is on
     gk = online and isinstance(gc, dict) and bool(gc.get("enabled", True))
+    spk = app_up and isinstance(st.get("speaker"), dict) and bool(st["speaker"].get("ok"))
     return {"app": "up" if app_up else "down", "fps": fps or 0.0, "online": online,
-            "cal": bool(cal), "laser_cal": bool(laser_cal), "gk": gk}
+            "cal": bool(cal), "laser_cal": bool(laser_cal), "gk": gk, "spk": spk}
 
 
 def status_changed(prev: Optional[dict], cur: dict, fps_step: float = 1.0) -> bool:
     if prev is None:
         return True
-    for k in ("app", "online", "cal", "laser_cal", "gk"):
+    for k in ("app", "online", "cal", "laser_cal", "gk", "spk"):
         if prev.get(k) != cur.get(k):
             return True
     return abs(float(prev.get("fps") or 0) - float(cur.get("fps") or 0)) >= fps_step

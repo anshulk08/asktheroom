@@ -283,6 +283,13 @@ listen:
   wake_words: [room, ask the room]   # also lets overheard speech reset or ask open questions ("room, reset",
                               # "ask the room, reset"; the wake word must open a reset). Room demo: see
                               # config.local.yaml.example
+  chime: true                 # a chime when the rig listens for a question ("Hey Room!" alone, a clicker press),
+                              # a short tone when "Room, <question>" is accepted (voice/cues.py)
+  indicator:                  # the listening light, on while the rig listens for a question
+    backend: none             # none (no LEDs yet: log only) | gpio (an LED on a GPIO line, libgpiod)
+    gpio_chip: gpiochip0
+    gpio_line: null           # the line offset of the header pin the LED is on
+    active_low: false         # true for an LED wired from 3.3 V to the pin
   idle_s: 8                   # reopen the mic after this long with nobody talking
   echo_tail_s: 0.4            # keep the mic shut this long after the rig stops speaking
   log_overheard: false        # debug only: log every transcript, including dropped chatter (privacy: keep false)

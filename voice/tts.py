@@ -1,4 +1,12 @@
-"""Speech out (spec V9): ElevenLabs streaming when online, Piper offline.
+"""Speech out (spec V9): the voice the phone app picked when online (Grok or ElevenLabs), Piper offline.
+
+The voice follows the iPhone app's helper settings (sent over Bluetooth, mobile/PROTOCOL.md): engine
+grok (the app's default, voice "eve"), rig (the app's rigVoice, "Same as the rig": ElevenLabs) or builtin
+(the app's builtIn, the iPhone's own voice, which the rig can't make: Piper). TTS.set_voice stores it in data/voice.json.
+
+Grok (xAI, checked 2026-09-26): POST https://api.x.ai/v1/tts with Bearer XAI_API_KEY, body {"text",
+"voice_id", "language", "speed" (0.7-1.5), "output_format": {"codec": "pcm", "sample_rate": 24000}}:
+raw signed 16-bit little-endian mono, first bytes in ~0.12 s from the rig.
 
 ElevenLabs (checked 2026-09-25): POST https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream
 with header xi-api-key, body {"text", "model_id"}, query output_format=pcm_22050 (raw signed 16-bit
@@ -29,11 +37,14 @@ and the audio resampled.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import queue
+import re
 import threading
 import time
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterator, Optional, Union
 
@@ -49,8 +60,21 @@ ELEVEN_URL = "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream"
 ELEVEN_FORMAT = "pcm_22050"
 ELEVEN_RATE = 22050
 FIRST_BYTE_S = 1.5          # slower than this -> Piper for this utterance
+GROK_TTS_URL = "https://api.x.ai/v1/tts"
+GROK_RATE = 24000
+GROK_DEFAULT_VOICE = "eve"  # the iPhone app's default (Speaker.swift Grok.defaultVoice)
+GROK_SPEEDS = (0.7, 1.5)
+ENGINES = ("grok", "rig", "builtin")
+# the phone sends its Speaker.Engine raw value (grok | rigVoice | builtIn); older names are taken too
+ENGINE_NAMES = {"grok": "grok", "rigvoice": "rig", "rig": "rig", "builtin": "builtin"}
+VOICE_PATH = "data/voice.json"          # the phone's voice settings (tts.voice_path overrides)
+SPEAKER_CHECK_S = 3.0                   # how long a speaker check is reused (GET /state polls often)
+EXTERNAL_SINK = re.compile(r"^bluez_sink\.|usb", re.I)   # a PulseAudio sink that is a speaker, not the Jetson's own outputs
 CHUNK_BYTES = 2048          # ~46 ms at 22.05 kHz int16
 PIPER_DIR = ROOT / "models" / "piper"
+MAX_SPOKEN_CHARS = 600      # longer text is cut at a sentence end: ~40 s of speech is already too long
+PIPER_MAX_CHARS = 250       # Piper runs a sentence in one pass and its memory grows with the square of its
+                            # length (6,600 chars: 8 GB); longer sentences go in pieces, cut at commas/spaces
 
 
 # ---------------------------------------------------------------- audio seam
@@ -146,6 +170,23 @@ def output_devices() -> list[dict]:
     return [dict(d, index=i) for i, d in enumerate(sd.query_devices()) if d.get("max_output_channels", 0) > 0]
 
 
+def pulse_default_sink(timeout: float = 2.0) -> Optional[str]:
+    """PulseAudio's default sink name (pactl, from pulseaudio-utils), or None without one."""
+    import subprocess
+    try:
+        r = subprocess.run(["pactl", "get-default-sink"], capture_output=True, text=True, timeout=timeout)
+        name = r.stdout.strip()
+        if r.returncode == 0 and name:
+            return name
+        r = subprocess.run(["pactl", "info"], capture_output=True, text=True, timeout=timeout)
+        for line in r.stdout.splitlines():
+            if line.startswith("Default Sink:"):
+                return line.split(":", 1)[1].strip() or None
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return None
+
+
 def resolve_output_device(spec) -> Optional[int]:
     """tts.output_device -> a sounddevice index, or None for the default device. An int (or digits)
     is taken as the index; any other string picks the output device whose name contains it (case
@@ -194,9 +235,42 @@ def load_piper(name: str, model_dir: Path = PIPER_DIR):
 
 
 def piper_chunks(voice, text: str) -> Iterator[tuple[bytes, int]]:
-    """(int16 bytes, sample rate) per sentence, as soon as each is synthesized."""
-    for chunk in voice.synthesize(text):
-        yield chunk.audio_int16_bytes, chunk.sample_rate
+    """(int16 bytes, sample rate) per sentence, as soon as each is synthesized; a sentence longer than
+    PIPER_MAX_CHARS goes to Piper in pieces (one 21,000-character sentence took the rig out of memory)."""
+    for piece in text_pieces(text):
+        for chunk in voice.synthesize(piece):
+            yield chunk.audio_int16_bytes, chunk.sample_rate
+
+
+def text_pieces(text: str, limit: int = PIPER_MAX_CHARS) -> list[str]:
+    """Sentences of at most limit characters: a longer one is cut after its last comma or semicolon that
+    fits, else at its last space, else at limit."""
+    out: list[str] = []
+    for sent in re.split(r"(?<=[.!?])\s+", text.strip()):
+        while len(sent) > limit:
+            cut = max(sent.rfind(", ", 0, limit), sent.rfind("; ", 0, limit)) + 1
+            if cut <= 0:
+                cut = sent.rfind(" ", 0, limit)
+            if cut <= 0:
+                cut = limit
+            out.append(sent[:cut].strip())
+            sent = sent[cut:].strip()
+        if sent:
+            out.append(sent)
+    return out
+
+
+def speakable(text: str, limit: int = MAX_SPOKEN_CHARS) -> str:
+    """text, or its whole sentences that fit in limit characters (else cut at a word, with a full stop)."""
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    head = text[:limit + 1]
+    end = max(head.rfind(". "), head.rfind("! "), head.rfind("? "))
+    if end > 0:
+        return head[:end + 1]
+    cut = head.rfind(" ", 0, limit)
+    return (head[:cut] if cut > 0 else head[:limit]).rstrip(",;:") + "."
 
 
 # ---------------------------------------------------------------- espeak (last resort)
@@ -257,8 +331,52 @@ def _abort_quietly(out, close: bool = True) -> None:
         pass
 
 
-class _ElevenFailed(Exception):
-    pass
+class _CloudFailed(Exception):
+    """A cloud voice failed before any audio played: the next engine speaks instead."""
+
+
+_ElevenFailed = _CloudFailed
+
+
+@dataclass(frozen=True)
+class VoiceChoice:
+    """The phone app's voice settings, as the rig uses them."""
+    engine: str = "grok"
+    grok_voice: str = GROK_DEFAULT_VOICE
+    speed: float = 1.0
+
+    @classmethod
+    def make(cls, engine=None, grok_voice=None, speed=None) -> "VoiceChoice":
+        """Validated: an unknown engine is grok, an empty voice the default, speed clamped to GROK_SPEEDS."""
+        e = ENGINE_NAMES.get(str(engine or "grok").strip().lower(), "grok")
+        v = re.sub(r"[^a-z0-9_-]", "", str(grok_voice or "").strip().lower())[:32]
+        try:
+            sp = float(speed) if speed is not None else 1.0
+        except (TypeError, ValueError):
+            sp = 1.0
+        if sp != sp:                            # NaN
+            sp = 1.0
+        return cls(e, v or GROK_DEFAULT_VOICE,
+                   round(min(max(sp, GROK_SPEEDS[0]), GROK_SPEEDS[1]), 2))
+
+    @classmethod
+    def load(cls, path: Optional[Path]) -> "VoiceChoice":
+        try:
+            d = json.loads(Path(path).read_text()) if path else {}
+            return cls.make(d.get("engine"), d.get("grok_voice"), d.get("speed"))
+        except (OSError, ValueError, AttributeError):
+            return cls()
+
+    def save(self, path: Optional[Path]) -> None:
+        if not path:
+            return
+        try:
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            tmp = Path(path).with_suffix(".tmp")
+            tmp.write_text(json.dumps(asdict(self)))
+            tmp.replace(path)
+        except OSError as ex:
+            log.warning("voice settings not saved (%s); they last until a restart", ex)
 
 
 class _Utterance:
@@ -283,13 +401,69 @@ class TTS:
         self.eleven_model: str = t.get("elevenlabs_model", "eleven_flash_v2_5")
         self.eleven_voice_cfg: str = t.get("elevenlabs_voice_id") or ""
         self.output_device = t.get("output_device")      # index | name substring | None (default)
+        vp = t.get("voice_path", VOICE_PATH)
+        self.voice_path: Optional[Path] = (ROOT / vp if not Path(vp).is_absolute() else Path(vp)) if vp else None
+        self.voice = VoiceChoice.load(self.voice_path)   # the phone app's pick; its default until one arrives
         self._lock = threading.Lock()          # one utterance at a time
         self._utt: Optional[_Utterance] = None
-        self.last_engine: Optional[str] = None  # 'elevenlabs' | 'piper' | 'espeak' | None
+        self.last_engine: Optional[str] = None  # 'grok' | 'elevenlabs' | 'piper' | 'espeak' | None
         self.last_first_audio_s: Optional[float] = None
         self.last_timed_out = False             # the last utterance hit its playback deadline
 
     # -- routing
+
+    def set_voice(self, engine=None, grok_voice=None, speed=None) -> VoiceChoice:
+        """The phone app's voice settings (engine grok | rig | builtin, Grok voice, speed): used from the
+        next answer on and kept in voice_path across restarts."""
+        v = VoiceChoice.make(engine, grok_voice, speed)
+        if v != self.voice:
+            log.info("voice: %s (Grok voice %s, speed %.2f), from the phone", v.engine, v.grok_voice, v.speed)
+            self.voice = v
+            v.save(self.voice_path)
+        return v
+
+    def speaker_status(self) -> dict:
+        """{"ok", "name"}: whether speech goes to an external speaker now. Through PulseAudio
+        (output_device 'pulse'/'default' with PULSE_SERVER set, the askroom:audio image): its default
+        sink is a Bluetooth or USB one. A named ALSA device: it is plugged in. The phone stays quiet
+        while ok (mobile/PROTOCOL.md, status 'spk'). Cached SPEAKER_CHECK_S."""
+        now = time.monotonic()
+        cached = getattr(self, "_spk", None)
+        if cached is not None and now - cached[0] < SPEAKER_CHECK_S:
+            return cached[1]
+        spec = self.output_device
+        st = {"ok": False, "name": ""}
+        try:
+            via_pulse = str(spec or "").strip().lower() in ("pulse", "default", "") and bool(os.environ.get("PULSE_SERVER"))
+            if via_pulse:
+                sink = pulse_default_sink()
+                st = {"ok": bool(sink and EXTERNAL_SINK.search(sink)), "name": sink or ""}
+            elif spec is not None and str(spec).strip():
+                want = str(spec).strip().lower()
+                hits = [str(d.get("name", "")) for d in output_devices() if want in str(d.get("name", "")).lower()]
+                st = {"ok": bool(hits), "name": hits[0] if hits else ""}
+        except Exception as ex:
+            log.debug("speaker check failed: %s", ex)
+        self._spk = (now, st)
+        return st
+
+    def attach(self, world) -> "TTS":
+        """GET /state gains 'speaker' (speaker_status) and 'voice' (the phone's voice settings), as
+        core.grok_check.GrokCheck.attach adds its own entry."""
+        state = world.state_json
+
+        def state_json(*a, **kw):
+            st = state(*a, **kw)
+            st["speaker"] = self.speaker_status()
+            st["voice"] = asdict(self.voice)
+            return st
+
+        world.state_json = state_json
+        return self
+
+    @staticmethod
+    def _grok_key() -> Optional[str]:
+        return os.environ.get("XAI_API_KEY", "").strip() or None
 
     def _eleven_creds(self) -> Optional[tuple[str, str]]:
         key = os.environ.get("ELEVENLABS_API_KEY", "").strip()
@@ -312,6 +486,9 @@ class TTS:
         text = (text or "").strip()
         if not text:
             return
+        if len(text) > MAX_SPOKEN_CHARS:
+            log.warning("answer is %d characters; speaking only the first %d", len(text), MAX_SPOKEN_CHARS)
+            text = speakable(text)
         with self._lock:
             u = self._utt = _Utterance()
             self.last_engine = None
@@ -335,19 +512,32 @@ class TTS:
             self.last_timed_out = True
             self._cut(u)
 
+    def _cloud_voices(self) -> list:
+        """(name, speak) for the cloud voices to try, the phone's pick first: grok -> Grok then
+        ElevenLabs; rig -> ElevenLabs then Grok; builtin (the iPhone's own voice) -> none (Piper)."""
+        v = self.voice
+        grok = ("grok", lambda text, u: self._speak_grok(text, key, v.grok_voice, v.speed, u)) \
+            if (key := self._grok_key()) else None
+        eleven = ("elevenlabs", lambda text, u: self._speak_eleven(text, *creds, u=u)) \
+            if (creds := self._eleven_creds()) else None
+        order = {"grok": [grok, eleven], "rig": [eleven, grok], "builtin": []}[v.engine]
+        return [c for c in order if c is not None]
+
     def _say(self, text: str, u: _Utterance) -> None:
-        """The utterance itself, on the worker thread: ElevenLabs, else Piper, else espeak."""
+        """The utterance itself, on the worker thread: the phone's cloud voice, else Piper, else espeak."""
         try:
-            creds = self._eleven_creds()
-            if creds and self._online():
-                try:
-                    self._speak_eleven(text, *creds, u=u)
-                    self.last_engine = "elevenlabs"
-                    return
-                except _ElevenFailed as ex:
-                    log.warning("ElevenLabs failed (%s); using Piper", ex)
-                except Exception:
-                    log.exception("ElevenLabs failed; using Piper")
+            if self._online():
+                for name, speak in self._cloud_voices():
+                    if u.stop.is_set():
+                        return
+                    try:
+                        speak(text, u)
+                        self.last_engine = name
+                        return
+                    except _CloudFailed as ex:
+                        log.warning("%s voice failed (%s); trying the next", name, ex)
+                    except Exception:
+                        log.exception("%s voice failed; trying the next", name)
             if u.stop.is_set():
                 return
             try:
@@ -373,6 +563,27 @@ class TTS:
     def speaking(self) -> bool:
         """True while an answer plays (the always-on mic waits, or it would answer itself)."""
         return self._lock.locked()
+
+    def play_cue(self, pcm: bytes, rate: int, deadline_s: float = 3.0) -> bool:
+        """A short cue (voice/cues.py chimes) on the speech output, blocking until it has played. Never
+        overlaps an answer (skipped if one is still playing after 0.5 s) and never hangs the caller past
+        deadline_s on a stalled speaker. False when it didn't play."""
+        if not self._lock.acquire(timeout=0.5):
+            return False
+        try:
+            def play() -> None:
+                out = open_output(rate, self._device())
+                try:
+                    out.write(pcm)
+                finally:
+                    out.close()
+            call_with_deadline(play, deadline_s, name="tts-cue")
+            return True
+        except Exception as ex:
+            log.warning("cue not played: %s: %s", type(ex).__name__, ex)
+            return False
+        finally:
+            self._lock.release()
 
     def stop(self) -> None:
         """Cut off current speech (safe from any thread; returns within about ABORT_S)."""
@@ -402,8 +613,26 @@ class TTS:
         return u.out
 
     def _speak_eleven(self, text: str, key: str, voice_id: str, u: Optional[_Utterance] = None) -> None:
-        """Stream PCM to the speaker as it arrives. Raises _ElevenFailed before any audio is
-        played (so the caller can fall back); errors after first audio just end the utterance."""
+        self._stream_cloud("ElevenLabs", ELEVEN_RATE, u, lambda: requests.post(
+            ELEVEN_URL.format(voice_id=voice_id),
+            params={"output_format": ELEVEN_FORMAT},
+            headers={"xi-api-key": key, "Content-Type": "application/json"},
+            json={"text": text, "model_id": self.eleven_model},
+            stream=True, timeout=(FIRST_BYTE_S, 5.0)))
+
+    def _speak_grok(self, text: str, key: str, voice: str, speed: float,
+                    u: Optional[_Utterance] = None) -> None:
+        self._stream_cloud("Grok", GROK_RATE, u, lambda: requests.post(
+            GROK_TTS_URL,
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            json={"text": text, "voice_id": voice, "language": "en", "speed": speed,
+                  "output_format": {"codec": "pcm", "sample_rate": GROK_RATE}},
+            stream=True, timeout=(FIRST_BYTE_S, 5.0)))
+
+    def _stream_cloud(self, name: str, rate: int, u: Optional[_Utterance], post) -> None:
+        """Stream a cloud voice's raw int16 mono PCM to the speaker as it arrives. post() makes the
+        streaming request. Raises _CloudFailed before any audio is played (so the caller can fall
+        back); errors after first audio just end the utterance."""
         u = u or _Utterance()
         q: "queue.Queue[object]" = queue.Queue()
         DONE = object()
@@ -412,17 +641,12 @@ class TTS:
         def fetch() -> None:
             r = None
             try:
-                r = requests.post(
-                    ELEVEN_URL.format(voice_id=voice_id),
-                    params={"output_format": ELEVEN_FORMAT},
-                    headers={"xi-api-key": key, "Content-Type": "application/json"},
-                    json={"text": text, "model_id": self.eleven_model},
-                    stream=True, timeout=(FIRST_BYTE_S, 5.0))
+                r = post()
                 if abandon.is_set():
                     return
                 u.resp = r
                 if r.status_code != 200:
-                    q.put(_ElevenFailed(f"HTTP {r.status_code}: {r.text[:200]}"))
+                    q.put(_CloudFailed(f"HTTP {r.status_code}: {r.text[:200]}"))
                     return
                 for chunk in r.iter_content(chunk_size=CHUNK_BYTES):
                     if u.stop.is_set() or abandon.is_set():
@@ -431,7 +655,7 @@ class TTS:
                         q.put(chunk)
                 q.put(DONE)
             except Exception as ex:
-                q.put(_ElevenFailed(f"{type(ex).__name__}: {ex}"))
+                q.put(_CloudFailed(f"{type(ex).__name__}: {ex}"))
             finally:
                 if r is not None:
                     if u.resp is r:
@@ -441,30 +665,30 @@ class TTS:
                     except Exception:
                         pass
 
-        threading.Thread(target=fetch, name="eleven", daemon=True).start()
+        threading.Thread(target=fetch, name=name.lower(), daemon=True).start()
         try:
             first = q.get(timeout=FIRST_BYTE_S)
         except queue.Empty:
             abandon.set()
             self._close_resp(u)
-            raise _ElevenFailed(f"no audio after {FIRST_BYTE_S} s")
+            raise _CloudFailed(f"no audio after {FIRST_BYTE_S} s")
         if isinstance(first, Exception):
             raise first
         if first is DONE:
-            raise _ElevenFailed("empty audio stream")
-        out = self._open(ELEVEN_RATE, u)
+            raise _CloudFailed("empty audio stream")
+        out = self._open(rate, u)
         try:
             out.write(first)  # type: ignore[arg-type]
             while not u.stop.is_set():
                 try:
                     item = q.get(timeout=5.0)
                 except queue.Empty:
-                    log.warning("ElevenLabs stream stalled")
+                    log.warning("%s stream stalled", name)
                     break
                 if item is DONE:
                     break
                 if isinstance(item, Exception):
-                    log.warning("ElevenLabs stream broke mid-utterance: %s", item)
+                    log.warning("%s stream broke mid-utterance: %s", name, item)
                     break
                 out.write(item)  # type: ignore[arg-type]
         finally:

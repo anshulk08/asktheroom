@@ -358,6 +358,10 @@ class BridgeCore:
     def on_question(self, value: bytes) -> None:
         """question write (called on the GLib thread: must not block)."""
         t0 = self.mono()
+        voice = P.parse_voice(bytes(value))
+        if voice is not None:                   # the phone's voice settings, not a question: no answer
+            threading.Thread(target=self.set_voice, args=(voice,), name="voice", daemon=True).start()
+            return
         qid, text, err = P.parse_question(bytes(value))
         self.stats["questions"] += 1
         if err:
@@ -369,6 +373,15 @@ class BridgeCore:
             self.asks.put_nowait((qid, text, t0))
         except queue.Full:
             self._send("answer", P.answer_msg(qid, False, BUSY_TEXT, ms=0))
+
+    def set_voice(self, voice: dict) -> None:
+        """POST /voice with the phone's voice settings (worker thread). The phone re-sends them on every
+        connect, so a failure is only logged."""
+        try:
+            r = self.http.post_json("/voice", voice, timeout=3.0)
+            log.info("voice from the phone: %s", r)
+        except Exception as ex:
+            log.warning("voice settings not applied: %s", ex)
 
     def answer(self, qid: int, text: str, t0: Optional[float] = None) -> dict:
         """POST /ask and build the answer message (blocking; worker thread)."""

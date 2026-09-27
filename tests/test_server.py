@@ -260,3 +260,22 @@ def test_full_frame_view_with_zones_and_room_places(tmp_path):
         assert img.shape[1] == 1280 and img.sum() > 0          # downscaled, zones drawn on black
     with TestClient(create_app(cfg, demo_world(events), events, frames=None)) as c:
         assert c.get("/full.jpg").status_code == 404
+
+
+def test_voice_sets_the_rigs_voice_and_503_without_a_speaker(tmp_path):
+    from voice.tts import VoiceChoice
+    cfg = load_config()
+    events = EventLog(str(tmp_path / "e.db"), str(tmp_path / "snaps"))
+    got = []
+
+    def voice_fn(engine, grok_voice, speed):
+        got.append((engine, grok_voice, speed))
+        return VoiceChoice.make(engine, grok_voice, speed)
+
+    with TestClient(create_app(cfg, demo_world(events), events, voice_fn=voice_fn)) as client:
+        r = client.post("/voice", json={"engine": "grok", "grok_voice": "Ara", "speed": 1.2})
+        assert r.status_code == 200 and r.json() == {"engine": "grok", "grok_voice": "ara", "speed": 1.2}
+        assert got == [("grok", "Ara", 1.2)]
+        assert client.post("/voice", content=b"nope").status_code == 400
+    with TestClient(create_app(cfg, demo_world(events), events)) as client:
+        assert client.post("/voice", json={"engine": "grok"}).status_code == 503

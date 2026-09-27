@@ -8,6 +8,8 @@ create_app(cfg, world, events, frames=None, ask_fn=None, table=None, care=None) 
   GET  /events?since=t   events with wall >= t (oldest first), each with a snapshot_url
   GET  /snapshots/{name} one event snapshot jpg (snapshot dir only)
   POST /ask              {"text", "source"?: "dashboard" | "phone"} -> {"text", "point_at", "action", "latency_ms"}
+  POST /voice            {"engine"?: "grok" | "rig" | "builtin", "grok_voice"?, "speed"?} the phone app's
+                         voice for the rig's speaker (BLE bridge) -> the stored {"engine", "grok_voice", "speed"}
   POST /sms              Twilio webhook (signature checked, whitelist only)
 
 With care=voice.care.Care (reminders, reports; see voice/care.py), additively:
@@ -27,6 +29,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import collections
+import dataclasses
 import json
 import logging
 import math
@@ -158,7 +161,7 @@ def canned_ask(cfg: dict, world) -> AskFn:
 # ---------------------------------------------------------------- app
 
 def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = None,
-               table=None, care=None) -> FastAPI:
+               table=None, care=None, voice_fn: Optional[Callable[..., Any]] = None) -> FastAPI:
     scfg = cfg.get("server") or {}
     push_period = 1.0 / float(scfg.get("push_hz", 5) or 5)
     mjpeg_period = 1.0 / float(scfg.get("mjpeg_fps", 10) or 10)
@@ -423,6 +426,19 @@ def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = 
         body = ('<?xml version="1.0" encoding="UTF-8"?><Response><Message>'
                 + escape(text[:1500]) + "</Message></Response>")
         return Response(body, media_type="application/xml")
+
+    @app.post("/voice")
+    async def voice_route(request: Request):
+        if voice_fn is None:
+            raise HTTPException(503, "no speaker on this rig")
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(400, "expected JSON {\"engine\", \"grok_voice\", \"speed\"}")
+        if not isinstance(body, dict):
+            raise HTTPException(400, "expected a JSON object")
+        v = voice_fn(body.get("engine"), body.get("grok_voice"), body.get("speed"))
+        return JSONResponse(dataclasses.asdict(v) if dataclasses.is_dataclass(v) else v)
 
     @app.post("/sms")
     async def sms(request: Request):
