@@ -163,9 +163,15 @@ class RoomMap:
 
 def sweep(laser, grid: tuple[int, int] = (20, 15), n_pairs: int = 2, refine: bool = True,
           jump_k: float = 2.5, stop: Optional[Callable[[], bool]] = None,
-          progress: Optional[Callable[[int, int], None]] = None) -> RoomMap:
+          progress: Optional[Callable[[int, int], None]] = None,
+          checkpoint: Optional[Callable[["RoomMap"], None]] = None, every: int = 10,
+          done: Optional[dict] = None) -> RoomMap:
     """Record the dot map over the laser's full servo range. stop() is checked before every point
-    (return True when a person is in view) and raises SweepAborted. The laser ends off."""
+    (return True when a person is in view) and raises SweepAborted. The laser ends off.
+    checkpoint(partial map) runs every `every` points and on any exit (an abort, a crash), so minutes of
+    dots are never lost; done ({(pan, tilt) rounded to 0.001: px or None}, from a partial map) skips
+    points already visited (python -m act.room_map --sweep --resume)."""
+    done = dict(done or {})
     (plo, phi), (tlo, thi) = laser.act.limits()
     gx, gy = int(grid[0]), int(grid[1])
     pans, tilts = np.linspace(plo, phi, gx), np.linspace(tlo, thi, gy)
@@ -173,8 +179,15 @@ def sweep(laser, grid: tuple[int, int] = (20, 15), n_pairs: int = 2, refine: boo
     pts, seen = [], []
     size = None
 
+    def partial() -> "RoomMap":
+        return RoomMap(pts[:len(seen)], [(math.nan, math.nan) if d is None else d for d in seen], step, size or (0, 0),
+                       t=time.time(), grid=(gx, gy))
+
     def visit(p: float, t: float) -> Optional[tuple[float, float]]:
         nonlocal size
+        key = (round(float(p), 3), round(float(t), 3))
+        if key in done:
+            return done[key]
         if stop is not None and stop():
             raise SweepAborted("person in view")
         laser.act.laser(False)                   # every move dark: the last look left the laser on
@@ -193,6 +206,11 @@ def sweep(laser, grid: tuple[int, int] = (20, 15), n_pairs: int = 2, refine: boo
             seen.append(visit(p, t))
             if progress:
                 progress(k + 1, len(order))
+            if checkpoint is not None and (k + 1) % max(1, every) == 0:
+                try:
+                    checkpoint(partial())
+                except Exception:                  # never let saving stop the sweep
+                    log.exception("sweep checkpoint failed")
         if refine:
             px = {(round(p, 3), round(t, 3)): d for (p, t), d in zip(pts, seen)}
             G = [[px[(round(p, 3), round(t, 3))] for p in pans] for t in tilts]
@@ -215,6 +233,11 @@ def sweep(laser, grid: tuple[int, int] = (20, 15), n_pairs: int = 2, refine: boo
                 seen.append(visit(p, t))
     finally:
         laser.off()
+        if checkpoint is not None and pts:
+            try:
+                checkpoint(partial())
+            except Exception:
+                log.exception("sweep checkpoint failed")
     px = [(math.nan, math.nan) if d is None else d for d in seen]
     return RoomMap(pts, px, step, size or (0, 0), t=time.time(), grid=(gx, gy))
 
@@ -344,6 +367,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--room-is-clear", action="store_true",
                     help="--sweep without a person detector (OpenCV 5): you checked nobody is in view")
     ap.add_argument("--out", help="where to write the map (default: config room_map)")
+    ap.add_argument("--resume", action="store_true", help="--sweep: skip the points a stopped sweep saved")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     if args.sim:
@@ -371,11 +395,21 @@ def main(argv: Optional[list[str]] = None) -> int:
 
         try:
             old = RoomMap.load(path).zones if os.path.exists(path) else {}
+            part = path.replace(".json", "") + ".partial.json"
+            done = {}
+            if args.resume and os.path.exists(part):
+                with open(part) as f:
+                    pd = json.load(f)
+                done = {(round(float(p), 3), round(float(t), 3)): (None if x is None else tuple(x))
+                        for (p, t), x in zip(pd["pulses"], pd["px"])}      # to_dict: unseen = null
+                print(f"resuming: {len(done)} points already swept in {part}")
             rm = sweep(laser, grid=tuple(args.grid or room.get("grid", (20, 15))),
                        n_pairs=int(room.get("n_pairs", 3)), stop=stop,
-                       progress=lambda k, n: k % 20 == 0 and log.info("%d/%d", k, n))
+                       progress=lambda k, n: k % 10 == 0 and log.info("%d/%d", k, n),
+                       checkpoint=lambda m: m.save(part), done=done)
             rm.zones = old
             rm.save(path)
+            os.remove(part) if os.path.exists(part) else None
             print(f"wrote {path}: {len(rm.pulses)} points, {rm.n_seen} dots seen, zones kept: {list(old)}")
         except SweepAborted:
             print("sweep aborted: a person came into view; clear the room and run it again")

@@ -478,3 +478,25 @@ def test_the_sweep_moves_between_points_dark():
     t0 = rig.clock.now()
     sweep(laser, grid=(6, 4), n_pairs=1)
     assert lit_moves(rig.act, t0) == [] and rig.act.laser_on is False
+
+
+def test_a_stopped_sweep_keeps_its_points_and_resumes_from_them(tmp_path):
+    """Minutes of dots are never lost: checkpoints on the way and on the abort; --resume skips them."""
+    rig = RoomRig(b_cm=3.0, seed=6)
+    laser = rig.make_laser()
+    saved, n = [], [0]
+
+    def stop():
+        n[0] += 1
+        return n[0] > 15                                   # someone walks in at the 16th point
+    with pytest.raises(SweepAborted):
+        sweep(laser, grid=(6, 4), n_pairs=1, refine=False, stop=stop, checkpoint=saved.append, every=5)
+    part = saved[-1]
+    assert len(part.pulses) == 15 and len(saved) == 4 and rig.act.laser_on is False     # 5, 10, 15, the abort
+    done = {(round(float(p), 3), round(float(t), 3)): (None if np.isnan(x).any() else tuple(x))
+            for (p, t), x in zip(part.pulses, part.px)}
+    looks = []
+    real = laser.find_dot_px
+    laser.find_dot_px = lambda *a, **k: looks.append(1) or real(*a, **k)
+    full = sweep(laser, grid=(6, 4), n_pairs=1, refine=False, done=done)
+    assert len(full.pulses) == 24 and len(looks) == 24 - 15             # only the 9 new points were looked at
