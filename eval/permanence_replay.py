@@ -164,7 +164,9 @@ def main(argv=None) -> int:
     ap.add_argument("--reid", default=str(Path.home() / "asktheroom/ws8-data/models/dinov2_s14.onnx"))
     ap.add_argument("--device", default="mps")
     ap.add_argument("--fps", type=float, default=2.0, help="frame rate when file names carry no time")
-    ap.add_argument("--every", type=int, default=1, help="process every Nth frame (the live loop's rate)")
+    ap.add_argument("--every", type=int, default=0,
+                    help="process every Nth frame; 0: about --rate a second, the live perception loop's rate")
+    ap.add_argument("--rate", type=float, default=10.0, help="views a second with --every 0 (live: ~8-10)")
     ap.add_argument("--sweep", action="store_true", help="every view on every processed frame")
     ap.add_argument("--config", default=None, help="JSON of permanence: overrides")
     ap.add_argument("--verify", action="store_true", help="ask Grok (needs XAI_API_KEY)")
@@ -216,9 +218,15 @@ def main(argv=None) -> int:
                                 "refs": "teach_on_cues" if a.teach_on_cues else (a.refs or "enroll")}) + "\n")
     if a.annotate:
         Path(a.annotate).mkdir(parents=True, exist_ok=True)
+    every = a.every
+    if every <= 0:
+        ts = (json.loads((src / "frames.json").read_text()).get("t") or []) if (src / "frames.json").exists() else []
+        fps = (len(ts) - 1) / (ts[-1] - ts[0]) if len(ts) > 1 and ts[-1] > ts[0] else a.fps
+        every = max(1, round(fps / a.rate))
+        print(f"clip at {fps:.1f} fps: every {every} frames (~{fps / every:.1f} views/s)", file=sys.stderr)
     born, taught, n, ms, t0w = {}, set(), 0, [], time.perf_counter()
     for i, (t, wall, img) in enumerate(frames_from(src, a.fps)):
-        if img is None or i % max(1, a.every):
+        if img is None or i % every:
             continue
         clock["wall"] = wall
         t0 = time.perf_counter()
