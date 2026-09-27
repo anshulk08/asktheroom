@@ -732,6 +732,7 @@ laser_room:
   color: red                  # the dot's colour: red | green (the detector looks for this channel's rise)
   drift_px: 300               # an aim's first seen dot this far off the target, drift_aims in a row: the head
   drift_aims: 2               # lost steps (its zero moved), so the laser locks off until re-homed and restarted
+  drift_cm: 30                # the same for table aims (a turret table fit), in table cm
   ignore_px: []               # [[x1, y1, x2, y2], ...] full-frame px the dot finder never looks in: the laser
                               # module itself, if the camera sees it (rig: [[850, 1250, 1300, 1440]])
 

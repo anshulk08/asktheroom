@@ -583,3 +583,26 @@ def test_two_aims_in_a_row_landing_far_off_lock_the_laser_until_restart(room_mai
     n = len(rig.act.calls)
     room.aim(Answer("x", action=act))              # refused, no hardware calls
     assert len(rig.act.calls) == n
+
+
+def test_aims_that_never_see_their_dot_count_toward_the_lock_and_the_lock_stops_every_action(room_main, monkeypatch):
+    """A big shift puts the dot out of view: not_seen aims lock too; locked, no table point or sweep runs."""
+    from act.laser import PxAim
+    room, rig, Answer = room_main
+    room._speak = lambda text: None
+    t = center(rig.box_px("table"))
+    unseen = PxAim(float("inf"), False, False, 3, None, "not_seen", None)
+    stopped = PxAim(float("inf"), False, False, 0, None, "unsafe", None)
+    results = iter([unseen, stopped, unseen])
+    monkeypatch.setattr(room.laser, "aim_px", lambda *a, **k: next(results))
+    act = f"room:{t[0]:.0f},{t[1]:.0f}"
+    room.aim(Answer("x", action=act))
+    room.aim(Answer("x", action=act))              # stopped for a person: neither counts nor resets
+    assert room.laser_locked is None
+    room.aim(Answer("x", action=act))
+    assert room.laser_locked
+    room.allow_sweep = True
+    n = len(rig.act.calls)
+    assert room.aim(Answer("x", point_at="wallet")) is None
+    assert room.aim(Answer("x", point_at="phone", action="sweep:left")) is None
+    assert len(rig.act.calls) == n

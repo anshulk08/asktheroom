@@ -193,6 +193,7 @@ class Room:
         # after aim: after drift_aims of them in a row the laser locks off until a re-home and restart.
         self.drift_px = float(lr.get("drift_px", 300))
         self.drift_aims = int(lr.get("drift_aims", 2))
+        self.drift_cm = float(lr.get("drift_cm", 30))                    # the table path's version, in table cm
         self._drift_n = 0
         self.laser_locked: Optional[str] = None
         self.view_rect: Optional[tuple] = None     # the table view's rect in the full frame (room memory on)
@@ -331,6 +332,9 @@ class Room:
         if action is None:
             return None
         err = None
+        if self.laser_locked:                 # every action: a shifted zero points anywhere
+            log.info("laser refused: %s", self.laser_locked)
+            return None
         with self._aim_lock:
             try:
                 if action.startswith("sweep:"):
@@ -372,6 +376,8 @@ class Room:
                         self.laser.state["target"] = ans.point_at
                     else:
                         err = self.laser.aim_object(ans.point_at, pos, check=lambda: self._unsafe(uv, box))
+                        la = getattr(self.laser, "last_aim", None) or {}
+                        self._note_drift(la.get("first_err_cm"), la.get("reason"), self.drift_cm)
                     log.info("laser -> %s at (%.1f, %.1f) via %s%s", ans.point_at, pos[0], pos[1],
                              ">".join(chain), f", err {err:.1f} cm" if err is not None else "")
             except (RuntimeError, ValueError) as ex:
@@ -550,16 +556,21 @@ class Room:
         if not r.on_target:                   # never leave the dot somewhere it wasn't confirmed
             self.laser.off()
             self.world.laser = dict(OFF)
-        self._note_drift(r)
+        self._note_drift(getattr(r, "first_err_px", None), getattr(r, "reason", None), self.drift_px)
         return r.on_target
 
-    def _note_drift(self, r) -> None:
-        """Count aims whose first seen dot landed over drift_px from the target; drift_aims in a row lock the
-        laser off (the head lost steps: its zero moved, so every aim now starts somewhere else)."""
-        first = getattr(r, "first_err_px", None)
+    def _note_drift(self, first, reason, limit: float) -> None:
+        """Count aims whose first seen dot landed over `limit` from the target, or that lit and looked but never
+        saw it (after a big shift the dot lands out of view); drift_aims in a row lock the laser off (the head
+        lost steps: its zero moved). Aims stopped before or without looking (a person, the budget, no map)
+        neither count nor reset."""
         if first is None:
-            return
-        self._drift_n = self._drift_n + 1 if first > self.drift_px else 0
+            if reason == "not_seen":
+                self._drift_n += 1
+            else:
+                return
+        else:
+            self._drift_n = self._drift_n + 1 if first > limit else 0
         if self._drift_n >= self.drift_aims and not self.laser_locked:
             self.laser_locked = (f"the laser's zero moved ({self._drift_n} aims in a row first landed over "
                                  f"{self.drift_px:.0f} px off): locked off until it is re-homed and restarted")
