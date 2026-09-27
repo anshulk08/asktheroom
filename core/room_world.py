@@ -338,6 +338,13 @@ class RoomRules:
             same = [(n, t) for n, t in cands if self.thing_guess(n) is not None
                     and names_match(mine, self.thing_guess(n), rc.name_match_min)]
             named = [(n, t) for n, t in cands if self.thing_guess(n) is not None]
+            # WS2 (live Sun 27 Sep 04:42): a 4 s duplicate of the pill bottle, born while someone leaned
+            # over the table, was lost; its departure let a counter object Grok also called a pill bottle
+            # take its identity, while the real pill bottle lay on the table the whole time. A thing of
+            # the same name still on the table is what that name means: no handoff by name alone.
+            if same and any(n not in self._room and names_match(mine, self.thing_guess(n), rc.name_match_min)
+                            for n in self._visible_things() if self.thing_guess(n) is not None):
+                same, cands = [], []
             if same:
                 name, dep_t = max(same, key=lambda c: c[1])
                 first = min(t for _, t in same)
