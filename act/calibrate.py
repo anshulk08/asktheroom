@@ -153,6 +153,7 @@ def calibrate(laser: Laser, grid: int = 4, margin: float = 0.05, settle_s: float
         laser.off()
     fit.table_px_to_cm = table_px_to_cm(laser.table, laser.table_size)
     fit.servo_limits = {"pan": [plo, phi], "tilt": [tlo, thi]}
+    fit.actuator = str((laser.cfg or {}).get("actuator", "fake")).lower()
     if laser.cal_path:
         fit.save(laser.cal_path)
     laser.fit = fit

@@ -14,7 +14,7 @@ from act.sim import SimRig
 from core.config import load_config
 from core.events import EventLog
 from core.fakeworld import demo_world
-from core.types import Answer
+from core.types import Answer, Status
 from core.world import World
 from server.app import create_app
 from server.sim import SimTable
@@ -59,6 +59,8 @@ def make_room(tmp_path, cal=None, world=None, **kw):
     room = main.Room(CFG, world, events, SimTable(CFG), None, laser, ask, tts=SpeakLog(), **kw)
     room.laser_timeout_s = 60
     room.listen_mode = "click"                  # the always-on tests switch it back
+    room.room_head_px = (640.0, 0.0)            # the laser head, as the camera sees it (the beam check)
+    room._people_now = lambda img: []           # a person detector that sees nobody
     return room, rig
 
 
@@ -104,6 +106,9 @@ def test_uncalibrated_laser_still_speaks(tmp_path):
 
 def test_sweep_and_circle_actions(tmp_path, cal_path):
     room, rig = make_room(tmp_path, cal_path)
+    assert room.aim(Answer("carried off the left", point_at="phone", action="sweep:left")) is None
+    assert not rig.act.writes                   # off by default: it runs down the edge the person left by
+    room.allow_sweep = True
     room.aim(Answer("carried off the left", point_at="phone", action="sweep:left"))
     assert room.world.laser["target"] == "edge:left"
     n = len(rig.act.writes)
@@ -1200,3 +1205,70 @@ def test_a_dropped_follow_up_logs_why_never_what(tmp_path, cal_path, caplog, wak
     assert room.tts.said == [] and resets == []
     assert f"after-wake follow-up dropped: {reason}" in msgs
     assert not any(follow.lower().strip("?.!") in m.lower() for m in msgs if follow not in ("you",)), msgs
+
+
+# ----- laser eye safety in the app (review of ws/laser)
+
+def test_table_aims_are_refused_without_a_head_position_or_with_a_person_near(tmp_path, cal_path):
+    room, rig = make_room(tmp_path, cal_path)
+    room.room_head_px = None
+    assert room.aim(Answer("x", point_at="wallet")) is None and not rig.act.writes
+    room.room_head_px = (640.0, 0.0)
+    uv, _ = room._table_full(room.world.resolve("wallet")[0], 4.0)
+    room._people_now = lambda img: [(uv[0] - 5, uv[1] - 5, uv[0] + 5, uv[1] + 5)]
+    assert room.aim(Answer("x", point_at="wallet")) is None and not rig.act.writes
+    room._people_now = lambda img: None                                 # nobody could look
+    assert room.aim(Answer("x", point_at="wallet")) is None and not rig.act.writes
+
+
+def test_a_stale_camera_frame_refuses_the_aim(tmp_path, cal_path):
+    from core.types import Frame
+    room, rig = make_room(tmp_path, cal_path)
+    old = rig.laser_frames_latest = room._full_frame()
+    room._full_frame = lambda: Frame(t=old.t - 5.0, wall=old.wall, img=old.img, idx=old.idx)
+    assert room.aim(Answer("x", point_at="wallet")) is None and not rig.act.writes
+
+
+def test_no_answer_from_the_person_detector_is_a_refusal_not_hog(tmp_path, cal_path):
+    room, rig = make_room(tmp_path, cal_path)
+    del room._people_now                                                # the real one, no perception thread
+    room.people_wait_s = 0.05
+    assert room._people_now(None) is None
+    assert room.aim(Answer("x", point_at="wallet")) is None and not rig.act.writes
+
+
+def test_an_object_in_someones_hand_is_never_pointed_at(tmp_path, cal_path):
+    room, rig = make_room(tmp_path, cal_path)
+    room.world.set("wallet", status=Status.HELD, parent="hand:1")
+    assert room.aim(Answer("You're holding your wallet.", point_at="wallet")) is None and not rig.act.writes
+
+
+def test_a_person_stepping_in_mid_aim_stops_it_dark(tmp_path, cal_path):
+    room, rig = make_room(tmp_path, cal_path)
+    uv, _ = room._table_full(room.world.resolve("wallet")[0], 4.0)
+    looks = []
+
+    def people(img):
+        looks.append(1)
+        return [] if len(looks) < 2 else [(uv[0] - 5, uv[1] - 5, uv[0] + 5, uv[1] + 5)]
+    room._people_now = people
+    room.laser.tol_cm = 0.001                                           # keep it looking
+    room.aim(Answer("x", point_at="wallet"))
+    assert len(looks) >= 2 and room.laser.last_aim["reason"] == "unsafe" and rig.act.laser_on is False
+
+
+def test_the_dwell_is_what_is_left_of_the_budget(tmp_path, cal_path):
+    room, _ = make_room(tmp_path, cal_path)
+    room.laser.last_aim = {"lit_s": 3.9}
+    room._schedule_off(60)
+    assert room._off_timer.interval == pytest.approx(0.1, abs=1e-6)
+    room._off_timer.cancel()
+
+
+def test_a_laser_fit_not_made_with_the_turret_is_ignored_on_it(cal_path, caplog):
+    import json
+    assert json.load(open(cal_path)).get("actuator") == "fake"         # act.calibrate stamps the actuator
+    cfg = dict(CFG, actuator="turret", turret={"port": "/dev/nonexistent-turret"},
+               paths=dict(CFG["paths"], laser_cal=cal_path))
+    laser = main.make_laser(cfg, None, SimTable(CFG))
+    assert laser.fit is None and "not fitted with the turret" in caplog.text

@@ -688,15 +688,19 @@ viewer:
   front: bottom
   sides: {}                   # optional labels per CAMERA side for the phone's "I sit here", e.g. {right: couch}
 
-# Room-wide laser safety (main.Room room aims; room: above has the zones, head_px and dwell). Before every room
-# aim the perception thread looks for people on the full frame (YOLOE's person classes; OpenCV HOG if it
-# can't answer in people_wait_s); a person or hand box grown by person_margin_px touching the target or the
-# beam's path from head_px refuses the aim, and with no detector able to look it is refused too. Any aim, table
-# or room, turns the laser off after max_on_s at most; it is off at startup and after any failed aim.
+# Laser eye safety (main.Room; room: above has the zones, head_px and dwell). Before every aim, table or room,
+# and before every look within one, the perception thread looks for people on the full frame (YOLOE's person
+# and clothing classes); a person or recent hand box grown by person_margin_px touching the target or the
+# beam's path from room.head_px refuses it, as do head_px unset, a stale frame, or no detector able to look.
+# An object in someone's hand is never pointed at. The head only moves dark; the dot stays lit only on a
+# confirmed hit, at most max_on_s from the aim's first light; off at startup and after any failed aim.
 laser_room:
   person_margin_px: 60
-  people_wait_s: 1.0
-  max_on_s: 4.0
+  people_wait_s: 1.0          # YOLOE's person look on the perception thread; no answer in time: refused
+  max_on_s: 4.0               # counted from each aim's first light; blinks don't restart it
+  max_frame_age_s: 0.5        # an older camera frame (a stalled camera) proves nothing: refused
+  allow_hog: false            # HOG as the fallback person detector (it misses seated people)
+  allow_sweep: false          # 'carried off' edge sweeps run down the edge the person walked out by
 
 # Stepper turret (actuator: turret; act/actuator.py TurretActuator, act/turret.py, firmware/turret).
 # An Arduino Uno drives two MKS SERVO42D closed-loop steppers; wiring and driver menu settings are in

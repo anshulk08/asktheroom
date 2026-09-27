@@ -239,6 +239,7 @@ def room_main(tmp_path, monkeypatch):
                      lambda text, source: Answer("x"))
     room.laser_timeout_s = 60
     room._people_now = lambda img: []           # a person detector that sees nobody (this OpenCV may have no HOG)
+    room.room_head_px = (320.0, 0.0)            # the laser head, as the camera sees it (the beam check)
     return room, rig, Answer
 
 

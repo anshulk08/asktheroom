@@ -165,6 +165,7 @@ class LaserFit:
     # after a table refit Laser maps new cm -> px -> these cm (exact while the camera and head stay put).
     table_px_to_cm: Optional[np.ndarray] = None
     servo_limits: Optional[dict] = None    # the limits it was fitted within (for the record)
+    actuator: Optional[str] = None         # the actuator it was fitted with (a servo fit is wrong for the turret)
 
     def _uv(self, xy: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         cx, cy, s = self.norm
@@ -193,7 +194,7 @@ class LaserFit:
     def to_dict(self) -> dict:
         return {"model": "poly2", "coef": self.coef.tolist(), "norm": list(self.norm),
                 "fit_error_cm": self.fit_error_cm, "n_points": self.n_points, "grid": self.grid,
-                "timestamp": self.timestamp, "servo_limits": self.servo_limits,
+                "timestamp": self.timestamp, "servo_limits": self.servo_limits, "actuator": self.actuator,
                 "table_px_to_cm": None if self.table_px_to_cm is None else self.table_px_to_cm.tolist()}
 
     @classmethod
@@ -202,7 +203,7 @@ class LaserFit:
         return cls(np.asarray(d["coef"], dtype=np.float64), tuple(d["norm"]),  # type: ignore[arg-type]
                    d.get("fit_error_cm", {}), int(d.get("n_points", 0)), d.get("grid"),
                    float(d.get("timestamp", 0.0)),
-                   None if H is None else np.asarray(H, dtype=np.float64), d.get("servo_limits"))
+                   None if H is None else np.asarray(H, dtype=np.float64), d.get("servo_limits"), d.get("actuator"))
 
     def save(self, path: str) -> None:
         d = os.path.dirname(os.path.abspath(path))
@@ -543,7 +544,7 @@ class Laser:
                       "err_cm": None if math.isinf(err) else round(err, 2)}
         return err
 
-    def aim_object(self, name: str, target_cm: tuple) -> float:
+    def aim_object(self, name: str, target_cm: tuple, check=None) -> float:
         """aim(), but for shiny objects (cfg shiny_objects) aim shiny_offset_cm toward the table
         centre so the dot lands on the table next to the object instead of glinting off it."""
         tgt = np.asarray(target_cm, dtype=np.float64)
@@ -552,7 +553,7 @@ class Laser:
             d = np.asarray(self.table_size, dtype=np.float64) / 2 - tgt
             n = float(np.linalg.norm(d))
             tgt = tgt + (d / n if n > 1e-6 else np.array([1.0, 0.0])) * off
-        err = self.aim(tuple(tgt))
+        err = self.aim(tuple(tgt), check=check)
         self.state["target"] = name
         return err
 
