@@ -50,6 +50,7 @@ from core.config import load_config
 from core.types import Answer, Intent
 
 log = logging.getLogger("askroom.main")
+WAKE_FILLER = {"hey", "hi", "ok", "okay", "yo", "please", "um", "uh"}   # words allowed around a bare wake word
 
 OFF = {"on": False, "target": None, "err_cm": None}
 NOT_HEARD = "Sorry, I didn't catch that."
@@ -496,6 +497,10 @@ class Room:
                 continue
             if not text:
                 continue
+            if self._bare_wake(text):           # "Room!" ... pause ... the question: listen for it now
+                log.info("heard the wake word alone; listening for the question")
+                self._asked(t_heard)
+                continue
             if self.interpret(text, overheard=True).kind == "IGNORE":
                 ignored += 1                    # dropped: not logged, not stored, not sent
                 continue
@@ -506,11 +511,22 @@ class Room:
     def _speaking(self) -> bool:
         return bool(getattr(self.tts, "speaking", False))
 
+    def _bare_wake(self, text: str) -> bool:
+        """The wake word on its own ("Room!", "hey room"): people pause after it, so the VAD ends the
+        utterance before the question. Treated like a clicker press: the next thing said is for the rig
+        (rig run, Sat 26 Sep: "Room!" then "where is my wallet?" as two utterances, neither answered)."""
+        from voice.intents import normalize
+        from voice.understand import wake_words
+        words = normalize(text).split()
+        wake = set(wake_words(self.cfg))
+        return bool(words) and any(w in wake for w in words) and all(w in wake or w in WAKE_FILLER for w in words)
+
     def _asked(self, t_press: float) -> None:
-        """Clicker press: stop the current answer, listen for one question, answer it."""
+        """Clicker press, or the wake word alone: stop the current answer, listen for one question, answer it."""
         if self.tts is not None:
             self.tts.stop()                     # a click interrupts the previous answer
-        self.clicker.clear()
+        if self.clicker is not None:
+            self.clicker.clear()
         try:
             text = self.stt.listen()
         except Exception:

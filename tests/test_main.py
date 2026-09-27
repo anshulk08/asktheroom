@@ -655,3 +655,21 @@ def test_a_recalibrate_that_keeps_the_size_says_nothing_more(tmp_path):
     room.table.size_cm = (80.0, 50.0)
     room.recalibrate = lambda timeout_s=None: True
     assert room._recalibrate_and_tell(speak=True) is None and room.tts.said == []
+
+
+def test_the_wake_word_alone_makes_the_rig_listen_for_the_question(tmp_path, cal_path, monkeypatch):
+    """Rig run (Sat 26 Sep): "Room!" ... pause ... "where is my wallet?" arrived as two utterances and
+    neither was answered. The bare wake word now acts like a clicker press: the next thing said is for
+    the rig."""
+    posted = []
+    monkeypatch.setattr(main.requests, "post",
+                        lambda url, json, timeout, headers=None: posted.append(json))
+    stt = FakeSTT("where is my wallet", overheard=["Room!", "hey room"])
+    room, _ = make_room(tmp_path, cal_path, stt=stt, clicker=FakeClicker())
+    room.webhook_url = "http://n8n/webhook/ask-the-room"
+    t = always_on(room)
+    assert wait_for(lambda: len(posted) >= 2)
+    assert [(q["heard"], q["mode"]) for q in posted[:2]] == [("where is my wallet", "asked")] * 2
+    assert all("wallet" in s.lower() for s in room.tts.said[:2])
+    assert room._bare_wake("Room!") and room._bare_wake("hey room, um") and not room._bare_wake("room where is it")
+    stop_voice(room, t)
