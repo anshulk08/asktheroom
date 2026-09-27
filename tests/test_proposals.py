@@ -684,3 +684,14 @@ def test_warmup_starts_again_on_reset():
 def test_the_default_warmup_is_about_three_seconds():
     from core.proposals import ChangeConfig
     assert ChangeConfig().warmup_frames == 45
+
+
+def test_people_marks_footwear_for_the_laser_gate():
+    """people() returns every person and worn box (the gate errs towards seeing someone) and records which
+    are footwear: only those may be let through when nobody is in them (main.Room._blockers)."""
+    m = FakeYOLOE([(4, 0.7, (300, 400, 420, 520)), (5, 0.6, (500, 200, 700, 300)), (1, 0.8, (900, 100, 1200, 700))])
+    m.names = {**FakeYOLOE.names, 4: 'sneaker', 5: 'shirt'}
+    y = YOLOEProposer({'conf': 0.15}, model=m)
+    boxes = y.people(np.zeros((H, W, 3), np.uint8))
+    assert set(boxes) == {(300, 400, 420, 520), (500, 200, 700, 300), (900, 100, 1200, 700)}
+    assert y.people_footwear == [(300, 400, 420, 520)]

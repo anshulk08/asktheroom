@@ -606,6 +606,10 @@ PEOPLE = ['person', 'man', 'woman', 'child', 'boy', 'girl', 'patient', 'head', '
 # worn box as a person.
 WORN = ['glove', 'shoe', 'footwear', 'leather shoe', 'running shoe', 'sneaker', 'boot', 'cowboy boot', 'sandal',
         'slipper', 'sock', 'air sock', 'jeans', 'pants', 'pant', 'sweat pant', 'shirt', 'polo shirt']
+# Footwear lies about on its own (a sneaker on the table or the floor): for the room laser's people gate a lone
+# one is not a person. Every other worn item (a shirt, a glove) may be all the model boxed of someone.
+FOOTWEAR = ['shoe', 'footwear', 'leather shoe', 'running shoe', 'sneaker', 'boot', 'cowboy boot', 'sandal',
+            'slipper', 'sock', 'air sock']
 PERSON_INSIDE = 0.6                     # share of a box inside a person box that flags it occluded
 DEFAULT_IGNORE = PEOPLE + ['table', 'dining table', 'desk', 'office desk', 'coffee table', 'tabletop', 'countertop',
                            'floor', 'wall', 'wood', 'wood floor', 'hardwood', 'plywood']
@@ -683,8 +687,10 @@ class YOLOEProposer:
         names = getattr(r, 'names', None) or getattr(self.model, 'names', {}) or {}
         xyxy, score, cls = _np(r.boxes.xyxy), _np(r.boxes.conf), _np(r.boxes.cls)
         label = [str(names.get(int(k), '')).lower() for k in cls]
-        return [tuple(int(round(float(v))) for v in b) for b, s, n in zip(xyxy, score, label)
-                if s >= conf and (n in PEOPLE or n in WORN)]
+        out = [(tuple(int(round(float(v))) for v in b), n in FOOTWEAR) for b, s, n in zip(xyxy, score, label)
+               if s >= conf and (n in PEOPLE or n in WORN)]
+        self.people_footwear = [b for b, foot in out if foot]    # which are footwear (main.Room._blockers)
+        return [b for b, _ in out]
 
     def propose(self, img: Optional[np.ndarray], known: list[BoxPx], hands: list[BoxPx]) -> list[Proposal]:
         if img is None:

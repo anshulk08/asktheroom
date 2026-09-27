@@ -46,6 +46,7 @@ from typing import Callable, Optional
 import numpy as np
 import requests
 
+from core import geom
 from core.config import load_config
 from core.types import Answer, Intent, Status
 
@@ -118,6 +119,7 @@ def warm_on_connect(netmon, warm: Callable[[], object]) -> None:
 
 PHONE_ECHO_S = 3.0      # a voice question matching a phone question this recent is the same question
 ANSWER_LATE_S = 10.0    # server.app.ASK_TIMEOUT_S: past it the asker was told "took too long", so stay quiet
+WORN_NEAR_PX = 40.0     # footwear this close to another person box is being worn (proposals.yoloe.worn_near_px)
 
 
 def _norm(text: str) -> str:
@@ -201,6 +203,8 @@ class Room:
         self._people_want = threading.Event()      # an aim asks the perception thread for person boxes ...
         self._people_done = threading.Event()
         self._people: Optional[list] = None        # ... full-frame px, or None: no person detector there
+        self._people_footwear: list = []           # which of those boxes are footwear (_blockers)
+        self.worn_near_px = WORN_NEAR_PX
         n8n = cfg.get("n8n") or {}
         self.webhook_url = str(n8n.get("webhook_url") or "")
         self.webhook_token = str(n8n.get("token") or "")
@@ -465,6 +469,8 @@ class Room:
             f = self._full_frame()
             if prop is not None and hasattr(prop, "people") and f is not None and f.img is not None:
                 people = prop.people(f.img)
+                self._people_footwear = list(getattr(prop, "people_footwear", None) or [])
+                self.worn_near_px = float(getattr(getattr(prop, "cfg", None), "worn_near_px", WORN_NEAR_PX))
         except Exception:
             log.exception("person check failed")
         self._people = people
@@ -517,10 +523,24 @@ class Room:
             people = self._people_now(f.img)
             if people is None:
                 return "no person detector could look (never aimed blind)"
-            blockers += people
+            blockers += self._blockers(people)
         if beam_blocked(uv, box, blockers, head, margin):
             return "a person or hand is near the target or the beam"
         return None
+
+    def _blockers(self, people: list) -> list:
+        """The person blockers, minus footwear nobody is in: a shoe, sneaker or sock box (core/proposals
+        FOOTWEAR) blocks only when it touches, within worn_near_px, another person box (a person, a leg, a
+        shirt). On the rig a white sneaker lying on the table next to the remote refused its aim 3 times
+        (06:02, Grok: "I don't see anyone"). Every other box blocks as before: a shirt or a glove may be all
+        YOLOE boxed of someone sitting there."""
+        foot = {tuple(b) for b in getattr(self, "_people_footwear", None) or []}
+        if not foot:
+            return list(people)
+        others = [b for b in people if tuple(b) not in foot]
+        g = self.worn_near_px
+        return others + [b for b in people if tuple(b) in foot and any(
+            b[0] - g <= o[2] and o[0] <= b[2] + g and b[1] - g <= o[3] and o[1] <= b[3] + g for o in others)]
 
     def _held(self, name: str, chain) -> bool:
         """The object (or what it is in) is in someone's hand: pointing there is pointing at a person."""
@@ -1484,7 +1504,15 @@ def build(cfg: dict, fake: bool = False, camera: int = 0, with_voice: bool = Tru
     if visual is not None:
         visual.grok_check = checker
     cleanup += [x.stop for x in (narrator, visual, namer, checker) if x is not None]
-    ask = voice.pipeline.make_ask(cfg, world, events, net=netmon, interpret=interpret, visual=visual)
+    def room_tracks():                  # room.aim_tracks: WHERE from the room tracker's named tracks
+        rm = getattr(room, "room_memory", None)
+        if rm is None:
+            return [], {}, lambda n: False
+        says = {z.name: z.say for z in rm.zones.zones.values()}
+        return rm.tracker.tracks(), says, lambda n: bool((world.room_json().get(n) or {}).get("tentative"))
+
+    ask = voice.pipeline.make_ask(cfg, world, events, net=netmon, interpret=interpret, visual=visual,
+                                  room_tracks=room_tracks)
     tts = voice.tts.TTS(cfg, net=netmon).attach(world)     # /state: speaker connected, the phone's voice
     tts.warm()
     cleanup.append(tts.stop)

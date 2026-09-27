@@ -553,6 +553,9 @@ detect_filter:
 # and for at most room_dwell_s. The map path is the `room_map` key above.
 room:
   enabled: false
+  aim_tracks: false           # WHERE for a name the world has no place for: a fresh Grok-named room track answers and
+                              # is aimed at (voice/room_tracks.py; never worn / body-part names, stale or tentative)
+  aim_track_fresh_s: 5        # ... matched this recently
   grid: [20, 15]              # sweep pulse grid (pan x tilt) over servo_limits; ~2-3 min on the rig
   n_pairs: 3                  # laser on/off pairs averaged per look (a far dot is faint)
   tol_px: 12                  # stop when the dot is this close to the target (or inside the object's box)
