@@ -391,3 +391,23 @@ def test_capture_opens_the_camera_as_the_detector_sees_it():
     assert isinstance(plain, Buf) and plain.kw.get("opener") is not None      # still 1080p, uncut
     off = cap.open_source({"room_memory": {"enabled": False}}, 0, make_buffer=Buf)
     assert isinstance(off, Buf) and off.kw == {}
+
+
+def test_max_rot_bounds_a_cutout_rotation_for_the_corner_camera():
+    """Overhead, any rotation of a cutout is a real pose; from the corner camera an object never lies upside
+    down, so --max-rot keeps pastes within +-max_rot degrees (0: the cutout's own orientation, only scaled/mirrored)."""
+    for seed in range(5):
+        p = synthesize.place_object(np.random.default_rng(seed), cut("wallet", (0, 255, 0), size=(60, 20)), 2,
+                                    (0, 0, W, H), max_rot=0)
+        ys, xs = np.nonzero(p.label)
+        w, h = xs.max() - xs.min() + 1, ys.max() - ys.min() + 1
+        assert 2.6 <= w / h <= 3.4, (seed, w, h)                      # 60x20 stays 3:1, never rotated
+    p = synthesize.place_object(np.random.default_rng(1), cut("wallet", (0, 255, 0), size=(60, 20)), 2,
+                                (0, 0, W, H))
+    ys, xs = np.nonzero(p.label)                                       # default: the old 0-360 draw
+    assert (xs.max() - xs.min() + 1) / (ys.max() - ys.min() + 1) < 2.6
+
+
+def test_train_parser_takes_flipud_for_the_corner_camera():
+    a = train.build_parser().parse_args(["--flipud", "0"])
+    assert a.flipud == 0.0 and train.build_parser().parse_args([]).flipud == 0.5

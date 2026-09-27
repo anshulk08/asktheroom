@@ -130,9 +130,12 @@ def rotate(bgra: np.ndarray, label: np.ndarray, angle: float, scale: float = 1.0
     return out, lab & (out[:, :, 3] >= 128)
 
 
-def place_object(rng: np.random.Generator, cut: Cut, cls: int, region: Box) -> Paste:
-    """A random pose inside region. A distractor's paste has cls NO_BOX and no label pixels."""
-    bgra, lab = rotate(cut.bgra, _label(cut.bgra, cut.box), rng.uniform(0, 360), rng.uniform(0.9, 1.1),
+def place_object(rng: np.random.Generator, cut: Cut, cls: int, region: Box, max_rot: float = 360.0) -> Paste:
+    """A random pose inside region. A distractor's paste has cls NO_BOX and no label pixels. max_rot:
+    the rotation is drawn from +-max_rot degrees (360: any, the overhead camera; a corner camera sees a
+    table in perspective, where an object is never upside down: 20-30)."""
+    angle = rng.uniform(0, 360) if max_rot >= 360 else rng.uniform(-max_rot, max_rot)
+    bgra, lab = rotate(cut.bgra, _label(cut.bgra, cut.box), angle, rng.uniform(0.9, 1.1),
                        bool(rng.random() < 0.5))
     h, w = bgra.shape[:2]
     rx1, ry1, rx2, ry2 = region
@@ -179,7 +182,8 @@ def place_hand(rng: np.random.Generator, cut: Cut, cls: int, frame: tuple[int, i
 
 def make_image(rng: np.random.Generator, backgrounds: Sequence[np.ndarray], cuts: dict[str, list[Cut]],
                names: list[str], region: Box, max_objects: int = 6, p_hand: float = 0.6,
-               min_visible: float = 0.3, p_distractor: float = 0.5) -> tuple[np.ndarray, list[tuple[int, Box]]]:
+               min_visible: float = 0.3, p_distractor: float = 0.5,
+               max_rot: float = 360.0) -> tuple[np.ndarray, list[tuple[int, Box]]]:
     """One composite. max_objects bounds the pasted items (objects and distractors together)."""
     bg = backgrounds[int(rng.integers(len(backgrounds)))]
     bg = np.clip(bg.astype(np.float32) * rng.uniform(0.92, 1.08), 0, 255).astype(np.uint8)
@@ -193,7 +197,7 @@ def make_image(rng: np.random.Generator, backgrounds: Sequence[np.ndarray], cuts
     for name in rng.choice(objs, k, replace=False) if k else []:
         group = cuts[name]
         cls = NO_BOX if name in dists else names.index(name)
-        pastes.append(place_object(rng, group[int(rng.integers(len(group)))], cls, region))
+        pastes.append(place_object(rng, group[int(rng.integers(len(group)))], cls, region, max_rot))
     if cuts.get("hand") and rng.random() < p_hand:
         for _ in range(2 if rng.random() < 0.25 else 1):
             toward = None
@@ -273,11 +277,14 @@ def main(argv=None) -> int:
                     help="share of images whose items are drawn from objects and distractors together "
                          "(only matters when capture.py --distractors saved some)")
     ap.add_argument("--holdout", default=HOLDOUT, help="capture group never pasted ('' pastes every cutout)")
+    ap.add_argument("--max-rot", type=float, default=360.0,
+                    help="pasted objects rotate within +-this many degrees (360: any, overhead camera; "
+                         "20-30 for a corner camera, where nothing on the table is upside down)")
     a = ap.parse_args(argv)
     names = class_names(load_config())
     data = Path(a.data)
     n = synthesize(data, names, a.n, a.seed, a.holdout or None, max_objects=a.max_objects, p_hand=a.p_hand,
-                   p_distractor=a.p_distractor)
+                   p_distractor=a.p_distractor, max_rot=a.max_rot)
     write_data_yaml(data, names)
     print(f"wrote {n} composites to {data / 'images'}/{PREFIX}_*.jpg; "
           f"sample sheet: {write_qa(data, names, PREFIX, 'qa_synth.jpg', limit=48)}")

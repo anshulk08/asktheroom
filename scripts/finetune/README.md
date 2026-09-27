@@ -81,6 +81,38 @@ Revisit the rig's per-class `conf_threshold` (wallet / phone are at 0.6 because 
 unknown things by those names at up to 0.72): with distractors in training the confusions should
 score lower, and a lower cut-off confirms placements sooner.
 
+## Corner camera (spec 0009/0010: the Brio high in the room corner, zoom 100, 1080p)
+
+The detector then sees the **table view**: the 1080p frame cut to `room_memory.table_view_rect`
+(config.local.yaml) and resized to 1280x720 (`core/room_view.TableView`). `capture.py` opens the camera the
+same way whenever room memory is on in config, so the captures are exactly what the model gets on the rig
+(`--full-frame` keeps the uncut 1080p frame instead). Leave the camera controls as the demo runs them
+(no `camera_setup.sh`: zoom 100 is the view; the model must work in the demo's own light).
+
+```
+cd ~/askroom_room                                        # the demo checkout; the host venv lives in ~/askroom
+docker ps --filter ancestor=askroom:latest --format '{{.ID}} {{.Command}}' | grep main.py | cut -d' ' -f1 | xargs -r docker stop
+~/askroom/.venv/bin/python scripts/finetune/capture.py \
+    --device /dev/v4l/by-id/usb-046d_Logitech_BRIO_3675F8D2-video-index0 \
+    --distractors airpods mug charger lipbalm coaster --roi 20,30,1250,660
+```
+`--roi` is the coffee-table top in table-view px (1280x720): the strip above it is floor and chair legs,
+where the person placing objects would otherwise count as a change. The table is dark wood: keep the room
+lamp on and prefer poses that don't stack a black object on the darkest grain. Then on the Mac (any
+checkout; `data/finetune-*` is gitignored), with the corner switches:
+
+```
+rsync -a "guru@10.90.84.178:askroom_room/data/finetune/" data/finetune/
+.venv/bin/python scripts/finetune/synthesize.py --n 500 --max-rot 25         # +-25 degrees: nothing is upside down
+PYTORCH_ENABLE_MPS_FALLBACK=1 .venv/bin/python scripts/finetune/train.py --model models/yolo26s.pt \
+    --device mps --batch 8 --epochs 30 --val-trials cap3 --flipud 0 --name askroom-yolo26s-corner
+scp <best.pt> "guru@10.90.84.178:askroom_room/models/askroom-yolo26s-corner.pt"
+```
+Engine as above (`scripts/dock.sh yolo export model=models/askroom-yolo26s-corner.pt format=engine half=True
+imgsz=640`, from `~/askroom_room`, when the Jetson is free), then in config.local.yaml: `detect.model` to the
+new engine and the per-prop `conf_threshold` back from 0.99 to ~0.6. Done when notebook, box and keys score
+>= 0.6 on the coffee table and the shell game passes (spec 0010 P1-1).
+
 ## Slow path (label trial-video frames by hand)
 
 Classes are exactly the config objects in order, then `hand`:

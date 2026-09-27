@@ -81,8 +81,7 @@ def write_split(data: Path, names: list[str], train: list[str], val: list[str]) 
     return p
 
 
-def main(argv=None) -> int:
-    from core.config import load_config
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--data", default=str(DEFAULT_DATA))
     ap.add_argument("--model", default="yolo11s.pt")
@@ -95,7 +94,15 @@ def main(argv=None) -> int:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--name", default="askroom-yolo11s")
     ap.add_argument("--split-only", action="store_true")
-    a = ap.parse_args(argv)
+    ap.add_argument("--flipud", type=float, default=0.5,
+                    help="up/down flip augmentation share: 0.5 for the overhead camera, 0 for a corner camera "
+                         "(a table in perspective is never upside down)")
+    return ap
+
+
+def main(argv=None) -> int:
+    from core.config import load_config
+    a = build_parser().parse_args(argv)
 
     data = Path(a.data)
     labelled = {p.stem for p in (data / "labels").glob("*.txt")}
@@ -114,10 +121,10 @@ def main(argv=None) -> int:
 
     from ultralytics import YOLO
     model = YOLO(a.model)
-    # Overhead camera: up/down flips are as plausible as left/right. No mosaic in the last epochs so
-    # the model finishes on whole-table views like the ones it will see.
+    # Overhead camera: up/down flips are as plausible as left/right (--flipud 0 for a corner camera). No
+    # mosaic in the last epochs so the model finishes on whole-table views like the ones it will see.
     res = model.train(data=str(ds), epochs=a.epochs, imgsz=a.imgsz, batch=a.batch, device=a.device,
-                      project="runs/askroom", name=a.name, seed=a.seed, flipud=0.5, fliplr=0.5,
+                      project="runs/askroom", name=a.name, seed=a.seed, flipud=a.flipud, fliplr=0.5,
                       close_mosaic=10, patience=30, exist_ok=True)
     best = Path(res.save_dir) / "weights" / "best.pt"
     got = list(YOLO(str(best)).names.values())
