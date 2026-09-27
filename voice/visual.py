@@ -170,6 +170,22 @@ Rules:
 - confidence: 0 to 1; below 0.5 if you aren't sure.
 Reply with the JSON object only."""
 
+# Pointing at what the room look found (room.point_looks): Moondream boxes the thing in the zone the answer
+# names, and Grok confirms the box before the laser may aim at it. The opening matches core/grok_trace's "is_a".
+IS_A_SYSTEM = """You look at one object in a red box in a room photo and say whether it is the named kind of thing. The photo is a close-up cut from a camera high in a corner of the room, looking down at an angle.
+
+Rules:
+- yes: true only if the object inside the red box is the thing named (a mug for "mug"; a cup is close enough for "mug"). False if the box shows something else, only part of furniture, a person or a hand, or nothing clear.
+- confidence: 0 to 1.
+Reply with the JSON object only."""
+IS_A_SCHEMA = {
+    "type": "object", "additionalProperties": False, "required": ["yes", "confidence"],
+    "properties": {"yes": {"type": "boolean"}, "confidence": {"type": "number"}},
+}
+POINT_LOOK_MAX_FRAC = 0.05       # a box over this share of the camera frame is furniture, not the thing
+POINT_LOOK_TIMEOUT_S = 3.0       # Moondream + Grok's check, altogether; past it the spoken answer goes alone
+NOT_SEEN = re.compile(r"\b(?:don'?t|do not|can'?t|cannot|couldn'?t|not)\b.{0,20}\b(?:see|tell|find|sure|seen)\b|\bno\b")
+
 # The second look when the marked frame gave no pick: every marked thing as its own numbered close-up. On
 # the rig (27 Sep 02:56) "where are the batteries?" got no mark among ~14 on the whole table view, then a
 # confident "I don't see any batteries." from the room look; 40 s later the same pick found them.
@@ -386,6 +402,15 @@ def zone_box(poly, frame_wh: tuple, min_px: int = 256) -> Optional[tuple]:
     return (x1, y1, x2, y2) if x2 - x1 > 1 and y2 - y1 > 1 else None
 
 
+def on_zone(poly, pt) -> bool:
+    """pt is on the zone: inside the polygon's x range and between its bottom and its top raised as in
+    zone_box (by its height, at least 0.4 of its width). A zone is drawn on a surface; what rests on it rises
+    above the drawn edge in the image (rig 27 Sep: glasses on the couch seat sat 40 px above the couch polygon)."""
+    xs, ys = [p[0] for p in poly], [p[1] for p in poly]
+    w, h = max(xs) - min(xs), max(ys) - min(ys)
+    return min(xs) <= pt[0] <= max(xs) and min(ys) - max(h, 0.4 * w) <= pt[1] <= max(ys)
+
+
 def image_place(poly, frame_wh: tuple) -> str:
     """Where a zone is in the image, in words for the prompt ('right side, middle height')."""
     fw, fh = frame_wh
@@ -590,6 +615,7 @@ class VisualQA:
         self.grok_check = None          # core.grok_check.GrokCheck when on (main.build sets it)
         self.room_zones: Optional[list] = None   # [(name, spoken)] when room memory is on (main.build): room look
         self._polys: Optional[dict] = None       # the zones' polygons (room_memory.zones_path), read on first use
+        self._look_grounder = None               # core.grounding.MoondreamGrounder for room.point_looks, on first use
 
     # -- the VLM call
 
@@ -806,10 +832,11 @@ class VisualQA:
             out.append((say.get(name, name), img[y1:y2, x1:x2]))
         return out[: self.c.room_crops]
 
-    def look_room(self, question: str) -> Answer:
+    def look_room(self, question: str, find: Optional[str] = None) -> Answer:
         """A question about the room: Grok gets the camera's whole view, close-ups of the zones it asks
         about (else the far ones), the zone names and where they are, and the tracker's beliefs. Spoken
-        only: the laser never aims off the table from this."""
+        only, unless room.point_looks is on and `find` (a WHERE's object) was placed in a zone: then
+        _point_look may add a room aim (action 'room:u,v,x1,y1,x2,y2', full-frame px) at a checked box."""
         f = self._room_frame()
         if f is None or getattr(f, "img", None) is None:
             return Answer("I can't see the room right now.")
@@ -828,9 +855,95 @@ class VisualQA:
         text = _spoken(_unmark(str(d.get("answer") or "")))
         if not text or _conf(d) < self.c.abstain_below:
             return Answer(ABSTAIN)
-        return Answer(text, evidence=self._look_evidence(img, f.wall))
+        box = self._point_look(f.img, find, text) if find else None
+        ans = Answer(text, evidence=self._look_evidence(img, f.wall, box, f.img.shape[1::-1]))
+        if box is not None:
+            x1, y1, x2, y2 = box
+            ans.action = f"room:{(x1 + x2) / 2:.0f},{(y1 + y2) / 2:.0f},{x1:.0f},{y1:.0f},{x2:.0f},{y2:.0f}"
+        return ans
 
-    def _look_evidence(self, jpg: bytes, wall: float) -> list:
+    # -- pointing at what the room look found (room.point_looks)
+
+    def _grounder_for_looks(self):
+        """A Moondream grounder when room.point_looks is on (MOONDREAM_API_KEY from the environment), else None."""
+        if not (self.cfg.get("room") or {}).get("point_looks"):
+            return None
+        if self._look_grounder is None:
+            try:
+                from core.grounding import GroundingConfig, MoondreamGrounder
+                g = (self.cfg.get("grounding") or {})
+                self._look_grounder = MoondreamGrounder(GroundingConfig.from_dict(
+                    {**g, "enabled": True, "verify": False, "timeout_s": POINT_LOOK_TIMEOUT_S}))
+            except Exception:
+                log.exception("point_looks: no grounder")
+                return None
+        return self._look_grounder
+
+    def _answer_zone(self, text: str) -> Optional[str]:
+        """The zone a positive answer places the thing in ('on the side table'), or None (no zone named, or
+        'I don't see it', 'can't tell')."""
+        from voice.intents import normalize
+        t = normalize(text)
+        if NOT_SEEN.search(t):
+            return None
+        zones = self._named_zones(t)
+        return zones[0] if len(zones) == 1 else None
+
+    def _point_look(self, img: np.ndarray, find: str, text: str) -> Optional[tuple]:
+        """A full-frame px box to aim at for `find`, which the answer `text` placed in one zone: Moondream's
+        /detect on that zone's native close-up, a box inside the zone and at most POINT_LOOK_MAX_FRAC of the
+        frame, then Grok's yes on a red-box close-up. None on anything else (the spoken answer stands)."""
+        g = self._grounder_for_looks()
+        zone = self._answer_zone(text) if g is not None else None
+        if zone is None:
+            return None
+        h, w = img.shape[:2]
+        poly = self._zone_polys((w, h)).get(zone)
+        cut = zone_box(poly, (w, h)) if poly else None
+        if cut is None:
+            return None
+        end = time.monotonic() + POINT_LOOK_TIMEOUT_S
+        x0, y0, cx1, cy1 = cut
+        try:
+            boxes = g.detect(img[y0:cy1, x0:cx1], find, deadline=end)
+        except Exception:
+            log.exception("point_looks: detect failed")
+            return None
+        for b in boxes[:2]:
+            box = (b[0] + x0, b[1] + y0, b[2] + x0, b[3] + y0)
+            if (box[2] - box[0]) * (box[3] - box[1]) > POINT_LOOK_MAX_FRAC * w * h:
+                continue
+            if not on_zone(poly, ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)):
+                continue
+            if self._is_a(img, box, find, end):
+                log.info("point_looks: %s in %s at %s", find, zone, [round(v) for v in box])
+                return box
+        log.info("point_looks: no checked box for %s in %s (%d found)", find, zone, len(boxes))
+        return None
+
+    def _is_a(self, img: np.ndarray, box: tuple, find: str, end: float) -> bool:
+        """Grok's yes on a close-up of box (red, padded by its own size), within the time left before end."""
+        import cv2
+        left = end - time.monotonic()
+        if left <= 0.2 or self._capped():
+            return False
+        h, w = img.shape[:2]
+        x1, y1, x2, y2 = (int(v) for v in box)
+        p = max(x2 - x1, y2 - y1, 40)
+        a, b, c, d = max(0, x1 - p), max(0, y1 - p), min(w, x2 + p), min(h, y2 + p)
+        crop = img[b:d, a:c].copy()
+        cv2.rectangle(crop, (x1 - a, y1 - b), (x2 - a, y2 - b), (0, 0, 255), 2)
+        parts = [("image", _jpeg(crop, 512, upscale=True)[0]), ("text", f"Is the object in the red box {find}?")]
+        self._calls.append(self.clock())
+        try:
+            reply = call_with_deadline(self.provider.narrate, left, IS_A_SYSTEM, parts, IS_A_SCHEMA, name="visual-is-a")
+            d = _parse_json(reply.text)
+        except Exception as ex:                  # a timeout included: no aim
+            log.info("point_looks: Grok's check failed: %s", ex)
+            return False
+        return d.get("yes") is True and _conf(d) >= self.c.abstain_below
+
+    def _look_evidence(self, jpg: bytes, wall: float, box=None, frame_wh=None) -> list:
         """The whole-room frame a look sent, saved in the snapshot dir as <ms>_look.jpg (pruned by age with
         the event snapshots), as the answer's evidence."""
         from core import evidence
@@ -844,7 +957,8 @@ class VisualQA:
         except OSError:
             log.warning("room look: could not save its frame for evidence", exc_info=True)
             return []
-        return evidence.trim([evidence.item("look", path, wall, f"What the camera saw at {_clock(wall)}", snap)])
+        return evidence.trim([evidence.item("look", path, wall, f"What the camera saw at {_clock(wall)}", snap,
+                                            box=box, box_space=frame_wh if box is not None else None)])
 
     def _zone_text(self, img: Optional[np.ndarray]) -> str:
         """The zones' spoken names, each with where it is in an image of the whole view (img None: in the
@@ -905,9 +1019,9 @@ class VisualQA:
         room = self._room_default(normalize(question))
         ob = self._observe(question, None)
         if ob is None:
-            return self.look_room(question) if room else Answer(CANT_SEE)
+            return self.look_room(question, said) if room else Answer(CANT_SEE)
         if not ob.marks:
-            return self.look_room(question) if room else self.look(question)
+            return self.look_room(question, said) if room else self.look(question)
         names = dict(ob.names)
         full, _ = _jpeg(draw_marks(ob.img, [mk.box_px for mk in ob.marks]), self.c.look_px)
         shown = shown_names(names, ob.state)
@@ -930,7 +1044,7 @@ class VisualQA:
                          m if picked else "none")
                 d, m, conf, picked = d2, m2, conf2, True
         if room and (not picked or conf < self.c.abstain_below):
-            return self.look_room(question)
+            return self.look_room(question, said)
         if not picked:
             return Answer(f"I can't see your {said} on the table right now." if conf >= self.c.abstain_below
                           else ABSTAIN)
@@ -1282,7 +1396,10 @@ class VisualQA:
         if how == "pick":
             return self.pick(text, said[0])
         if how == "room":
-            a = self.look_room(text)
+            find = (said[0] if said else None) if k == "WHERE" else None
+            if k == "WHERE" and target and not find:
+                find = self._names().get(target) or display_name(self.cfg, target)
+            a = self.look_room(text, find)
             a.obj = target                  # a known object looked for in the room (None for other questions)
             return a
         return self.look(text, intent) if how == "look" else self.recall(text)

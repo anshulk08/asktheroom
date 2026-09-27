@@ -560,6 +560,8 @@ room:
   jump_px: 30                 # dot moved this much more than predicted: it landed on something nearer
   max_map_gap_px: 60          # refuse targets farther than this from every mapped dot
   room_dwell_s: 5             # room aims turn off after this (the table keeps laser_timeout_s)
+  point_looks: false          # a WHERE Grok's room look places in a zone also aims: Moondream boxes it in that zone's
+                              # close-up (MOONDREAM_API_KEY), Grok confirms a red-box close-up; 3 s budget, else spoken only
   require_zone: true          # fire only inside a zone polygon (floor, furniture tops; never eye level)
   head_px: null               # [u, v] where the pan-tilt head appears in the image, for the beam-path check
   hand_recent_s: 2            # hand boxes seen this recently block a room aim
