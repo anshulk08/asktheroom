@@ -214,13 +214,16 @@ def aim_stats(laser: Laser, targets, truth=None) -> dict:
 # ---------------------------------------------------------------- the rig (--rig)
 
 JOG_STEPS_US = (2, 5, 10, 25, 50)       # per key press; 50 is the most a press can move a servo
-JOG_HELP = """Jog the dot to each corner of the TABLETOP in turn (top-left, top-right, bottom-right,
-bottom-left as the camera sees it) and press Enter at each one.
+JOG_HELP = """Jog the dot to 8 points on the TABLETOP's edge in turn, clockwise as the camera sees it: each
+corner and each edge's middle (the prompt names the next one), and press Enter at each.
   a / d or left / right   pan        w / s or up / down   tilt
-  [ / ]                   smaller / bigger step              u   undo the last corner
+  [ / ]                   smaller / bigger step              u   undo the last point
   l                       laser on / off                     q   quit without saving
 The laser turns itself off after laser_timeout_s idle; any key lights it again."""
-CORNERS = ("top-left", "top-right", "bottom-right", "bottom-left")
+# A pan/tilt head's view of a straight table edge bows outward between the corners (up to ~75 us for a head
+# 40 cm up near an edge), so the corners alone would clip the edges' middles: record those too.
+JOG_POINTS = ("top-left corner", "top edge middle", "top-right corner", "right edge middle",
+              "bottom-right corner", "bottom edge middle", "bottom-left corner", "left edge middle")
 
 
 @contextlib.contextmanager
@@ -251,10 +254,11 @@ def terminal_keys() -> Iterator[Callable[[], str]]:
 
 
 def jog_limits(act, read_key: Callable[[], str], out: Callable[[str], None] = print,
-               step_us: float = 10, margin: float = 0.05):
-    """Interactive jog: the person moves the dot to the tabletop's four corners and records each. Returns
-    the servo limits that just cover them (their bounding box plus `margin` of the span on each side,
-    inside the actuator's current limits), or None if they quit. Leaves the laser off."""
+               step_us: float = 10, margin: float = 0.05, min_margin_us: float = 20.0):
+    """Interactive jog: the person moves the dot to the tabletop's corners and edge middles (JOG_POINTS)
+    and records each. Returns servo limits that cover them (their bounding box plus `margin` of the span,
+    at least min_margin_us, on each side, inside the actuator's current limits), or None if they quit.
+    The limits only need to be safe, not tight. Leaves the laser off."""
     (plo, phi), (tlo, thi) = act.limits()
     pan, tilt = (plo + phi) / 2, (tlo + thi) / 2
     steps = list(JOG_STEPS_US)
@@ -267,9 +271,9 @@ def jog_limits(act, read_key: Callable[[], str], out: Callable[[str], None] = pr
     act.laser(True)
     laser_on = True
     try:
-        while len(corners) < 4:
-            out(f"  corner {len(corners) + 1}/4 ({CORNERS[len(corners)]}): pan {pan:.0f} tilt {tilt:.0f} "
-                f"step {steps[si]} us")
+        while len(corners) < len(JOG_POINTS):
+            out(f"  point {len(corners) + 1}/{len(JOG_POINTS)} ({JOG_POINTS[len(corners)]}): pan {pan:.0f} "
+                f"tilt {tilt:.0f} step {steps[si]} us")
             k = read_key()
             if k == "q":
                 out("jog cancelled")
@@ -286,7 +290,7 @@ def jog_limits(act, read_key: Callable[[], str], out: Callable[[str], None] = pr
                 corners.pop()
             elif k == "enter":
                 corners.append((pan, tilt))
-                out(f"  {CORNERS[len(corners) - 1]}: pan {pan:.0f}, tilt {tilt:.0f}")
+                out(f"  {JOG_POINTS[len(corners) - 1]}: pan {pan:.0f}, tilt {tilt:.0f}")
             elif k == "l":
                 laser_on = not laser_on
                 act.laser(laser_on)
@@ -297,7 +301,7 @@ def jog_limits(act, read_key: Callable[[], str], out: Callable[[str], None] = pr
         act.laser(False)
     c = np.asarray(corners)
     lo, hi = c.min(axis=0), c.max(axis=0)
-    m = margin * np.maximum(hi - lo, 20.0)
+    m = np.maximum(margin * (hi - lo), min_margin_us)
     return ((max(plo, float(np.floor(lo[0] - m[0]))), min(phi, float(np.ceil(hi[0] + m[0])))),
             (max(tlo, float(np.floor(lo[1] - m[1]))), min(thi, float(np.ceil(hi[1] + m[1])))))
 

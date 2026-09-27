@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from act.calibrate import Region, calibrate, jog_limits, main, rig_session, spot_check
-from act.sim import SimRig
+from act.sim import HeadGeometry, SimRig
 from core.config import load_config
 
 
@@ -23,8 +23,13 @@ def keys_to(start, corners, step=10):
     return keys
 
 
-def wide_rig(seed=3):
-    rig = SimRig(load_config(), seed=seed)
+def edge_points(w, h):
+    """JOG_POINTS in table cm: corners and edge middles, clockwise from top-left."""
+    return [(0, 0), (w / 2, 0), (w, 0), (w, h / 2), (w, h), (w / 2, h), (0, h), (0, h / 2)]
+
+
+def wide_rig(seed=3, geom=None):
+    rig = SimRig(load_config(), seed=seed, geom=geom)
     rig.act._limits = ((600.0, 2400.0), (600.0, 2400.0))      # config's full travel, as on the rig today
     return rig
 
@@ -32,7 +37,7 @@ def wide_rig(seed=3):
 def test_jog_limits_cover_the_table_and_the_laser_timeout_still_applies():
     rig = wide_rig()
     w, h = rig.table.size_cm
-    corners = [rig.geom.pulses_for(c) for c in [(0, 0), (w, 0), (w, h), (0, h)]]
+    corners = [rig.geom.pulses_for(c) for c in edge_points(w, h)]
     keys = keys_to((1500, 1500), corners)
     idle_at, seen = len(keys) // 2, {}
 
@@ -65,7 +70,7 @@ def test_jog_quit_returns_none_with_the_laser_off():
 def test_rig_session_jog_to_gate_pass(tmp_path):
     rig = wide_rig()
     w, h = rig.table.size_cm
-    corners = [rig.geom.pulses_for(c) for c in [(0, 0), (w, 0), (w, h), (0, h)]]
+    corners = [rig.geom.pulses_for(c) for c in edge_points(w, h)]
     laser = rig.make_laser("")
     laser.cal_path = str(tmp_path / "laser_cal.json")
     lines = []
@@ -154,3 +159,19 @@ def test_a_surface_near_saturation_gets_the_exposure_hint(cal_rig, monkeypatch):
     rep = spot_check(laser, ask, n=1, out=lines.append)
     assert rep["spots"][0]["surface_red"] == 240
     assert any("near saturation" in s and "camera_setup.sh" in s for s in lines)
+
+
+def test_jog_limits_cover_the_bowed_edges_of_a_low_head():
+    """Head 40 cm up, 10 cm off the near edge: the near edge's middle needs pulses well outside the four
+    corners' box. The 8-point jog covers every point along every edge."""
+    rig = wide_rig(geom=HeadGeometry(pos=(45.0, -10.0, 40.0)))
+    w, h = rig.table.size_cm
+    pts = [rig.geom.pulses_for(c) for c in edge_points(w, h)]
+    lim = jog_limits(rig.act, iter(keys_to((1500, 1500), pts)).__next__, out=lambda s: None)
+    corners = np.array([pts[i] for i in (0, 2, 4, 6)])
+    along = np.array([rig.geom.pulses_for((x, y)) for x in np.linspace(0, w, 13) for y in (0, h)] +
+                     [rig.geom.pulses_for((x, y)) for y in np.linspace(0, h, 9) for x in (0, w)])
+    c_lo, c_hi = corners.min(axis=0), corners.max(axis=0)
+    assert ((along < c_lo - 0.05 * (c_hi - c_lo)) | (along > c_hi + 0.05 * (c_hi - c_lo))).any()  # corners alone clip
+    for ax in (0, 1):
+        assert lim[ax][0] - 5 <= along[:, ax].min() and along[:, ax].max() <= lim[ax][1] + 5, ax   # +-5: 10 us steps
