@@ -6,7 +6,7 @@ set from the same questions with Piper (and Grok's voices when $XAI_API_KEY is s
 reverb added, plus noise-only clips.
 
 Each run is one STT setup: a whisper.cpp model (pywhispercpp here; the rig runs whisper-server with the same
-ggml file) or a cloud API, and a prompt ("rig": voice.stt.initial_prompt as deployed, "demo": DEMO_PROMPT,
+ggml file) or a cloud API, and a prompt ("rig": voice.stt.initial_prompt, the overheard prompt; "demo": voice.stt.question_prompt;
 "none"). Per setup it prints:
   WER       word error rate over the question clips (words normalized; "okay"/"ok" and "color"/"colour" alike)
   intent    voice.intents.parse of the transcript gives the truth's kind and object
@@ -17,6 +17,7 @@ ggml file) or a cloud API, and a prompt ("rig": voice.stt.initial_prompt as depl
     python scripts/eval_stt.py --synthesize data/stt_eval/synth
     python scripts/eval_stt.py data/stt_eval/rec --models base.en,small.en --prompts rig,demo
     python scripts/eval_stt.py data/stt_eval/rec --cloud xai,groq  # needs $XAI_API_KEY / $GROQ_API_KEY
+    python scripts/eval_stt.py data/stt_eval/rec --server 127.0.0.1:8179 --label small.en-q5_1   # the Jetson
 """
 from __future__ import annotations
 
@@ -36,7 +37,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core.config import load_config  # noqa: E402
 from voice.intents import parse  # noqa: E402
-from voice.stt import RATE, audio_ctx_for, clean, echoes_prompt, filler_only, initial_prompt, read_wav, write_wav  # noqa: E402
+from voice.stt import (RATE, clean, echoes_prompt, filler_only, initial_prompt, question_prompt, read_wav,  # noqa: E402
+                       write_wav)
 from voice.understand import bare_wake, has_wake_word  # noqa: E402
 
 # The questions the demo is asked (the same list WS7 recorded on the rig with record_demo.py).
@@ -48,12 +50,6 @@ QUESTIONS = [
     "What color are the laptops?", "Hey Room, what's on the table right now?", "Who moved my pill bottle?",
     "What did I miss?", "Show me my keys.",
 ]
-# Natural questions the demo hears, not a list of names: Whisper takes the prompt as preceding speech, so
-# it primes the way these are phrased ("what color is my pill bottle", misheard as "what car is my belt").
-# The wake word only opens sentences, as in initial_prompt.
-DEMO_PROMPT = ("Hey Room! Okay Room. Room, what do you see? What color is my pill bottle? Where are my keys? "
-               "What's on the kitchen counter? What changed? Where did I leave my wallet, glasses, phone, remote, "
-               "meds, specs?")
 SPELL = {"ok": "okay", "colour": "color", "whats": "what is", "wheres": "where is", "im": "i am"}
 
 
@@ -96,6 +92,22 @@ class Whisper:
         if len(audio) < n:
             audio = np.concatenate([audio, np.zeros(n - len(audio), np.float32)])
         return clean(self.b.transcribe(audio, prompt, 0))     # the rig runs audio_ctx 0 (config.yaml)
+
+
+class Server:
+    """A running whisper-server (how the rig runs whisper.cpp: the model stays loaded on the GPU)."""
+
+    def __init__(self, url: str, label: str):
+        from voice.stt import WhisperServerBackend
+        host, port = url.rsplit(":", 1)
+        self.name = label or f"server:{port}"
+        self.b = WhisperServerBackend(start=False, host=host, port=int(port))
+
+    def __call__(self, audio: np.ndarray, prompt: str) -> str:
+        n = int(1.1 * RATE)
+        if len(audio) < n:
+            audio = np.concatenate([audio, np.zeros(n - len(audio), np.float32)])
+        return clean(self.b.transcribe(audio, prompt, 0))
 
 
 class Cloud:
@@ -268,6 +280,8 @@ def main(argv=None) -> int:
     ap.add_argument("--models", default="base.en", help="whisper.cpp models, comma-separated")
     ap.add_argument("--models-dir", default="", help="where the ggml-*.bin files are (default: models/whisper)")
     ap.add_argument("--prompts", default="rig,demo", help="rig | demo | none, comma-separated")
+    ap.add_argument("--server", default="", help="host:port of a running whisper-server, e.g. 127.0.0.1:8179")
+    ap.add_argument("--label", default="", help="the --server's model, for the report")
     ap.add_argument("--cloud", default="", help="xai | groq | openai, comma-separated (API key in the environment)")
     ap.add_argument("-v", "--verbose", action="store_true", help="print each miss and noise transcript")
     ap.add_argument("--json", help="write every transcript to this file")
@@ -279,8 +293,9 @@ def main(argv=None) -> int:
         ap.error("a clip set directory, or --synthesize DIR")
     items = load_set(Path(a.dir))
     rig = initial_prompt(cfg, synonyms=bool((cfg.get("stt") or {}).get("prompt_synonyms", False)))
-    prompts = {"rig": rig, "demo": DEMO_PROMPT, "none": ""}
-    setups = [Whisper(m, a.models_dir) for m in a.models.split(",") if m]
+    prompts = {"rig": rig, "demo": question_prompt(cfg), "none": ""}
+    setups = [Whisper(m, a.models_dir) for m in a.models.split(",") if m and not a.server]
+    setups += [Server(a.server, a.label)] if a.server else []
     setups += [XaiStt() if c == "xai" else Cloud(c) for c in a.cloud.split(",") if c]
     print(f"{len(items)} clips ({sum(1 for i in items if i['text'])} questions) in {a.dir}")
     for stt in setups:
