@@ -357,6 +357,10 @@ visual_memory:
   abstain_below: 0.5         # VLM confidence under this: "I can't tell from here."
   recall_frames: 6           # saved frames sent per past-tense question
   recall_px: 768
+  room_crops: 3              # room memory on: native close-ups of drawn zones sent with the whole view (the zones
+                             # a question names, else the far ones), at most this many; 0: the whole view only
+  room_crop_px: 640          # their long side
+  room_crop_max_frac: 0.1    # a question naming no zone gets close-ups of zones under this share of the frame
   archive:
     archive_every_s: 30      # a frame is kept at least this often ...
     check_every_s: 1.0       # ... and on a settled scene change, checked this often
@@ -365,6 +369,11 @@ visual_memory:
     jpeg_quality: 80
     max_mb: 500              # disk cap for saved frames (oldest go first)
     keep_h: 24
+    room_every_s: 30         # room memory on: the whole camera view is kept this often too (0: never) ...
+    room_min_gap_s: 10       # ... and after a world event once this long has passed
+    room_frame_px: 1280
+    room_max_mb: 300         # the room frames' own disk cap (a busy table can't push the room's history out)
+    room_tiles: [4, 3]       # tile grid embedded for room frames (things across the room are small)
   embed:
     embed: onnx              # onnx (MobileCLIP2-S0: python scripts/export_mobileclip.py) | fake | none
     image_model: models/mobileclip2_s0_image.onnx

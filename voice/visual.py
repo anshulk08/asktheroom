@@ -49,8 +49,17 @@ window, each with its time and the world model's digest, plus the narrations and
 window, go to the VLM; the answer cites times ('a red mug was on the left from about 9:10 to 9:40').
 When nothing in the archive matches the words well enough, it abstains without a VLM call.
 
+look_room(): with room memory on (spec 0009/0010), the camera in a room corner and the table view cut from
+it, a question about the room (and, by default, any camera question that doesn't say "table") gets the
+whole camera view, plus native-resolution close-ups of drawn zones (room_zones.json): the zones the question
+names, else the far (small) ones, at most room_crops. A cup on the far counter is ~40 px of the 2560 px
+frame and ~20 px of the 1280 px view Grok gets; its close-up shows it at ~15x that area. Spoken only (no
+laser off the table). A thing Grok looks for and doesn't see is an honest "I don't see it" (confidence is
+in the answer, so an absence can be sure); too far or dark to tell abstains. Recall of a room question
+uses the archive's whole-room frames (view 'room') when it has any in the window.
+
 Every VLM answer passes the medication rule (core/narration_store.redact_meds) and is cut to two spoken
-sentences. The prompts say the camera sees only the tabletop, and nothing else is claimed.
+sentences. The table prompts keep answers to the table; people are only ever "someone".
 """
 from __future__ import annotations
 
@@ -88,6 +97,7 @@ JUMP_CM = 5.0              # a visible entity that moved more than this during t
 HIDDEN = (Status.HELD.value, Status.UNDER.value, Status.INSIDE.value)
 POINT_MARGIN_CM = 2.0      # a VLM point this close outside a marked box still lands on it
 POINT_NEAR_CM = 6.0
+NEW_THING = "something new"      # a thing with no name and no guess, in VLM prompts (core/labels.py)
 BIND_CONF = 0.7                  # a picked unnamed thing takes the asked-for name at or above this confidence
 VLM_MARGIN_S = 2.0               # wall-clock deadline per Grok call: visual_memory.timeout_s plus this
 
@@ -100,13 +110,13 @@ SCENE = re.compile(r"\b(?:table|desk|here|this|that|these|those|see|seen|saw|loo
 THING_Q = re.compile(r"^(?:is|are) (?:the|my|your|our|a|an|there)\b")     # 'is the charger plugged in'
 NOT_THING = re.compile(r"\b(?:weather|time|date|day|news|temperature)\b")  # 'is the weather nice'
 
-LOOK_SYSTEM = """You answer spoken questions about a tabletop seen by an overhead camera that looks straight down. You see the table surface, the objects on it and sometimes hands; nothing beyond the table's edge, no faces, no room. Image 1 is the whole table right now. Any later images are enlarged close-ups of objects the question names; each says when it was taken, and an older close-up shows how the object looked then, not necessarily now. You also get what an object tracker believes about known objects; it remembers hidden ones (an object INSIDE the box or UNDER the notebook can't be seen but is there).
+LOOK_SYSTEM = """You answer spoken questions about a tabletop. Image 1 is the camera's view of the whole table right now; the camera is above the table, looking straight down or, mounted high in a corner of the room, down at an angle, so the edges of the image may show the floor, furniture or people around the table. Any later images are enlarged close-ups of objects the question names; each says when it was taken, and an older close-up shows how the object looked then, not necessarily now. You also get what an object tracker believes about known objects; it remembers hidden ones (an object INSIDE the box or UNDER the notebook can't be seen but is there). A name ending in "?" is a guess ("mug?": say "what looks like a mug"); "something new" is a thing nobody has named (describe it by what you see). Never say "unnamed" or a number in brackets.
 
 Rules:
 - Answer in one or two short spoken sentences: plain words, no lists, no coordinates, no markdown.
 - Say only what you can see or what the tracker states. If you can't tell, say so and set confidence below 0.5.
 - Never state or imply that medication was taken, swallowed, skipped or missed.
-- Never describe anything beyond the table; the camera cannot see it.
+- Answer about the table and what is on it. Don't describe people beyond "someone"; never guess who they are.
 - Image 1 has numbered yellow boxes (marks) around objects the tracker follows; the text lists them. If the answer is about one visible thing and a mark is on it, set mark to that number and point to null.
 - If the thing has no mark, set mark to null and point to its centre in image 1 as {"x": fraction of the width, "y": fraction of the height}, each 0 to 1.
 - If the answer is not about one visible thing, mark and point are both null.
@@ -120,20 +130,25 @@ ROOM_Q = re.compile(r"\b(?:room|couch|sofa|shelf|bookshelf|bed|floor|chair|dress
 # With room memory on the whole room is the default view; a question that says "table" keeps the table look.
 TABLE_Q = re.compile(r"\b(?:table|desk)\b")
 
-ROOM_SYSTEM = """You answer spoken questions about a room seen by one camera mounted high in it, looking down at an angle. Image 1 is the camera's whole view right now: a table near the middle and parts of the room around it. The text names the areas of the room the rig knows (for example "the couch") and what an object tracker believes about known objects, including ones it saw moved off the table into those areas.
+ROOM_SYSTEM = """You answer spoken questions about a room seen by one camera mounted high in a corner, looking down across the room at an angle. Near the camera things look big; across the room they look small. Image 1 is the camera's whole view right now. The text names the areas of the room the rig knows (for example "the couch") and says where each one is in image 1. Any later images are sharp close-ups of some of those areas, cut from the same moment at full resolution: small things far from the camera are clearest there. You also get what an object tracker believes about known objects, including ones it saw moved off the table into those areas.
 
 Rules:
 - Answer in one or two short spoken sentences: plain words, no lists, no coordinates, no markdown.
-- Say where things are using the named areas or plain room words ("on the couch", "on the floor by the table"), never positions in the image.
-- Say only what you can see or what the tracker states. If you can't tell, say so and set confidence below 0.5. Small things far from the camera are hard to see: don't guess.
+- Say where things are using the named areas or plain room words ("on the couch", "on the floor by the doorway"), never positions in the image or image numbers.
+- seen: first, briefly (at most about 50 words) list what you see in image 1 and in each close-up: the objects and where they are. Then answer from that list. The listener never hears seen.
+- Say only what you can see or what the tracker states.
+- If you are asked where something is or whether it is there: look for it in image 1 and every close-up. If it isn't in any of them, say plainly that you don't see it (for example, that you don't see a mug) with a confidence for how sure you are that it isn't in view; it may be hidden or out of view, so don't say it isn't in the room. If you see something close to what was asked (a cup for a mug), say what you see and where.
+- If what was asked about is too small, dark or blocked to make out, say you can't tell and set confidence below 0.5. Don't guess.
 - Don't describe people beyond "someone"; never guess who they are.
 - Never state or imply that medication was taken, swallowed, skipped or missed.
-- confidence: 0 to 1.
+- confidence: 0 to 1, how sure you are that your answer is right.
 Reply with the JSON object only."""
 
+# seen comes first: listing what is in view before answering stopped "I don't see X" for things in plain
+# view (eval/room_look.py: 4 of 4 visible things found, against 0 of 4 answering directly).
 ROOM_SCHEMA = {
-    "type": "object", "additionalProperties": False, "required": ["answer", "confidence"],
-    "properties": {"answer": {"type": "string"}, "confidence": {"type": "number"}},
+    "type": "object", "additionalProperties": False, "required": ["seen", "answer", "confidence"],
+    "properties": {"seen": {"type": "string"}, "answer": {"type": "string"}, "confidence": {"type": "number"}},
 }
 
 LOOK_SCHEMA = {
@@ -146,7 +161,7 @@ LOOK_SCHEMA = {
             "properties": {"x": {"type": "number"}, "y": {"type": "number"}}}]}},
 }
 
-PICK_SYSTEM = """You find one object on a tabletop seen by an overhead camera that looks straight down. The image has numbered yellow boxes (marks) around the objects a tracker follows. Your only job is to say which mark shows the object the person asks about and what that object is.
+PICK_SYSTEM = """You find one object on a tabletop seen by a camera above it (looking straight down, or down at an angle from high in a corner of the room). The image has numbered yellow boxes (marks) around the objects a tracker follows. Your only job is to say which mark shows the object the person asks about and what that object is. A name ending in "?" is a guess ("mug?": say "what looks like a mug"); "something new" is a thing nobody has named (describe it by what you see). Never say "unnamed" or a number in brackets.
 
 Rules:
 - mark: the number of the box around the object asked about; null if no box shows it.
@@ -161,19 +176,32 @@ PICK_SCHEMA = {
                    "confidence": {"type": "number"}},
 }
 
-RECALL_SYSTEM = """You answer spoken questions about what was on a tabletop earlier. You get frames an overhead camera saved at the listed times (it looks straight down: table, objects, sometimes hands; nothing beyond the table, no faces), what an object tracker believed at each frame, and the tracker's events and activity notes for that time.
+RECALL_SYSTEM = """You answer spoken questions about what was on a tabletop earlier. You get frames a camera above the table saved at the listed times (the table, objects and sometimes hands; the camera may look at an angle, so the edges can show the floor or furniture around the table), what an object tracker believed at each frame, and the tracker's events and activity notes for that time. A name ending in "?" is a guess ("mug?": say "what looks like a mug"); "something new" is a thing nobody has named (describe it by what you see). Never say "unnamed" or a number in brackets.
 
 Rules:
+- seen: first, briefly (a few words per frame) list for each frame its time and what it shows that bears on the question. Then answer from that list. The listener never hears seen.
 - Answer in one or two short spoken sentences with times, e.g. "A red mug was on the left side from about 9:10 to 9:40." Use the frame times; say "about".
 - Say only what the frames or notes show. If none of the frames show what was asked, say you didn't see it in the saved pictures. If you can't tell, set confidence below 0.5.
 - Never state or imply that medication was taken, swallowed, skipped or missed.
-- Never describe anything beyond the table.
+- Answer about the table and what is on it. Don't describe people beyond "someone"; never guess who they are.
 - confidence: 0 to 1.
 Reply with the JSON object only."""
 
-RECALL_SCHEMA = {
-    "type": "object", "additionalProperties": False, "required": ["answer", "confidence"],
-    "properties": {"answer": {"type": "string"}, "confidence": {"type": "number"}},
+ROOM_RECALL_SYSTEM = """You answer spoken questions about what the room looked like earlier. You get pictures of the whole room that one camera, mounted high in a corner and looking down across the room at an angle, saved at the listed times (near the camera things look big; across the room, small), what an object tracker believed at each picture, and the tracker's events and activity notes for that time. A name ending in "?" is a guess ("mug?": say "what looks like a mug"); "something new" is a thing nobody has named (describe it by what you see). Never say "unnamed" or a number in brackets. The text names the areas of the room the rig knows and where each one is in the pictures.
+
+Rules:
+- seen: first, briefly (a few words per picture) list for each picture its time and what it shows that bears on the question: people, objects and where they are. Then answer from that list. The listener never hears seen.
+- Answer in one or two short spoken sentences with times, e.g. "There was a laptop on the couch at about 6:20 and again at about 11." Use the picture times; say "about".
+- Say where things were using the named areas or plain room words ("on the couch", "on the kitchen counter"), never positions in the image or picture numbers.
+- Say only what the pictures or notes show. If none of the pictures show what was asked, say you didn't see it in the saved pictures. If you can't tell, set confidence below 0.5.
+- Don't describe people beyond "someone"; never guess who they are.
+- Never state or imply that medication was taken, swallowed, skipped or missed.
+- confidence: 0 to 1.
+Reply with the JSON object only."""
+
+RECALL_SCHEMA = {                  # seen first, as ROOM_SCHEMA
+    "type": "object", "additionalProperties": False, "required": ["seen", "answer", "confidence"],
+    "properties": {"seen": {"type": "string"}, "answer": {"type": "string"}, "confidence": {"type": "number"}},
 }
 
 
@@ -299,6 +327,50 @@ def spoken_names(world, cfg: dict) -> dict:
     except Exception:
         labels = {}
     return {n: (labels.get(n) if n.startswith("thing:") else display_name(cfg, n)) for n in ents}
+
+
+def zone_box(poly, frame_wh: tuple, min_px: int = 256) -> Optional[tuple]:
+    """The frame px box a zone's close-up is cut from: the polygon's box grown by 15% on each side, upwards
+    by its height (at least 0.4 of its width), since a zone is drawn on a surface and what stands on it rises
+    above it in the image, and downwards by 40% of its height (things at a surface's front edge), then
+    widened to at least min_px, inside the frame. None if empty."""
+    if len(poly) < 3:
+        return None
+    xs, ys = [p[0] for p in poly], [p[1] for p in poly]
+    x1, y1, x2, y2 = min(xs), min(ys), max(xs), max(ys)
+    w, h = x2 - x1, y2 - y1
+    x1, x2 = x1 - 0.15 * w, x2 + 0.15 * w
+    y1, y2 = y1 - max(h, 0.4 * w) - 0.15 * h, y2 + 0.4 * h
+    fw, fh = frame_wh
+    for lo, hi, n in ((0, 2, fw), (1, 3, fh)):
+        b = [x1, y1, x2, y2]
+        if b[hi] - b[lo] < min_px:
+            c = (b[lo] + b[hi]) / 2
+            b[lo], b[hi] = c - min_px / 2, c + min_px / 2
+        x1, y1, x2, y2 = b
+    x1, y1, x2, y2 = max(0, round(x1)), max(0, round(y1)), min(fw, round(x2)), min(fh, round(y2))
+    return (x1, y1, x2, y2) if x2 - x1 > 1 and y2 - y1 > 1 else None
+
+
+def image_place(poly, frame_wh: tuple) -> str:
+    """Where a zone is in the image, in words for the prompt ('right side, middle height')."""
+    fw, fh = frame_wh
+    cx = sum(p[0] for p in poly) / len(poly) / fw
+    cy = sum(p[1] for p in poly) / len(poly) / fh
+    x = "left side" if cx < 1 / 3 else "right side" if cx > 2 / 3 else "middle"
+    y = "top" if cy < 1 / 3 else "bottom" if cy > 2 / 3 else "middle height"
+    return f"{x}, {y}"
+
+
+def shown_names(names: dict, state: Optional[dict]) -> dict:
+    """entity -> what the VLM is told it is: its spoken name (names), else for a thing core.labels' name
+    from state ('mug?' for a guess, else 'something new'). Never None."""
+    try:
+        from core.labels import thing_labels
+        things = thing_labels(state)
+    except Exception:
+        things = {}
+    return {n: v or things.get(n) or NEW_THING for n, v in names.items()}
 
 
 def _clock(wall: float) -> str:
@@ -456,6 +528,7 @@ class VisualQA:
         self.last: Optional[dict] = None
         self.grok_check = None          # core.grok_check.GrokCheck when on (main.build sets it)
         self.room_zones: Optional[list] = None   # [(name, spoken)] when room memory is on (main.build): room look
+        self._polys: Optional[dict] = None       # the zones' polygons (room_memory.zones_path), read on first use
 
     # -- the VLM call
 
@@ -512,13 +585,20 @@ class VisualQA:
                 out.append(n)
         return out[: self.c.max_crops]
 
-    def _state_text(self, state: Optional[dict] = None) -> str:
+    def _state_text(self, state: Optional[dict] = None, placed_only: bool = False) -> str:
+        """The tracker's beliefs as text. placed_only (the room look): only named objects it has a place
+        for; a list of never-seen names or unnamed blobs made Grok 'see' them in the room."""
         from voice.llm import compact_state
         try:
             names = self._names(state)
+            taught = {v for v in names.values() if v}
             rows = []
             for d in compact_state(self.world if state is None else _Frozen(state), self.cfg):
-                spoken = names.get(d["name"]) or "unnamed object"
+                # compact_state names a thing by its core.labels name (its taught name, guess or 'something new')
+                spoken = names.get(d["name"]) or d["name"] or NEW_THING
+                if placed_only and (spoken not in taught or (d["status"] == Status.UNKNOWN.value
+                                                             and not d.get("room_zone"))):
+                    continue
                 s = f"{spoken}: {d['status'].lower()}"
                 if d.get("parent"):
                     s += f" ({names.get(d['parent'], d['parent'])})"
@@ -554,35 +634,82 @@ class VisualQA:
         ("room, what's on the table?") is not a room word."""
         if not self._room_on():
             return False
-        from voice.intents import _without_wake_word, normalize
+        from voice.intents import _without_wake_word
         t = _without_wake_word(t, self.cfg)
-        if ROOM_Q.search(t):
-            return True
-        low = f" {t} "
-        for name, say in self.room_zones:
-            for w in (name.replace("_", " "), say):
-                w = normalize(w)
-                w = re.sub(r"^(?:the|a|an) ", "", w)
-                if w and re.search(rf"\b{re.escape(w)}\b", low):
-                    return True
-        return False
+        return bool(ROOM_Q.search(t) or self._named_zones(t))
 
     def _room_default(self, t: str) -> bool:
         """With room memory on, a question the camera answers looks at the whole room unless it says
         "table" (and names no zone: "the side table" is the room). t normalized."""
         return self._room_on() and (self._about_room(t) or not TABLE_Q.search(t))
 
+    def _zone_polys(self, frame_wh: tuple) -> dict:
+        """zone name -> polygon in this frame's px, from room_memory.zones_path (read once; scaled when the
+        frame's size differs from the one the zones were drawn at). {} if the file can't be read."""
+        if self._polys is None:
+            self._polys = {}
+            try:
+                from core.room_zones import Zones
+                zs = Zones.load((self.cfg.get("room_memory") or {}).get("zones_path", "room_zones.json"))
+                self._polys = {"size": zs.size_px, "zones": {z.name: z.poly for z in zs.zones.values()}}
+            except Exception:
+                log.warning("room look: zone polygons unavailable; no close-ups", exc_info=True)
+        if not self._polys:
+            return {}
+        (dw, dh), (fw, fh) = self._polys["size"], frame_wh
+        sx, sy = (fw / dw if dw else 1.0), (fh / dh if dh else 1.0)
+        return {n: [(x * sx, y * sy) for x, y in poly] for n, poly in self._polys["zones"].items()}
+
+    def _named_zones(self, t: str) -> list[str]:
+        """Zone names the question (t normalized, wake word removed) names, in zone order."""
+        from voice.intents import normalize
+        low, out = f" {t} ", []
+        for name, say in self.room_zones:
+            for w in (name.replace("_", " "), say):
+                w = re.sub(r"^(?:the|a|an) ", "", normalize(w))
+                if w and re.search(rf"\b{re.escape(w)}\b", low) and name not in out:
+                    out.append(name)
+        return out
+
+    def _zone_crops(self, img: np.ndarray, question: str) -> list[tuple[str, np.ndarray]]:
+        """(spoken zone name, native-px close-up) for the zones the question names, else for the far
+        zones (each under room_crop_max_frac of the frame), at most room_crops. Not the table: a close-up
+        of its clutter made Grok 'see' glasses and a phone there (eval/room_look.py), and the tracker
+        answers for what is on the table."""
+        from voice.intents import _without_wake_word, normalize
+        if self.c.room_crops <= 0:
+            return []
+        h, w = img.shape[:2]
+        polys = self._zone_polys((w, h))
+        if not polys:
+            return []
+        say = dict(self.room_zones)
+        named = self._named_zones(_without_wake_word(normalize(question), self.cfg))
+        out = []
+        for name in named or [n for n, _ in self.room_zones]:
+            box = zone_box(polys[name], (w, h)) if name in polys else None
+            if box is None:
+                continue
+            x1, y1, x2, y2 = box
+            if not named and (x2 - x1) * (y2 - y1) > self.c.room_crop_max_frac * w * h:
+                continue                     # near and big: image 1 shows it well enough
+            out.append((say.get(name, name), img[y1:y2, x1:x2]))
+        return out[: self.c.room_crops]
+
     def look_room(self, question: str) -> Answer:
-        """A question about the room: Grok gets the camera's whole view, the zone names and the tracker's
-        beliefs. Spoken only: the laser never aims off the table from this."""
+        """A question about the room: Grok gets the camera's whole view, close-ups of the zones it asks
+        about (else the far ones), the zone names and where they are, and the tracker's beliefs. Spoken
+        only: the laser never aims off the table from this."""
         f = self._room_frame()
         if f is None or getattr(f, "img", None) is None:
             return Answer("I can't see the room right now.")
         img, _ = _jpeg(f.img, self.c.look_px)
-        zones = ", ".join(say for _, say in self.room_zones)
-        parts: list = [("text", "Image 1: the camera's whole view of the room now."), ("image", img),
-                       ("text", f"Areas the rig knows: {zones}.\nTracker: {self._state_text()}.\n"
-                                f"Question: {question}")]
+        parts: list = [("text", "Image 1: the camera's whole view of the room now."), ("image", img)]
+        for i, (say, crop) in enumerate(self._zone_crops(f.img, question), 2):
+            parts += [("text", f"Image {i}: close-up of {say}, now."),
+                      ("image", _jpeg(crop, self.c.room_crop_px, upscale=True)[0])]
+        parts.append(("text", f"Areas the rig knows: {self._zone_text(f.img)}.\n"
+                              f"Tracker: {self._state_text(placed_only=True)}.\nQuestion: {question}"))
         try:
             d = self._vlm(ROOM_SYSTEM, parts, ROOM_SCHEMA)
         except (ProviderError, NarrationError) as ex:
@@ -593,19 +720,38 @@ class VisualQA:
             return Answer(ABSTAIN)
         return Answer(text)
 
+    def _zone_text(self, img: Optional[np.ndarray]) -> str:
+        """The zones' spoken names, each with where it is in an image of the whole view (img None: in the
+        view the zones were drawn on, which saved room frames are, shrunk)."""
+        if img is not None:
+            h, w = img.shape[:2]
+        else:
+            self._zone_polys((1, 1))
+            w, h = (self._polys or {}).get("size") or (1, 1)
+        polys = self._zone_polys((w, h)) if w and h else {}
+        out = [f"{say} ({image_place(polys[n], (w, h))} of the view)" if n in polys else say
+               for n, say in self.room_zones]
+        rect = getattr(self.frames, "rect", None)                 # the table view's cut, camera px
+        if rect is not None and w and h:
+            x1, y1, x2, y2 = rect
+            out.append(f"the table the tracker watches ({image_place([(x1, y1), (x2, y1), (x2, y2), (x1, y2)], (w, h))}"
+                       f" of the view; call it \"the table\", it is none of the other areas)")
+        return ", ".join(out)
+
     def look(self, question: str, intent: Optional[Intent] = None) -> Answer:
         obs = self._observe(question, intent)
         if obs is None:
             return Answer(CANT_SEE)
         oh, ow = obs.img.shape[:2]
-        names, marks = obs.names, obs.marks
+        names, marks = shown_names(obs.names, obs.state), obs.marks
         full, _ = _jpeg(draw_marks(obs.img, [mk.box_px for mk in marks]) if marks else obs.img, self.c.look_px)
         parts: list = [("text", "Image 1: the whole table now, from above."), ("image", full)]
         for i, (n, crop) in enumerate(obs.crops, 2):
-            parts += [("text", f"Image {i}: close-up of the {names.get(n) or 'unnamed object'}, "
+            nm = names.get(n) or NEW_THING
+            parts += [("text", f"Image {i}: close-up of {nm if nm == NEW_THING or nm.endswith('?') else 'the ' + nm}, "
                                f"{_taken(obs.t - crop.t)}."),
                       ("image", _jpeg(crop.img, self.c.crop_px, upscale=True)[0])]
-        listed = ", ".join(f"{i} = {names.get(mk.name) or 'unnamed object'}" for i, mk in enumerate(marks, 1))
+        listed = ", ".join(f"{i} = {names.get(mk.name) or NEW_THING}" for i, mk in enumerate(marks, 1))
         parts.append(("text", f"Marks: {listed or 'none'}.\nTracker: {self._state_text(obs.state)}.\n"
                               f"Question: {question}"))
         try:
@@ -638,7 +784,8 @@ class VisualQA:
             return self.look_room(question) if room else self.look(question)
         names = dict(ob.names)
         full, _ = _jpeg(draw_marks(ob.img, [mk.box_px for mk in ob.marks]), self.c.look_px)
-        listed = ", ".join(f"{i} = {names.get(mk.name) or 'unnamed object'}" for i, mk in enumerate(ob.marks, 1))
+        shown = shown_names(names, ob.state)
+        listed = ", ".join(f"{i} = {shown.get(mk.name) or NEW_THING}" for i, mk in enumerate(ob.marks, 1))
         parts: list = [("image", full), ("text", f"Marks: {listed}.\nFind: {said}\nQuestion: {question}")]
         try:
             d = self._vlm(PICK_SYSTEM, parts, PICK_SCHEMA)
@@ -827,35 +974,64 @@ class VisualQA:
             return w.t0, w.t1, f" {w.label}"
         return now - self.c.keep_h * 3600, now, ""
 
+    def _recall_view(self, question: str, t0: float, t1: float) -> str:
+        """'room' when room memory is on, the question doesn't keep to the table and the archive has room
+        frames in [t0, t1]; else 'table'."""
+        from voice.intents import normalize
+        if not self._room_default(normalize(question)):
+            return "table"
+        return "room" if any(r.path for r in self.archive.store.window(t0, t1, "room")) else "table"
+
     def recall(self, question: str) -> Answer:
         if self.archive is None:
             return Answer("I don't keep pictures of the table, so I can't tell.")
         now = self.clock()
         t0, t1, label = self._window(question, now)
+        view = self._recall_view(question, t0, t1)
+        what = "the room" if view == "room" else "the table"
         phrase = query_phrase(question)
-        hits = self.archive.search(phrase, t0, t1, self.c.recall_frames) if phrase else []
+        hits = self.archive.search(phrase, t0, t1, self.c.recall_frames, view=view) if phrase else []
         if phrase and hits and hits[0][1] < self.c.min_sim:
-            return Answer(f"I don't remember seeing {phrase}{label}.")
-        rows = [r for r, _ in hits] or (self.archive.sample(t0, t1, self.c.recall_frames) if "before you left"
-                                        not in label else self.archive.store.window(t0, t1)[-self.c.recall_frames:])
+            # On room frames a small far thing scores like an absent one (a cup on the counter 0.195, an
+            # umbrella nowhere 0.212; eval/room_look.py): Grok looks at frames spread over the window instead.
+            if view == "table":
+                return Answer(f"I don't remember seeing {phrase}{label}.")
+            hits = []
+        rows = [r for r, _ in hits] or (self.archive.sample(t0, t1, self.c.recall_frames, view=view)
+                                        if "before you left" not in label
+                                        else self.archive.store.window(t0, t1, view)[-self.c.recall_frames:])
         rows = sorted((r for r in rows if r.path), key=lambda r: r.t)
         if not rows:
-            return Answer(f"I don't have any saved pictures of the table{label}.")
-        parts: list = [("text", self._context(t0, t1))]
+            return Answer(f"I don't have any saved pictures of {what}{label}.")
+        context = self._context(t0, t1)
+        if view == "room":
+            context += f"\nAreas the rig knows: {self._zone_text(None)}."
+        parts: list = [("text", context)]
         import cv2
+        from voice.intents import _without_wake_word, normalize
+        named = self._named_zones(_without_wake_word(normalize(question), self.cfg)) if view == "room" else []
+        say = dict(self.room_zones or [])
         n = 0
         for r in rows:
             img = cv2.imread(r.path)
             if img is None:
                 continue
             n += 1
-            parts += [("text", f"Frame {n} at {_clock(r.t)}{', a hand in view' if r.hands else ''}; tracker: "
-                               f"{digest_text(r.digest)}."), ("image", _jpeg(img, self.c.recall_px)[0])]
+            parts += [("text", f"{'Picture' if view == 'room' else 'Frame'} {n} at {_clock(r.t)}"
+                               f"{', a hand in view' if r.hands else ''}; tracker: {digest_text(r.digest)}."),
+                      ("image", _jpeg(img, self.c.look_px if view == "room" else self.c.recall_px)[0])]
+            polys = self._zone_polys(img.shape[1::-1]) if named else {}
+            for z in named[:2]:              # the areas asked about, enlarged from the saved picture
+                box = zone_box(polys[z], img.shape[1::-1], min_px=128) if z in polys else None
+                if box is not None:
+                    x1, y1, x2, y2 = box
+                    parts += [("text", f"Picture {n}, close-up of {say.get(z, z)}."),
+                              ("image", _jpeg(img[y1:y2, x1:x2], self.c.room_crop_px // 2, upscale=True)[0])]
         if n == 0:
-            return Answer(f"I don't have any saved pictures of the table{label}.")
+            return Answer(f"I don't have any saved pictures of {what}{label}.")
         parts.append(("text", f"Question: {question}"))
         try:
-            d = self._vlm(RECALL_SYSTEM, parts, RECALL_SCHEMA)
+            d = self._vlm(ROOM_RECALL_SYSTEM if view == "room" else RECALL_SYSTEM, parts, RECALL_SCHEMA)
         except (ProviderError, NarrationError) as ex:
             log.warning("recall failed: %s", ex)
             return Answer("Sorry, I couldn't go through the saved pictures just now.")
@@ -895,12 +1071,13 @@ class VisualQA:
         t = normalize(text)
         past = bool(PAST.search(t))
         if k == "OTHER":
-            if not past and self._about_room(t):
-                how = "room"
-            elif not self._about_table(intent, t):
+            about_room = self._about_room(t)
+            if not about_room and not self._about_table(intent, t):
                 return None
-            elif past:
-                how = "recall"
+            if past:
+                how = "recall"          # the room's saved frames when room memory is on (recall picks)
+            elif about_room:
+                how = "room"
             elif intent.obj or intent.name or not self._room_default(t):
                 how = "look"            # "table" said, or a tracked prop named: the table look and its close-ups
             else:
@@ -911,10 +1088,16 @@ class VisualQA:
                 known = target is not None
             except Exception:
                 target, known = None, True
-            if known:
-                return self._sighting(ent=target) if k == "WHERE" and target else None
             said = [w for w in (intent.name or intent.obj, query_phrase(text)) if w]
-            if k == "WHERE":
+            if known:
+                if k != "WHERE" or not target:
+                    return None
+                seen = self._sighting(ent=target)
+                if seen is not None or not (self._room_default(t) and self._never_placed(target)):
+                    return seen
+                how = "room"            # a known thing the tracker has never seen: Grok looks around the room
+                said = []
+            elif k == "WHERE":
                 how = "pick"
             elif self.archive is not None and _narrated_about(said, self.events, self.clock()) is None:
                 how = "recall"
@@ -926,7 +1109,7 @@ class VisualQA:
         if not online:
             if k == "OTHER":
                 return Answer(OFFLINE)
-            return self._sighting(said=said[0]) if k == "WHERE" else None
+            return self._sighting(said=said[0]) if k == "WHERE" and said else None
         if self._capped():
             log.info("visual questions: hourly cap reached; answering without the camera")
             return None
@@ -945,11 +1128,7 @@ class VisualQA:
         if self.grok_check is None:
             return None
         if ent is not None:
-            try:
-                e = self.world.get(ent)
-            except Exception:
-                return None
-            if e.status != "UNKNOWN" or e.pos_cm is not None or e.last_seen is not None:
+            if not self._never_placed(ent):
                 return None
             said = self._names().get(ent) or said
         if not said:
@@ -965,6 +1144,14 @@ class VisualQA:
         text = _spoken(f"I haven't tracked your {said}, but at {_clock(hit['wall'])} I saw what looked like "
                        f"your {said} {area((hit['x_cm'], hit['y_cm']), self.cfg)}.")
         return Answer(text)                 # an old, ungrounded VLM sighting: spoken only, never aimed at
+
+    def _never_placed(self, ent: str) -> bool:
+        """A tracked object the world has never had a position for (UNKNOWN, never seen)."""
+        try:
+            e = self.world.get(ent)
+        except Exception:
+            return False
+        return e.status == "UNKNOWN" and e.pos_cm is None and e.last_seen is None
 
     def _about_table(self, intent: Intent, t: str) -> bool:
         """Whether an OTHER question (t normalized) is about the table or what the camera sees: it says
@@ -985,8 +1172,9 @@ class VisualQA:
         return {"enabled": True, "provider": self.provider.name, "model": self.provider.model,
                 "archive": arch,
                 "disclosure": (f"Visual questions are on: the current camera frame of the table"
-                               f"{', the whole room view (the default view for questions with room memory on)' if self._room_frame() is not None else ''}"
-                               f" and, for questions about earlier, up to {self.c.recall_frames} saved frames are sent to "
+                               f"{', the whole room view with close-ups of its areas (the default view for questions with room memory on)' if self._room_frame() is not None else ''}"
+                               f" and, for questions about earlier, up to {self.c.recall_frames} saved frames"
+                               f"{' (of the table or the whole room)' if self._room_frame() is not None else ''} are sent to "
                                f"{self.provider.name} ({self.provider.model}). Saved frames stay on this "
                                f"device for {self.c.keep_h:g} h.")}
 
@@ -1026,7 +1214,8 @@ def from_config(cfg: dict, world, events, frames=None, table=None, online=None, 
     c = VisualConfig.from_dict(cfg.get("visual_memory"))
     if not c.enabled:
         return None
-    archive = VisualArchive(cfg, events, world, embedder=make_embedder(c), start=start, c=c).attach(world)
+    archive = VisualArchive(cfg, events, world, embedder=make_embedder(c), start=start, c=c,
+                            frames=frames).attach(world)
     qa = VisualQA(cfg, world, events, frames, table, archive=archive, online=online, c=c).attach(world)
     log.info("visual memory on: %s", qa.status()["disclosure"])
     return qa

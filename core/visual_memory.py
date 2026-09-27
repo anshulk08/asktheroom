@@ -1,5 +1,6 @@
-"""Visual memory: an archive of what the table looked like, searchable by text, for past-tense questions
-('was there a red mug here this morning?', 'when did the papers show up?').
+"""Visual memory: an archive of what the table (and, with room memory on, the whole room) looked like,
+searchable by text, for past-tense questions ('was there a red mug here this morning?', 'what was on the
+couch earlier?').
 
 Archive policy. The perception thread hands a frame reference to a worker at most every check_every_s
 (O(1) there; if the worker is behind, the check is skipped, never queued). The worker compares a 128x72
@@ -12,6 +13,13 @@ grey thumbnail with the last archived one and saves a JPEG (<= frame_px, quality
 Each row records the time, the path, the change score, whether hands were in view, why it was saved,
 and a digest of the world model then (which entities were visible and roughly where), so text search
 works on the world model's names as well as on pixels.
+
+Room frames. With room memory on the frame source is a core.room_view.TableView: the table pipeline sees a
+cut of the camera frame, and full_at(t) / latest_full() give the whole view. The worker then also keeps the
+whole view (<= room_frame_px, rows with view = 'room') every room_every_s, and after a world event once
+room_min_gap_s has passed: people on a couch move all the time, so pixel change is no trigger there. Room
+rows are embedded with the finer room_tiles grid (a cup on the far counter is ~30 px of a 1280 px view) and
+have their own disk cap (room_max_mb), so a busy table does not push the room's history out.
 
 Search. A pluggable embedder (MobileCLIP2-S0 in ONNX by default: image and text towers from
 scripts/export_mobileclip.py, tokenized by core/clip_tokenizer.py) embeds each saved frame on a third
@@ -41,9 +49,10 @@ log = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS visual_frames (id INTEGER PRIMARY KEY, t REAL, path TEXT, bytes INTEGER,
-  score REAL, hands INTEGER, reason TEXT, digest TEXT, emb BLOB, emb_n INTEGER, emb_model TEXT);
+  score REAL, hands INTEGER, reason TEXT, digest TEXT, emb BLOB, emb_n INTEGER, emb_model TEXT, view TEXT);
 CREATE INDEX IF NOT EXISTS visual_frames_t ON visual_frames(t);
 """
+VIEWS = ("table", "room")
 
 
 @dataclass
@@ -73,6 +82,16 @@ class VisualConfig:
     jpeg_quality: int = 80
     max_mb: float = 500.0
     keep_h: float = 24.0
+    # whole-room frames (room memory on: the frame source has latest_full)
+    room_every_s: float = 30.0     # a room frame at least this often (0: none)
+    room_min_gap_s: float = 10.0   # ... and after a world event, once this long has passed
+    room_frame_px: int = 1280
+    room_max_mb: float = 300.0     # the room frames' own disk cap
+    room_tiles: tuple = (4, 3)
+    # the whole-room look (voice/visual.py look_room): native-resolution close-ups of drawn zones
+    room_crops: int = 3            # at most this many zone close-ups per room question
+    room_crop_px: int = 640        # their long side (upscaled from the native crop)
+    room_crop_max_frac: float = 0.1   # unnamed in the question, only zones under this share of the frame
     # embedder
     embed: str = "onnx"            # onnx | none | fake
     image_model: str = "models/mobileclip2_s0_image.onnx"
@@ -96,6 +115,7 @@ class VisualConfig:
         known = {f.name for f in fields(cls)}
         c = cls(**{k: v for k, v in flat.items() if k in known})
         c.tiles = tuple(c.tiles) if c.tiles else (0, 0)
+        c.room_tiles = tuple(c.room_tiles) if c.room_tiles else (0, 0)
         return c
 
 
@@ -285,10 +305,11 @@ class FrameRow:
     reason: str
     digest: dict
     emb: Optional[np.ndarray]
+    view: str = "table"
 
 
 def _frame_row(r, dim: Optional[int] = None) -> FrameRow:
-    i, t, path, nbytes, score, hands, reason, digest, blob, n = r
+    i, t, path, nbytes, score, hands, reason, digest, blob, n, view = r
     emb = None
     if blob is not None and n:
         emb = np.frombuffer(blob, np.float16).astype(np.float32).reshape(n, -1)
@@ -296,7 +317,7 @@ def _frame_row(r, dim: Optional[int] = None) -> FrameRow:
         dg = json.loads(digest) if digest else {}
     except ValueError:
         dg = {}
-    return FrameRow(i, t, path, nbytes or 0, score or 0.0, bool(hands), reason or "", dg, emb)
+    return FrameRow(i, t, path, nbytes or 0, score or 0.0, bool(hands), reason or "", dg, emb, view or "table")
 
 
 class ArchiveStore:
@@ -305,7 +326,11 @@ class ArchiveStore:
     def __init__(self, events):
         self.events = events
         with events._locked():
-            events._conn().executescript(SCHEMA)
+            c = events._conn()
+            c.executescript(SCHEMA)
+            if "view" not in {r[1] for r in c.execute("PRAGMA table_info(visual_frames)")}:
+                c.execute("ALTER TABLE visual_frames ADD COLUMN view TEXT")     # archives from before room frames
+                c.commit()
 
     def _exec(self, sql: str, args=()) -> int:
         with self.events._locked():
@@ -318,20 +343,25 @@ class ArchiveStore:
         with self.events._locked():
             return self.events._conn().execute(sql, args).fetchall()
 
-    def add(self, t: float, path: str, nbytes: int, score: float, hands: bool, reason: str, digest: dict) -> int:
-        return self._exec("INSERT INTO visual_frames (t, path, bytes, score, hands, reason, digest) "
-                          "VALUES (?,?,?,?,?,?,?)", (t, path, nbytes, score, int(hands), reason, json.dumps(digest)))
+    def add(self, t: float, path: str, nbytes: int, score: float, hands: bool, reason: str, digest: dict,
+            view: str = "table") -> int:
+        return self._exec("INSERT INTO visual_frames (t, path, bytes, score, hands, reason, digest, view) "
+                          "VALUES (?,?,?,?,?,?,?,?)",
+                          (t, path, nbytes, score, int(hands), reason, json.dumps(digest), view))
 
     def set_embedding(self, id_: int, emb: np.ndarray, model: str) -> None:
         e = np.asarray(emb, np.float16)
         self._exec("UPDATE visual_frames SET emb = ?, emb_n = ?, emb_model = ? WHERE id = ?",
                    (e.tobytes(), int(e.shape[0]), model, id_))
 
-    _COLS = "id, t, path, bytes, score, hands, reason, digest, emb, emb_n"
+    _COLS = "id, t, path, bytes, score, hands, reason, digest, emb, emb_n, view"
+    _VIEW = "COALESCE(view, 'table') = ?"
 
-    def window(self, t0: float, t1: float) -> list[FrameRow]:
-        return [_frame_row(r) for r in self._q(f"SELECT {self._COLS} FROM visual_frames WHERE t >= ? AND t <= ? "
-                                               "ORDER BY t", (t0, t1))]
+    def window(self, t0: float, t1: float, view: Optional[str] = None) -> list[FrameRow]:
+        """Rows in [t0, t1] by time; only one view's ('table' or 'room') when given."""
+        w, args = ("", (t0, t1)) if view is None else (f" AND {self._VIEW}", (t0, t1, view))
+        return [_frame_row(r) for r in self._q(f"SELECT {self._COLS} FROM visual_frames WHERE t >= ? AND t <= ?{w} "
+                                               "ORDER BY t", args)]
 
     def get(self, id_: int) -> Optional[FrameRow]:
         r = self._q(f"SELECT {self._COLS} FROM visual_frames WHERE id = ?", (id_,))
@@ -343,14 +373,18 @@ class ArchiveStore:
             (limit,))]
 
     def stats(self) -> dict:
-        n, nb, ne = self._q("SELECT COUNT(*), COALESCE(SUM(bytes), 0), COUNT(emb) FROM visual_frames")[0]
-        return {"frames": n, "mb": round(nb / 1e6, 1), "embedded": ne}
+        n, nb, ne, nr = self._q("SELECT COUNT(*), COALESCE(SUM(bytes), 0), COUNT(emb), "
+                                "COALESCE(SUM(view = 'room'), 0) FROM visual_frames")[0]
+        return {"frames": n, "mb": round(nb / 1e6, 1), "embedded": ne, "room_frames": nr}
 
-    def prune(self, keep_h: float, max_mb: float, now: Optional[float] = None) -> int:
-        """Drop frames older than keep_h, then the oldest until the JPEGs fit in max_mb."""
+    def prune(self, keep_h: float, max_mb: float, now: Optional[float] = None, view: Optional[str] = None) -> int:
+        """Drop frames older than keep_h, then the oldest until the JPEGs fit in max_mb (of one view's
+        frames when given: the table and the room have separate caps)."""
         now = time.time() if now is None else now
-        gone = self._q("SELECT id, path FROM visual_frames WHERE t < ?", (now - keep_h * 3600,))
-        rows = self._q("SELECT id, path, bytes FROM visual_frames WHERE t >= ? ORDER BY t", (now - keep_h * 3600,))
+        w, args = ("", ()) if view is None else (f" AND {self._VIEW}", (view,))
+        gone = self._q(f"SELECT id, path FROM visual_frames WHERE t < ?{w}", (now - keep_h * 3600, *args))
+        rows = self._q(f"SELECT id, path, bytes FROM visual_frames WHERE t >= ?{w} ORDER BY t",
+                       (now - keep_h * 3600, *args))
         total = sum(b or 0 for _, _, b in rows)
         cap = max_mb * 1e6
         for i, p, b in rows:
@@ -390,17 +424,19 @@ def digest(world, cfg: dict) -> dict:
     """What the world model believed when the frame was saved: visible entities by spoken name and
     rough area, and the hidden ones with where they are."""
     from core.config import display_name
+    from core.labels import thing_labels
     try:
         st = world.state_json()
     except Exception:
         return {}
     labels = st.get("aliases") or {}
+    shown = thing_labels(st)                     # a thing's taught name, else 'mug?' or 'something new
     w = float(((cfg.get("table") or {}).get("size_cm") or [90, 60])[0])
     vis, hid = [], []
     for e in st.get("entities", []):
         n = e.get("name", "")
         name = e.get("label") or (labels.get(n) if n.startswith("thing:") else None) or \
-            ("unnamed object" if n.startswith("thing:") else display_name(cfg, n))
+            (shown.get(n) or "something new" if n.startswith("thing:") else display_name(cfg, n))
         pos = e.get("resolved_cm") or e.get("pos_cm")
         area = None if not pos else ("left" if pos[0] < w / 3 else "right" if pos[0] > 2 * w / 3 else "middle")
         if e.get("status") == "VISIBLE":
@@ -418,11 +454,13 @@ def digest_text(d: dict) -> str:
 
 class VisualArchive:
     """Saves, embeds and searches frames (see the module docstring). start=False: no threads (tests
-    call drain())."""
+    call drain()). frames: the app's frame source; one with latest_full (TableView) adds room frames."""
 
     def __init__(self, cfg: dict, events, world=None, embedder: Optional[Embedder] = None,
-                 clock: Callable[[], float] = time.time, start: bool = True, c: Optional[VisualConfig] = None):
+                 clock: Callable[[], float] = time.time, start: bool = True, c: Optional[VisualConfig] = None,
+                 frames=None):
         self.cfg = cfg
+        self.frames = frames
         self.c = c or VisualConfig.from_dict(cfg.get("visual_memory"))
         self.store = ArchiveStore(events)
         self.root = os.path.join(events.snap_dir, "archive")
@@ -435,6 +473,7 @@ class VisualArchive:
         self._dirty = False
         self._last_thumb: Optional[np.ndarray] = None
         self._last_save: Optional[float] = None
+        self._last_room: Optional[float] = None
         self._pending_change = False
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
@@ -503,10 +542,10 @@ class VisualArchive:
             self._check(*item[1:])
         while True:
             try:
-                id_, img = self._eq.get_nowait()
+                item = self._eq.get_nowait()
             except queue.Empty:
                 break
-            self._embed(id_, img)
+            self._embed(*item)
         if self.embedder is not None:
             self._backfill(1000)
 
@@ -517,12 +556,18 @@ class VisualArchive:
             im = cv2.imread(r.path) if r.path else None
             if im is not None:
                 try:
-                    self._embed(r.id, im)
+                    self._embed(r.id, im, r.view)
                 except Exception:
                     log.exception("archive backfill failed")
 
     def _check(self, frame, hands: bool, dirty: bool) -> Optional[int]:
-        """Decide whether this frame is archived (see the module docstring); returns the row id if so."""
+        """Decide whether this frame is archived (see the module docstring); returns the table row id if so.
+        A room frame is kept on its own schedule."""
+        if self._room_due(frame.wall, dirty):
+            try:
+                self._save_room(frame)
+            except Exception:
+                log.exception("archive room frame failed")
         th = _thumb(frame.img)
         score = change_pct(th, self._last_thumb)
         # A world event always marks a change; a pixel difference only counts without hands in view
@@ -539,39 +584,82 @@ class VisualArchive:
             return None
         return self._save(frame, th, score, hands, reason)
 
-    def _save(self, frame, th, score: float, hands: bool, reason: str) -> int:
+    def _write(self, img: np.ndarray, wall: float, long_side: int, suffix: str = "") -> tuple[np.ndarray, str, int]:
+        """img shrunk to long_side and saved as the hour folder's JPEG: (saved img, path, bytes)."""
         import cv2
-        img = frame.img
         h, w = img.shape[:2]
-        s = self.c.frame_px / max(h, w)
+        s = long_side / max(h, w)
         if s < 1:
             img = cv2.resize(img, (round(w * s), round(h * s)), interpolation=cv2.INTER_AREA)
-        d = os.path.join(self.root, datetime.fromtimestamp(frame.wall).strftime("%Y%m%d-%H"))
+        d = os.path.join(self.root, datetime.fromtimestamp(wall).strftime("%Y%m%d-%H"))
         os.makedirs(d, exist_ok=True)
-        path = os.path.join(d, f"{int(frame.wall * 1000)}.jpg")
+        path = os.path.join(d, f"{int(wall * 1000)}{suffix}.jpg")
         ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, int(self.c.jpeg_quality)])
         if not ok:
             raise RuntimeError("jpeg encode failed")
         with open(path, "wb") as f:
             f.write(buf.tobytes())
-        dg = digest(self.world, self.cfg) if self.world is not None else {}
-        id_ = self.store.add(frame.wall, path, len(buf), round(score, 2), hands, reason, dg)
-        self._last_thumb, self._last_save, self._pending_change = th, frame.wall, False
+        return img, path, len(buf)
+
+    def _queue_embed(self, id_: int, img: np.ndarray, view: str) -> None:
         if self.embedder is not None:
             try:
-                self._eq.put_nowait((id_, img))
+                self._eq.put_nowait((id_, img, view))
             except queue.Full:
                 self.skipped += 1           # backfilled when the embedder is idle
+
+    def _save(self, frame, th, score: float, hands: bool, reason: str) -> int:
+        img, path, nbytes = self._write(frame.img, frame.wall, self.c.frame_px)
+        dg = digest(self.world, self.cfg) if self.world is not None else {}
+        id_ = self.store.add(frame.wall, path, nbytes, round(score, 2), hands, reason, dg)
+        self._last_thumb, self._last_save, self._pending_change = th, frame.wall, False
+        self._queue_embed(id_, img, "table")
         now = self.clock()
         if now - self._pruned > 60:
             self._pruned = now
-            self.store.prune(self.c.keep_h, self.c.max_mb, now=now)
+            if self._room_source() is None:
+                self.store.prune(self.c.keep_h, self.c.max_mb, now=now)
+            else:
+                self.store.prune(self.c.keep_h, self.c.max_mb, now=now, view="table")
+                self.store.prune(self.c.keep_h, self.c.room_max_mb, now=now, view="room")
+        return id_
+
+    # -- room frames
+
+    def _room_source(self):
+        """frames.full_at (else latest_full) when the source has the whole camera view, else None."""
+        if self.c.room_every_s <= 0 or self.frames is None:
+            return None
+        return getattr(self.frames, "full_at", None) or getattr(self.frames, "latest_full", None)
+
+    def _room_due(self, wall: float, dirty: bool) -> bool:
+        if self._room_source() is None:
+            return False
+        if self._last_room is None:
+            return True
+        gap = wall - self._last_room
+        return gap >= self.c.room_every_s or (dirty and gap >= self.c.room_min_gap_s)
+
+    def _save_room(self, frame) -> Optional[int]:
+        """The whole camera view at the table frame's time (full_at; the newest one if the ring has moved on)."""
+        src = getattr(self.frames, "full_at", None)
+        full = src(frame.t) if src is not None else None
+        if full is None or getattr(full, "img", None) is None:
+            latest = getattr(self.frames, "latest_full", None)
+            full = latest() if latest is not None else None
+        if full is None or getattr(full, "img", None) is None:
+            return None
+        img, path, nbytes = self._write(full.img, frame.wall, self.c.room_frame_px, "_room")
+        dg = digest(self.world, self.cfg) if self.world is not None else {}
+        id_ = self.store.add(frame.wall, path, nbytes, 0.0, False, "room", dg, view="room")
+        self._last_room = frame.wall
+        self._queue_embed(id_, img, "room")
         return id_
 
     # -- embed worker
 
-    def _embed(self, id_: int, img: np.ndarray) -> None:
-        emb = self.embedder.image(tiles(img, self.c.tiles))
+    def _embed(self, id_: int, img: np.ndarray, view: str = "table") -> None:
+        emb = self.embedder.image(tiles(img, self.c.room_tiles if view == "room" else self.c.tiles))
         self.store.set_embedding(id_, emb, self.embedder.name)
 
     def _embed_loop(self) -> None:
@@ -583,25 +671,27 @@ class VisualArchive:
                 self.embedder = None
         while not self._stop.is_set():
             try:
-                id_, img = self._eq.get(timeout=5.0)
+                item = self._eq.get(timeout=5.0)
             except queue.Empty:
                 if self.embedder is not None:
                     self._backfill(2)                     # idle: catch up on what was skipped
                 continue
             try:
-                self._embed(id_, img)
+                self._embed(*item)
             except Exception:
                 log.exception("archive embedding failed")
 
     # -- search
 
-    def search(self, query: str, t0: float, t1: float, k: int = 6, min_gap_s: float = 60.0) -> list[tuple]:
+    def search(self, query: str, t0: float, t1: float, k: int = 6, min_gap_s: float = 60.0,
+               view: Optional[str] = None) -> list[tuple]:
         """(FrameRow, similarity) best first: 'a photo of {query}' against each frame's best tile, in
-        [t0, t1], at most one frame per min_gap_s unless nothing else is left. [] without a text embedder."""
+        [t0, t1] (one view's frames when given), at most one frame per min_gap_s unless nothing else is
+        left. [] without a text embedder."""
         if self.embedder is None or not getattr(self.embedder, "can_text", False):
             return []
         q = self.embedder.text([f"a photo of {query}"])[0]
-        rows = [r for r in self.store.window(t0, t1) if r.emb is not None and r.path]
+        rows = [r for r in self.store.window(t0, t1, view) if r.emb is not None and r.path]
         scored = sorted(((r, float((r.emb @ q).max())) for r in rows), key=lambda x: -x[1])
         out: list[tuple] = []
         for r, s in scored:
@@ -611,9 +701,10 @@ class VisualArchive:
                 break
         return out
 
-    def sample(self, t0: float, t1: float, k: int = 6) -> list[FrameRow]:
-        """k frames spread evenly over [t0, t1], preferring change frames (for time-only questions)."""
-        rows = [r for r in self.store.window(t0, t1) if r.path]
+    def sample(self, t0: float, t1: float, k: int = 6, view: Optional[str] = None) -> list[FrameRow]:
+        """k frames spread evenly over [t0, t1], preferring change frames (for time-only questions); one
+        view's frames when given."""
+        rows = [r for r in self.store.window(t0, t1, view) if r.path]
         if len(rows) <= k:
             return rows
         changes = [r for r in rows if r.reason in ("change", "first")]

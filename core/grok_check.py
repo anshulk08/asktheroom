@@ -97,7 +97,7 @@ class GrokCheckConfig:
             "min_hand_frames": self.min_hand_frames, "max_episode_s": 1e9, "keyframe_every_s": 1e9})
 
 
-SYSTEM = """You check what an object tracker believes is on a tabletop. The image is from an overhead camera that looks straight down: the table surface, the objects on it and sometimes hands; nothing beyond the table's edge. Numbered yellow boxes (marks) are drawn around the objects the tracker follows, and the text says what the tracker calls each one.
+SYSTEM = """You check what an object tracker believes is on a tabletop. The image is the camera's view of the table: the camera is above it, looking straight down or, mounted high in a corner of the room, down at an angle, so the edges of the image may show the floor, furniture or people around the table. Numbered yellow boxes (marks) are drawn around the objects the tracker follows, and the text says what the tracker calls each one.
 
 For every mark:
 - real: true if the box shows a physical object on the table; false if it shows only empty table, a shadow, a reflection, a hand or arm, or a printed black-and-white marker.
@@ -107,7 +107,7 @@ For every mark:
 - not_object: your probability (0 to 1) that the box shows no object at all (table, shadow, cable, tape, part of the desk).
 - held: true if a hand is touching or holding the object.
 
-unmarked: objects on the table that no box covers (at most 8), each with a label as above, point = its centre as {"x": fraction of the image width, "y": fraction of the height}, each 0 to 1, and a confidence. Ignore the table itself, cables, hands and the printed square markers.
+unmarked: objects on the table that no box covers (at most 8), each with a label as above, point = its centre as {"x": fraction of the image width, "y": fraction of the height}, each 0 to 1, and a confidence. Ignore the table itself, anything off the table, cables, hands and the printed square markers.
 
 Reply with the JSON object only."""
 

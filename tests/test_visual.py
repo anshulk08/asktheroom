@@ -265,7 +265,7 @@ def test_look_marks_visible_entities_and_points_at_the_chosen_mark(log):
     texts = " ".join(p[1] for p in call.parts if p[0] == "text")
     assert "1 = keys" in texts and "2 = box" in texts
     s = call.system.lower()
-    assert "numbered" in s and "mark" in s and "medication" in s and "beyond the table" in s
+    assert "numbered" in s and "mark" in s and "medication" in s and "about the table" in s and "someone" in s
     assert "box_2d" not in s
     assert "never mention the marks" in s                   # the listener can't see them
     assert "not the image" in s                              # 'near the top of the image' means nothing aloud
@@ -835,7 +835,8 @@ def test_pick_asks_grok_only_which_mark_and_what_it_is(log):
     from voice.visual import PICK_SCHEMA, PICK_SYSTEM
     assert call.system == PICK_SYSTEM and "answer" not in PICK_SCHEMA["properties"]
     assert [p[0] for p in call.parts].count("image") == 1                 # the marked frame only, no close-ups
-    assert "Find: red mug" in call.parts[-1][1] and "2 = unnamed object" in call.parts[-1][1]
+    from core.labels import thing_label
+    assert "Find: red mug" in call.parts[-1][1] and f"2 = {thing_label('thing:3')}" in call.parts[-1][1]
     assert a.point_at == "thing:3" and a.action == "point"
     assert "red mug" in a.text.lower() and "mark" not in a.text.lower()   # the WHERE template, by the new name
 
