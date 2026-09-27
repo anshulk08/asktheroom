@@ -48,7 +48,8 @@ def make_ask(cfg: dict, world, events, net=None, other: Optional[Callable] = Non
         if ans is None and intent.kind == "OTHER":
             ans = other(text, world, events, cfg, online=online)
         elif ans is None:
-            ans = answer(intent, world, events, cfg, now=clock() if clock is not None else None)
+            describe = visual.describe_where if visual is not None and online else None
+            ans = answer(intent, world, events, cfg, now=clock() if clock is not None else None, describe=describe)
         latency_ms = int((time.perf_counter() - t0) * 1000)
         try:
             events.log_question(text, intent.kind, intent.obj, ans.text, online, latency_ms)

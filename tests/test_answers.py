@@ -129,7 +129,7 @@ def test_visible(w):
 
 def test_visible_near_other_object(w):
     w.set("wallet", pos_cm=(65.0, 35.0))
-    assert ask(w, "WHERE", "wallet").text == "Your wallet is on the table, near the box."
+    assert ask(w, "WHERE", "wallet").text == "Your wallet is on the table, just left of the box."
 
 
 def test_inside_plural(w):

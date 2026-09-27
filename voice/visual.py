@@ -202,6 +202,23 @@ Rules:
 - pictures: the numbers of the pictures your answer rests on (at most 3; empty if none shows it).
 Reply with the JSON object only."""
 
+DESCRIBE_SYSTEM = """You say where one object is, for someone in the room looking for it. The pictures are from a camera mounted high in a corner of the room, looking down at an angle; a numbered yellow box is drawn around the object. Image 1 is the camera's view, image 2 a close-up around the box.
+
+Rules:
+- where: one short phrase (at most 10 words) placing the object by the things right next to it or the part of the furniture it is on, e.g. "next to the laptop charger", "by the armrest nearest the TV", "on the stack of papers".
+- Never use left, right, in front of or behind: the listener is not where the camera is.
+- Don't name the object itself, and don't mention the box, the image or the camera.
+- Never state or imply that medication was taken, swallowed, skipped or missed.
+- confidence: 0 to 1; below 0.5 if you can't tell.
+Reply with the JSON object only."""
+
+DESCRIBE_SCHEMA = {
+    "type": "object", "additionalProperties": False, "required": ["where", "confidence"],
+    "properties": {"where": {"type": "string"}, "confidence": {"type": "number"}},
+}
+DESCRIBE_DEADLINE_S = 1.5        # a WHERE answer waits this long for Grok's description, then goes without
+SIDE_WORDS = re.compile(r"\b(?:left|behind|in front of|to the right|on the right|right of|right side|right-hand)\b")
+
 RECALL_SCHEMA = {                  # seen first, as ROOM_SCHEMA; pictures: which ones the answer rests on (evidence)
     "type": "object", "additionalProperties": False, "required": ["seen", "answer", "confidence", "pictures"],
     "properties": {"seen": {"type": "string"}, "answer": {"type": "string"}, "confidence": {"type": "number"},
@@ -542,12 +559,13 @@ class VisualQA:
             self._calls.popleft()
         return len(self._calls) >= self.c.max_per_hour
 
-    def _vlm(self, system: str, parts: list, schema: dict) -> dict:
+    def _vlm(self, system: str, parts: list, schema: dict, limit: Optional[float] = None) -> dict:
         """One Grok call, bounded in wall time: requests' timeout is per phase (DNS, connect, each read),
         so a stalling connection could hold a spoken answer far past visual_memory.timeout_s. Past
-        timeout_s + VLM_MARGIN_S it raises ProviderError, and the callers' usual failure answer is said."""
+        timeout_s + VLM_MARGIN_S (or `limit`) it raises ProviderError, and the callers' usual failure
+        answer is said."""
         self._calls.append(self.clock())
-        limit = float(self.c.timeout_s) + VLM_MARGIN_S
+        limit = float(self.c.timeout_s) + VLM_MARGIN_S if limit is None else float(limit)
         try:
             reply = call_with_deadline(self.provider.narrate, limit, system, parts, schema, name="visual-grok")
         except TimeoutError:
@@ -555,6 +573,54 @@ class VisualQA:
         d = _parse_json(reply.text)
         self.last = {"latency_ms": reply.latency_ms, "usage": reply.usage, "reply": d}
         return d
+
+    # -- where exactly (voice/answers.py WHERE, when no landmark says it)
+
+    def describe_where(self, ent: str, place=None) -> Optional[str]:
+        """A short phrase for where `ent` is ('next to the laptop charger', 'by the armrest nearest the TV'),
+        from one quick Grok look at the live frame with it boxed: the full view for a room place (its
+        box_px), else the table view (its box_cm). None when offline, over the hourly cap, with nothing to
+        box, or after DESCRIBE_DEADLINE_S: the template answer goes out without it. Never left/right: Grok
+        sees from the camera, not the user's seat."""
+        if not self.online() or self._capped():
+            return None
+        try:
+            if place is not None and getattr(place, "kind", None) == "room":
+                f, box, on = self._room_frame(), getattr(place, "box_px", None), place.say
+            else:
+                f = self.frames.latest() if self.frames is not None else None
+                box_cm = self.world.get(ent).box_cm
+                box, on = (cm_box_to_px(self.table, box_cm) if box_cm is not None else None), "the table"
+            if f is None or getattr(f, "img", None) is None or box is None:
+                return None
+            img = f.img
+            h, w = img.shape[:2]
+            x1, y1, x2, y2 = (float(v) for v in box)
+            side = max(x2 - x1, y2 - y1) * 3 + 160                      # the box and what surrounds it
+            cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+            cx1, cy1 = int(max(0, cx - side / 2)), int(max(0, cy - side / 2))
+            cx2, cy2 = int(min(w, cx + side / 2)), int(min(h, cy + side / 2))
+            marked = draw_marks(img, [(x1, y1, x2, y2)])
+            parts = [("text", f"Image 1: the camera's view; the boxed object is on {on}."),
+                     ("image", _jpeg(marked, self.c.look_px)[0]),
+                     ("text", "Image 2: close-up around it."),
+                     ("image", _jpeg(marked[cy1:cy2, cx1:cx2], self.c.crop_px, upscale=True)[0]),
+                     ("text", "Where exactly is it?")]
+        except Exception:
+            log.debug("describe_where: nothing to look at", exc_info=True)
+            return None
+        try:
+            d = self._vlm(DESCRIBE_SYSTEM, parts, DESCRIBE_SCHEMA, limit=DESCRIBE_DEADLINE_S)
+        except (ProviderError, NarrationError) as ex:
+            log.info("describe_where: none in time (%s)", ex)
+            return None
+        where = _spoken(str(d.get("where") or "")).strip().rstrip(".")
+        where = re.sub(r"^(?:it(?:'s| is)|they(?:'re| are))\s+", "", where, flags=re.I)
+        where = re.sub(rf"^on {re.escape(on)},?\s*", "", where, flags=re.I)
+        if (not where or _conf(d) < self.c.abstain_below or SIDE_WORDS.search(where.lower())
+                or len(where.split()) > 12 or where == PILLS_SAFE.rstrip(".")):
+            return None
+        return where[:1].lower() + where[1:]
 
     # -- names
 

@@ -189,7 +189,7 @@ def test_table_answers_unchanged_by_place(w, name):
 def test_world_without_place_works(w):
     nw = NoPlace(w)
     assert not hasattr(nw, "place")
-    assert ask(nw, "wallet").text == "Your wallet is on the table."
+    assert ask(nw, "wallet").text == "Your wallet is on the table, behind the box."
 
 
 def test_place_error_falls_back_to_table(w):

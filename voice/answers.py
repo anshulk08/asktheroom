@@ -28,7 +28,6 @@ log = logging.getLogger(__name__)
 __all__ = ["Answer", "answer", "ago", "clock", "area"]
 
 PLURAL = {"keys", "glasses", "pills"}
-NEAR_CM = 25.0          # 'near the X' only when another visible object is this close
 CHANGES_WINDOW_S = 600  # default look-back for 'what changed'
 ALSO_NAMED_MAX = 3      # 'what changed': other changed things named, the rest 'a few other things'
 PUT_DOWN = ("PUT_BACK", "MOVED", "PUT_INSIDE", "COVERED", "EXITED_VIEW")
@@ -222,23 +221,35 @@ def _which(cfg: dict) -> Answer:
 
 # ---------- per-intent answers ----------
 
-def _where(obj: str, world, events, cfg: dict, now: float) -> Answer:
+def _where(obj: str, world, events, cfg: dict, now: float, describe=None) -> Answer:
     """world.place() first (room memory, spec 0009): a room place gets the room templates, anything else
-    today's table templates; then one sentence for a conflicting sighting of the object, if any."""
+    today's table templates; then one sentence for a conflicting sighting of the object, if any.
+    describe(obj, place) -> a short phrase or None: Grok's look at where it is, within a deadline
+    (VisualQA.describe_where; None offline), for a table spot with no landmark or a room zone."""
     try:
         place = world.place(obj, now) if hasattr(world, "place") else None
     except Exception:
         place = None
     if place is not None and place.kind == "room":
-        ans = _tentative(_where_room(obj, place, cfg, now, world), place, cfg, obj)
+        ans = _tentative(_where_room(obj, place, cfg, now, world, describe), place, cfg, obj)
     else:
-        ans = _placed_when(_where_table(obj, world, events, cfg, now), obj, world, events, cfg, now)
+        ans = _placed_when(_where_table(obj, world, events, cfg, now, describe), obj, world, events, cfg, now)
     if place is not None and place.conflicts:
         ans = Answer(f"{ans.text} {_conflict_tail(place.conflicts[0], cfg)}", ans.point_at, ans.action)
     return ans
 
 
-def _where_room(obj: str, place, cfg: dict, now: float, world=None) -> Answer:
+def _described(describe, obj: str, place=None) -> Optional[str]:
+    """describe's phrase, or None (no describer, nothing in time, or it failed)."""
+    if describe is None:
+        return None
+    try:
+        return describe(obj, place) or None
+    except Exception:
+        return None
+
+
+def _where_room(obj: str, place, cfg: dict, now: float, world=None, describe=None) -> Answer:
     """Spoken room place (spec 0009 section 4). Room answers never point the laser and never say who put
     the thing there: the camera saw it arrive, not whose hand it was."""
     pk = _pk(cfg, obj)
@@ -258,7 +269,8 @@ def _where_room(obj: str, place, cfg: dict, now: float, world=None) -> Answer:
         return Answer(f"I last saw {Y.lower()} {n} on {say}{at}. I can't see {it} there now.")
     if not place.fresh:
         return Answer(f"I last saw {Y.lower()} {n} on {say}{at}.")
-    text = f"{Y} {n} {be} on {say}."
+    detail = _described(describe, obj, place)       # 'by the armrest nearest the TV'
+    text = f"{Y} {n} {be} on {say}{', ' + detail if detail else ''}."
     if place.arrival_observed and arrived is not None:
         text += f" {It} appeared there {_when(arrived, now)}."
     elif arrived is not None or last is not None:
@@ -298,7 +310,7 @@ def _conflict_tail(c, cfg: dict) -> str:
     return f"I also see {n} on {c.say}."
 
 
-def _where_table(obj: str, world, events, cfg: dict, now: float) -> Answer:
+def _where_table(obj: str, world, events, cfg: dict, now: float, describe=None) -> Answer:
     e = world.get(obj)
     pk = _pk(cfg, obj)
     n, be, It, Y = _dn(cfg, obj), _be(pk), _It(pk), _your(cfg, obj)
@@ -321,8 +333,10 @@ def _where_table(obj: str, world, events, cfg: dict, now: float) -> Answer:
             holder = None
         if holder:                          # seen lying in an open box: 'in the box', not 'on the table'
             return Answer(f"{Y} {n} {be}{prob} in {_pn(cfg, holder)}.", point_at=obj, action="point")
-        near = _nearest(obj, e, world, cfg)
-        tail = f", near the {near}" if near else ""
+        from voice.landmarks import phrase
+        where = phrase(obj, e.pos_cm, world, cfg) or _described(describe, obj) or \
+            (area(e.pos_cm, cfg) if e.pos_cm is not None else None)
+        tail = f", {where}" if where else ""
         return Answer(f"{Y} {n} {be}{prob} on the table{tail}.", point_at=obj, action="point")
 
     if e.status == Status.HELD:
@@ -363,25 +377,6 @@ def _where_table(obj: str, world, events, cfg: dict, now: float) -> Answer:
         if ev or e.last_seen:
             text += f" {It} {_be(pk, True)} put there {ago(ev.wall if ev else e.last_seen, now)}."
     return Answer(text, point_at=obj, action="point")
-
-
-def _nearest(obj: str, e: Entity, world, cfg: dict) -> Optional[str]:
-    if e.pos_cm is None:
-        return None
-    try:
-        ents = world.state_json().get("entities", [])
-    except Exception:
-        return None
-    best, bd = None, NEAR_CM
-    for d in ents:
-        if d.get("name") == obj or d.get("status") != Status.VISIBLE.value or not d.get("pos_cm"):
-            continue
-        if str(d.get("name")).startswith("thing:") and not d.get("label"):
-            continue                    # an unnamed thing is no landmark
-        dist = ((d["pos_cm"][0] - e.pos_cm[0]) ** 2 + (d["pos_cm"][1] - e.pos_cm[1]) ** 2) ** 0.5
-        if dist < bd:
-            best, bd = d["name"], dist
-    return _dn(cfg, best) if best else None
 
 
 def _history(obj: str, world, cfg: dict, now: float) -> Answer:
@@ -495,8 +490,9 @@ def _changes(events, cfg: dict, now: float, since: Optional[float]) -> Answer:
 
 
 def answer(intent: Intent, world, events, cfg: Optional[dict] = None,
-           since: Optional[float] = None, now: Optional[float] = None) -> Answer:
-    """Render the offline answer for an intent. `since` (wall time) scopes CHANGES."""
+           since: Optional[float] = None, now: Optional[float] = None, describe=None) -> Answer:
+    """Render the offline answer for an intent. `since` (wall time) scopes CHANGES. `describe` (see
+    _where) lets WHERE add Grok's look at the spot when no landmark says it; None: templates only."""
     cfg = cfg if cfg is not None else load_config()
     now = now if now is not None else time.time()
     k = intent.kind
@@ -533,10 +529,10 @@ def answer(intent: Intent, world, events, cfg: Optional[dict] = None,
         if spoken and spoken != obj and spoken in (getattr(world.get(obj), "aliases", None) or []):
             cfg = {**cfg, "display_names": {**(cfg.get("display_names") or {}), obj: spoken}}   # 'brown wallet'
         if guessed:
-            ans = _guessed_answer(k, intent, guessed, world, events, cfg, now)
+            ans = _guessed_answer(k, intent, guessed, world, events, cfg, now, describe)
             obj = guessed[0]
         elif k == "WHERE":
-            ans = _maybe_back(obj, _where(obj, world, events, cfg, now), world, cfg)
+            ans = _maybe_back(obj, _where(obj, world, events, cfg, now, describe), world, cfg)
         elif k == "HISTORY":
             ans = _plus_narration(_history(obj, world, cfg, now), obj, world, events, cfg, now)
         else:
@@ -785,7 +781,8 @@ def _place(e: Entity, world, cfg: dict) -> str:
     return f"was last seen {area(e.pos_cm, cfg)}"
 
 
-def _guessed_answer(k: str, intent: Intent, guessed: list[str], world, events, cfg: dict, now: float) -> Answer:
+def _guessed_answer(k: str, intent: Intent, guessed: list[str], world, events, cfg: dict, now: float,
+                    describe=None) -> Answer:
     """A question answered through automatic name guesses: the thing is spoken as the person named
     it, and the answer hedges. Two equally good fits (neither, or both, in view): both places."""
     from core.things import norm_name
@@ -800,7 +797,7 @@ def _guessed_answer(k: str, intent: Intent, guessed: list[str], world, events, c
         except Exception:
             pass
     if k == "WHERE":
-        ans = _where(obj, world, events, cfg, now)
+        ans = _where(obj, world, events, cfg, now, describe)
     elif k == "HISTORY":
         ans = _history(obj, world, cfg, now)
     else:
