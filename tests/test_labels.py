@@ -39,6 +39,9 @@ def test_thing_labels_never_number_a_thing_but_keep_each_name_unique():
                       + [{'name': 'thing:5', 'guess': {'name': 'mug'}}, {'name': 'thing:6', 'guess': {'name': 'mug'}}]}
     assert thing_labels(st) == {'thing:3': 'something new', 'thing:8': 'something new (2)',
                                 'thing:12': 'something new (3)', 'thing:5': 'mug?', 'thing:6': 'mug? (2)'}
+    weak = {'entities': [{'name': 'thing:1', 'guess': {'name': 'cable', 'confidence': 0.3}},
+                         {'name': 'thing:2', 'guess': {'name': 'mug', 'confidence': 0.5}}]}
+    assert thing_labels(weak) == {'thing:1': 'something new', 'thing:2': 'mug?'}
 
 
 def test_spoken():
