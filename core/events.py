@@ -211,6 +211,13 @@ class EventLog:
                        int(bool(online)), int(latency_ms)))
             c.commit()
 
+    def recent_questions(self, n: int = 20) -> list[dict]:
+        """The last n questions asked (any source), newest first, with their answers (the /live history)."""
+        rows = self._rows('SELECT t, text, intent, obj, answer, online, latency_ms FROM questions '
+                          'ORDER BY id DESC LIMIT ?', (int(n),))
+        return [{"t": r[0], "text": r[1], "intent": r[2], "obj": r[3], "answer": r[4], "online": bool(r[5]),
+                 "latency_ms": r[6]} for r in rows]
+
     def save_state(self, state: dict, t: float | None = None) -> None:
         """t defaults to state['t'], else now."""
         if t is None:
