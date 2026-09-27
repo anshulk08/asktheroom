@@ -530,6 +530,42 @@ def test_room_clutter_is_not_named_while_no_handoff_is_possible():
     assert namer.pending() == 1
 
 
+def test_with_name_all_static_room_clutter_is_named_with_no_handoff_open():
+    """room_memory.name_all (the laser points at named room tracks): the paper towels on the counter never
+    arrive, and nothing left the table, yet 'point to the paper towels' needs their name."""
+    fn = Namer()
+    namer = RoomNamer(fn, start=False, clock=lambda: 0.0)
+    rm, _, _ = make(props=[Proposal((100, 100, 140, 140), 0.5)], namer=namer, name_all=True)
+    rm.world = HintWorld([])
+    rm.step(frame(1))
+    rm.step(frame(2))                                        # confirmed, and never changed: static
+    [th] = things(rm)
+    assert th.confirmed and not th.changed
+    assert namer.pending() == 1 and th.name_asked
+    assert namer.step() is True and th.guess == GUESS
+
+
+def test_with_name_all_a_handoff_still_sends_only_arrivals():
+    namer = RoomNamer(Namer(), start=False, clock=lambda: 0.0)
+    rm, _, _ = make(props=[Proposal((100, 100, 140, 140), 0.5)], namer=namer, name_all=True)
+    rm.world = HintWorld([REMOTE])
+    rm.step(frame(1))
+    rm.step(frame(2))
+    assert namer.pending() == 0                              # static: waits for the handoff to close
+
+
+def test_the_namer_takes_the_first_zones_first():
+    named = []
+    namer = RoomNamer(lambda img, ctx=None: named.append(int(img[0, 0, 0])) or dict(GUESS), start=False,
+                      clock=lambda: 0.0, first=('counter',))
+    for i, zone in enumerate(('couch', 'counter', 'doorway')):
+        tr = RoomTrack(tid=f'r:{i}', zone=zone, cls='thing', box_px=(0, 0, 1, 1), first_seen=0.0, first_wall=0.0,
+                       last_seen=0.0, last_wall=0.0, confirmed=True)
+        namer.submit(tr, np.full((4, 4, 3), i, np.uint8))
+    namer.step()
+    assert named == [1]                                      # the counter's, though the doorway's is newest
+
+
 def test_a_candidate_is_verified_by_name_not_named_openly():
     asked = []
 

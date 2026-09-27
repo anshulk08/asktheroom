@@ -49,6 +49,9 @@ class RoomConfig:
     thing_name_wait_s: float = 45.0                # a confirmed thing track waits this long for its Grok answer
     name_match_min: float = 2.0                    # core.auto_name.match_score two guesses need (head noun shared)
     names_per_minute: int = 60                     # Grok calls for room crops, at most (only while a handoff is possible)
+    name_all: bool = False                         # name every confirmed thing track once, handoff or not: the laser
+                                                   # points at named room tracks (room.aim_tracks, voice/room_tracks.py)
+    name_first: tuple = ()                         # zones whose tracks are named before others' (after verifications)
     room_every_n_hot: int = 2                      # ... every N frames instead while a handoff is hot (spec 0010 P0-3)
     hot_max_s: float = 30.0                        # a departure keeps the room hot (fast cadence) this long; the handoff
                                                    # itself stays open for handoff_s at the normal cadence
