@@ -118,9 +118,9 @@ struct Entity: Codable, Equatable, Identifiable {
     //   taught alias        "my charger"       ("your" in sentences)
     //   alias from Grok     "tape roll?"       ("what looks like a tape roll", never "your")
     //   Grok guess >= 0.5   "phone charger?"   (same hedging)
-    //   nothing, weak guess "unnamed object 9"
+    //   nothing, weak guess "something new"    (never its number; hidden from Recent/Dashboard)
 
-    /// A guess counts from here up; below it the thing stays "unnamed".
+    /// A guess counts from here up; below it the thing stays nameless.
     static let guessThreshold = 0.5
     /// Older bridges send `g` without `gc`.
     static let defaultGuessConfidence = 0.6
@@ -138,11 +138,8 @@ struct Entity: Codable, Equatable, Identifiable {
 
     var isHedged: Bool { hedgedName != nil }
 
-    /// A thing with nothing to call it but its number.
+    /// A thing with nothing to call it: shown as "something new", left out of Recent and Home.
     var isNameless: Bool { isThing && aliases.isEmpty && !isHedged }
-
-    /// "7" for `thing:7`, kept for the detail sheet once a guess replaces it in the title.
-    var thingNumber: String? { isThing ? String(n.dropFirst("thing:".count)) : nil }
 
     var displayName: String {
         hedgedName.map { "\($0)?" } ?? Entity.displayName(for: n, aliases: aliases)
@@ -154,6 +151,8 @@ struct Entity: Codable, Equatable, Identifiable {
     }
 
     static let hedgePrefix = "what looks like "
+    /// What a nameless thing is called. Its number means nothing to the person.
+    static let namelessName = "something new"
 
     /// "what looks like a tape roll".
     static func looksLike(_ name: String) -> String { hedgePrefix + withArticle(name) }
@@ -167,7 +166,7 @@ struct Entity: Codable, Equatable, Identifiable {
     static func displayName(for name: String, aliases: [String] = []) -> String {
         if name.hasPrefix("thing:") {
             if let first = aliases.first { return first }
-            return "unnamed object \(name.dropFirst("thing:".count))"
+            return namelessName
         }
         return name.replacingOccurrences(of: "_", with: " ")
     }
@@ -193,6 +192,12 @@ struct Snapshot: Codable, Equatable {
     var time: Date? { t.map(Date.init(timeIntervalSince1970:)) }
 
     func entity(named name: String) -> Entity? { e.first { $0.n == name } }
+
+    /// Older things `entity` might be, leaving out ones with no name to tell them by:
+    /// "might be something new" says nothing.
+    func knownMatches(of entity: Entity) -> [MaybeSame] {
+        entity.maybeSameAs.filter { self.entity(named: $0.name).map { !$0.isNameless } ?? false }
+    }
 
     /// The chain from an entity out to the outermost thing holding it, e.g. keys → notebook → box.
     /// Stops at hands, missing parents and cycles; the rig nests at most 3 levels.

@@ -20,8 +20,14 @@ final class MapLayoutTests: XCTestCase {
         XCTAssertEqual(item("remote", in: items).glyph, "hand.raised.fill")
         XCTAssertNil(item("wallet", in: items).caption)
         XCTAssertEqual(item("thing:7", in: items).title, "my charger")
-        XCTAssertEqual(item("thing:9", in: items).caption, "probably might be unnamed object 4")
-        XCTAssertTrue(item("thing:9", in: items).linkBadge)
+        // thing:9 might be thing:4, which has no name to tell it by: say nothing.
+        XCTAssertEqual(item("thing:9", in: items).caption, "probably here")
+        XCTAssertFalse(item("thing:9", in: items).linkBadge)
+
+        var s = sample
+        s.update("thing:9") { $0.m = [MaybeSame(name: "thing:7", score: 0.7)] }
+        XCTAssertEqual(item("thing:9", in: MapLayout.items(for: s)).caption, "probably might be my charger")
+        XCTAssertTrue(item("thing:9", in: MapLayout.items(for: s)).linkBadge)
     }
 
     func testLineStyleAndOpacityCarryStatus() {
@@ -116,13 +122,15 @@ final class MapLayoutTests: XCTestCase {
         XCTAssertTrue(body.contains(CGPoint(x: keys.x, y: keys.y)), "still inside the box")
     }
 
-    /// Unnamed things print a short label; the full name stays for VoiceOver and the card.
-    func testUnnamedThingsGetAShortLabel() {
+    /// Nameless things print a short "new", never their number; "something new" stays for
+    /// VoiceOver and the card.
+    func testNamelessThingsGetAShortLabelAndNoNumber() {
         let items = MapLayout.items(for: sample)
-        XCTAssertEqual(item("thing:9", in: items).label, "unnamed")
-        XCTAssertEqual(item("thing:9", in: items).title, "unnamed object 9")
+        XCTAssertEqual(item("thing:9", in: items).label, "new")
+        XCTAssertEqual(item("thing:9", in: items).title, "something new")
         XCTAssertEqual(item("thing:7", in: items).label, "my charger", "named things keep their name")
-        XCTAssertTrue(item("thing:9", in: items).accessibilityLabel.hasPrefix("unnamed object 9"))
+        XCTAssertTrue(item("thing:9", in: items).accessibilityLabel.hasPrefix("something new"))
+        XCTAssertNil(item("thing:9", in: items).accessibilityLabel.rangeOfCharacter(from: .decimalDigits))
     }
 
     /// The room's guesses print with a question mark, on the map and for VoiceOver.
