@@ -105,7 +105,12 @@ stt: {input_device: "<USB mic name part>"}      # not the corner Brio's mic: it 
 tts: {output_device: "<USB speaker name part>"} # null = HDMI, which is silent on the rig
 listen: {wake_words: [ask the room, askroom, ask room]}
 demo: {hold_notices: true}                      # nothing speaks unasked while judges are there
+room_check: {pulse_sink: bluez}                 # once the Bluetooth speaker is paired (askroom:audio image, PulseAudio):
+                                                # demo_check --live check 14 then fails if the sink fell back to HDMI
 ```
+
+A Bluetooth speaker plays through the host's PulseAudio (the `askroom:audio` image; `scripts/dock.sh` passes the
+socket through): set `tts.output_device: pulse` (or `default`) and see `docs/runbooks/room-voice.md` §11.
 
 Then run the app **with voice** (§2 start, without `--no-voice`) and follow the voice runbook's checks.
 
