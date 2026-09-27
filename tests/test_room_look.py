@@ -508,3 +508,28 @@ def test_a_pick_that_fits_the_guess_or_a_weak_guess_is_taken(log):
         q, prov = guessed_pick_qa(log, guess)
         a = ask(q, "where is my laptop?")
         assert a.point_at == "thing:3" and q.world.labels.get("thing:3") == "laptop", guess
+
+
+# -- a second look before "I don't see it" (rig 27 Sep 05:49: "Where's the notebook?" -> "I don't see a notebook."
+# with the notebook in plain view on the couch; asked again 15 s later: "The notebook is on the couch.")
+
+def test_a_where_the_room_look_denies_gets_one_more_look_with_every_zone(log, tmp_path):
+    q, prov = zoned_qa(log, tmp_path)
+    prov.replies = [room_reply("I don't see a notebook."), room_reply("The notebook is on the couch.")]
+    a = q.look_room("where is my notebook?")
+    assert a.text == "The notebook is on the couch." and len(prov.calls) == 2
+    assert len(images(prov.calls[0])) == 2 and len(images(prov.calls[1])) == 3    # the couch close-up too
+
+
+def test_two_denials_keep_the_first_answer(log, tmp_path):
+    q, prov = zoned_qa(log, tmp_path)
+    prov.replies = [room_reply("I don't see a notebook."), room_reply("I don't see any notebook.")]
+    assert q.look_room("where is my notebook?").text == "I don't see a notebook." and len(prov.calls) == 2
+
+
+def test_no_second_look_when_found_or_not_a_where(log, tmp_path):
+    q, prov = zoned_qa(log, tmp_path, reply=room_reply("The notebook is on the couch."))
+    assert q.look_room("where is my notebook?").text == "The notebook is on the couch." and len(prov.calls) == 1
+    q, prov = zoned_qa(log, tmp_path, reply=room_reply("There is nothing on the couch."))
+    q.look_room("what's on the couch?")
+    assert len(prov.calls) == 1
