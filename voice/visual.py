@@ -170,6 +170,17 @@ Rules:
 - confidence: 0 to 1; below 0.5 if you aren't sure.
 Reply with the JSON object only."""
 
+# A room answer that says it didn't see the thing (normalize drops apostrophes: "isn't" -> "isnt").
+NEGATION = re.compile(r"\b(?:not|no|nothing|none|isnt|arent|wasnt|werent|dont|doesnt|didnt|cant|cannot|couldnt"
+                      r"|never|unable|without|nowhere)\b")
+WHERE_Q = re.compile(r"\b(?:where|is there|are there|do you see|can you see|have you seen)\b")
+
+
+def normalize_text(text: str) -> str:
+    from voice.intents import normalize
+    return normalize(text)
+
+
 # The second look when the marked frame gave no pick: every marked thing as its own numbered close-up. On
 # the rig (27 Sep 02:56) "where are the batteries?" got no mark among ~14 on the whole table view, then a
 # confident "I don't see any batteries." from the room look; 40 s later the same pick found them.
@@ -781,7 +792,7 @@ class VisualQA:
                     out.append(name)
         return out
 
-    def _zone_crops(self, img: np.ndarray, question: str) -> list[tuple[str, np.ndarray]]:
+    def _zone_crops(self, img: np.ndarray, question: str, every: bool = False) -> list[tuple[str, np.ndarray]]:
         """(spoken zone name, native-px close-up) for the zones the question names, else for the far
         zones (each under room_crop_max_frac of the frame), at most room_crops. Not the table: a close-up
         of its clutter made Grok 'see' glasses and a phone there (eval/room_look.py), and the tracker
@@ -801,12 +812,12 @@ class VisualQA:
             if box is None:
                 continue
             x1, y1, x2, y2 = box
-            if not named and (x2 - x1) * (y2 - y1) > self.c.room_crop_max_frac * w * h:
+            if not named and not every and (x2 - x1) * (y2 - y1) > self.c.room_crop_max_frac * w * h:
                 continue                     # near and big: image 1 shows it well enough
             out.append((say.get(name, name), img[y1:y2, x1:x2]))
-        return out[: self.c.room_crops]
+        return out if every else out[: self.c.room_crops]
 
-    def look_room(self, question: str) -> Answer:
+    def look_room(self, question: str, again: bool = True) -> Answer:
         """A question about the room: Grok gets the camera's whole view, close-ups of the zones it asks
         about (else the far ones), the zone names and where they are, and the tracker's beliefs. Spoken
         only: the laser never aims off the table from this."""
@@ -815,7 +826,7 @@ class VisualQA:
             return Answer("I can't see the room right now.")
         img, _ = _jpeg(f.img, self.c.look_px)
         parts: list = [("text", "Image 1: the camera's whole view of the room now."), ("image", img)]
-        for i, (say, crop) in enumerate(self._zone_crops(f.img, question), 2):
+        for i, (say, crop) in enumerate(self._zone_crops(f.img, question, every=not again), 2):
             parts += [("text", f"Image {i}: close-up of {say}, now."),
                       ("image", _jpeg(crop, self.c.room_crop_px, upscale=True)[0])]
         parts.append(("text", f"Areas the rig knows: {self._zone_text(f.img)}.\n"
@@ -828,6 +839,13 @@ class VisualQA:
         text = _spoken(_unmark(str(d.get("answer") or "")))
         if not text or _conf(d) < self.c.abstain_below:
             return Answer(ABSTAIN)
+        if again and WHERE_Q.search(question.lower()) and NEGATION.search(normalize_text(text)) and not self._capped():
+            # "I don't see the notebook." for a notebook in plain view on the couch (rig 27 Sep 05:49; asked again
+            # 15 s later: "The notebook is on the couch."): one more look, with every zone's close-up
+            second = self.look_room(question, again=False)
+            if second.text != ABSTAIN and not NEGATION.search(normalize_text(second.text)):
+                log.info("room look: found on the second look: %r (first: %r)", second.text, text)
+                return second
         return Answer(text, evidence=self._look_evidence(img, f.wall))
 
     def _look_evidence(self, jpg: bytes, wall: float) -> list:
