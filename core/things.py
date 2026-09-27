@@ -10,16 +10,19 @@ keeps its entity with merged_into set.
 Identity is causal first; appearance only confirms. Each proposal goes through ordered rules, not a
 weighted score, so every decision can be explained in one sentence:
   per batch, while the thing is in view or in a hand (continuity):
-    merge  one proposal covering two visible things' last boxes: both are kept where they were, at
-           ambiguity_penalty, until they come apart (then nearest, or appearance if decisive)
     (b)    a visible thing: the nearest proposal within gate_cm, of a size like its latest box (or,
            while an arm hides part of it, over the box it rests in: the whole of it again)
     (b)    a HELD thing: a proposal at its holding hand's recent boxes
-  otherwise the proposal is a candidate; after the k-of-n debounce, clear of hands:
+    merge  one proposal covering two visible things' last boxes: those not seen on their own are kept
+           where they were, at ambiguity_penalty, until they come apart (then nearest, or appearance if
+           decisive); the blob itself is never a candidate
+  otherwise the proposal is a candidate; after the k-of-n debounce, clear of hands, and not lying on a
+  thing in view (the same box, or the same spot at a like size: that thing seen twice):
     (a)    causal: it came out of a container / cover that holds hidden things (a hand touched that
            parent since they hid), or appeared where an UNDER thing lay: that child. Several
            children: appearance may pick one, else a new thing linked to all of them
-    (b)    a thing lost in place (no hand involved) seen again at the same spot; with thing_identity:
+    (b)    a thing lost in place (no hand involved) seen again at the same spot (the nearest, if several
+           were lost there); with thing_identity:
            rebirth_s, also one lost recently after a pick-up, a false pick-up or an edge exit
     (c)    appearance resurrects an archived thing only above resurrect_sim AND by resurrect_margin
            over every other thing (a twin on the table blocks it)
@@ -57,6 +60,7 @@ OPEN_INSIDE = 0.8   # this much of a visible object's box within an open contain
 STARTUP_S = 3.0     # configured objects first seen this soon after the first batch were not put down
 ARTICLES = {'my', 'the', 'a', 'an', 'your', 'our', 'this', 'that', 'his', 'her', 'their'}
 NEG = float('-inf')
+SAME_SIZE = 2.0     # 'a like size' for the same-spot birth veto: areas within this factor
 REST_IOU = 0.5      # a proposal this much over the box a partly hidden thing rests in: the whole of it
 CROSS_UV = 1.0      # a hand in and out of a thing container on opposite sides of its middle, this far
                     # apart (in half-widths): it crossed the thing carrying something past, not into it
@@ -432,9 +436,10 @@ class ThingRules:
                              + [h.box_cm for h in dets.hands])
         if not props and not self._cands:
             return []
-        props = self._match_merged(props, seen)
+        props, blobs = self._merged_blobs(props)
         props = self._match_visible(props, seen)
         props = self._match_held(props, seen)
+        self._match_merged(blobs, seen)
         return self._track_candidates(props, seen, dets.hands)
 
     def _proposals(self, items, seen, hands) -> list[Detection]:
@@ -466,25 +471,36 @@ class ThingRules:
                 and self.entities[n].merged_into is None and self.entities[n].zone == 'table'
                 and self.entities[n].box_cm is not None]
 
-    def _match_merged(self, props, seen) -> list[Detection]:
-        """One proposal over 2+ visible things' last boxes: keep every one of them where it was (their
-        identities are not decidable inside the blob), at a confidence penalty, and learn nothing."""
+    def _merged_blobs(self, props) -> tuple[list[Detection], list[tuple[Detection, list[str]]]]:
+        """Splits off the proposals lying over 2+ visible things' last boxes (and plainly none of them):
+        (the rest, [(blob, the things under it)]). A blob is never a candidate: what it shows is known."""
         tc = self._tcfg
         vis = self._visible_things()
-        rest = []
+        rest, blobs = [], []
         for d in props:
             inside = [n for n in vis if geom.overlap_frac(d.box_cm, self.entities[n].box_cm) >= tc.merge_cover]
             if len(inside) < 2 or any(geom.iou(d.box_cm, self.entities[n].box_cm) >= tc.member_iou for n in inside):
                 rest.append(d)
-                continue
+            else:
+                blobs.append((d, inside))
+        return rest, blobs
+
+    def _match_merged(self, blobs, seen) -> None:
+        """After the one-to-one rules: a thing under a blob that no proposal of its own explained stays
+        where it was (its identity is not decidable inside the blob), at a confidence penalty, learning
+        nothing. One still seen on its own is just that: holding it here too left its own proposal
+        unmatched, and it was born again every few seconds (on the rig, 100 things over one cable pile)."""
+        tc = self._tcfg
+        for d, inside in blobs:
             group = frozenset(inside)
             for n in inside:
+                if n in seen:
+                    continue
                 ent = self.entities[n]
                 seen[n] = Detection(THING, d.conf, self._box_px.get(n, d.box_px), ent.pos_cm, ent.box_cm)
                 self._merged[n] = group
                 ent.confidence = min(ent.confidence, self.cfg.ambiguity_penalty)
                 self._unsure_until[n] = self._now + tc.ambiguous_s
-        return rest
 
     def _match_visible(self, props, seen) -> list[Detection]:
         """Rule (b), in view: each visible thing takes its nearest proposal within gate_cm."""
@@ -610,6 +626,8 @@ class ThingRules:
         candidate's bits, so the world's observation rule reports TAKEN_OUT / UNCOVERED / CORRECTED /
         MOVED as for a configured object) or a new thing."""
         d = c.det
+        if self._on_a_thing(d, seen):
+            return []                          # a thing in view seen twice (two boxes on one object)
         vec = self._embed(d.box_px)
         verdict, links = self._identify(d, vec, seen, self._may_create(d))
         if verdict == 'skip':
@@ -619,6 +637,24 @@ class ThingRules:
             seen[verdict] = d
             return []
         return self._new_thing(d, c.bits, vec, links, seen)
+
+    def _on_a_thing(self, d: Detection, seen) -> bool:
+        """The proposal lies on a thing in view (visible, or placed this batch): the same box (IoU >=
+        dup_iou), or the same spot at a like size (either box holds the other's centre, areas within
+        SAME_SIZE). Then it is that thing seen twice, never a new one nor a lost one brought back beside
+        it. A phone laid on a notebook is neither (a third of its box, and far smaller)."""
+        tc = self._tcfg
+        boxes = [self.entities[n].box_cm for n in self._visible_things()]
+        boxes += [s.box_cm for n, s in seen.items() if is_thing(n) and s.box_cm is not None]
+        a = geom.area(d.box_cm)
+        for b in boxes:
+            if geom.iou(d.box_cm, b) >= tc.dup_iou:
+                return True
+            ab = geom.area(b)
+            if a > 0 and ab > 0 and max(a, ab) / min(a, ab) <= SAME_SIZE and (
+                    geom.contains_point(b, d.center_cm) or geom.contains_point(d.box_cm, geom.center(b))):
+                return True
+        return False
 
     def _may_create(self, d: Detection) -> bool:
         """A proposal may start a NEW identity only inside the tabletop outline, clear of its edge
@@ -669,8 +705,9 @@ class ThingRules:
                 and self.entities[n].pos_cm is not None
                 and geom.dist(d.center_cm, self.entities[n].pos_cm) <= tc.same_spot_cm
                 and self._size_fits(n, d.box_cm)]
-        if len(spot) == 1:
-            return spot[0], []
+        if spot:           # several lost there (duplicates of one object): the nearest, then the latest
+            return min(spot, key=lambda n: (geom.dist(d.center_cm, self.entities[n].pos_cm),
+                                            -(self.entities[n].last_seen or NEG))), []
         back = self._reborn(d, seen)
         if back:
             return back, []

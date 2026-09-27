@@ -327,6 +327,29 @@ def test_overlapping_proposals_keep_the_most_confident():
     assert dedupe([b, a], [], [], DedupeConfig()) == [a]
 
 
+def test_a_box_nested_in_a_bigger_one_is_dropped_whatever_the_scores():
+    """A keycap scoring above its laptop dropped the laptop and kept the key (on the rig, dozens of
+    things on one laptop). The part goes, the object stays."""
+    laptop, key = P((100, 100, 300, 220), 0.4), P((150, 150, 170, 170), 0.9)
+    assert dedupe([key, laptop], [], [], DedupeConfig()) == [laptop]
+
+
+def test_only_the_outermost_of_nested_boxes_is_kept():
+    pile, wire, strand = P((100, 100, 200, 200), 0.3), P((110, 110, 160, 160), 0.8), P((120, 120, 140, 140), 0.9)
+    assert dedupe([strand, wire, pile], [], [], DedupeConfig()) == [pile]
+
+
+def test_a_box_beside_or_partly_over_a_bigger_one_is_kept():
+    big, side = P((100, 100, 200, 200), 0.4), P((180, 150, 240, 190), 0.9)   # a third of it inside
+    assert dedupe([big, side], [], [], DedupeConfig()) == [side, big]
+
+
+def test_min_side_px_drops_slivers():
+    sliver, obj = P((100, 100, 300, 108), 0.9), P((100, 150, 140, 190), 0.5)
+    assert dedupe([sliver, obj], [], [], DedupeConfig()) == [sliver, obj]
+    assert dedupe([sliver, obj], [], [], DedupeConfig.from_dict({'min_side_px': 12})) == [obj]
+
+
 def test_dedupe_thresholds_come_from_config():
     p = P((150, 100, 250, 200))                       # IoU 1/3 with K
     assert dedupe([p], [K], [], DedupeConfig()) == [p]
@@ -381,6 +404,18 @@ def test_yoloe_flags_boxes_that_are_part_of_a_person():
     props = YOLOEProposer({'conf': 0.15}, model=m).propose(np.zeros((H, W, 3), np.uint8), [], [])
     flags = {q.box_px: q.occluded for q in props}
     assert flags == {(420, 480, 500, 540): True, (650, 600, 760, 690): False, (900, 300, 990, 380): False}
+
+
+def test_yoloe_treats_feet_and_clothes_as_people():
+    """Feet up at the coffee table came as 'shoe' / 'sock' / 'jeans' boxes and became things. They are
+    people: never a proposal, and what lies inside one (a lace read as 'cable') is occluded."""
+    m = FakeYOLOE([(4, 0.7, (300, 400, 420, 520)),          # shoe
+                   (3, 0.5, (330, 430, 380, 470)),          # 'charger' inside the shoe
+                   (5, 0.6, (500, 200, 700, 300)),          # jeans
+                   (0, 0.6, (900, 300, 990, 380))])         # a cup
+    m.names = {**FakeYOLOE.names, 4: 'shoe', 5: 'jeans'}
+    props = YOLOEProposer({'conf': 0.15}, model=m).propose(np.zeros((H, W, 3), np.uint8), [], [])
+    assert {q.box_px: q.occluded for q in props} == {(330, 430, 380, 470): True, (900, 300, 990, 380): False}
 
 
 def test_the_occluded_flag_reaches_the_world_on_the_detection():
