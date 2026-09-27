@@ -156,7 +156,8 @@ def test_replay_config_takes_the_yoloe_model_override(tmp_path):
 
 
 @pytest.mark.parametrize("name", ["room_still", "room_clutter", "room_couch", "room_carry", "room_move", "room_remove",
-                                  "room_straight", "room_block", "room_keys_off", "room_return"])
+                                  "room_straight", "room_block", "room_keys_off", "room_return",
+                                  "room_under", "room_shell"])
 def test_room_scenarios_become_truth_with_segments_and_zones(name):
     from eval.guided import CLIPS, truth_from
     c = CLIPS[name]
@@ -176,6 +177,13 @@ def test_room_scenarios_become_truth_with_segments_and_zones(name):
     if name in ("room_keys_off", "room_return", "room_carry"):
         back = [s for s in t["steps"] if s.get("expect_same")]
         assert back and all(s["event"] == "putdown" for s in back)
+    if name in ("room_under", "room_shell"):
+        cover = next(s for s in t["steps"] if s["event"] == "cover")
+        uncover = next(s for s in t["steps"] if s["event"] == "uncover")
+        assert cover["obj"] == uncover["obj"] == "B" and cover["parent"] == uncover["parent"] in placed
+        assert 15 <= uncover["t"] - cover["t"] <= 60
+        under = [c for c in t["checkpoints"] if c["expect"].get("B", {}).get("state") == "under"]
+        assert under and all(cover["t"] < c["t"] < uncover["t"] for c in under)
     if name == "room_block":
         b0, b1 = [s["t"] for s in t["steps"] if s["event"] in ("block", "unblock")]
         assert 10 <= b1 - b0 <= 20

@@ -41,6 +41,7 @@ import shlex
 import subprocess
 import time
 from pathlib import Path
+from typing import Optional
 
 import os
 JETSON = os.environ.get("ASKROOM_JETSON", "guru@10.90.84.178")            # Wi-Fi; guru@192.168.55.1 over USB
@@ -133,11 +134,13 @@ STILL, PEOPLE = "still", "people"
 PLACE_EVERY = 6.0           # s between place cues: ~2 s to say, ~3 s to put it down and pull the hand back
 
 
-def _place_in(props: list, t0: float = 3.0) -> list:
-    """Cues that put each prop down one by one (binds each identity to its prop), then hands away."""
+def _place_in(props: list, t0: float = 3.0, said: Optional[dict] = None) -> list:
+    """Cues that put each prop down one by one (binds each identity to its prop), then hands away.
+    said: how a cue names a prop, when not DEMO's description ('first cup, upside down,')."""
     steps = [{"at": 0, "say": "Recording. Hands away.", "event": "hands_out", "seg": STILL}]
     for i, p in enumerate(props):
-        steps.append({"at": t0 + i * PLACE_EVERY, "say": f"Put the {DEMO[p]} on the table, then hands away.",
+        what = (said or {}).get(p) or DEMO[p]
+        steps.append({"at": t0 + i * PLACE_EVERY, "say": f"Put the {what} on the table, then hands away.",
                       "event": "place", "obj": p, "seg": PEOPLE})
     return steps
 
@@ -332,10 +335,67 @@ def _room_return() -> dict:
                                             {"at": t + 58, "expect": _on("A", "C", "NB")}]}
 
 
+def _room_under() -> dict:
+    steps = _place_in(["A", "NB", "B"])
+    t = _end_of(steps)
+    steps += [
+        {"at": t, "say": "Hands away.", "event": "hands_out", "seg": STILL},
+        {"at": t + 8, "say": "Lay the notebook flat over the keys so they are hidden, then hands away. Nobody "
+                             "touch it.", "event": "cover", "obj": "B", "parent": "NB", "seg": PEOPLE},
+        {"at": t + 30, "say": "Lift the notebook off the keys and put it down beside them, then hands away.",
+         "event": "uncover", "obj": "B", "parent": "NB", "seg": PEOPLE},
+        {"at": t + 30.01, "say": "", "event": "move", "obj": "NB", "seg": PEOPLE},
+        {"at": t + 42, "say": "Hands away. Keep still.", "event": "hands_out", "seg": STILL}]
+    return {"room": True, "props": {"A": "wallet", "NB": "notebook", "B": "keys"}, "seconds": int(t + 62),
+            "setup": "Empty coffee table. Hold the wallet, the notebook and the keys; put each down when told, "
+                     "the keys at least a notebook's width from the wallet.",
+            "steps": steps,
+            "checkpoints": [{"at": t + 6, "expect": _on("A", "NB", "B")},
+                            {"at": t + 18, "expect": {"B": {"state": "under", "parent": "NB"}}},
+                            {"at": t + 28, "expect": {"B": {"state": "under", "parent": "NB"}}},
+                            {"at": t + 58, "expect": _on("A", "NB", "B")}]}
+
+
+CUPS = {"CUP1": "first cup, upside down,", "CUP2": "second cup, upside down,", "CUP3": "third cup, upside down,"}
+
+
+def _room_shell() -> dict:
+    steps = _place_in(["CUP1", "CUP2", "CUP3", "B"], said=CUPS)
+    t = _end_of(steps)
+    steps += [
+        {"at": t, "say": "Hands away.", "event": "hands_out", "seg": STILL},
+        {"at": t + 8, "say": "Put the first cup over the keys, then hands away.", "event": "cover", "obj": "B",
+         "parent": "CUP1", "seg": PEOPLE},
+        {"at": t + 20, "say": "Slowly slide the cup with the keys to a new spot, then hands away.",
+         "event": "move", "obj": "CUP1", "seg": PEOPLE},
+        {"at": t + 32, "say": "Slowly swap the cup with the keys and the second cup: slide each one into the "
+                              "other's place, then hands away.", "event": "move", "obj": "CUP1", "seg": PEOPLE},
+        {"at": t + 32.01, "say": "", "event": "move", "obj": "CUP2", "seg": PEOPLE},
+        {"at": t + 48, "say": "Slowly swap the cup with the keys and the third cup the same way, then hands away.",
+         "event": "move", "obj": "CUP1", "seg": PEOPLE},
+        {"at": t + 48.01, "say": "", "event": "move", "obj": "CUP3", "seg": PEOPLE},
+        {"at": t + 64, "say": "Lift the cup with the keys and put it down beside them, then hands away.",
+         "event": "uncover", "obj": "B", "parent": "CUP1", "seg": PEOPLE},
+        {"at": t + 64.01, "say": "", "event": "move", "obj": "CUP1", "seg": PEOPLE},
+        {"at": t + 76, "say": "Hands away. Keep still.", "event": "hands_out", "seg": STILL}]
+    under = {"B": {"state": "under", "parent": "CUP1"}}
+    return {"room": True, "props": {"CUP1": "cup", "CUP2": "cup", "CUP3": "cup", "B": "keys"},
+            "seconds": int(t + 95),
+            "setup": "Empty coffee table. Three opaque cups (mugs or paper cups that hide the keys) and the keys. "
+                     "Put each cup down upside down when told, a hand-width apart, then the keys, away from the "
+                     "cups. One person does every move, slowly, one hand at a time, and keeps track of the cup "
+                     "with the keys.",
+            "steps": steps,
+            "checkpoints": [{"at": t + 6, "expect": _on("CUP1", "CUP2", "CUP3", "B")},
+                            {"at": t + 18, "expect": under}, {"at": t + 30, "expect": under},
+                            {"at": t + 46, "expect": under}, {"at": t + 62, "expect": under},
+                            {"at": t + 92, "expect": _on("CUP1", "CUP2", "CUP3", "B")}]}
+
+
 ROOM_CLIPS = {"room_still": _room_still(), "room_clutter": _room_clutter(), "room_couch": _room_couch(),
               "room_carry": _room_carry(), "room_move": _room_move(), "room_remove": _room_remove(),
               "room_straight": _room_straight(), "room_block": _room_block(), "room_keys_off": _room_keys_off(),
-              "room_return": _room_return()}
+              "room_return": _room_return(), "room_under": _room_under(), "room_shell": _room_shell()}
 CLIPS.update(ROOM_CLIPS)
 
 
