@@ -234,7 +234,7 @@ def test_a_room_place_cites_the_arrival_nearest_its_arrival_time_with_camera_px(
     [e] = a.evidence
     assert e["t"] == round(first.wall, 3) and e["clock"] == clock(first.wall)
     assert e["box_px"] == [1000, 1100, 1100, 1180] and e["box"] == [500, 550, 550, 590]
-    assert a.obj == "keys" and a.point_at is None                      # room answers never aim, but say what
+    assert a.obj == "keys" and a.point_at == "keys"                    # seen there now: the laser may show it; say what
 
 
 def test_thing_snapshots_have_urls():

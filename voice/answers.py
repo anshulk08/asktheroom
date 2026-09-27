@@ -232,6 +232,8 @@ def _where(obj: str, world, events, cfg: dict, now: float, describe=None) -> Ans
         place = None
     if place is not None and place.kind == "room":
         ans = _tentative(_where_room(obj, place, cfg, now, world, describe), place, cfg, obj)
+        if place.fresh and not place.absent and ans.point_at is None:   # seen there now: the laser may show it
+            ans = Answer(ans.text, obj, ans.action, ans.target_cm)
     else:
         ans = _placed_when(_where_table(obj, world, events, cfg, now, describe), obj, world, events, cfg, now)
     if place is not None and place.conflicts:

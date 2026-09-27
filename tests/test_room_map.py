@@ -444,3 +444,29 @@ def test_an_exception_mid_aim_leaves_the_laser_off(mapped, monkeypatch):
     with pytest.raises(OSError):
         laser.aim_px(center(rig.box_px("table")), room_map=rm, tol_px=0.01)
     assert rig.act.laser_on is False
+
+
+# ----- the laser demo (WS10): zones from room memory, a laser beside the lens
+
+def test_pointable_zones_come_from_room_memorys_zones_and_the_table_view(tmp_path):
+    import json
+    from act.room_map import zones_from
+    p = tmp_path / "room_zones.json"
+    p.write_text(json.dumps({"view": "v", "size_px": [2560, 1440], "zones": {
+        "couch": {"say": "the couch", "poly": [[100, 500], [900, 500], [900, 900], [100, 900]]},
+        "bad": {"say": "x", "poly": [[1, 1], [2, 2]]}}}))
+    z = zones_from(str(p), {"room_memory": {"table_view_rect": [0, 980, 817, 1440]}})
+    assert set(z) == {"couch", "table"} and z["table"][2] == [817.0, 1440.0]
+    assert "table" not in zones_from(str(p), {}, table=True)
+
+
+def test_a_laser_beside_the_lens_checks_the_target_with_a_wider_margin(room_main):
+    room, rig, Answer = room_main
+    t = center(rig.box_px("table"))
+    room.room_head_px = "camera"
+    room._people_now = lambda img: [(t[0] + 90, t[1] - 5, t[0] + 140, t[1] + 5)]   # 90 px off: inside 2 x 60
+    assert room._unsafe(t, None) is not None
+    room._people_now = lambda img: [(t[0] + 200, t[1] - 5, t[0] + 240, t[1] + 5)]
+    assert room._unsafe(t, None) is None
+    room.room_head_px = "ceiling"
+    assert "neither" in room._unsafe(t, None)

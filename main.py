@@ -470,6 +470,13 @@ class Room:
         from act.room_map import beam_blocked
         if self.room_head_px is None:
             return "room.head_px is not set, so the beam's path can't be checked"
+        head, margin = self.room_head_px, self.person_margin_px
+        if isinstance(head, str):
+            if head != "camera":
+                return f"room.head_px {head!r} is neither [x, y] nor 'camera'"
+            # The laser right by the lens: its beam seen from the camera is (nearly) a point on the target, so
+            # the check is the target's box, with twice the margin for the few cm the head sits off the lens.
+            head, margin = None, 2 * self.person_margin_px
         f = self._full_frame()
         if f is None or f.img is None:
             return "no camera frame"
@@ -487,7 +494,7 @@ class Room:
             if people is None:
                 return "no person detector could look (never aimed blind)"
             blockers += people
-        if beam_blocked(uv, box, blockers, self.room_head_px, self.person_margin_px):
+        if beam_blocked(uv, box, blockers, head, margin):
             return "a person or hand is near the target or the beam"
         return None
 

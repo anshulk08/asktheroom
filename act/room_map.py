@@ -256,6 +256,19 @@ def beam_blocked(target_px, box_px, blockers, head_px=None, margin_px: float = 2
     return False
 
 
+def zones_from(path: str, cfg: dict, table: bool = True) -> dict:
+    """Room memory's drawn zones (room_zones.json: {"zones": {name: {"poly": [[x, y], ...]}}}, full-frame px)
+    as pointable zones, and the table view's rect (room_memory.table_view_rect) as 'table'."""
+    with open(path) as f:
+        d = json.load(f)
+    zones = {n: [[float(x), float(y)] for x, y in z.get("poly", [])] for n, z in (d.get("zones") or {}).items()}
+    rect = (cfg.get("room_memory") or {}).get("table_view_rect")
+    if table and rect:
+        x1, y1, x2, y2 = (float(v) for v in rect)
+        zones["table"] = [[x1, y1], [x2, y1], [x2, y2], [x1, y2]]
+    return {n: p for n, p in zones.items() if len(p) >= 3}
+
+
 # ---------------------------------------------------------------- CLI
 
 def aim_room_stats(laser, rm: RoomMap, targets, truth=None, boxes=None) -> dict:
@@ -318,6 +331,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--poly", nargs="+", help="zone polygon as x,y image px pairs")
     ap.add_argument("--delete-zone", help="remove a zone")
     ap.add_argument("--list", action="store_true", help="print the map summary and zones")
+    ap.add_argument("--zones-from", metavar="ROOM_ZONES_JSON",
+                    help="use room memory's zones (room_zones.json, full-frame px) as the pointable zones, plus "
+                         "'table' (room_memory.table_view_rect) unless --no-table")
+    ap.add_argument("--no-table", action="store_true")
     ap.add_argument("--grid", type=int, nargs=2, default=None, metavar=("NX", "NY"))
     ap.add_argument("--b-cm", type=float, default=3.0, help="--sim: pivot offset from the lens")
     ap.add_argument("--aims", type=int, default=20)
@@ -370,6 +387,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"no {path}; run python -m act.room_map --sweep first")
         return 1
     rm = RoomMap.load(path)
+    if args.zones_from:
+        rm.zones.update(zones_from(args.zones_from, cfg, table=not args.no_table))
+        rm.save(path)
     if args.zone:
         if not args.poly or len(args.poly) < 3:
             ap.error("--zone needs --poly with at least 3 x,y points")
