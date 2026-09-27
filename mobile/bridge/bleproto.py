@@ -348,6 +348,7 @@ def _conf2(v: Any) -> Optional[float]:
     return round(float(v), 2)
 
 
+REGISTRY_STATES = ("visible", "hidden", "carried", "last_seen", "unknown")   # core/permanence.py
 NOT_OBJECT = "not an object"          # core/grok_check.py NOT_OBJECT: the belief's clutter label
 
 
@@ -420,6 +421,11 @@ def compact_entity(e: dict, view: Optional[dict] = None) -> dict:
     ls = _r1(e.get("last_seen"))
     if ls is not None:
         out["ls"] = ls
+    reg = e.get("registry")                                # object permanence (spec 0011): the registry's state
+    if isinstance(reg, dict) and reg.get("state") in REGISTRY_STATES:
+        out["rg"] = str(reg["state"])
+        if reg.get("tentative"):
+            out["rt"] = 1
     return out
 
 
@@ -429,8 +435,8 @@ STALE_THING_S = 600.0
 def _stale_thing(e: dict, now: float) -> bool:
     """An unnamed thing:N that is GONE / UNKNOWN and was last seen over STALE_THING_S ago: clutter on
     the phone, so it is left out. Named things and configured objects are always sent."""
-    if not str(e.get("name")).startswith("thing:") or e.get("aliases"):
-        return False
+    if not str(e.get("name")).startswith("thing:") or e.get("aliases") or isinstance(e.get("registry"), dict):
+        return False                                       # named, configured, or in the registry: always sent
     if str(e.get("status") or "UNKNOWN") not in ("GONE", "UNKNOWN"):
         return False
     ls = _r1(e.get("last_seen"))
@@ -471,7 +477,7 @@ def _cut_rank(e: dict) -> tuple:
     """Which entity goes first when a state is over budget (lower first): unnamed things lost or gone,
     then hidden, then visible, oldest first; named things and configured objects only after all of them."""
     thing = str(e.get("n", "")).startswith("thing:")
-    named = not thing or bool(e.get("a")) or bool(e.get("g"))
+    named = not thing or bool(e.get("a")) or bool(e.get("g")) or "rg" in e   # registry objects are never cut
     status = {"X": 0, "G": 0, "U": 1, "I": 1, "H": 2, "V": 2}.get(e.get("s"), 0)
     return (1 if named else 0, status, float(e.get("ls") or 0.0))
 
@@ -524,7 +530,7 @@ def state_changed(prev: Optional[dict], cur: dict) -> bool:
         return True
     for n, c in ce.items():
         p = pe[n]
-        for k in ("k", "s", "p", "edge", "a", "m", "g", "as"):
+        for k in ("k", "s", "p", "edge", "a", "m", "g", "as", "rg", "rt"):
             if p.get(k) != c.get(k):
                 return True
         if _moved(p.get("xy"), c.get("xy")) or _moved(p.get("r"), c.get("r")):

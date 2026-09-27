@@ -1269,3 +1269,33 @@ def test_pump_paces_chunks_and_keeps_priority():
         clock.t += 0.01
         P.pump(ob, pacer, lambda c, v: sent.append(c), 4)
     assert sent.count("state") == 10 and ob.pending() == 0
+
+
+def test_registry_state_reaches_the_phone_and_is_never_cut():
+    e = P.compact_entity({"name": "thing:7", "kind": "target", "status": "VISIBLE", "zone": "couch", "aliases": [],
+                          "registry": {"state": "last_seen", "tentative": True, "zone": "couch"}})
+    assert e["rg"] == "last_seen" and e["rt"] == 1 and e["z"] == "couch"
+    assert "rg" not in P.compact_entity({"name": "keys", "registry": {"state": "sideways"}})
+    st = room_rig_state(300, now=1790000100.0)
+    st["entities"].append({"name": "thing:9999", "kind": "target", "status": "UNKNOWN", "aliases": [],
+                           "last_seen": 1.0, "registry": {"state": "hidden"}})
+    c = P.cap_state(P.compact_state(st, (100, 60), 1790000100.0), 4000)
+    kept = {x["n"] for x in c["e"]}
+    assert "thing:9999" in kept and {"keys", "wallet", "box", "notebook"} <= kept and c["more"] > 0
+    prev = P.compact_state(st, (100, 60), 1790000100.0)
+    st["entities"][-1]["registry"]["state"] = "carried"
+    assert P.state_changed(prev, P.compact_state(st, (100, 60), 1790000100.0))
+
+
+def test_an_old_app_without_hello_gets_plain_paced_capped_states():
+    """A phone app from before the hello (no compression) still works through the new bridge."""
+    core, http, phone, mono = make()
+    http.state = room_rig_state()
+    core.note_mtu("/dev_old_phone", 185)
+    core.poll_once()
+    core.set_notifying("state", True)
+    assert not core.compress and phone.asm["state"].compressed == 0
+    last = phone.msgs["state"][-1]
+    assert len(P.dumps({k: v for k, v in last.items()})) <= P.STATE_MAX_BYTES + 64
+    assert {"keys", "pill_bottle", "wallet"} <= {e["n"] for e in last["e"]} and last["tx"] == 0
+    assert phone.chunk_counts["state"][-1] <= P.STATE_MAX_BYTES // 179 + 2

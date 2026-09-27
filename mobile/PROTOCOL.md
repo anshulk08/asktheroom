@@ -281,6 +281,8 @@ is kept). Named things and the configured objects are always sent. When a stale 
 | `e[].gc` | float | the confidence of `g`, 0–1, 2 decimals. Only with `g`, and only when the server gave a number |
 | `e[].as` | `grok` | `a[0]` was bound automatically by the Grok settle check, not taught by a person. Show it, but as the rig's name ("stapler (named by Grok)"). Absent: taught. Things only, optional |
 | `e[].ls` | float | last-seen wall time (Unix s, 1 decimal) |
+| `e[].rg` | str | object permanence (spec 0011, `permanence.mode: registry`): the registry's state, `visible`/`hidden`/`carried`/`last_seen`/`unknown`. A registry object is never cut from a capped state. Optional |
+| `e[].rt` | 1 | the registry found it by a re-find (Grok), not by appearance alone: tentative. Optional |
 | `tx` | int | state chunks the bridge sent before this message. Between two states, `tx` grows by the chunks sent; the phone compares that with the chunks it received for its "lost" count |
 | `more` | int | entities left out to keep the message under the bridge's cap (`--state-max`, 12 KB of JSON): unnamed things lost or gone first, then hidden, then visible, oldest first; named things last. Optional |
 | `lh` | str | the room layout's hash (`GET /room_layout`, the room map from the user's seat). Absent: no room map |
