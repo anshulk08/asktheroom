@@ -48,7 +48,9 @@ class RoomConfig:
     things: bool = True                            # also track unnamed objects (YOLOE) in zones; handoff by Grok name
     thing_name_wait_s: float = 45.0                # a confirmed thing track waits this long for its Grok answer
     name_match_min: float = 2.0                    # core.auto_name.match_score two guesses need (head noun shared)
-    names_per_minute: int = 20                     # Grok calls for room crops, at most (only while a handoff is possible)
+    names_per_minute: int = 60                     # Grok calls for room crops, at most (only while a handoff is possible)
+    room_every_n_hot: int = 1                      # ... every N frames instead while a handoff is open (spec 0010 P0-3)
+    confirm_visits_arrival: int = 1                # visits to confirm a track whose spot changed (an arrival)
 
     @classmethod
     def from_dict(cls, d: Optional[dict]) -> "RoomConfig":
