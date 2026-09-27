@@ -263,3 +263,35 @@ def test_a_teaching_sentence_may_open_with_the_wake_word(text):
 def test_the_wake_word_is_only_stripped_at_the_start():
     assert parse("the room this is my mug", CFG).kind != "TEACH"
     assert parse("roommate this is my mug", CFG).kind != "TEACH"
+
+
+# -- the room demo (spec 0010): places are where things are, never things
+
+@pytest.mark.parametrize("text, obj", [
+    ("where's my wallet", "wallet"), ("where is my glasses case", "glasses"), ("where are my pills", "pill_bottle"),
+    ("where did I leave the remote", "remote"), ("is my wallet on the couch", "wallet"),
+    ("is the pill bottle on the kitchen counter", "pill_bottle"), ("did I put my glasses on the side table", "glasses"),
+    ("where did I put the remote in the living room", "remote"),
+])
+def test_room_questions_about_the_demo_set(text, obj):
+    it = parse(text, CFG)
+    assert (it.kind, it.obj) == ("WHERE", obj), (text, it)
+
+
+@pytest.mark.parametrize("text", ["where's the couch", "where is the kitchen counter", "where's the side table",
+                                  "where is the kitchen", "show me the couch", "where's the living room"])
+def test_a_place_is_not_an_untaught_thing(text):
+    it = parse(text, CFG)
+    assert it.kind == "OTHER" and it.name is None, (text, it)
+
+
+@pytest.mark.parametrize("text", ["is it on the counter?", "are they under the couch", "is it still on the side table",
+                                  "and is it in the kitchen"])
+def test_a_pronoun_asking_about_a_place_is_a_where_follow_up(text):
+    it = parse(text, CFG)
+    assert (it.kind, it.obj, it.name) == ("WHERE", None, None), (text, it)
+
+
+def test_a_thing_named_with_a_place_word_is_still_a_thing():
+    assert parse("is my charger on the couch", CFG).name == "charger"
+    assert parse("where is my couch cushion", CFG).name == "couch cushion"

@@ -118,6 +118,42 @@ NAME_STOP = {
     "moved", "touched", "taken", "took", "grabbed", "picked", "handled", "used", "opened", "messed",
     "disturbed", "tampered", "gone", "missing", "lost", "stolen",
 }
+# Places in a room (spec 0010: the room demo). A spoken phrase made only of these is where something is,
+# never the name of a thing: 'where's the couch' is not an untaught object, 'the kitchen counter' is a spot.
+PLACES = {
+    "couch", "sofa", "loveseat", "armchair", "chair", "chairs", "stool", "bench", "ottoman", "side", "end",
+    "coffee", "table", "tables", "desk", "counter", "countertop", "kitchen", "living", "dining", "bedroom",
+    "room", "shelf", "shelves", "bookshelf", "bookcase", "cabinet", "cupboard", "drawer", "dresser",
+    "nightstand", "bed", "floor", "rug", "carpet", "corner", "window", "windowsill", "sill", "door",
+    "doorway", "hallway", "hall", "wall", "tv", "stand", "fridge", "sink", "stove", "microwave", "island",
+    "mantel", "mantle", "fireplace", "entryway", "closet", "porch", "bathroom",
+}
+# 'is it on the counter?', 'are they under the couch': a follow-up asking whether the last thing is there
+PRONOUN_WHERE = re.compile(r"^(?:and\s+)?(?:is|are|was|were)\s+(?:it|they|them|those|that|these|this)\s+(?:still\s+)?"
+                           r"(?:on|in|under|at|near|by|inside|behind|beside|next to|underneath|beneath|over)\b")
+
+
+def _names_a_place(t: str) -> bool:
+    """t (normalized) says 'the/my <place>' and asks about it, not about an 'it' on it."""
+    if PRONOUN_WHERE.search(t):
+        return False
+    for m in _POSS.finditer(t):
+        words = []
+        for w in m.group(1).split():
+            if w in ARTICLES or (w in NAME_STOP and w not in PLACES):
+                break
+            words.append(w)
+        if words and is_place(" ".join(words)):
+            return True
+    return False
+
+
+def is_place(name: Optional[str]) -> bool:
+    """A spoken phrase that names a place in the room ('couch', 'kitchen counter'), not a thing."""
+    words = (name or "").split()
+    return bool(words) and all(w in PLACES for w in words)
+
+
 _POSS = re.compile(r"\b(?:my|the|your|our)\s+([a-z0-9]+(?:\s+[a-z0-9]+){0,3})")
 
 
@@ -270,7 +306,7 @@ def _spoken_name(t: str) -> Optional[str]:
             if w in NAME_STOP or w in ARTICLES:
                 break
             words.append(w)
-        if words:
+        if words and not is_place(" ".join(words)):
             return " ".join(words)
     return None
 
@@ -364,14 +400,18 @@ def parse(text: str, cfg: dict, aliases=()) -> Intent:
     elif WHERE2.search(t) or (SHOW.search(t) and (obj or spoken)):
         kind = "WHERE"
     elif obj and (re.search(rf"\b(?:is|are)\s+(?:my|the|your|our)?\s*{re.escape(obj)}\b", t)
-                  or re.search(r"\b(?:leave|left)\b", t)
+                  or re.search(r"\b(?:leave|left|put|set|drop|dropped|place|placed)\b", t)
                   or [w for w in t.split() if w not in ARTICLES] == [obj]):
         kind = "WHERE"
     elif obj is None and (re.search(r"\b(?:is|are)\s+(?:my|your|our)\s", t)
                           or re.fullmatch(r"(?:my|our)\s+[a-z0-9]+(?:\s+[a-z0-9]+)?", t)):
         kind = "WHERE"                  # 'is my charger in the box', 'my charger?'
+    elif obj is None and PRONOUN_WHERE.search(t):
+        kind = "WHERE"                  # 'is it on the counter?': voice.conversation fills in the thing
     else:
         kind = "OTHER"
+    if kind == "WHERE" and obj is None and spoken is None and _names_a_place(t):
+        kind = "OTHER"                  # 'where's the couch': a place, not a thing to find
 
     name = spoken if kind in ("WHERE", "HISTORY", "HANDLED") and obj is None else None
     if kind in ("HISTORY", "HANDLED") and obj is None and name is None and GENERAL.search(t):
