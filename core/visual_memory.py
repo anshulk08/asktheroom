@@ -10,6 +10,11 @@ grey thumbnail with the last archived one and saves a JPEG (<= frame_px, quality
   - the scene changed (share of thumbnail pixels changed >= change_thr %, or the world model logged an event since
     the last save) and no hand is over the table: the settled view after a change, not the hand
     in the middle of it.
+  The change gate (config.yaml turns it on; the code defaults keep the policy above): with a tabletop outline
+  (core/table_area.py, via proposals.table_roi) only pixels on the tabletop count (change_on_table: the
+  corner rig's table view also shows legs, laps and the couch); a world event counts only when the view
+  changed too (events_need_pixels: the tracker's COVERED/UNCOVERED churn); change frames are at least
+  change_min_gap_s apart; settle_checks waits for a still view. eval/archive_replay.py measures it on a rig hour.
 Each row records the time, the path, the change score, whether hands were in view, why it was saved,
 and a digest of the world model then (which entities were visible and roughly where), so text search
 works on the world model's names as well as on pixels.
@@ -78,6 +83,10 @@ class VisualConfig:
     archive_every_s: float = 30.0
     check_every_s: float = 1.0
     change_thr: float = 0.3        # % of 128x72 grey thumbnail pixels changed by > 20 levels (keys ~0.4%)
+    change_on_table: bool = True   # with a calibrated table, change is measured on the tabletop outline only
+    settle_checks: int = 0         # a change is kept once the view has held still this many checks in a row
+    change_min_gap_s: float = 0.0  # ... and at least this long after the last kept frame
+    events_need_pixels: bool = False   # a world event marks a change only if the view changed too
     frame_px: int = 1280
     jpeg_quality: int = 80
     max_mb: float = 500.0
@@ -405,13 +414,30 @@ class ArchiveStore:
 
 # ---------------------------------------------------------------- the archive
 
-def change_pct(a: np.ndarray, b: Optional[np.ndarray], level: float = 20.0) -> float:
-    """Percent of thumbnail pixels whose grey level moved by more than `level` (100 with no reference).
-    A share of changed pixels, not a mean difference: a phone is ~2% of the table and would vanish in a
-    mean, while sensor noise averaged down to 128x72 stays far under 20 levels."""
+def change_pct(a: np.ndarray, b: Optional[np.ndarray], level: float = 20.0, mask: Optional[np.ndarray] = None) -> float:
+    """Percent of thumbnail pixels (those in mask, when given) whose grey level moved by more than `level`
+    (100 with no reference). A share of changed pixels, not a mean difference: a phone is ~2% of the table
+    and would vanish in a mean, while sensor noise averaged down to 128x72 stays far under 20 levels."""
     if b is None:
         return 100.0
-    return float((np.abs(a - b) > level).mean() * 100.0)
+    moved = np.abs(a - b) > level
+    return float((moved[mask] if mask is not None else moved).mean() * 100.0)
+
+
+def table_mask(table, cfg: dict, frame_wh: tuple) -> Optional[np.ndarray]:
+    """The 128x72 thumbnail pixels on the tabletop: core/proposals.table_roi (the operator's outline, else
+    the calibrated area) scaled from frame px. None without a calibrated table, or when the outline covers
+    under 2% of the view (then the whole view counts, as before)."""
+    import cv2
+    from core.proposals import table_roi
+    roi = table_roi(table, cfg)
+    if not roi:
+        return None
+    fw, fh = frame_wh
+    pts = np.array([[x * 128 / fw, y * 72 / fh] for x, y in roi], np.float32)
+    m = np.zeros((72, 128), np.uint8)
+    cv2.fillPoly(m, [np.round(pts).astype(np.int32)], 1)
+    return m.astype(bool) if m.mean() >= 0.02 else None
 
 
 def _thumb(img: np.ndarray) -> np.ndarray:
@@ -459,9 +485,10 @@ class VisualArchive:
 
     def __init__(self, cfg: dict, events, world=None, embedder: Optional[Embedder] = None,
                  clock: Callable[[], float] = time.time, start: bool = True, c: Optional[VisualConfig] = None,
-                 frames=None):
+                 frames=None, table=None):
         self.cfg = cfg
         self.frames = frames
+        self.table = table              # with a tabletop outline, only change on the tabletop counts
         self.c = c or VisualConfig.from_dict(cfg.get("visual_memory"))
         self.store = ArchiveStore(events)
         self.root = os.path.join(events.snap_dir, "archive")
@@ -475,6 +502,8 @@ class VisualArchive:
         self._last_thumb: Optional[np.ndarray] = None
         self._last_save: Optional[float] = None
         self._last_room: Optional[float] = None
+        self._prev_thumb: Optional[np.ndarray] = None     # the previous check's (for settle_checks)
+        self._still = 0
         self._pending_change = False
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
@@ -570,20 +599,35 @@ class VisualArchive:
             except Exception:
                 log.exception("archive room frame failed")
         th = _thumb(frame.img)
-        score = change_pct(th, self._last_thumb)
-        # A world event always marks a change; a pixel difference only counts without hands in view
-        # (a hand passing over an unchanged table is not a change).
-        if dirty or (not hands and score >= self.c.change_thr):
+        mask = self._mask(frame.img) if self.c.change_on_table else None
+        score = change_pct(th, self._last_thumb, mask=mask)
+        still = self._prev_thumb is not None and change_pct(th, self._prev_thumb, mask=mask) < self.c.change_thr
+        self._still, self._prev_thumb = (self._still + 1 if still else 0), th
+        # A world event marks a change (with events_need_pixels, only if the view changed too); a pixel
+        # difference only counts without hands in view (a hand passing over an unchanged table is not a change).
+        changed = score >= self.c.change_thr
+        if (dirty and (changed or not self.c.events_need_pixels)) or (not hands and changed):
             self._pending_change = True
         if self._last_save is None:
             reason = "first"
         elif frame.wall - self._last_save >= self.c.archive_every_s:
             reason = "interval"
-        elif self._pending_change and not hands:
+        elif (self._pending_change and not hands and self._still >= self.c.settle_checks
+              and frame.wall - self._last_save >= self.c.change_min_gap_s):
             reason = "change"
         else:
             return None
         return self._save(frame, th, score, hands, reason)
+
+    def _mask(self, img: np.ndarray) -> Optional[np.ndarray]:
+        """table_mask for this frame (recomputed each check: a recalibration moves the outline)."""
+        if self.table is None:
+            return None
+        try:
+            return table_mask(self.table, self.cfg, (img.shape[1], img.shape[0]))
+        except Exception:
+            log.debug("archive: no tabletop mask", exc_info=True)
+            return None
 
     def _write(self, img: np.ndarray, wall: float, long_side: int, suffix: str = "") -> tuple[np.ndarray, str, int]:
         """img shrunk to long_side and saved as the hour folder's JPEG: (saved img, path, bytes)."""

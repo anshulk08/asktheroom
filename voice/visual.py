@@ -1215,7 +1215,7 @@ def from_config(cfg: dict, world, events, frames=None, table=None, online=None, 
     if not c.enabled:
         return None
     archive = VisualArchive(cfg, events, world, embedder=make_embedder(c), start=start, c=c,
-                            frames=frames).attach(world)
+                            frames=frames, table=table).attach(world)
     qa = VisualQA(cfg, world, events, frames, table, archive=archive, online=online, c=c).attach(world)
     log.info("visual memory on: %s", qa.status()["disclosure"])
     return qa

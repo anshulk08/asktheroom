@@ -369,6 +369,14 @@ visual_memory:
     archive_every_s: 30      # a frame is kept at least this often ...
     check_every_s: 1.0       # ... and on a settled scene change, checked this often
     change_thr: 0.3          # % of 128x72 thumbnail pixels changed by > 20 grey levels
+    # Change gate (rig hour 26 Sep 23:00 replayed, eval/archive_replay.py): people's legs at the table edge
+    # and the world's event churn made 2420 of 2424 saves an hour 'change'. With these: 562 an hour, every one
+    # of the hour's 83 tabletop states still kept (first frame 1.2 s in, median); with a tabletop outline
+    # (python -m core.table --outline, change_on_table) 353 an hour, 83 of 83.
+    change_on_table: true    # with a tabletop outline, only change inside it counts (legs, laps and couch don't)
+    events_need_pixels: true # a world event marks a change only when the view changed too
+    change_min_gap_s: 5      # change frames at least this far apart (the 30 s floor still applies)
+    settle_checks: 0         # wait for this many still checks before a change frame (2 lost 28 of 83 states)
     frame_px: 1280
     jpeg_quality: 80
     max_mb: 500              # disk cap for saved frames (oldest go first)
