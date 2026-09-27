@@ -443,3 +443,48 @@ def test_a_question_at_the_right_thing_in_the_wrong_parent_says_so():
     q = {"point_at": "thing:6", "expected_entity": "thing:6", "expect_parent": "BOX", "parent_ok": False}
     assert score_clip._want(q) == "want thing:6 in BOX, the world has it elsewhere"
     assert score_clip._want(dict(q, point_at="thing:2")) == "want thing:6"
+
+
+# ----- names (WS3) -------------------------------------------------------------------------------------
+
+class FakeGrok:
+    """A naming provider: one reply per call, in order (the last repeats); counts calls."""
+    name, model = "grok", "fake"
+
+    def __init__(self, *names):
+        self.names, self.calls = list(names), 0
+
+    def narrate(self, system, parts, schema):
+        from core.narration import Reply
+        n = self.names[min(self.calls, len(self.names) - 1)]
+        self.calls += 1
+        return Reply(json.dumps({"object": True, "name": n, "also": [], "confidence": 0.9}), {}, 5)
+
+
+def test_replay_names_every_new_thing_by_the_end_of_the_clip(tmp_path):
+    """Grok's per-minute cap runs on clip time: a 3 s clip would name one thing; the queue is drained at
+    the end, so every new thing's guess is in the last sample for the naming block."""
+    take = Take(tmp_path)
+    take.cfg["auto_name"] = dict(take.cfg.get("auto_name") or {}, max_per_minute=1)
+    take.run(0.5)
+    take.put("a", (40, 30))
+    take.put("b", (90, 30), hid=2)
+    take.run(1.0)
+    clip = load_clip(take.write({"props": {}}))
+    grok = FakeGrok("stapler", "coffee mug")
+    trace = score_clip.replay_clip(clip, detector=take.stub(), names=grok)
+    guesses = sorted(v["guess"]["name"] for v in trace.samples[-1].names.values() if v.get("guess"))
+    assert guesses == ["coffee mug", "stapler"] and grok.calls == 2
+
+
+def test_grok_cache_asks_once_per_prompt_and_image(tmp_path):
+    from eval.grok_cache import provider
+    inner = FakeGrok("stapler", "coffee mug")
+    p = provider(cfg={}, cache=str(tmp_path), inner=inner)
+    parts = [("text", "Close-up:"), ("image", b"\xff\xd8jpeg")]
+    first = p.narrate("sys", parts, {"type": "object"}).text
+    assert p.narrate("sys", parts, {"type": "object"}).text == first and inner.calls == 1
+    assert json.loads(p.narrate("sys", [("image", b"other")], {"type": "object"}).text)["name"] == "coffee mug"
+    again = provider(cfg={}, cache=str(tmp_path), salt="trial1", inner=inner)
+    again.narrate("sys", parts, {"type": "object"})
+    assert inner.calls == 3 and p.calls == 2 and again.calls == 1

@@ -27,9 +27,10 @@ main.open_frames does (eval/clip.clip_view: the recorded table_view_rect, resize
 table pipeline sees the live cut. When the replay config has room memory on and the clip recorded its
 zones (meta.json room_zones, or --zones), main.make_room_memory runs it on the full frames, as the app does;
 nothing is named unless --names is given: --names grok (live Grok calls) or --names module:factory (an
-injected provider, e.g. a cached one), attached as core.auto_name.AutoNamer to the replayed world and to
-room memory's namer, stepped on clip time after each perception step, so names land at once (live they
-take ~1-3 s).
+injected provider, e.g. eval.grok_cache:provider, Grok cached on disk), attached as core.auto_name.AutoNamer
+to the replayed world (with the TableView, so close-ups are native full-frame cuts, as live) and to room
+memory's namer, stepped on clip time after each perception step, so names land at once (live they take
+~1-3 s); what is still queued at the clip's end is asked then (the per-minute cap runs on clip time).
 truth.commands and truth.questions go at their t
 through Room.ask: the care layer and voice.pipeline.make_ask (both clocked by the clip's wall time, so
 'put there 20 seconds ago' is measured on the clip) with voice.understand.Understander offline (the
@@ -271,6 +272,16 @@ class _Names:
                 if not x.step():
                     break
 
+    def drain(self, now: dict, most: int = 200) -> None:
+        """At the clip's end: ask about every queued close-up, moving clip time past the per-minute cap and
+        the retry delays (the live app would have got to them after the clip)."""
+        for _ in range(most):
+            pending = self.namer.status()["pending"] + (self.room.pending() if self.room is not None else 0)
+            if not pending:
+                return
+            now["t"] += 61.0
+            self.step()
+
 
 def load_provider(spec: str, cfg: dict, clip: Clip):
     """--names value -> provider: 'grok' is None (AutoNamer's configured Grok provider); 'module:factory'
@@ -325,6 +336,8 @@ def replay_clip(clip: Clip, cfg: Optional[dict] = None, detector=None, max_fps: 
             view = clip.view()
             slot = FrameSlot()
             frames = TableView(slot, view[0], view[1]) if view is not None else None
+            if namer is not None:
+                namer.namer.frames = frames            # native close-ups from the full frame, as main.build
             hands = HandTracker(frame_size=tuple(cfg.get("frame_size_px") or (1280, 720)))
             interpret = Understander(cfg, online=lambda: False)       # offline: the rule parser
             clock = {"wall": clip.wall[0] if clip.wall else time.time()}
@@ -417,20 +430,30 @@ def _run(clip: Clip, room, world, interpret, trace: Trace, period: float, clock:
     if prev is not None:
         step(prev, max(ready, prev.t))
     say_until(math.inf)
+    if namer is not None and now is not None and trace.samples:
+        namer.drain(now)
+        trace.samples[-1].names = _names(world.state_json())
     trace.wall_s = time.perf_counter() - t0
+
+
+def _names(st: dict) -> dict:
+    """thing -> {"label", "aliases", "guess"} (those it has) for the entities of a state_json."""
+    out = {}
+    for e in st["entities"]:
+        got = {k: e[k] for k in ("label", "aliases", "guess") if e.get(k)}
+        if got:
+            out[e["name"]] = got
+    return out
 
 
 def _sample(trace: Trace, world, t: float, dets, evs) -> None:
     st = world.state_json()
-    ents, zones, names = {}, {}, {}
+    ents, zones, names = {}, {}, _names(st)
     for e in st["entities"]:
         ents[e["name"]] = (e["status"], e["parent"], tuple(e["pos_cm"]) if e["pos_cm"] is not None else None)
         trace.kinds[e["name"]] = e["kind"]
         if e.get("zone") not in (None, "table"):
             zones[e["name"]] = e["zone"]
-        got = {k: e[k] for k in ("label", "aliases", "guess") if e.get(k)}
-        if got:
-            names[e["name"]] = got
     trace.merged = dict(st.get("merged") or {})
     seen: dict = defaultdict(list)
     for d in dets.items:
@@ -1122,7 +1145,7 @@ def add_replay_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--mode", help="shorthand for --set permanence.mode=MODE (the permanence tracker to replay)")
     ap.add_argument("--names", metavar="grok|MODULE:FACTORY",
                     help="name new things through core.auto_name on clip time: 'grok' (live calls, XAI_API_KEY) or "
-                         "an injected provider factory, e.g. eval.naming:CachedProvider (called with cfg= and "
+                         "an injected provider factory, e.g. eval.grok_cache:provider (cached Grok; called with cfg= and "
                          "clip_dir= when it takes them)")
     ap.add_argument("--grok", action="store_true", help="the same as --names grok")
 
