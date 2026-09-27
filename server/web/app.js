@@ -498,6 +498,52 @@
     }
   }
 
+  // ------------------------------------------------------------------ room trial scoreboard
+  // Real scripts/room_trials.py results only (GET /scoreboard); hidden until a run was recorded today.
+
+  function frac(x) { return x.passed + "/" + x.total; }
+
+  function scoreRow(label, x, head) {
+    const tr = document.createElement("tr");
+    if (head) tr.className = "score-all";
+    const cells = [label, x.handoffs.total ? frac(x.handoffs) : "\u2013",
+      x.returns.total ? frac(x.returns) : "\u2013", x.median_s != null ? x.median_s + " s" : "\u2013"];
+    cells.forEach((v, i) => {
+      const td = document.createElement(i ? "td" : "th");
+      if (!i) td.scope = "row";
+      td.textContent = v;
+      tr.appendChild(td);
+    });
+    return tr;
+  }
+
+  function renderScore(sb) {
+    const chip = $("st-score"), box = $("score");
+    const has = sb && sb.runs > 0;
+    chip.hidden = !has;
+    box.hidden = !has;
+    if (!has) return;
+    const h = sb.handoffs;
+    setText(chip, frac(h) + (sb.median_s != null ? " \u00b7 " + sb.median_s + " s" : ""));
+    chip.title = "Room handoffs passed today, of " + h.total + " tried" +
+      (sb.skipped ? " (" + sb.skipped + " skipped: not seen on the table first)" : "") +
+      "; table returns " + frac(sb.returns) + ". From real scripts/room_trials.py runs.";
+    $("score-sum").textContent = "Room trials today: " + frac(h) + " handoffs, " + frac(sb.returns) + " returns";
+    const rows = $("score-rows");
+    rows.replaceChildren(scoreRow("All", sb, true));
+    Object.keys(sb.by_object).forEach((o) => rows.appendChild(scoreRow(nice(o), sb.by_object[o])));
+    Object.keys(sb.by_zone).forEach((z) => rows.appendChild(scoreRow("at " + z.replace(/_/g, " "), sb.by_zone[z])));
+  }
+
+  async function pollScore() {
+    try {
+      const r = await fetch("/scoreboard", { cache: "no-store" });
+      if (r.ok) renderScore(await r.json());
+    } catch (e) { /* the dashboard works without it */ }
+  }
+  pollScore();
+  setInterval(pollScore, 30000);
+
   function setLink(state) {
     const el = $("st-link");
     el.dataset.state = state;
