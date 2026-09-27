@@ -834,13 +834,18 @@ def build(cfg: dict, fake: bool = False, camera: int = 0, with_voice: bool = Tru
     else:
         import act.actuator
         import act.laser
-        actuator = act.actuator.make_actuator(cfg)     # cfg["actuator"]: fake | pca9685 | serial
+        # A driver that can't start (adafruit_servokit missing, no board on I2C) logs "LASER DISABLED" and
+        # gives a FakeActuator: answers are spoken, the app runs.
+        actuator, why = act.actuator.make_actuator_or_fake(cfg)   # cfg["actuator"]: fake | pca9685 | serial
         cleanup.append(actuator.close)
-        if str(cfg.get("actuator", "fake")).lower() == "fake":
+        if why is None and str(cfg.get("actuator", "fake")).lower() == "fake":
             log.warning("actuator is 'fake': the servos will not move. On the rig set `actuator: pca9685` "
                         "(or serial/bus) in config.local.yaml")
         laser = act.laser.Laser(actuator, frames, table, cfg["paths"]["laser_cal"], cfg=cfg)
-        if laser.fit is None:
+        laser.disabled = why
+        if why is not None:
+            pass                                        # make_actuator_or_fake logged it
+        elif laser.fit is None:
             log.warning("laser not calibrated (%s missing); answers will be spoken only",
                         cfg["paths"]["laser_cal"])
         elif laser_older_than_table(laser.fit, table.cal_path):

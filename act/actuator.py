@@ -332,3 +332,16 @@ def make_actuator(cfg: dict, clock: Optional[Clock] = None) -> BaseActuator:
     if kind not in ACTUATORS:
         raise ValueError(f"unknown actuator {kind!r}; expected one of {sorted(ACTUATORS)}")
     return ACTUATORS[kind](cfg, clock)
+
+
+def make_actuator_or_fake(cfg: dict, clock: Optional[Clock] = None) -> tuple[BaseActuator, Optional[str]]:
+    """make_actuator, but a driver that can't start (adafruit_servokit missing from the image, no board
+    on I2C, serial port gone) gives a FakeActuator and the reason instead of stopping the app: the
+    caller then runs with the laser disabled and answers by voice only."""
+    try:
+        return make_actuator(cfg, clock), None
+    except Exception as e:  # noqa: BLE001 - ImportError, OSError, ValueError, NotImplementedError ...
+        why = f"actuator {cfg.get('actuator')!r} failed to start: {type(e).__name__}: {e}"
+        log.error("%s. LASER DISABLED: answers are spoken only. Fix it (docker/Dockerfile installs "
+                  "adafruit-circuitpython-servokit; check the board with i2cdetect -y -r 7) and restart.", why)
+        return FakeActuator(cfg, clock), why
