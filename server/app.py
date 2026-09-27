@@ -95,6 +95,9 @@ INITIAL_EVENTS = 200          # events sent on a fresh WS connection
 EMPTY_TWIML = '<?xml version="1.0" encoding="UTF-8"?><Response></Response>'
 SCORE_MAX_BYTES = 256 * 1024  # a room_trials.py results file is a few KB
 AskFn = Callable[[str, str], Answer]
+# /demo/evidence: the events whose snapshot shows where an object is now, and the ones never shown as proof
+EVIDENCE_PLACED = {"PUT_BACK", "MOVED", "APPEARED", "UNCOVERED", "TAKEN_OUT", "FOUND", "CORRECTED", "ROOM_ARRIVED"}
+EVIDENCE_NEVER = {"LOST_TRACK", "EXITED_VIEW"}
 
 
 # ---------------------------------------------------------------- helpers
@@ -627,12 +630,15 @@ def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = 
     @app.get("/demo/evidence")
     async def demo_evidence(obj: str = ""):
         def find() -> dict:
-            for ev in events.last(obj, 8) if obj else []:
+            """The newest snapshot of the moment obj got where it is (put down, moved, appeared, uncovered,
+            found, ...), else its newest other snapshot; never 'lost track of it' (that shows the empty spot)."""
+            seen = []
+            for ev in events.last(obj, 30) if obj else []:
+                typ = str(getattr(ev.type, "value", ev.type))
                 url = snapshot_url(ev.snapshot)
-                if url:
-                    return {"obj": ev.obj, "type": str(getattr(ev.type, "value", ev.type)), "t": ev.wall,
-                            "snapshot_url": url}
-            return {}
+                if url and typ not in EVIDENCE_NEVER:
+                    seen.append({"obj": ev.obj, "type": typ, "t": ev.wall, "snapshot_url": url})
+            return next((e for e in seen if e["type"] in EVIDENCE_PLACED), seen[0] if seen else {})
         return JSONResponse(await asyncio.to_thread(find), headers={"Cache-Control": "no-store"})
 
     @app.get("/grok/trace")
