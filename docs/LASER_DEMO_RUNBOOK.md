@@ -31,8 +31,10 @@ U confirms "it moved": pan swung both ways, tilt went **down** only, then it par
 ## 2. One lit test point (L, 20 s): does the camera see the dot?
 
 ```
-ASKROOM_IMAGE=askroom:audio scripts/dock.sh python3 scripts/laser_testpoint.py 0 -22 --blinks 3
+ASKROOM_IMAGE=askroom:audio scripts/dock.sh python3 scripts/laser_testpoint.py 0 -22 --blinks 3 --eye-safe-confirmed
 ```
+Only with the app stopped (it holds the serial port and the camera) and the room confirmed clear. With the app
+running, check alignment with one ask at a tracked object instead (`in_box after 1 tries`, err under ~50 px).
 Tonight: dot px (1127, 889) on the couch seat, score 103 (threshold 40), firmware `POS 0.00 -22.01 0 1`. A tilt
 of −40° or lower lands below the camera's view (the floor under the corner): aim −20..−25° for this test.
 
