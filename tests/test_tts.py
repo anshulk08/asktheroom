@@ -448,3 +448,70 @@ def test_speak_caps_a_long_answer(audio, piper, caplog, monkeypatch):
     t.speak(LONG_LIST)
     assert sum(map(len, piper.texts)) <= tts.MAX_SPOKEN_CHARS
     assert "speaking only the first" in caplog.text
+
+
+# -- the phone app's voice (Grok TTS by default)
+
+def grok_key(monkeypatch, key="xk"):
+    monkeypatch.setattr(tts.TTS, "_grok_key", staticmethod(lambda: key))
+
+
+def test_online_the_rig_speaks_with_the_apps_default_grok_voice(monkeypatch, audio, piper):
+    grok_key(monkeypatch)
+    post = FakePost()
+    monkeypatch.setattr(tts.requests, "post", post)
+    t = TTS(CFG, online())
+    t.speak("Your keys are on the couch.")
+    assert t.last_engine == "grok" and piper.texts == []
+    url, kw = post.calls[0]
+    assert url == "https://api.x.ai/v1/tts" and kw["headers"]["Authorization"] == "Bearer xk"
+    assert kw["json"] == {"text": "Your keys are on the couch.", "voice_id": "eve", "language": "en", "speed": 1.0,
+                          "output_format": {"codec": "pcm", "sample_rate": 24000}}
+    assert kw["stream"] is True and audio.opened == [24000] and audio.closed == 1
+
+
+def test_the_phones_voice_is_used_and_kept_across_restarts(monkeypatch, audio, piper):
+    grok_key(monkeypatch)
+    post = FakePost()
+    monkeypatch.setattr(tts.requests, "post", post)
+    t = TTS(CFG, online())
+    assert t.set_voice("grok", "Ara", 1.3) == tts.VoiceChoice("grok", "ara", 1.3)
+    t2 = TTS(CFG, online())                                   # a restart reads data/voice.json
+    t2.speak("Hello.")
+    assert post.calls[0][1]["json"]["voice_id"] == "ara" and post.calls[0][1]["json"]["speed"] == 1.3
+
+
+def test_voice_settings_are_validated():
+    V = tts.VoiceChoice.make
+    assert V("nonsense", "", "fast") == tts.VoiceChoice("grok", "eve", 1.0)
+    assert V("rig", "Rex!!", 9) == tts.VoiceChoice("rig", "rex", 1.5)
+    assert V("builtin", None, 0.1).speed == 0.7 and V(speed=float("nan")).speed == 1.0
+
+
+def test_grok_failing_falls_back_to_piper(monkeypatch, audio, piper):
+    grok_key(monkeypatch)
+    monkeypatch.setattr(tts.requests, "post", FakePost(resp=FakeResp(status=401)))
+    t = TTS(CFG, online())
+    t.speak("Fallback please.")
+    assert t.last_engine == "piper" and piper.texts == ["Fallback please."]
+
+
+def test_offline_grok_is_not_tried(monkeypatch, audio, piper):
+    grok_key(monkeypatch)
+    monkeypatch.setattr(tts.requests, "post", lambda *a, **k: pytest.fail("no network offline"))
+    t = TTS(CFG, online(False))
+    t.speak("Offline.")
+    assert t.last_engine == "piper"
+
+
+def test_same_as_the_rig_picks_elevenlabs_and_the_iphone_voice_picks_piper(monkeypatch, audio, piper, eleven_env):
+    grok_key(monkeypatch)
+    post = FakePost()
+    monkeypatch.setattr(tts.requests, "post", post)
+    t = TTS(CFG, online())
+    t.set_voice("rig")
+    t.speak("One.")
+    assert t.last_engine == "elevenlabs" and "elevenlabs" in post.calls[0][0]
+    t.set_voice("builtin")
+    t.speak("Two.")
+    assert t.last_engine == "piper" and len(post.calls) == 1
