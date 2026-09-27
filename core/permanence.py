@@ -101,6 +101,7 @@ class PermanenceConfig:
     arrival_s: float = 2.0                  # a candidate first seen this long before it went still counts
     marks: int = 6                          # candidates marked in one question
     backstop_s: float = 180.0               # objects with no new arrivals: asked about their best matches (0: off)
+    reask_s: float = 60.0                   # a candidate re-find turned down isn't asked about again this soon
     places: list = field(default_factory=list)   # [{name, say, poly: [[x, y], ...]}] full-frame px, after zones
     table_say: str = "the table"
     near_px: float = 250.0                  # outside every place: 'near <zone>' within this many px
@@ -214,6 +215,7 @@ class RegObject:
     asking: bool = False                        # a Grok question about it is in flight
     asked_wall: float = float("-inf")
     search_view: int = 0                        # a grounding re-find's next view
+    rejected: list = field(default_factory=list)   # [(box, wall)] candidates a re-find turned down
     how: str = ""                               # how it was last found: 'look', 'teach', 'refind:<source>'
 
 
@@ -562,14 +564,16 @@ class Permanence:
         object turns up somewhere new), else, for one never seen or once backstop_s is due, the candidates that
         look most like it. Candidates another registered object holds are never suspects."""
         claimed = self._claimed()
+        o.rejected = [(b, t) for b, t in o.rejected if wall - t < self.c.reask_s]
         pool = [(i, k) for i, ks in self._cands.items() for k in ks
-                if not any(geom.iou(k.box, b) >= 0.5 for b in claimed)]
+                if not any(geom.iou(k.box, b) >= 0.5 for b in claimed)
+                and not any(geom.iou(k.box, b) >= 0.7 for b, _ in o.rejected)]
         if o.state in (CARRIED, LAST_SEEN) and o.seen_wall is not None:
             new = [(i, k) for i, k in pool if k.first_wall >= o.seen_wall - self.c.arrival_s]
             if new:
                 return sorted(new, key=lambda q: (q[1].in_person, -o.bank.sim(q[1].emb)))
-        backstop = o.state == UNKNOWN or (self.c.backstop_s > 0 and wall - (o.since_wall or wall) >= self.c.backstop_s
-                                          and wall - o.asked_wall >= self.c.backstop_s)
+        backstop = self.c.backstop_s > 0 and wall - o.asked_wall >= self.c.backstop_s and \
+            (o.state == UNKNOWN or wall - (o.since_wall or wall) >= self.c.backstop_s)
         if not backstop and o.name not in self._backstop_now:
             return []
         good = [(i, k) for i, k in pool if o.bank.sim(k.emb) >= self.c.sim_backstop]
@@ -642,6 +646,8 @@ class Permanence:
                 o.asking = False
                 if o.state in (VISIBLE, HIDDEN):
                     continue
+                if not any(float(c) >= self.c.verify_conf for _, c, _ in found):   # none of them: don't re-ask
+                    o.rejected += [(k.box, wall) for k in ks]
                 claimed = self._claimed()
                 for box, conf, source in sorted(found, key=lambda f: -float(f[1])):
                     if float(conf) < self.c.verify_conf or any(geom.iou(box, b) >= 0.5 for b in claimed):

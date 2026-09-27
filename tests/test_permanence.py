@@ -521,3 +521,17 @@ def test_mark_numbers_never_sit_on_another_box():
     white = np.all(out == (255, 255, 255), axis=2)
     for x1, y1, x2, y2 in boxes:
         assert not white[y1 + 2:y2 - 1, x1 + 2:x2 - 1].any()          # no number inside or over a box
+
+
+def test_turned_down_suspects_are_not_asked_about_again_and_never_seen_objects_only_rarely():
+    clock, s = Clock(), Scene()
+    asked = []
+    p = reg(clock, verify=lambda name, refs, marked, n: asked.append(name) or (0, 0.9))
+    carried_off(p, s, clock)
+    s.put("mug", MUG, (1000, 600, 1060, 640))                       # a new arrival: asked about once
+    for _ in range(6):
+        clock.t += p.c.ask_every_s
+        run(p, s, clock)
+        settle(p, s, clock)
+    assert asked.count("remote") == 1
+    assert asked.count("keys") <= 1                                  # never seen: a backstop, then rarely
