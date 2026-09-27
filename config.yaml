@@ -289,6 +289,8 @@ listen:
   greeting_misheard: [bro, drew, broom, groom]   # how Whisper writes "room" after hey/okay: wakes the rig only as
                               # a whole greeting ("Hey, bro!"); "bro" is common in chatter
   greeting_merged: [goodroom, okroom, okayroom, heyroom]   # a greeting Whisper wrote as one word ("Goodroom.")
+  bare_wake_min_speech_ms: 400  # a wake word alone opens the mic only with this much speech (0: off); with the
+                              # prompt echo check, keeps Whisper writing "Hey Room!" for noise from waking the rig
   chime: true                 # a chime when the rig listens for a question ("Hey Room!" alone, a clicker press),
                               # a short tone when "Room, <question>" is accepted (voice/cues.py)
   indicator:                  # the listening light, on while the rig listens for a question

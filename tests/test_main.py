@@ -1109,7 +1109,7 @@ def test_the_bare_wake_log_line_says_how_much_speech_and_if_it_was_the_prompt(tm
     on noise: the speech span, the clip length and echoes_prompt, never the transcript."""
     from voice.stt import initial_prompt
     stt = FakeSTT("", overheard=["Hey Room! Okay Room.", "Okay, room."])
-    stt.prompt, stt.last_speech_s, stt.last_clip_s = initial_prompt(CFG), 0.35, 1.2
+    stt.prompt, stt.last_speech_s, stt.last_clip_s = initial_prompt(CFG), 0.45, 1.2
     room, _ = make_room(tmp_path, cal_path, stt=stt, clicker=FakeClicker())
     with caplog.at_level(logging.INFO, logger="askroom.main"):
         t = always_on(room)
@@ -1117,6 +1117,21 @@ def test_the_bare_wake_log_line_says_how_much_speech_and_if_it_was_the_prompt(tm
         time.sleep(0.2)
         stop_voice(room, t)
     lines = [r.getMessage() for r in caplog.records if "wake word alone" in r.getMessage()]
-    assert lines[0].endswith("(speech 350 ms, clip 1.20 s, prompt echo True)")
-    assert lines[1].endswith("prompt echo False)")
-    assert not any("Room" in m for m in lines)
+    assert lines == ["heard the wake word alone; listening for the question (speech 450 ms, clip 1.20 s, "
+                     "prompt echo False)"]              # the echo no longer opens the mic (_bare_wake)
+
+
+def test_a_bare_wake_needs_real_speech_and_not_the_prompt_echoed(tmp_path, cal_path):
+    """Whisper writes its prompt back on noise ("Hey Room! Okay Room."): a prompt echo, or a wake word in under
+    listen.bare_wake_min_speech_ms of speech, doesn't open the mic."""
+    from voice.stt import initial_prompt
+    stt = FakeSTT("")
+    stt.prompt = initial_prompt(CFG)
+    room, _ = make_room(tmp_path, cal_path, stt=stt)
+    stt.last_speech_s = 0.6
+    assert room._bare_wake("Okay room.") and room._bare_wake("Hey Room!")
+    assert not room._bare_wake("Hey Room! Okay Room.")
+    stt.last_speech_s = 0.2
+    assert not room._bare_wake("Okay room.")
+    room.bare_wake_min_s = 0.0
+    assert room._bare_wake("Okay room.")

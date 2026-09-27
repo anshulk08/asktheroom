@@ -190,6 +190,7 @@ class Room:
         self.echo_tail_s = float(li.get("echo_tail_s", 0.4))
         # "speak now": a chime and the listening light when the rig listens for a question (voice/cues.py)
         self.chime = bool(li.get("chime", True))
+        self.bare_wake_min_s = float(li.get("bare_wake_min_speech_ms", 400)) / 1000   # 0: off
         from voice.cues import ListenIndicator
         self.indicator = ListenIndicator(cfg)
         demo = cfg.get("demo") or {}
@@ -664,9 +665,21 @@ class Room:
         """The wake word on its own ("Room!", "hey room", a misheard "Hey, bro!"): people pause after it, so the
         VAD ends the utterance before the question. Treated like a clicker press: the next thing said is for
         the rig (rig run, Sat 26 Sep: "Room!" then "where is my wallet?" as two utterances, neither answered).
-        voice.understand.bare_wake has the rules."""
+        voice.understand.bare_wake has the rules. Two more checks against Whisper on noise: a clip that is its
+        own prompt written back ("Hey Room! Okay Room.": voice.stt.echoes_prompt), or under
+        listen.bare_wake_min_speech_ms of speech, doesn't open the mic."""
+        from voice.stt import echoes_prompt
         from voice.understand import bare_wake
-        return bare_wake(text, self.cfg)
+        if not bare_wake(text, self.cfg):
+            return False
+        if echoes_prompt(text, str(getattr(self.stt, "prompt", "") or "")):
+            log.info("heard the Whisper prompt written back; not a wake word")
+            return False
+        speech_s = getattr(self.stt, "last_speech_s", None)
+        if isinstance(speech_s, (int, float)) and speech_s < self.bare_wake_min_s:
+            log.info("wake word in %.0f ms of speech: too short, not opening the mic", 1000 * speech_s)
+            return False
+        return True
 
     def _log_wake(self, text: str, again: bool = False) -> None:
         """Log a bare wake word with the clip's speech span, its length and whether it is the Whisper prompt
