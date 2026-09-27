@@ -28,10 +28,13 @@ fi
 # Jetson this is ("board not supported"); name it from the host's device tree. Orin Nano / NX (p3767):
 # board.I2C() is then /dev/i2c-7, header pins 3/5.
 blinka=()
-if tr -d '\0' < /proc/device-tree/compatible 2>/dev/null | grep -q p3767; then
+if [ -r /proc/device-tree/compatible ] && tr -d '\0' < /proc/device-tree/compatible | grep -q p3767; then
   blinka=(-e BLINKA_FORCEBOARD="${BLINKA_FORCEBOARD:-JETSON_ORIN_NANO}" -e BLINKA_FORCECHIP="${BLINKA_FORCECHIP:-T234}"
           -e JETSON_MODEL_NAME="${JETSON_MODEL_NAME:-JETSON_ORIN_NANO}")
 fi
-exec docker run --rm "${tty[@]}" --runtime=nvidia --ipc=host --network=host "${devs[@]}" "${cams[@]}" "${blinka[@]}" \
+# ${a[@]+"${a[@]}"}: an empty array is "unbound" under set -u in bash < 4.4 (macOS).
+# ASKROOM_DOCKER_ARGS: extra `docker run` options, e.g. "-d --name askroom_room_app" (scripts/room_app.sh).
+read -r -a extra <<< "${ASKROOM_DOCKER_ARGS:-}"
+exec docker run --rm ${tty[@]+"${tty[@]}"} ${extra[@]+"${extra[@]}"} --runtime=nvidia --ipc=host --network=host ${devs[@]+"${devs[@]}"} ${cams[@]+"${cams[@]}"} ${blinka[@]+"${blinka[@]}"} \
   -v /etc/localtime:/etc/localtime:ro -v /etc/timezone:/etc/timezone:ro \
-  "${envf[@]}" -v "$PWD":/askroom -w /askroom -e PYTHONPATH=/askroom "$IMAGE" "$@"
+  ${envf[@]+"${envf[@]}"} -v "$PWD":/askroom -w /askroom -e PYTHONPATH=/askroom "$IMAGE" "$@"
