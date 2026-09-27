@@ -811,3 +811,72 @@ def test_overheard_where_with_nothing_to_find_is_ignored(tmp_path, cal_path):
     assert wait_for(lambda: room.tts.said)
     assert len(room.tts.said) == 1 and "keys" in room.tts.said[0].lower()
     stop_voice(room, t)
+
+
+class SlowGrokOther:
+    """A model that takes 0.3 s and reads everything as OTHER (what Grok says to chatter)."""
+    url, name, local = "stub", "grok", False
+
+    def __init__(self):
+        self.asked = []
+
+    def ask(self, text, timeout):
+        import json
+        self.asked.append(text)
+        time.sleep(0.3)
+        return json.dumps({"kind": "OTHER", "object": "none"})
+
+    def health(self, timeout=1.0):
+        return True
+
+
+def test_no_thinking_cue_for_chatter_the_model_then_rejects(tmp_path, cal_path):
+    """'Let me look.' used to start before the overheard verdict: the rig said it, then nothing."""
+    from voice.understand import Understander
+    room, _ = make_room(tmp_path, cal_path)
+    room.cue_after_s = 0.05
+    room.interpret = Understander(CFG, model=SlowGrokOther())
+    assert room._for_rig("where's my stapler")                # passes the cheap checks; the model decides
+    assert room._answer("where's my stapler", time.monotonic(), time.monotonic(), {"mode": "overheard"}) is False
+    time.sleep(0.1)
+    assert room.tts.said == [] and room.interpret.model.asked == ["where's my stapler"]
+
+
+def test_a_sure_overheard_question_still_gets_the_cue_while_the_answer_is_slow(tmp_path, cal_path):
+    from voice.understand import Understander
+    room, _ = make_room(tmp_path, cal_path)
+    room.cue_after_s = 0.05
+    room.interpret = Understander(CFG, model=SlowGrokOther())
+    fast = room.base_ask
+    room.base_ask = lambda text, source: (time.sleep(0.3), fast(text, source))[1]
+    assert room._answer("room, where is my wallet", time.monotonic(), time.monotonic(), {"mode": "overheard"})
+    assert room.tts.said[0] == "Let me look." and "wallet" in room.tts.said[1].lower()
+
+
+def test_a_reset_that_comes_after_the_fallback_is_not_applied(tmp_path, cal_path):
+    """After answer_limit_s the rules answered, but the ask thread ran on and reset the world ~1 s later."""
+    room, _ = make_room(tmp_path, cal_path)
+    room.cue_after_s, room.answer_limit_s = 0, 0.2
+    routed = room.base_ask
+    room.base_ask = lambda text, source: (time.sleep(0.5), routed(text, source))[1]
+    resets = []
+    room.world.reset = lambda: resets.append(1)
+    ans, _ = room._ask_with_cue("reset everything")
+    assert room._answer_late and resets == []
+    time.sleep(0.6)
+    assert resets == []                                       # the late RESET was dropped
+    ans = room.ask("reset everything", "voice")               # on time, it still resets
+    assert resets == [1]
+
+
+def test_overheard_follow_up_reaches_the_conversation_memory(tmp_path, cal_path):
+    from voice.care import attach_care
+    from voice.understand import Understander
+    stt = FakeSTT("", overheard=["where is it now", "where are my keys", "where is it now"])
+    room, _ = make_room(tmp_path, cal_path, stt=stt, clicker=FakeClicker(),
+                        interpret=Understander(dict(CFG, understand={"enabled": False})))
+    attach_care(room, dict(CFG, care=dict(CFG.get("care") or {}, profile_llm=False)))
+    t = always_on(room)
+    assert wait_for(lambda: len(room.tts.said) == 2)
+    assert "keys" in room.tts.said[0].lower() and "keys" in room.tts.said[1].lower()   # the first 'it' was dropped
+    stop_voice(room, t)

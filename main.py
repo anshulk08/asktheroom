@@ -131,6 +131,9 @@ def _rules_answer(text: str, world, events, cfg: dict) -> Answer:
         return fallback()
 
 
+CUE_AFTER_VERDICT_S = 0.3      # overheard: after the model accepts, the answer gets this long before the cue
+
+
 class Room:
     """Owns every part and thread. build() wires the rig or the fake; run() starts the threads."""
 
@@ -177,6 +180,7 @@ class Room:
         self._ignored = 0
         self.stop_ev = threading.Event()
         self._acted = threading.local()            # .kind: RESET / RECAL if the router answered one
+        self._turn = threading.local()             # .stale: set when the voice loop gave up on this ask thread
         self._clear_ev = threading.Event()         # RESET: the perception thread resets proposals + crops
         self._cal_warned = False
         self._aim_lock = threading.Lock()
@@ -196,6 +200,9 @@ class Room:
         """ask, noting the intent the router answered, so Room.ask acts only on a real RESET / RECAL:
         never on text the care layer handled ('remind me to reset the router') or rewrote."""
         def routed(text: str, source: str) -> Answer:
+            if self._stale():                  # the voice loop already gave up on it: no TEACH binding either
+                log.info("question %r timed out before the router got it; not acting on it", text)
+                return _rules_answer(text, self.world, self.events, self.cfg)
             ans = ask(text, source)
             self._acted.kind = self.interpret(text).kind     # the same Intent the router used (cached)
             return ans
@@ -206,6 +213,9 @@ class Room:
         self._acted.kind = None
         ans = self.base_ask(text, source)
         kind, self._acted.kind = self._acted.kind, None
+        if kind in ("RESET", "RECAL") and self._stale():
+            log.warning("%s for %r came after the voice loop gave up on it; not acting on it", kind, text)
+            kind = None
         if kind == "RESET":
             self.world.reset()
             if self.hands is not None:
@@ -215,6 +225,11 @@ class Room:
             threading.Thread(target=self._recalibrate_and_tell, args=(source != "sms",), name="recal",
                              daemon=True).start()
         return ans
+
+    def _stale(self) -> bool:
+        """This thread is answering a voice question _ask_with_cue already answered from the rules."""
+        ev = getattr(self._turn, "stale", None)
+        return ev is not None and ev.is_set()
 
     def ask_and_act(self, text: str, source: str) -> Answer:
         """ask_fn for the server: dashboard questions are spoken and aimed, texts only answered. An
@@ -537,6 +552,15 @@ class Room:
         else:
             self._ignored += 1
 
+    def _certain(self, text: str) -> bool:
+        """Overheard speech the model can't reject (Understander.certain); True without one."""
+        certain = getattr(self.interpret, "certain", None)
+        try:
+            return True if certain is None else bool(certain(text))
+        except Exception:
+            log.exception("certain() failed")
+            return False
+
     def _for_rig(self, text: str) -> bool:
         """Overheard speech that may be for the rig, by the checks that need no model (the model's
         reading, if any, runs behind the thinking cue in _ask_with_cue)."""
@@ -618,19 +642,23 @@ class Room:
     def _ask_with_cue(self, text: str, overheard: bool = False) -> tuple[Optional[Answer], bool]:
         """ask(text, "voice") on its own thread; if no answer within demo.thinking_cue_s (a model is
         reading it, or Grok is answering), say a short "let me look" so the rig doesn't sit silent.
-        overheard: the model's reading of overheard speech runs here too, behind the cue, and IGNORE
-        returns (None, cued). No answer within voice_guard.answer_limit_s (Wi-Fi stalled) or an error:
-        the rules and templates answer instead. Returns (answer, cued). The TTS lock queues the answer
-        behind the cue."""
+        overheard: the model's reading of overheard speech runs here too. The cue starts at once when the
+        speech is surely for the rig (Understander.certain: wake word, an object named); otherwise only once
+        the model accepted it, so chatter it rejects gets no "let me look" either. IGNORE returns
+        (None, cued). No answer within voice_guard.answer_limit_s (Wi-Fi stalled) or an error: the rules
+        and templates answer instead, and the late answer may no longer act on the room (Room.ask).
+        Returns (answer, cued). The TTS lock queues the answer behind the cue."""
         box: dict = {}
-        done = threading.Event()
+        done, accepted, stale = threading.Event(), threading.Event(), threading.Event()
 
         def work() -> None:
+            self._turn.stale = stale
             try:
                 if overheard and self.interpret(text, overheard=True).kind == "IGNORE":
                     box["ignore"] = True
-                else:
-                    box["ans"] = self.ask(text, "voice")
+                    return
+                accepted.set()
+                box["ans"] = self.ask(text, "voice")
             except Exception as ex:
                 box["err"] = ex
                 log.exception("answering %r failed; the rules answer", text)
@@ -638,16 +666,23 @@ class Room:
                 done.set()
 
         t0 = time.monotonic()
+        left = lambda: max(0.0, self.answer_limit_s - (time.monotonic() - t0))   # noqa: E731
         self._answer_late = False
         threading.Thread(target=work, name="ask", daemon=True).start()
         cued = False
         if self.cue_after_s > 0 and self.tts is not None and self.cue_phrases:
-            cued = not done.wait(min(self.cue_after_s, self.answer_limit_s))
+            wait_s = self.cue_after_s
+            if overheard and not self._certain(text):
+                while not (accepted.is_set() or done.is_set()) and left() > 0:
+                    done.wait(0.02)            # the model's verdict first
+                wait_s = max(CUE_AFTER_VERDICT_S, self.cue_after_s - (time.monotonic() - t0))
+            cued = not done.wait(min(wait_s, left()))
             if cued and not self.stop_ev.is_set():
                 phrase = self.cue_phrases[self._cues % len(self.cue_phrases)]
                 self._cues += 1
                 threading.Thread(target=self._speak, args=(phrase,), name="cue", daemon=True).start()
-        if not done.wait(max(0.0, self.answer_limit_s - (time.monotonic() - t0))):
+        if not done.wait(left()):
+            stale.set()                        # the ask thread must not act on it when it finally returns
             log.warning("no answer to %r after %.0f s; the rules answer", text, self.answer_limit_s)
             self._answer_late = True
             return _rules_answer(text, self.world, self.events, self.cfg), cued
