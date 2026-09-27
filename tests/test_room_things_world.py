@@ -336,3 +336,22 @@ def test_an_unnamed_new_track_does_not_block_a_handoff(scene, world):
     seen(scene, world, clutter, zone='bookshelf')
     trk = room_thing(scene, world, 'r:8', guess=dict(REMOTE))
     assert types(seen(scene, world, trk, zone='couch')) == [EventType.FOUND]
+
+
+def test_a_thing_that_barely_sat_on_the_table_does_not_make_the_room_hot(scene, world):
+    """Rig: a foot at the table edge is born, named 'sneaker' and gone 3 s later. It may still be handed
+    off (hints stay), but it must not switch on the fast cadence, which halves the table's fps; a thing
+    that sat for handoff_min_dwell_s does, and only for hot_max_s."""
+    namer = namer_for(world, {"name": "sneaker", "also": ["shoe"], "confidence": 0.8}, REMOTE)
+    scene.thing('foot', 40, 30)
+    scene.run(world, 1.5)
+    assert namer.step() is True
+    scene.remove('foot')
+    scene.run(world, 3.0)
+    assert world.get('thing:1').status != Status.VISIBLE and 'thing:1' in world._departures
+    assert len(world.room_handoff_hints(scene.t)) == 1 and world.room_hot(scene.t) is False
+    named_thing_leaves(scene, world, namer, key='remote', at=(60, 30), thing='thing:2')
+    world._placed_t['thing:2'] = world._departures['thing:2'][0] - 5.0      # sat 5 s before leaving
+    assert world.room_hot(scene.t) is True
+    world.room_cfg.hot_max_s = 0.5
+    assert world.room_hot(scene.t + 1.0) is False and len(world.room_handoff_hints(scene.t + 1.0)) == 2
