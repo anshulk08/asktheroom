@@ -16,7 +16,8 @@ a cue first (a place step), so the scorer knows which identity is which prop wit
 step's `seg` (still: nobody near the table; people: someone moving, sitting or reaching) splits the clip
 for the phantom-birth rates; carry_to (from the table) and place_room (straight into the room, never on
 the table) steps name the room zone (room_zones.json key, or 'floor') the prop goes to; block / unblock
-steps: a person hides a resting prop and moves away again.
+steps: a person hides a resting prop and moves away again; a putdown with expect_same brings a carried or
+removed prop back, and the scorer wants the identity it had before.
 
 The recorder needs the camera, so the live app must be stopped first (the rig owner does that:
 scripts/room_app.sh stop). This driver never stops it: it refuses while any container runs main.py
@@ -207,7 +208,7 @@ def _room_carry() -> dict:
                                    "can see it, and step away.", "event": "carry_to", "obj": "A", "zone": zone,
                    "seg": PEOPLE},
                   {"at": t + 25, "say": "Bring the wallet back to the table, put it down, then hands away.",
-                   "event": "putdown", "obj": "A", "seg": PEOPLE}]
+                   "event": "putdown", "obj": "A", "expect_same": True, "seg": PEOPLE}]
         t += 37
     steps.append({"at": t, "say": "Hands away. Nobody touch anything.", "event": "hands_out", "seg": STILL})
     return {"room": True, "props": {"A": "wallet", "C": "phone", "NB": "notebook", "BOX": "box"},
@@ -284,19 +285,57 @@ def _room_block() -> dict:
         {"at": t, "say": "Hands away.", "event": "hands_out", "seg": STILL},
         {"at": t + 10, "say": "Sit or crouch right in front of the pill bottle, so the camera can't see it, and "
                               "keep still. Don't touch it.", "event": "block", "obj": "PB", "seg": PEOPLE},
-        {"at": t + 22, "say": "Move away from the table.", "event": "unblock", "obj": "PB", "seg": PEOPLE},
-        {"at": t + 30, "say": "Everyone away. Keep still.", "event": "hands_out", "seg": STILL}]
-    return {"room": True, "props": {"A": "wallet", "C": "phone", "PB": "pill bottle"}, "seconds": int(t + 52),
+        {"at": t + 26, "say": "Move away from the table.", "event": "unblock", "obj": "PB", "seg": PEOPLE},
+        {"at": t + 34, "say": "Everyone away. Keep still.", "event": "hands_out", "seg": STILL}]
+    return {"room": True, "props": {"A": "wallet", "C": "phone", "PB": "pill bottle"}, "seconds": int(t + 56),
             "setup": "Empty coffee table. Hold the wallet, the phone and the pill bottle. Put the pill bottle down "
                      "near the table edge by the couch, so someone sitting or crouching there hides it from the "
                      "camera.",
             "steps": steps, "checkpoints": [{"at": t + 8, "expect": _on("A", "C", "PB")},
-                                            {"at": t + 50, "expect": _on("A", "C", "PB")}]}
+                                            {"at": t + 54, "expect": _on("A", "C", "PB")}]}
+
+
+def _room_keys_off() -> dict:
+    steps = [{"at": 0, "say": "Recording. Hands away.", "event": "hands_out", "seg": STILL},
+             {"at": 3, "say": "Put the keys on the table, then hands away.", "event": "place", "obj": "B",
+              "seg": PEOPLE},
+             {"at": 12, "say": "Pick up the keys and put them straight on the couch, the shortest way, not past the "
+                              "side table or the counter. Then step away.", "event": "carry_to", "obj": "B",
+              "zone": "couch", "seg": PEOPLE},
+             {"at": 35, "say": "Bring the keys back to the table, put them down, then hands away.",
+              "event": "putdown", "obj": "B", "expect_same": True, "seg": PEOPLE},
+             {"at": 47, "say": "Pick up the keys and put them on the floor by the doorway, away from the couch, the "
+                              "side table and the counter. Then step away.", "event": "carry_to", "obj": "B",
+              "zone": "floor", "seg": PEOPLE},
+             {"at": 70, "say": "Bring the keys back to the table, put them down, then hands away.",
+              "event": "putdown", "obj": "B", "expect_same": True, "seg": PEOPLE},
+             {"at": 82, "say": "Hands away. Nobody touch anything.", "event": "hands_out", "seg": STILL}]
+    return {"room": True, "props": {"B": "keys", "C": "phone", "NB": "notebook"}, "seconds": 97,
+            "setup": "Phone and notebook on the coffee table, apart. Couch clear. Hold the keys, off the table.",
+            "steps": steps, "checkpoints": [{"at": 45, "expect": _on("B")}, {"at": 94, "expect": _on("B")}]}
+
+
+def _room_return() -> dict:
+    steps = _place_in(["A", "C", "NB"])
+    t = _end_of(steps)
+    steps += [
+        {"at": t, "say": "Hands away.", "event": "hands_out", "seg": STILL},
+        {"at": t + 8, "say": "Pick up the wallet and take it out of the room, out of the camera's view.",
+         "event": "remove", "obj": "A", "seg": PEOPLE},
+        {"at": t + 28, "say": "Bring the wallet back and put it down on a different spot on the table, then hands "
+                              "away.", "event": "putdown", "obj": "A", "expect_same": True, "seg": PEOPLE},
+        {"at": t + 40, "say": "Hands away. Keep still.", "event": "hands_out", "seg": STILL}]
+    return {"room": True, "props": {"A": "wallet", "C": "phone", "NB": "notebook"}, "seconds": int(t + 60),
+            "setup": "Empty coffee table. Hold the wallet, the phone and the notebook; put each down when told. "
+                     "Carry the wallet right out of the room when told (behind a door or round a corner).",
+            "steps": steps, "checkpoints": [{"at": t + 6, "expect": _on("A", "C", "NB")},
+                                            {"at": t + 58, "expect": _on("A", "C", "NB")}]}
 
 
 ROOM_CLIPS = {"room_still": _room_still(), "room_clutter": _room_clutter(), "room_couch": _room_couch(),
               "room_carry": _room_carry(), "room_move": _room_move(), "room_remove": _room_remove(),
-              "room_straight": _room_straight(), "room_block": _room_block()}
+              "room_straight": _room_straight(), "room_block": _room_block(), "room_keys_off": _room_keys_off(),
+              "room_return": _room_return()}
 CLIPS.update(ROOM_CLIPS)
 
 
