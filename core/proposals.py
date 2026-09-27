@@ -38,6 +38,7 @@ switched), the reference is recaptured.
 """
 from __future__ import annotations
 
+import dataclasses
 import logging
 import time
 from dataclasses import dataclass, field, fields
@@ -88,8 +89,10 @@ class DedupeConfig:
     known box inside it) while being at most known_grow times its area: a loose box around the same
     object. A larger box that only partly overlaps (an unknown next to the keys) is kept. Hands are
     stricter (fingers and arms spill past the hand box). Among proposals, a box nested in a bigger one
-    is a part of that object (a keycap of a laptop, one wire of a cable pile) whatever the scores, and a
-    box narrower than min_side_px is a sliver, not an object."""
+    is a part of that object (a keycap of a laptop, one wire of a cable pile) whatever the scores, unless
+    it is clearly its own object lying on it (under nest_small of its area, scoring nest_keep_conf or
+    more). A part is kept flagged occluded: it may carry on a thing already tracked (keys in an open
+    tub), never start one. A box narrower than min_side_px is a sliver, not an object."""
     known_iou: float = 0.5
     known_inside: float = 0.7
     known_contain: float = 0.8
@@ -99,6 +102,9 @@ class DedupeConfig:
     self_iou: float = 0.5               # two proposals this similar: keep the more confident
     self_inside: float = 0.8            # a proposal nested this much in a bigger kept one: dropped
     min_side_px: int = 0                # full-resolution px; 0 = no minimum
+    nest_small: float = 0.25            # a nested box under this share of its host's area ...
+    nest_keep_conf: float = 0.7         # ... scoring this or more is its own object (on the rig's frames
+                                        # laptop keys and cable parts scored under 0.7)
 
     @classmethod
     def from_dict(cls, raw: Optional[dict]) -> 'DedupeConfig':
@@ -107,9 +113,9 @@ class DedupeConfig:
 
 def dedupe(props: list[Proposal], known: list[BoxPx], hands: list[BoxPx], cfg: DedupeConfig) -> list[Proposal]:
     """Proposals that are not a known object, a hand, a sliver or another proposal, most confident
-    first. Nesting is decided biggest first, so only the outermost of a chain of nested boxes stays: by
-    confidence, a keycap scoring above its laptop dropped the laptop and kept every key (on the rig, dozens
-    of things on one laptop)."""
+    first; parts of a bigger proposal come back flagged occluded. Nesting is decided biggest first, so of
+    a chain of nested boxes the outermost is the object: by confidence, a keycap scoring above its laptop
+    dropped the laptop and kept every key as an object (on the rig, dozens of things on one laptop)."""
     kept: list[Proposal] = []
     for p in sorted(props, key=lambda q: -q.conf):
         b = p.box_px
@@ -124,11 +130,16 @@ def dedupe(props: list[Proposal], known: list[BoxPx], hands: list[BoxPx], cfg: D
         if any(geom.iou(b, q.box_px) >= cfg.self_iou for q in kept):
             continue
         kept.append(p)
-    outer: list[Proposal] = []
+    objects: list[Proposal] = []
+    parts: set[int] = set()
     for p in sorted(kept, key=lambda q: -geom.area(q.box_px)):
-        if not any(geom.overlap_frac(q.box_px, p.box_px) >= cfg.self_inside for q in outer):
-            outer.append(p)
-    return [p for p in kept if p in outer]
+        hosts = [q for q in objects if geom.overlap_frac(q.box_px, p.box_px) >= cfg.self_inside]
+        if hosts and not (geom.area(p.box_px) < cfg.nest_small * min(geom.area(q.box_px) for q in hosts)
+                          and p.conf >= cfg.nest_keep_conf):
+            parts.add(id(p))
+        else:
+            objects.append(p)
+    return [dataclasses.replace(p, occluded=True) if id(p) in parts else p for p in kept]
 
 
 # ================================================================================ change proposer
@@ -587,11 +598,13 @@ class _quiet_nan:
 # ================================================================================ YOLOE adapter
 
 # Prompt-free vocabularies name the table, people and hands too; none of them is a thing on the table.
-# People include what they wear: on the rig, feet up at the coffee table came as 'shoe', 'sock', 'jeans'.
 PEOPLE = ['person', 'man', 'woman', 'child', 'boy', 'girl', 'patient', 'head', 'hair', 'hand', 'arm', 'finger',
-          'glove', 'foot', 'toe', 'leg', 'knee', 'shoe', 'footwear', 'leather shoe', 'running shoe', 'sneaker',
-          'boot', 'cowboy boot', 'sandal', 'slipper', 'sock', 'air sock', 'jeans', 'pants', 'pant', 'sweat pant',
-          'shirt', 'polo shirt']        # a box mostly inside one: occluded
+          'foot', 'toe', 'leg', 'knee']   # a box mostly inside one: occluded
+# What people wear is a person while worn: on the rig, feet up at the coffee table came as 'shoe', 'sock',
+# 'jeans'. A worn-item box touching a person box (grown by YOLOEConfig.worn_near_px) is treated as one; a
+# shoe alone on the table, away from people, is an object.
+WORN = ['glove', 'shoe', 'footwear', 'leather shoe', 'running shoe', 'sneaker', 'boot', 'cowboy boot', 'sandal',
+        'slipper', 'sock', 'air sock', 'jeans', 'pants', 'pant', 'sweat pant', 'shirt', 'polo shirt']
 PERSON_INSIDE = 0.6                     # share of a box inside a person box that flags it occluded
 DEFAULT_IGNORE = PEOPLE + ['table', 'dining table', 'desk', 'office desk', 'coffee table', 'tabletop', 'countertop',
                            'floor', 'wall', 'wood', 'wood floor', 'hardwood', 'plywood']
@@ -612,6 +625,7 @@ class YOLOEConfig:
     max_area_frac: float = 0.15
     masks: bool = False                 # keep box-sized masks (seg checkpoints)
     ignore_classes: list = field(default_factory=lambda: list(DEFAULT_IGNORE))
+    worn_near_px: int = 40              # a worn item (WORN) this close to a person box is part of them
 
     @classmethod
     def from_dict(cls, raw: Optional[dict]) -> 'YOLOEConfig':
@@ -663,11 +677,15 @@ class YOLOEProposer:
         masks = _np(r.masks.data) > 0.5 if (c.masks and getattr(r, 'masks', None) is not None) else None
         fh, fw = img.shape[:2]
         lo, hi = c.min_area_frac * fh * fw, c.max_area_frac * fh * fw
-        people = [tuple(float(v) for v in b) for b, s, k in zip(xyxy, conf, cls)
-                  if s >= c.conf and str(names.get(int(k), '')).lower() in PEOPLE]
+        label = [str(names.get(int(k), '')).lower() for k in cls]
+        people = [tuple(float(v) for v in b) for b, s, n in zip(xyxy, conf, label) if s >= c.conf and n in PEOPLE]
+        g = c.worn_near_px
+        worn = [tuple(float(v) for v in b) for b, s, n in zip(xyxy, conf, label) if s >= c.conf and n in WORN
+                and any(geom.intersection((b[0] - g, b[1] - g, b[2] + g, b[3] + g), p) for p in people)]
+        people += worn
         cands = []
         for j, (b, s, k) in enumerate(zip(xyxy, conf, cls)):
-            if s < c.conf or str(names.get(int(k), '')).lower() in self.ignore:
+            if s < c.conf or label[j] in self.ignore or tuple(float(v) for v in b) in worn:
                 continue
             occluded = any(geom.overlap_frac(p, tuple(float(v) for v in b)) >= PERSON_INSIDE for p in people)
             box = tuple(int(round(v)) for v in b)

@@ -48,6 +48,9 @@ proposals:
     self_iou: 0.5
     self_inside: 0.8         # nested this much in a bigger proposal: a part of it (a keycap), whatever the scores
     min_side_px: 12          # narrower boxes are slivers (full-res px; YOLOE boxes are ~19+ px above min_area_frac)
+    nest_small: 0.25         # a nested box under this share of its host's area ...
+    nest_keep_conf: 0.7      # ... scoring this or more is its own object (keys in a tub); other parts only carry on
+                             # a tracked thing (rig frames: laptop keys and cable parts scored under 0.7)
   change:
     work_px: 480             # working long side: Mac 2.3 ms/frame; Orin Nano ~13 ms (320: ~7.5, 640: ~17)
     ref_frames: 10           # empty-table reference = median of this many frames (startup, reset)
@@ -72,6 +75,7 @@ proposals:
     imgsz: 640
     half: false              # .pt on a GPU only; an .engine has its precision baked in
     masks: false
+    worn_near_px: 40         # a shoe / sock / jeans box this close to a person box is the person; alone, an object
   crops:                     # core/crops.py: best-clean + latest crop per object / proposal
     enabled: true
     size_px: 128
@@ -197,6 +201,8 @@ openworld:
   maybe_sim: 0.70            # a new thing is linked 'maybe the same as' an old one above this
   exemplar_max: 8            # appearance views kept per thing
   teach_recent_s: 30
+  forget_unnamed_s: 600      # an unnamed thing lost this long leaves the state; unnamed duplicates lost in place at
+                             # one spot fold into the oldest once no room zone can take them (room handoff_s)
 
 # Stretch (D15, D16)
 floor_zones: {}               # per zone: table edge, ArUco 4-7 positions in table cm, head preset pan/tilt

@@ -100,6 +100,8 @@ class ThingsConfig:
     exemplar_min_px: int = 16
     exemplar_dup_sim: float = 0.97     # a view this close to a stored one adds nothing
     teach_recent_s: float = 30.0       # no teach zone: things put down within this long
+    forget_unnamed_s: float = 600.0    # an unnamed thing lost (UNKNOWN / GONE) this long leaves the state;
+                                       # unnamed lost ones at one spot fold into the oldest at once. 0 = never
 
     @classmethod
     def from_config(cls, cfg) -> 'ThingsConfig':
@@ -266,6 +268,7 @@ class ThingRules:
         self._merged: dict[str, frozenset] = {}         # thing -> things sharing its merged proposal
         self._unsure_until: dict[str, float] = {}       # thing -> no exemplar learning before this
         self._learn_t: dict[str, float] = {}
+        self._forget_t = NEG                            # last housekeeping pass (_forget_lost)
         self._clean: dict[str, Detection] = {}          # this batch's unambiguous associations
         self._trail: dict[str, deque] = {}              # hand -> recent (t, box_cm)
         self._batch_boxes: list[tuple] = []             # this batch's object / proposal / hand boxes
@@ -843,6 +846,62 @@ class ThingRules:
                 self._unsure_until[n] = self._now + self._tcfg.ambiguous_s
         if self.embed is not None:
             self._learn_looks()
+        self._forget_lost()
+
+    def _forget_lost(self) -> None:
+        """Housekeeping, once a second: an unnamed thing lost (UNKNOWN / GONE) for over forget_unnamed_s
+        leaves the state, and unnamed things lost in place (no pick-up) at one spot (same_spot_cm, a like
+        size: duplicates of one object) fold into the oldest, quietly (merged_into; history kept, no event).
+        Named things, things holding others, things off the table or that left it within the room handoff
+        window (a room zone may still take them), and configured objects are never touched. On the rig a clutter pile left 90 lost
+        duplicates at one spot in the phone's state until a RESET."""
+        tc = self._tcfg
+        if tc.forget_unnamed_s <= 0 or self._wall is None or self._now - self._forget_t < 1.0:
+            return
+        self._forget_t = self._now
+        rc = getattr(self, 'room_cfg', None)
+        handoff = getattr(rc, 'handoff_s', 0.0) if rc is not None else 0.0
+        keep = {e.parent for e in self.entities.values() if e.parent}
+        keep |= {n for n, (t, _) in getattr(self, '_departures', {}).items() if self._now - t <= handoff}
+        lost = [n for n in self._things if self.entities[n].merged_into is None and self.entities[n].zone == 'table'
+                and self.entities[n].status in ARCHIVED and not self.entities[n].aliases and n not in keep]
+        gone = set()
+        for n in lost:
+            e = self.entities[n]
+            if e.last_seen is None or self._wall - e.last_seen > tc.forget_unnamed_s:
+                self._drop_thing(n, n)
+                gone.add(n)
+        cells: dict[tuple, list[str]] = {}
+        r = max(tc.same_spot_cm, 1e-6)
+        for n in lost:                              # oldest first: the oldest at a spot keeps it
+            e = self.entities[n]
+            if n in gone or e.pos_cm is None or e.pre_pickup_pos is not None:
+                continue
+            cx, cy = int(e.pos_cm[0] // r), int(e.pos_cm[1] // r)
+            twin = next((m for dx in (-1, 0, 1) for dy in (-1, 0, 1) for m in cells.get((cx + dx, cy + dy), ())
+                         if geom.dist(e.pos_cm, self.entities[m].pos_cm) <= tc.same_spot_cm
+                         and self._size_ok(e.box_cm, self.entities[m].box_cm)), None)
+            if twin is not None:
+                self._drop_thing(n, twin)
+                gone.add(n)
+            else:
+                cells.setdefault((cx, cy), []).append(n)
+        if gone:
+            self._things = [n for n in self._things if n not in gone]
+
+    def _drop_thing(self, name: str, into: str) -> None:
+        """name leaves the state: merged into its twin, or into itself when simply forgotten (as
+        retire_thing). The caller takes it off _things."""
+        e = self.entities[name]
+        if into != name:
+            self._banks[into].extend(self._banks[name])
+            for n in self._things:
+                m = self.entities[n]
+                m.maybe_same_as = [(into if k == name else k, sc) for k, sc in m.maybe_same_as if n != into or k != name]
+        e.merged_into, e.status, e.parent, e.confidence = into, Status.UNKNOWN, None, 0.0
+        self._bits[name] = self._new_bits()
+        self._present[name] = False
+        self._merged.pop(name, None)
 
     def _learn_looks(self) -> None:
         tc = self._tcfg
