@@ -84,6 +84,15 @@ class RoomRules:
         self._pending_things: dict[str, RoomTrack] = {}          # confirmed 'thing' tracks not decided yet
         self.room_cfg = RoomConfig.from_dict(getattr(self, '_room_raw', None))
 
+    def room_reset(self) -> None:
+        """The room side alone, as RoomMemory.reset does it on the perception thread after World.reset
+        already ran on the asking thread: whatever one visit of the old tracks left in the fresh world (a
+        conflict, a pending thing) goes; the config stays (World.reset re-reads it)."""
+        with self.lock:
+            cfg = self.room_cfg
+            self._reset_room()
+            self.room_cfg = cfg
+
     def thing_guess(self, name: str) -> Optional[dict]:
         """Grok's {name, also, confidence} for a thing on the table. core/auto_name.py's attach replaces
         this on the instance; without a namer no thing has a name, so none is ever handed over."""

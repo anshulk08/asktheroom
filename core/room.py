@@ -73,6 +73,11 @@ class RoomTracker:
             return list(self._tracks.get(zone, []))
         return [tr for ts in self._tracks.values() for tr in ts]
 
+    def reset(self) -> None:
+        """Forget every track (a spoken reset). The id counter goes on: a naming job or an event log entry
+        that still names an old 'r:N' must never point at a new track."""
+        self._tracks = {}
+
     def visit(self, zone: str, say: str, obs: list[RoomObservation], blockers: list[BoxPx],
               changes: list[BoxPx], t: float, wall: float, frame_idx: int,
               lum: Optional[Callable[[BoxPx], float]] = None, crop=None) -> ZoneVisit:
@@ -170,10 +175,11 @@ class RoomTracker:
 # Grok names for thing tracks
 
 class _Job:
-    __slots__ = ("track", "img", "attempts", "due", "hints")
+    __slots__ = ("track", "img", "attempts", "due", "hints", "gen")
 
-    def __init__(self, track: RoomTrack, img: np.ndarray, due: float, hints=None):
+    def __init__(self, track: RoomTrack, img: np.ndarray, due: float, hints=None, gen: int = 0):
         self.track, self.img, self.attempts, self.due, self.hints = track, img, 0, due, hints
+        self.gen = gen                     # the reset generation it was queued in (RoomNamer.reset)
 
 
 class RoomNamer:
@@ -196,6 +202,7 @@ class RoomNamer:
         self._lock = threading.Lock()
         self._jobs: deque = deque(maxlen=max(1, int(max_pending)))   # full: appending drops the oldest
         self._calls: deque = deque()       # clock() of recent calls (the per-minute cap)
+        self._gen = 0                      # bumped by reset(): a job from an older generation never lands
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -207,12 +214,20 @@ class RoomNamer:
         """hints: Grok names of things that just left the table (the handoff candidates), asked about
         directly when a verify_fn is set."""
         with self._lock:
-            self._jobs.append(_Job(track, img, self.clock(), list(hints) if hints else None))
+            self._jobs.append(_Job(track, img, self.clock(), list(hints) if hints else None, self._gen))
         self._wake.set()
 
     def pending(self) -> int:
         with self._lock:
             return len(self._jobs)
+
+    def reset(self) -> None:
+        """Drop every queued job and disown the one in flight: after a spoken reset its tracks are gone,
+        and a Grok answer for a pre-reset crop must not become a new track's name (the worker checks the
+        generation after the call, so even an answer already on its way is thrown away)."""
+        with self._lock:
+            self._jobs.clear()
+            self._gen += 1
 
     def step(self, now: Optional[float] = None) -> bool:
         """Try the next due job. True when a call was made."""
@@ -235,6 +250,11 @@ class RoomNamer:
             log.info("naming room track %s failed (attempt %d): %s", job.track.tid, job.attempts, e)
             g = None
         self._save(job, g)
+        with self._lock:
+            stale = job.gen != self._gen
+        if stale:                          # reset while it was asked: neither applied nor retried
+            log.info("room track %s in %s: named after a reset, dropped", job.track.tid, job.track.zone)
+            return True
         if g:
             job.track.guess = g
             log.info("room track %s in %s looks like a %s", job.track.tid, job.track.zone, g.get("name"))
@@ -371,6 +391,21 @@ class RoomMemory:
         """Stops the naming worker (build's cleanup)."""
         if self.namer is not None:
             self.namer.stop()
+
+    def reset(self) -> None:
+        """A spoken reset, without a restart: forget every track, every queued or in-flight Grok name, and
+        every zone's previous crop (the first visit after this takes fresh backgrounds, so nothing counts
+        as 'changed' until something really arrives), then the World's room side too. Runs on the
+        perception thread, like step(), so the next run starts exactly like a fresh start: World.reset()
+        on the asking thread may already have cleared the room state, but one visit with the old tracks
+        could have slipped in between (a pre-reset conflict or pending thing in a fresh world)."""
+        self.tracker.reset()
+        if self.namer is not None:
+            self.namer.reset()
+        self._prev.clear()
+        fn = getattr(self.world, "room_reset", None)
+        if callable(fn):
+            fn()
 
     def step(self, full: Optional[Frame]) -> list[Event]:
         """One perception frame. Every room_every_n-th call processes the next zone and returns
