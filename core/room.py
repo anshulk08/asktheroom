@@ -808,7 +808,10 @@ def make_verify_fn(namer) -> Callable[[np.ndarray, list], Optional[dict]]:
     """(img, hints) -> guess, through the auto-namer's Grok provider. Asking "is it one of these?" (the
     names of things that just left the table) is far more reliable than open naming for a small, far
     object: open naming called the remote on the couch a phone and an eyeglasses case (rig run). A match
-    returns that hint's guess, so the World's name check passes; 'none' returns what Grok says it is."""
+    returns that hint's guess, so the World's name check passes; 'none' returns what Grok says it is.
+    Speed: the call goes through the auto-namer's provider, built from visual_memory (grok-4.3 at
+    reasoning_effort 'none', its lowest, timeout_s 8), which is what makes it ~0.6-1.5 s; narrate() takes
+    no per-call effort, so nothing is set here. The crop goes at namer.c.crop_px (384) on its long side."""
     from core.auto_name import _jpeg, clean_name, match_score
     from core.narration import _parse_json
 
