@@ -178,6 +178,21 @@ def test_two_same_named_departed_things_are_one_object_the_latest_is_handed_over
     assert world.get('thing:1').zone == 'table' and 'thing:1' not in world._departures
 
 
+def test_no_handoff_by_name_while_a_same_named_thing_is_still_on_the_table(scene, world):
+    """Live Sun 27 Sep 04:42: a 4 s duplicate of the pill bottle (born while someone leaned over the table)
+    was lost, and a counter object Grok also called a pill bottle took its identity while the real one lay
+    on the table. A same-named thing still on the table is what the name means: nothing is handed over."""
+    namer = namer_for(world, REMOTE, REMOTE)
+    scene.thing('remote', 80, 30)
+    scene.run(world, 1.5)
+    assert namer.step() is True and world.thing_guess('thing:1') == REMOTE
+    named_thing_leaves(scene, world, namer, key='dup', at=(40, 50), thing='thing:2')
+    assert world.get('thing:1').status == Status.VISIBLE
+    trk = room_thing(scene, world, 'r:1')
+    assert seen(scene, world, trk, zone='couch') == []
+    assert world.get('thing:2').zone == 'table' and world.get('thing:1').zone == 'table'
+
+
 def test_two_new_room_tracks_hand_over_nothing(scene, world):
     named_thing_leaves(scene, world, namer_for(world, REMOTE))
     a = room_thing(scene, world, 'r:1')
