@@ -2,7 +2,7 @@
 (server GET /grok/trace, /grok/img/<id>; the /demo page).
 
 core/xai.Client._create records every chat call here: its time, purpose (from the system prompt: naming,
-verify, pick, look, look_room, recall, recall_room, check, refind, confirm, is_a, answer, understand,
+verify, pick, pick_sheet, describe, look, look_room, recall, recall_room, check, refind, confirm, is_a, answer, understand,
 narration, other), model, latency, the text parts of the request (hint lists, questions; trimmed), small
 JPEG thumbnails of the images actually sent (at most THUMB_PX on the long side, in memory only) and the
 reply (the message content, trimmed; tool call names). Never the API key, headers or the full images.
@@ -24,6 +24,7 @@ log = logging.getLogger(__name__)
 
 KEEP = 30                    # calls kept
 THUMB_PX = 480               # thumbnail long side
+SHEET_PX = 960               # ... for a sheet of numbered close-ups (pick_sheet): its numbers must stay legible
 TEXT_MAX = 600               # request text kept per call
 REPLY_MAX = 1500             # reply text kept per call
 
@@ -39,6 +40,8 @@ PURPOSES = [
     ("You answer spoken questions about what was on a tabletop earlier", "recall"),
     ("You answer spoken questions about a room", "look_room"),
     ("You answer spoken questions about a tabletop", "look"),
+    ("You find one object among the things", "pick_sheet"),     # voice/visual.py: a sheet of numbered close-ups
+    ("You say where one object is", "describe"),                 # voice/visual.py (WS5): the spot, in words
     ("You find one object", "pick"),
     ("You describe short episodes", "narration"),
     ("You sort questions", "understand"),
@@ -61,8 +64,8 @@ def purpose(system: str) -> str:
     return next((name for k, name in KEYWORDS if k in low), "other")
 
 
-def _thumb(url: str) -> Optional[bytes]:
-    """A data:image/...;base64 URL -> a JPEG at most THUMB_PX on its long side, or None."""
+def _thumb(url: str, px: int = THUMB_PX) -> Optional[bytes]:
+    """A data:image/...;base64 URL -> a JPEG at most px on its long side, or None."""
     try:
         import cv2
         import numpy as np
@@ -74,7 +77,7 @@ def _thumb(url: str) -> Optional[bytes]:
         if img is None:
             return None
         h, w = img.shape[:2]
-        s = THUMB_PX / max(h, w)
+        s = px / max(h, w)
         if s < 1:
             img = cv2.resize(img, (max(1, round(w * s)), max(1, round(h * s))), interpolation=cv2.INTER_AREA)
         ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 82])
@@ -90,6 +93,7 @@ def record(body: dict, reply: Optional[dict], ms: float, error: Optional[str] = 
         msgs = body.get("messages") or []
         system = next((m.get("content") for m in msgs if m.get("role") == "system" and isinstance(m.get("content"), str)), "")
         texts, thumbs = [], []
+        px = SHEET_PX if purpose(system) == "pick_sheet" else THUMB_PX
         for m in msgs:
             if m.get("role") == "system":
                 continue
@@ -101,7 +105,7 @@ def record(body: dict, reply: Optional[dict], ms: float, error: Optional[str] = 
                     if part.get("type") == "text":
                         texts.append(str(part.get("text", "")))
                     elif part.get("type") == "image_url":
-                        t = _thumb(str((part.get("image_url") or {}).get("url", "")))
+                        t = _thumb(str((part.get("image_url") or {}).get("url", "")), px)
                         if t is not None:
                             thumbs.append(t)
         content, tools = "", []

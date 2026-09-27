@@ -81,6 +81,17 @@ def test_errors_are_kept_and_the_ring_drops_old_calls_with_their_images():
     assert len(grok_trace.calls(100)) == grok_trace.KEEP and grok_trace.image(first) is None
 
 
+def test_a_pick_sheet_keeps_a_larger_thumbnail():
+    PICK_SHEET_SYSTEM = "You find one object among the things on a tabletop. The image is a grid of numbered close-ups"
+    xai.Client("https://api.x.ai/v1", KEY, session=Session()).chat.completions.create(model="grok-4.3", messages=[
+        {"role": "system", "content": PICK_SHEET_SYSTEM},
+        {"role": "user", "content": [{"type": "image_url", "image_url": {"url": data_url(960, 768)}},
+                                     {"type": "text", "text": "Close-ups: 1, 2, 3."}]}])
+    [c] = grok_trace.calls()
+    img = cv2.imdecode(np.frombuffer(grok_trace.image(c["images"][0]), np.uint8), cv2.IMREAD_COLOR)
+    assert c["purpose"] == "pick_sheet" and img.shape[:2] == (768, 960)
+
+
 def test_purpose_from_the_system_prompt():
     from core.grok_check import SYSTEM as CHECK
     from core.room import VERIFY_SYSTEM
@@ -94,6 +105,9 @@ def test_purpose_from_the_system_prompt():
                         ("You look at one object in a red box in a room photo and say whether it is the named kind of "
                          "thing.", "is_a")):
         assert grok_trace.purpose(start) == want
+    assert grok_trace.purpose("You find one object among the things on a tabletop. The image is a grid") == "pick_sheet"
+    assert grok_trace.purpose("You say where one object is on a tabletop") == "describe"
+    assert grok_trace.purpose("You find one object on a tabletop seen by a camera above it") == "pick"
     assert grok_trace.purpose("something else") == "other"
 
 

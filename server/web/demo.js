@@ -254,10 +254,12 @@
     objs.sort((a, b) => (order[a.state] || 0) - (order[b.state] || 0) || (a.guessed ? 1 : 0) - (b.guessed ? 1 : 0));
     const placed = [];
     const labelled = [];
+    const ix1 = Math.max(0, ox), iy1 = Math.max(0, oy), ix2 = Math.min(W, ox + ww * k), iy2 = Math.min(H, oy + wh * k);
     for (const o of objs) {
-      const [x1, y1] = P(o.box[0], o.box[1]);
-      const [x2, y2] = P(o.box[2], o.box[3]);
-      if (x2 < 0 || y2 < 0 || x1 > W || y1 > H) continue;
+      let [x1, y1] = P(o.box[0], o.box[1]);
+      let [x2, y2] = P(o.box[2], o.box[3]);
+      x1 = Math.max(ix1, x1); y1 = Math.max(iy1, y1); x2 = Math.min(ix2, x2); y2 = Math.min(iy2, y2);   // on the image only
+      if (x2 - x1 < 2 || y2 - y1 < 2) continue;
       const ghost = o.state !== "visible";
       const found = badge(o).indexOf("found again") === 0;
       ctx.save();
@@ -387,8 +389,8 @@
     const zid = near ? o.zone.slice(5) : o.zone;
     const z = (L.zones || []).find((q) => q.id === zid);
     if (!z) return null;                                    // "room:left" and the like: no spot on the map
-    if (near) return [z.rect[0] + z.rect[2] + 10 + 8 * (i % 3), z.rect[1] + z.rect[3] / 2];
     const [zx, zy, zw, zh] = z.rect;
+    if (near) return [zx + zw * 0.88, zy + zh * (0.55 + 0.12 * (i % 3))];   // inside, at the zone's edge
     const poly = zonePoly(o.zone);
     if (poly && o.box) {                                    // where in the zone, roughly
       const xs = poly.map((p) => p[0]), ys = poly.map((p) => p[1]);
@@ -410,6 +412,7 @@
     const k = Math.min((W - 2 * m) / L.size[0], (H - 2 * m) / L.size[1]);
     const ox = (W - L.size[0] * k) / 2, oy = (H - L.size[1] * k) / 2;
     const P = (x, y) => [ox + x * k, oy + y * k];
+    const reserved = [];                                  // where pin labels may not go: titles, TABLE, YOU
     // zones
     for (const z of L.zones || []) {
       const [x, y] = P(z.rect[0], z.rect[1]);
@@ -426,7 +429,9 @@
       mctx.font = 700 + " " + Math.round(16 * dpr) + "px " + FONT;
       mctx.fillStyle = COL.ink2;
       mctx.textBaseline = "top";
-      mctx.fillText(stripThe(z.say).toUpperCase(), x + 8 * dpr, y + 6 * dpr);
+      const zt = stripThe(z.say).toUpperCase();
+      mctx.fillText(zt, x + 8 * dpr, y + 6 * dpr);
+      reserved.push({ x: x + 8 * dpr, y: y + 4 * dpr, w: mctx.measureText(zt).width, h: 20 * dpr });
     }
     // the table
     const [tx, ty] = P(L.table.rect[0], L.table.rect[1]);
@@ -439,6 +444,7 @@
     mctx.font = 700 + " " + Math.round(14 * dpr) + "px " + FONT;
     mctx.fillStyle = "rgba(255,235,210,0.75)";
     mctx.fillText("TABLE", tx + 6 * dpr, ty + 5 * dpr);
+    reserved.push({ x: tx + 4 * dpr, y: ty + 3 * dpr, w: mctx.measureText("TABLE").width + 4 * dpr, h: 18 * dpr });
     // you
     if (L.you) {
       const [yx, yy] = P(L.you[0], L.you[1]);
@@ -455,6 +461,7 @@
       mctx.textBaseline = "top";
       mctx.fillText("YOU", yx, yy + 11 * dpr);
       mctx.textAlign = "start";
+      reserved.push({ x: yx - 22 * dpr, y: yy - 13 * dpr, w: 44 * dpr, h: 42 * dpr });
     }
     // pins: eased toward their place; a short fading trail when one moves
     const t = now();
@@ -507,13 +514,15 @@
       mctx.fillStyle = COL.ink;
       mctx.textBaseline = "middle";
       if (!o.guessed || o.zone !== "table") {                 // table clutter: a dot; named things and rooms: a name
-        const tw = mctx.measureText(o.name).width;
-        const lx = px + r + 5 * dpr;
-        let ly = py;
-        for (let n = 0; n < 4 && labels.some((q) => Math.abs(q.y - ly) < 20 * dpr && lx < q.x + q.w && q.x < lx + tw); n++) ly += 20 * dpr;
-        if (ly < H - 10 * dpr && lx + tw < W) {             // no label past the panel's edge
-          labels.push({ x: lx, y: ly, w: tw });
-          mctx.fillText(o.name, lx, ly);
+        const tw = mctx.measureText(o.name).width, th = 20 * dpr;
+        const hit = (lx, ly) => labels.concat(reserved).some((q) => lx < q.x + q.w && q.x < lx + tw &&
+          ly - th / 2 < q.y + q.h && q.y < ly + th / 2);
+        const right = px + r + 5 * dpr, left = px - r - 5 * dpr - tw;
+        const spots = [[right, py], [right, py + th], [right, py - th], [left, py], [right, py + 2 * th], [left, py + th]];
+        const spot = spots.find(([lx, ly]) => lx >= 0 && lx + tw <= W && ly - th / 2 >= 0 && ly + th / 2 <= H && !hit(lx, ly));
+        if (spot) {                                         // no room: the dot alone, never an overlap
+          labels.push({ x: spot[0], y: spot[1] - th / 2, w: tw, h: th });
+          mctx.fillText(o.name, spot[0], spot[1]);
         }
       }
       mctx.globalAlpha = 1;
@@ -652,8 +661,9 @@
 
   // The newest Grok call that looked at something (core/grok_trace.py via GET /grok/trace): the images
   // actually sent, the request's text (a hint list, a question) and the raw reply, model and latency.
-  const LOOKS = new Set(["naming", "verify", "pick", "look", "look_room", "recall", "recall_room", "check", "refind", "confirm", "is_a"]);
+  const LOOKS = new Set(["naming", "verify", "pick", "pick_sheet", "describe", "look", "look_room", "recall", "recall_room", "check", "refind", "confirm", "is_a"]);
   const PURPOSE = { naming: "naming a new object", verify: "is it one of these?", pick: "finding an object",
+    pick_sheet: "second look: close-ups", describe: "describing the spot",
     look: "looking at the table", look_room: "looking at the room", recall: "remembering the table",
     recall_room: "remembering the room", check: "checking the tracker", refind: "re-finding an object",
     confirm: "same object?", is_a: "is it that kind of thing?" };
@@ -664,7 +674,7 @@
     try {
       const d = JSON.parse(raw.replace(/^```(?:json)?\s*|```$/g, ""));
       const keep = {};
-      for (const k of ["object", "name", "match", "answer", "seen", "mark", "same", "confidence", "also"]) if (k in d) keep[k] = d[k];
+      for (const k of ["object", "name", "label", "match", "answer", "seen", "mark", "same", "confidence", "also"]) if (k in d) keep[k] = d[k];
       return JSON.stringify(Object.keys(keep).length ? keep : d).replace(/,"/g, ', "').replace(/":/g, '": ');
     } catch (e) {
       if (raw) return raw;
@@ -672,12 +682,46 @@
     }
   }
 
+  // What the panel shows (the rig makes a verify call every ~2 s while a handoff is open, and the trace ring
+  // holds 30 calls, so the newest call is rarely the interesting one):
+  //  1. the latest answer's own calls (a look, pick or pick sheet from up to ANSWER_BEFORE_S before it), held
+  //     for HOLD_S after the answer arrives; the pick sheet first, then pick, then look;
+  //  2. else the newest call that isn't a verify; a verify only when the shown call is VERIFY_EVERY_S old.
+  const ANSWER_CALLS = ["pick_sheet", "pick", "describe", "look_room", "look", "recall_room", "recall"];
+  const HOLD_S = 25, ANSWER_BEFORE_S = 20, VERIFY_EVERY_S = 10;
+  let held = null, heldUntil = 0, heldFor = null, shownAt = 0;
+
+  function latestAnswerT() {
+    const a = answersToShow()[0];
+    return a && a.t ? a.t : null;
+  }
+
   async function pollEyes() {
     let calls;
-    try { calls = await getJSON("/grok/trace?limit=10"); } catch (e) { return; }
-    const c = (calls || []).find((x) => LOOKS.has(x.purpose) && x.images && x.images.length);
+    try { calls = await getJSON("/grok/trace?limit=30"); } catch (e) { return; }
+    calls = (calls || []).filter((x) => LOOKS.has(x.purpose) && x.images && x.images.length);
+    const at = latestAnswerT();
+    if (at && at !== heldFor) {                               // a new answer: find the calls it was built on
+      const mine = calls.filter((x) => x.t >= at - ANSWER_BEFORE_S && x.t <= at + 2 && ANSWER_CALLS.indexOf(x.purpose) >= 0);
+      mine.sort((a, b) => ANSWER_CALLS.indexOf(a.purpose) - ANSWER_CALLS.indexOf(b.purpose) || b.t - a.t);
+      heldFor = at;
+      if (mine.length) { held = mine[0]; heldUntil = Date.now() + HOLD_S * 1000; }
+    }
+    let c = null;
+    if (held && Date.now() < heldUntil) c = held;
+    else {
+      c = calls.find((x) => x.purpose !== "verify");
+      const v = calls.find((x) => x.purpose === "verify");
+      if (v && (!c || v.t > c.t) && Date.now() - shownAt > VERIFY_EVERY_S * 1000) c = v;
+      if (!c && eyesId !== null) return;                      // keep what is shown
+    }
     if (!c || c.id === eyesId) return;
+    showCall(c);
+  }
+
+  function showCall(c) {
     eyesId = c.id;
+    shownAt = Date.now();
     $("eyes").hidden = false;
     document.querySelector(".talk").classList.add("has-eyes");
     $("eyes-meta").textContent = (PURPOSE[c.purpose] || c.purpose) + " · " + (c.model || "grok") + " · " +
@@ -693,6 +737,28 @@
     }
     $("eyes-req").textContent = clean(c.request);
     $("eyes-reply").textContent = clean(replyText(c));
+    if (c.purpose === "pick_sheet" && c.images.length) showSheet(c);
+  }
+
+  // A pick sheet (voice/visual.py pick_sheet: a grid of numbered close-ups) is too dense for the small panel:
+  // it takes over the coffee-table close-up for SHEET_S, large enough to read its numbers, with Grok's pick.
+  const SHEET_S = 20;
+  let sheetTimer = null;
+  function showSheet(c) {
+    const box = $("sheet");
+    $("sheet-img").src = "/grok/img/" + c.images[0];
+    let pick = "";
+    try {
+      const d = JSON.parse(String(c.reply || "").replace(/^```(?:json)?\s*|```$/g, ""));
+      const what = d.label || d.name;                       // WS5's PICK_SCHEMA: mark, label, confidence
+      if (d.mark != null) pick = "Grok picked " + d.mark + (what ? " · " + what : "") +
+        (d.confidence != null ? " · " + Number(d.confidence).toFixed(2) : "");
+      else pick = "Grok: none of these";
+    } catch (e) { pick = c.ok === false ? "no reply (offline)" : ""; }
+    $("sheet-pick").textContent = clean(pick);
+    box.hidden = false;
+    clearTimeout(sheetTimer);
+    sheetTimer = setTimeout(() => { box.hidden = true; }, SHEET_S * 1000);
   }
 
   // ------------------------------------------------------------------ live state
