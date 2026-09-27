@@ -254,6 +254,8 @@ stt:
   max_s: 6
   silence_ms: 700             # this long below the VAD's off threshold after speech ends the question
   no_speech_s: 4              # give up if nobody starts talking
+  min_speech_ms: 250          # always-on mic: less speech than this (a cough, a clack) is dropped before Whisper,
+                              # which writes "you" or "Thank you." for it
   vad_threshold: 0.5          # Silero speech probability; off threshold is this - 0.15
   input_device: null          # sounddevice device index or name; null = default mic
 
@@ -280,9 +282,13 @@ n8n:
 
 listen:
   mode: always                # always: answer what's meant for the rig | wake: only "room, ..." | click: clicker only
-  wake_words: [room, ask the room]   # also lets overheard speech reset or ask open questions ("room, reset",
-                              # "ask the room, reset"; the wake word must open a reset). Room demo: see
-                              # config.local.yaml.example
+  wake_words: [room, ask the room]   # said to the rig only where it opens the sentence, or a clause right before
+                              # the question ("okay room, what...", "..., room, where..."); never "in the room".
+                              # Also lets overheard speech reset or ask open questions ("room, reset"; the wake
+                              # word must open a reset). Not mishearings: "rum", "broom" would wake it anywhere
+  greeting_misheard: [bro, drew, broom, groom]   # how Whisper writes "room" after hey/okay: wakes the rig only as
+                              # a whole greeting ("Hey, bro!"); "bro" is common in chatter
+  greeting_merged: [goodroom, okroom, okayroom, heyroom]   # a greeting Whisper wrote as one word ("Goodroom.")
   chime: true                 # a chime when the rig listens for a question ("Hey Room!" alone, a clicker press),
                               # a short tone when "Room, <question>" is accepted (voice/cues.py)
   indicator:                  # the listening light, on while the rig listens for a question

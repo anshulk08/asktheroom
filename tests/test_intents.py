@@ -113,7 +113,11 @@ def test_empty_text_is_other():
 TEACH_CASES = [
     ("This is my charger.", "charger"),
     ("this is my phone charger", "phone charger"),
-    ("Okay, this is the blue mug", "blue mug"),
+    ("Okay, this is my blue mug", "blue mug"),
+    ("Call this the blue mug", "blue mug"),
+    ("This is my charger for the laptop", "charger"),   # Whisper runs sentences on
+    ("This is my name tag", "name tag"),
+    ("Call this my hot dog", "hot dog"),
     ("Remember this as my headphones", "headphones"),
     ("remember this as Grandma's ring", "grandmas ring"),
     ("Call this my lucky coin", "lucky coin"),
@@ -136,6 +140,9 @@ def test_teach_intent(text, name):
     "That's my point.", "That's the problem.", "That's the thing.", "This is the best!",
     "Do you remember it as bigger?", "Call it even.", "That's a lot of stuff.", "It is my keys.",
     "I can't remember what to call this.", "Is this my charger?",
+    # rig, Sat 26 Sep: chatter that taught names
+    "This is the best news.", "This is the official edition.", "That's my name.", "This is the best way to do this.",
+    "This is the process to protect the hospital. This process for the CS, where you might be.",
 ])
 def test_everyday_phrases_do_not_teach(text):
     assert parse(text, CFG).kind != "TEACH", text
@@ -251,6 +258,7 @@ def test_teaching_a_person_is_recognised():
     from voice.intents import names_a_person
     assert names_a_person(parse("This is my wife Karen", CFG).name)
     assert names_a_person("friend") and not names_a_person("travel charger")
+    assert names_a_person("crazy 14th friend") and not names_a_person("hot dog")
     assert not names_a_person("friends mug", "this is my friend's mug")
 
 

@@ -56,6 +56,7 @@ CONTEXT = 64                # samples of the previous chunk Silero v5 expects in
 PREROLL_S = 0.3             # kept before the first speech block (soft consonants start early)
 TAIL_S = 0.2                # kept after the last speech block
 MIN_WHISPER_S = 1.1         # whisper.cpp drops input under 1 s; pad short clips with silence
+FILLER_WORDS = {"you", "thank", "thanks", "so", "very", "much"}   # filler_only: nobody asks the rig this
 CTX_PER_S = 50              # encoder positions per second of audio (1500 = 30 s)
 CTX_PAD = 32                # slack: at +16 a clip ending in 1.3 s of digital silence came out as "Where"
 VAD_PATH = ROOT / "models" / "silero_vad.onnx"
@@ -273,10 +274,11 @@ def initial_prompt(cfg: dict, synonyms: bool = False) -> str:
         names = list(dict.fromkeys(names))
     if not names:
         return ""
-    # The wake word leads, as it is spoken ("Room, where ..."): on its own, a one-word "Room!" came back
-    # as "Hit the Arduino table." from the ceiling mic (rig, Sat 26 Sep); primed, Whisper expects it.
-    wake = ((cfg.get("listen") or {}).get("wake_words") or ["room"])[0]
-    return f"{str(wake).strip().capitalize()}, where are my {', '.join(names)}?"
+    # The greetings lead, as they are spoken: on its own, a one-word "Room!" came back as "Hit the Arduino
+    # table." from the ceiling mic, and "Hey room" as "Hey, bro!" or "Hey Drew!" (rig, Sat 26 Sep). The wake
+    # word only opens sentences here, so Whisper isn't primed to write "room" mid-sentence.
+    wake = str(((cfg.get("listen") or {}).get("wake_words") or ["room"])[0]).strip().capitalize()
+    return f"Hey {wake}! Okay {wake}. {wake}, where are my {', '.join(names)}?"
 
 
 def audio_ctx_for(n_samples: int, rate: int = RATE) -> int:
@@ -287,6 +289,12 @@ def audio_ctx_for(n_samples: int, rate: int = RATE) -> int:
 def clean(text: str) -> str:
     """Drop Whisper's non-speech tags and extra spaces."""
     return " ".join(TAG.sub(" ", text or "").split())
+
+
+def filler_only(text: str) -> bool:
+    """What Whisper writes for noise: 'you' (12 times on the rig, Sat 26 Sep), 'Thank you.' (6), 'Thanks!'."""
+    words = re.findall(r"[a-z]+", text.lower())
+    return bool(words) and set(words) <= FILLER_WORDS and bool({"you", "thanks"} & set(words))
 
 
 class Backend(Protocol):
@@ -567,6 +575,7 @@ class STT:
         self.silence_ms = float(s.get("silence_ms", 700))
         self.threshold = float(s.get("vad_threshold", 0.5))
         self.no_speech_s = float(s.get("no_speech_s", 4))
+        self.min_speech_s = float(s.get("min_speech_ms", 250)) / 1000   # always-on mic: a cough, a clack
         ctx = s.get("audio_ctx", "sized")
         self.audio_ctx = "sized" if ctx in (None, "", "sized") else int(ctx)   # int: fixed (0 = full 30 s)
         drop = s.get("end_drop_db")
@@ -615,11 +624,12 @@ class STT:
 
     def record_until_silence(self, max_s: Optional[float] = None,
                              silence_ms: Optional[float] = None,
-                             no_speech_s: Optional[float] = None) -> np.ndarray:
+                             no_speech_s: Optional[float] = None, min_speech_s: float = 0.0) -> np.ndarray:
         """Record 16 kHz mono float32 until silence_ms of non-speech follows speech, max_s passes,
         a clicker press, or no_speech_s with no speech at all. Returns the speech plus a little
-        padding, or an empty array if nobody spoke. If the TTS starts speaking while this records (a care
-        notice, a dashboard or phone answer), the recording ends and the clip is discarded (empty array,
+        padding, or an empty array if nobody spoke (or for under min_speech_s, unless a click ended it).
+        If the TTS starts speaking while this records (a care notice, a dashboard or phone answer), the
+        recording ends and the clip is discarded (empty array,
         last_stop 'tts'): the mic would hear the rig and answer itself. Speech already playing when the
         recording starts (a clicked answer still cutting off) doesn't count until it has stopped once."""
         max_s = self.max_s if max_s is None else max_s
@@ -677,13 +687,15 @@ class STT:
                     was_quiet = True
         finally:
             src.close()
+        note = ""
         if stop == "tts":
-            first = None                        # the rig talking over it: nothing here is a question
+            first, note = None, " (the rig started speaking: discarded)"   # nothing here is a question
+        elif first is not None and stop != "click" and (last - first + 1) * block_s < min_speech_s:
+            first, note = None, f" (under {min_speech_s * 1000:.0f} ms of speech: discarded)"
         self.last_ms["record"] = 1000 * (time.monotonic() - t0)
         self.last_speech = first is not None
         self.last_stop = stop
-        log.info("recorded %.2f s, stopped by %s, speech=%s%s", len(blocks) * block_s, stop, self.last_speech,
-                 " (the rig started speaking: discarded)" if stop == "tts" else "")
+        log.info("recorded %.2f s, stopped by %s, speech=%s%s", len(blocks) * block_s, stop, self.last_speech, note)
         if first is None:
             return np.zeros(0, dtype=np.float32)
         a = max(0, first - int(PREROLL_S / block_s))
@@ -719,8 +731,14 @@ class STT:
 
     def hear(self, idle_s: float = 8.0) -> str:
         """Always-on mic: wait up to idle_s for someone to speak, then record until they stop and
-        transcribe. The audio lives only in memory and is dropped here. '' if nobody spoke."""
-        return self.transcribe(self.record_until_silence(no_speech_s=idle_s))
+        transcribe. The audio lives only in memory and is dropped here. '' if nobody spoke, for under
+        stt.min_speech_ms of speech, or for Whisper's fillers ('you', 'Thank you.': filler_only; a clicked
+        "thank you" still acknowledges a care notice)."""
+        text = self.transcribe(self.record_until_silence(no_speech_s=idle_s, min_speech_s=self.min_speech_s))
+        if filler_only(text):
+            log.info("dropped Whisper's filler for noise")
+            return ""
+        return text
 
 
 def main(argv=None) -> int:

@@ -4,6 +4,7 @@ import time
 import types
 
 import numpy as np
+import pytest
 
 from core.config import load_config
 from tests.test_main import FakeClicker, FakeSTT, always_on, cal_path, make_room, stop_voice, wait_for  # noqa: F401 (fixture)
@@ -141,6 +142,18 @@ def test_room_and_the_question_in_one_breath_gets_the_short_tone(tmp_path, cal_p
     stop_voice(room, t)
     assert log.events[0] == ("cue", len(cues.chime_pcm("ack")))
     assert ("listen", None) not in log.events and not any(e[0] == "light" for e in log.events)
+
+
+@pytest.mark.parametrize("text", ["where did I leave my wallet in the room?", "did anyone move my wallet in this room"])
+def test_room_later_in_the_sentence_gets_no_short_tone(tmp_path, cal_path, text):
+    """The ack chime uses the answering rule (voice.understand.has_wake_word): "room" anywhere used to chime."""
+    stt = FakeSTT("", overheard=[text])
+    room, _ = make_room(tmp_path, cal_path, stt=stt, clicker=FakeClicker())
+    log = CueLog(room)
+    t = always_on(room)
+    assert wait_for(lambda: room.tts.said)
+    stop_voice(room, t)
+    assert not any(e[0] == "cue" for e in log.events) and "wallet" in room.tts.said[0].lower()
 
 
 def test_the_light_goes_off_when_the_mic_fails(tmp_path, cal_path):

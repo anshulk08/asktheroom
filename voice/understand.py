@@ -36,7 +36,10 @@ Qwen offline). Qwen isn't installed on the Jetson; qwen and auto need scripts/qw
 
 Overheard: decide "was that for me?" without the model, then read it like an asked question.
   - A whole teaching sentence ("this is my vaseline") is for the rig, whatever else is true below.
-  - listen.mode wake: only speech with the wake word counts (a loud hall defeats the rest).
+  - listen.mode wake: only speech with the wake word counts (a loud hall defeats the rest), teaching too.
+    The wake word counts where it is said to the rig: opening the sentence or a clause just before the
+    question ("okay room, what...", "that's there, room, where..."), never "in the room" (has_wake_word).
+    A bare "Room!" (bare_wake) makes the next sentence a question for the rig (after_wake).
   - Keyword gate: no object, command word or wake word ("we built this in twenty hours") -> IGNORE.
   - Addressed: the wake word ("room, ...") or a question/request opening ("where", "did", "can",
     "show", after fillers like "okay so"). "I'll grab my keys on the way out" and "put the wallet
@@ -70,8 +73,8 @@ import requests
 from core.config import load_config
 from core.types import INTENT_KINDS, Intent
 from net import call_with_deadline
-from voice.intents import (GENERAL, YOU_REQUEST, _spoken_name, _vocab, firm_question, fuzzy_match, matched_exactly, names_a_person,
-                           normalize, parse)
+from voice.intents import (FILLER, GENERAL, YOU_REQUEST, _spoken_name, _vocab, firm_question, fuzzy_match, matched_exactly,
+                           names_a_person, normalize, parse)
 
 log = logging.getLogger(__name__)
 
@@ -123,9 +126,95 @@ def system_prompt(cfg: dict) -> str:
     return SYSTEM.format(objects=", ".join(_objects(cfg)))
 
 
+# "Room" said to the rig opens the sentence ("okay room, what do you see") or starts a clause right before
+# the question ("that's there, room, where is the wallet"). Anywhere else it is the room people are in: on
+# the rig (Sat 26 Sep) 15 of 38 answered sentences only had "room" in them ("I'm in the room", "try this
+# room", "this is Ask the Room, speaking...").
+ASKS = QUESTION_START | {"how", "hows", "why", "which", "whose", "do", "does", "whered"}
+NOT_AFTER = {"the", "this", "that", "a", "an", "in", "my", "our", "your", "his", "her", "their", "these",
+             "those", "of", "to", "into", "whole", "same"}
+GREETINGS = {"hey", "hi", "hello", "ok", "okay", "yo"}
+OPENERS = FILLERS | GREETINGS | FILLER  # may come before a wake word that opens the utterance ("uhm, hello room")
+CLAUSE = GREETINGS | {"um", "uh", "umm", "uhm", "so", "oh", "well", "alright"}   # or opens a clause mid-sentence
+WAKE_FILLER = {"hey", "hi", "hello", "ok", "okay", "yo", "please", "um", "uh"}   # words allowed around a bare wake word
+MISHEARD_AFTER = {"hey", "ok", "okay"}  # the greetings Whisper misheard "room" after ("yo bro", "hi bro" are chatter)
+# How Whisper wrote "room" after "hey" / "okay" from the ceiling mic (1 greeting in 4 missed): the wake word
+# only in a bare greeting ("Hey, bro!"), since "bro" is all over the chatter; the merged ones stand alone.
+GREETING_MISHEARD = ["bro", "drew", "broom", "groom"]
+GREETING_MERGED = ["goodroom", "okroom", "okayroom", "heyroom"]
+
+
+def _words(text: str) -> list[tuple[str, bool]]:
+    """(word, opens a clause) for each word, fillers kept: the wake-word rules need "hey" and the commas
+    that normalize() drops."""
+    out, cut = [], True
+    t = re.sub(r"\s-+\s", " , ", re.sub(r"['’`]", "", text.lower()))    # a spaced dash breaks; "play-room" doesn't
+    for m in re.finditer(r"[a-z0-9]+|[.,!?;:\u2013\u2014\u2026]", t):
+        if m.group(0)[0].isalnum():
+            out.append((m.group(0), cut))
+            cut = False
+        else:
+            cut = True
+    return out
+
+
+def _phrases(cfg: dict) -> list[list[str]]:
+    return [w.split() for w in wake_words(cfg) if w]
+
+
+def _listen_list(cfg: dict, key: str, default: list[str]) -> set[str]:
+    return {normalize(w) for w in (cfg.get("listen") or {}).get(key, default) or []}
+
+
 def has_wake_word(text: str, cfg: dict) -> bool:
-    t = f" {normalize(text)} "
-    return any(f" {w} " in t for w in wake_words(cfg))
+    """The wake word said to the rig: it opens the utterance (after fillers like "hey", "okay"), or opens a
+    clause (after a comma or a filler) with a question word right after it. Never after the/this/a/in/my.
+    Answering and the ack chime (main._addressed) both use this."""
+    words = _words(text)
+    ws = [w for w, _ in words]
+    for p in _phrases(cfg):
+        for i in range(len(ws) - len(p) + 1):
+            if ws[i:i + len(p)] != p:
+                continue
+            if all(w in OPENERS for w in ws[:i]):
+                return True
+            j = i + len(p)
+            if (j < len(ws) and ws[j] in ASKS and ws[i - 1] not in NOT_AFTER
+                    and (words[i][1] or ws[i - 1] in CLAUSE)):
+                return True
+    return False
+
+
+def bare_wake(text: str, cfg: dict) -> bool:
+    """The wake word on its own ("Room!", "hey room", "ask the room"): people pause after it, so the VAD ends
+    the utterance before the question. Also:
+      - a misheard greeting (listen.greeting_misheard after hey/okay: "Hey, bro!", "Hey Drew!"), or a merged
+        one (listen.greeting_merged: "Goodroom."), only as the whole utterance;
+      - a greeting that ends a longer clip ("Really? Okay room."): speech merged into the clip (about 1 in 5
+        ran to stt.max_s on the rig) must not hide it."""
+    raw = _words(text)
+    lo, hi = 0, len(raw)
+    while lo < hi and raw[lo][0] in WAKE_FILLER:
+        lo += 1
+    while hi > lo and raw[hi - 1][0] in WAKE_FILLER:
+        hi -= 1
+    words = raw[lo:hi]
+    ws = [w for w, _ in words]
+    wake = set(wake_words(cfg))
+    if ws and (" ".join(ws) in wake or all(w in wake for w in ws)):   # "hey ask the room um", "room room"
+        return True
+    merged = _listen_list(cfg, "greeting_merged", GREETING_MERGED)
+    misheard = _listen_list(cfg, "greeting_misheard", GREETING_MISHEARD)
+    if len(ws) == 1 and (ws[0] in merged or (ws[0] in misheard and lo and raw[lo - 1][0] in MISHEARD_AFTER)):
+        return True
+    # "... Okay room." / "... Goodroom.": the greeting opens the last clause of a longer clip
+    if ws and ws[-1] in merged and words[-1][1]:
+        return True
+    for p in _phrases(cfg):
+        i = len(ws) - len(p)
+        if i >= 1 and ws[i:] == p and ws[i - 1] in GREETINGS and words[i - 1][1]:
+            return True
+    return False
 
 
 def names_object(text: str, cfg: dict) -> bool:
@@ -377,6 +466,27 @@ class Understander:
         with self._lock:
             return self._screen(text)
 
+    def after_wake(self, text: str) -> bool:
+        """The question after a bare wake word ("Room!" ... "what do you see?"): it needs no wake word of its
+        own (listen.mode wake), but it must be a question, name a thing ("the laptop charging") or teach one.
+        Chatter after a misheard greeting isn't: a WHERE needs something to look for, and "can you put your
+        phone away", "are you guys ready" are said to people. RESET / RECAL still need the wake word."""
+        with self._lock:
+            if not text.strip():
+                return False
+            rules = parse(text, self.cfg, aliases=self._taught())
+            if rules.kind == "TEACH":
+                return not names_a_person(rules.name, text)
+            if rules.kind in ACTS:
+                return opens_with_wake_word(text, self.cfg)
+            if rules.kind == "WHERE" and rules.obj is None and rules.name is None:
+                return self._followup(text, rules)       # "where are you guys from": nothing to look for
+            t = normalize(text)
+            if (YOU_REQUEST.search(t) or re.search(r"\byou (?:guys|all|two)\b|\byall\b", t)):
+                return False
+            return bool(addressed(text, self.cfg) or rules.obj is not None or rules.name is not None
+                        or names_object(text, self.cfg) or _spoken_name(normalize(text)) is not None)
+
     def certain(self, text: str) -> bool:
         """Overheard speech that passed screen() and that the model can't turn into IGNORE: the wake word,
         an object named as such (or a taught name), or a reading the rules decide alone. Otherwise the
@@ -413,8 +523,9 @@ class Understander:
         woke = has_wake_word(text, self.cfg)
         if rules.kind == "TEACH":              # "this is my vaseline": only a whole teaching sentence parses so
             # (idioms like "call it a day" don't), and it has no question opening or known object for the
-            # gate; "this is my wife Karen" introduces a person
-            return woke or not names_a_person(rules.name, text)
+            # gate; "this is my wife Karen" introduces a person. listen.mode wake: "room, this is my mug" only
+            # ("this is my crazy 14th friend" was taught on the rig)
+            return woke or (not self.wake_only and not names_a_person(rules.name, text))
         if (not text.strip() or not (gate(text, self.cfg) or self._followup(text, rules))
                 or not addressed(text, self.cfg) or (self.wake_only and not woke)):
             return False

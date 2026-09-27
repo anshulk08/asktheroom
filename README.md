@@ -131,7 +131,7 @@ What differs per device goes in a gitignored `config.local.yaml` next to it, mer
 | `table`, `servo_limits`, `actuator`, `laser_*` | Table size and markers, pan-tilt driver and limits |
 | `stt` | Whisper backend and VAD settings |
 | `understand` | Model on/off, `backend: grok \| qwen \| auto` (default grok; auto: Grok online, Qwen offline), llama-server URL and model (qwen), intent timeout 1.5 s |
-| `listen` | `mode: always \| wake \| click` (default `always`), `wake_words: [room]`, `idle_s`, `echo_tail_s` |
+| `listen` | `mode: always \| wake \| click` (default `always`), `wake_words: [room, ask the room]` (counted only where they open the sentence, or a clause before the question), `greeting_misheard`, `greeting_merged`, `idle_s`, `echo_tail_s` |
 | `n8n` | `webhook_url` for the question log (empty turns it off), shared `token` |
 | `demo` | `thinking_cue_s` (a short "Let me look." when an answer takes longer than this, default 1 s; 0 = off), `thinking_phrases`, `hold_notices` (true: reminders and the morning report never speak unasked) |
 | `sms` | `whitelist` of E.164 numbers allowed to text questions |
