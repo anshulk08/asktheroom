@@ -492,9 +492,14 @@ class HintWorld(StubWorld):
 REMOTE = {"name": "remote control", "also": ["remote"], "confidence": 0.7}
 
 
-def _confirm_one(rm):
-    rm.step(frame(1))
-    rm.step(frame(2))
+def _confirm_one(rm, box_full=(1700, 200, 1740, 240)):
+    """Two visits of the thing's zone; the first frame is bright where the thing is, so the second visit
+    sees the change: it arrived (only arrivals are sent to Grok while a handoff is open, spec 0010 P0-3)."""
+    f1, f2 = frame(1), frame(2)
+    x1, y1, x2, y2 = box_full
+    f1.img[y1:y2, x1:x2] = 255
+    rm.step(f1)
+    rm.step(f2)
 
 
 def test_room_clutter_is_not_named_while_no_handoff_is_possible():
@@ -503,6 +508,8 @@ def test_room_clutter_is_not_named_while_no_handoff_is_possible():
     rm, _, _ = make(props=[Proposal((100, 100, 140, 140), 0.5)], namer=namer)
     rm.world = HintWorld([])
     _confirm_one(rm)
+    [th] = things(rm)
+    assert th.confirmed and th.changed
     assert namer.pending() == 0 and not any(t.name_asked for t in rm.tracker.tracks())
     rm.world.hints = [REMOTE]                                # something just left the table
     rm.step(frame(3))
@@ -612,7 +619,7 @@ def test_a_candidate_is_sent_boxed_in_red_with_its_surroundings():
     big = rect_zone("wall", 0, 0, 1000, 500)
     rm, _, _ = make(zones=(big,), props=[Proposal((300, 200, 320, 210), 0.5)], namer=namer, max_crop_px=1000)
     rm.world = HintWorld([REMOTE])
-    _confirm_one(rm)
+    _confirm_one(rm, box_full=(300, 200, 320, 210))
     assert namer.step(0.0)
     img = asked[0]
     assert min(img.shape[:2]) >= MARK_MIN_SIDE                       # a 20x10 box gets a 240 px patch
