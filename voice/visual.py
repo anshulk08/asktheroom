@@ -170,6 +170,19 @@ Rules:
 - confidence: 0 to 1; below 0.5 if you aren't sure.
 Reply with the JSON object only."""
 
+# The second look when the marked frame gave no pick: every marked thing as its own numbered close-up. On
+# the rig (27 Sep 02:56) "where are the batteries?" got no mark among ~14 on the whole table view, then a
+# confident "I don't see any batteries." from the room look; 40 s later the same pick found them.
+PICK_SHEET_SYSTEM = """You find one object among the things on a tabletop. The image is a grid of numbered close-ups, one per object a tracker follows, cut from a camera above the table (it may look down at an angle, so a close-up can also show a bit of what is around the object). Your only job is to say which numbered close-up shows the object the person asks about and what that object is.
+
+Rules:
+- mark: the number of the close-up whose main object is the one asked about; null if none shows it.
+- label: what the object in that close-up is, the way a person would say it: 1 to 4 plain words, colour first if it helps ("red mug", "phone charger"). Null if mark is null. For any medicine container say only "pill bottle".
+- confidence: 0 to 1; below 0.5 if you aren't sure.
+Reply with the JSON object only."""
+SHEET_TILE = 192                 # px per close-up in the pick sheet
+SHEET_MAX = 20                   # close-ups per sheet (5 x 4)
+
 PICK_SCHEMA = {
     "type": "object", "additionalProperties": False, "required": ["mark", "label", "confidence"],
     "properties": {"mark": {"anyOf": [{"type": "null"}, {"type": "integer"}]},
@@ -392,6 +405,33 @@ def shown_names(names: dict, state: Optional[dict]) -> dict:
     except Exception:
         things = {}
     return {n: v or things.get(n) or NEW_THING for n, v in names.items()}
+
+
+def pick_sheet(img: np.ndarray, boxes: list, tile: int = SHEET_TILE, cols: int = 5) -> np.ndarray:
+    """A grid of close-ups, one per px box (grown by 40%, at least 48 px), each fitted into a tile x tile
+    cell and numbered from 1 in its corner, like draw_marks' tags."""
+    import cv2
+    h, w = img.shape[:2]
+    rows = max(1, -(-len(boxes) // cols))
+    sheet = np.full((rows * tile, min(cols, max(1, len(boxes))) * tile, 3), 40, np.uint8)
+    for i, (x1, y1, x2, y2) in enumerate(boxes):
+        bw, bh = max(48.0, (x2 - x1) * 1.4), max(48.0, (y2 - y1) * 1.4)
+        cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+        a, b = int(max(0, cx - bw / 2)), int(max(0, cy - bh / 2))
+        c, d = int(min(w, cx + bw / 2)), int(min(h, cy + bh / 2))
+        crop = img[b:d, a:c] if d > b and c > a else np.zeros((8, 8, 3), np.uint8)
+        s = (tile - 8) / max(crop.shape[:2])
+        crop = cv2.resize(crop, (max(1, round(crop.shape[1] * s)), max(1, round(crop.shape[0] * s))),
+                          interpolation=cv2.INTER_AREA if s < 1 else cv2.INTER_CUBIC)
+        r, k = divmod(i, cols)
+        oy, ox = r * tile + (tile - crop.shape[0]) // 2, k * tile + (tile - crop.shape[1]) // 2
+        sheet[oy:oy + crop.shape[0], ox:ox + crop.shape[1]] = crop
+        label = str(i + 1)
+        (tw, th), base = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
+        cv2.rectangle(sheet, (k * tile, r * tile), (k * tile + tw + 8, r * tile + th + base + 6), (0, 255, 255), -1)
+        cv2.putText(sheet, label, (k * tile + 4, r * tile + th + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2,
+                    cv2.LINE_AA)
+    return sheet
 
 
 def _clock(wall: float) -> str:
@@ -880,6 +920,15 @@ class VisualQA:
             return Answer("Sorry, I couldn't look at the table just now.")
         m, conf = d.get("mark"), _conf(d)
         picked = isinstance(m, int) and not isinstance(m, bool) and 1 <= m <= len(ob.marks)
+        if not picked or conf < self.c.abstain_below:
+            # Before any "I don't see it": the marked things as close-ups, where a small one is ~4x bigger
+            d2 = self._pick_sheet(ob, shown, said, question)
+            m2, conf2 = d2.get("mark"), _conf(d2)
+            if (isinstance(m2, int) and not isinstance(m2, bool) and 1 <= m2 <= min(len(ob.marks), SHEET_MAX)
+                    and conf2 >= max(self.c.abstain_below, BIND_CONF)):     # a second chance, so a firmer bar
+                log.info("visual pick: the close-ups found %s (%.2f) after the marked frame gave %s", said, conf2,
+                         m if picked else "none")
+                d, m, conf, picked = d2, m2, conf2, True
         if room and (not picked or conf < self.c.abstain_below):
             return self.look_room(question)
         if not picked:
@@ -901,20 +950,38 @@ class VisualQA:
                     names[ent] = said
             except Exception:
                 log.exception("bind_alias failed")
-        if ent.startswith("thing:") and not names.get(ent):
-            if label and label != said.lower():
-                return self._verified(f"I think your {said} is this {label}.", mk)
-            return self._verified(f"I think this is your {said}.", mk)
         from voice.answers import answer
         try:
-            text = answer(Intent("WHERE", None, "", name=ent), self.world, self.events, self.cfg).text
+            where = answer(Intent("WHERE", None, "", name=ent), self.world, self.events, self.cfg)
         except Exception:
             log.exception("pick: WHERE template failed")
-            text = ""
-        known = names.get(ent) or ""
-        if known.lower() != said.lower():               # Grok picked something the rig knows by another name
-            text = f"I think your {said} is what I call your {known}. {text}".strip()
-        return self._verified(text or f"I think this is your {said}.", mk)
+            where = Answer("")
+        if ent.startswith("thing:") and not names.get(ent):
+            text = f"I think your {said} is this {label}." if label and label != said.lower() else \
+                f"I think this is your {said}."
+        else:
+            text = where.text
+            known = names.get(ent) or ""
+            if known.lower() != said.lower():           # Grok picked something the rig knows by another name
+                text = f"I think your {said} is what I call your {known}. {text}".strip()
+        out = self._verified(text or f"I think this is your {said}.", mk)
+        out.evidence, out.obj = list(where.evidence or []), ent    # the picked thing's receipt
+        return out
+
+    def _pick_sheet(self, ob, shown: dict, said: str, question: str) -> dict:
+        """The pick again on a sheet of the marked things' close-ups (the first SHEET_MAX marks); {} if the
+        call fails or the cap is reached."""
+        if self._capped():
+            return {}
+        marks = ob.marks[:SHEET_MAX]
+        sheet, _ = _jpeg(pick_sheet(ob.img, [mk.box_px for mk in marks]), self.c.look_px)
+        listed = ", ".join(f"{i} = {shown.get(mk.name) or NEW_THING}" for i, mk in enumerate(marks, 1))
+        parts: list = [("image", sheet), ("text", f"Close-ups: {listed}.\nFind: {said}\nQuestion: {question}")]
+        try:
+            return self._vlm(PICK_SHEET_SYSTEM, parts, PICK_SCHEMA)
+        except (ProviderError, NarrationError) as ex:
+            log.warning("pick (close-ups) failed: %s", ex)
+            return {}
 
     def _observe(self, question: str, intent: Optional[Intent]) -> Optional[Observation]:
         """One consistent observation for a question: the frame read once, the world state read once

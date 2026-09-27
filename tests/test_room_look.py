@@ -119,12 +119,12 @@ def test_a_zone_named_table_is_the_room(log):
 
 def test_where_is_an_unknown_thing_not_on_the_table_looks_in_the_whole_room(log):
     from tests.test_visual import pick_qa
-    from voice.visual import PICK_SYSTEM
+    from voice.visual import PICK_SHEET_SYSTEM, PICK_SYSTEM, ROOM_SYSTEM
     q, prov = pick_qa(log, mark=None)
     q.frames, q.room_zones = RoomFrames(), [("couch", "the couch")]
-    prov.replies = [pick_json(mark=None), room_reply("Your mug is on the couch.")]
+    prov.replies = [pick_json(mark=None), pick_json(mark=None), room_reply("Your mug is on the couch.")]
     a = ask(q, "room, where is my mug?")
-    assert [c.system == PICK_SYSTEM for c in prov.calls] == [True, False]      # the table first, then the room
+    assert [c.system for c in prov.calls] == [PICK_SYSTEM, PICK_SHEET_SYSTEM, ROOM_SYSTEM]   # table, close-ups, room
     assert a == Answer("Your mug is on the couch.")                             # spoken only: no laser off the table
 
 
@@ -148,9 +148,9 @@ def test_where_on_the_table_keeps_the_table_answer(log):
     from tests.test_visual import pick_qa
     q, prov = pick_qa(log, mark=None)
     q.frames, q.room_zones = RoomFrames(), [("couch", "the couch")]
-    prov.replies = [pick_json(mark=None), room_reply("Your mug is on the couch.")]
+    prov.replies = [pick_json(mark=None), pick_json(mark=None), room_reply("Your mug is on the couch.")]
     assert ask(q, "is my mug on the table?") == Answer("I can't see your mug on the table right now.")
-    assert len(prov.calls) == 1                                                 # the table pick only
+    assert len(prov.calls) == 2                                                 # the table pick and its close-ups
 
 
 # -- whole-room seeing (spec 0010): zone close-ups, honest absence, room frames for recall
@@ -444,3 +444,38 @@ def test_a_stale_room_place_is_checked_with_a_room_look(log):
 def test_a_fresh_room_place_stays_with_the_world_model(log):
     q, prov = room_placed(log, fresh=True)
     assert ask(q, "where are my glasses?") is None and prov.calls == []
+
+
+# -- one answer whatever the phrasing (rig 27 Sep 02:56: "where are the batteries?" got "I don't see any
+# batteries." from the room look after an empty pick; "where do you see the batteries?" then found them)
+
+@pytest.mark.parametrize("text", ["where are the batteries?", "where are my batteries?",
+                                  "where do you see the batteries?"])
+def test_a_missed_pick_is_retried_on_close_ups_before_any_i_dont_see_it(log, text):
+    from tests.test_visual import pick_qa
+    from voice.visual import PICK_SHEET_SYSTEM, PICK_SYSTEM
+    q, prov = pick_qa(log, mark=None)
+    q.frames, q.room_zones = RoomFrames(), [("couch", "the couch")]
+    prov.replies = [pick_json(mark=None), json.dumps({"mark": 2, "label": "battery pack", "confidence": 0.9}),
+                    room_reply("I don't see any batteries.")]
+    a = ask(q, text)
+    assert [c.system for c in prov.calls] == [PICK_SYSTEM, PICK_SHEET_SYSTEM], text     # never the room look
+    assert "batteries" in a.text.lower() and "don't see" not in a.text and a.point_at == "thing:3", a.text
+    assert a.obj == "thing:3"
+    sheet = decode(images(prov.calls[1])[0])
+    assert sheet.shape[1] >= 2 * 192 - 8                                         # one close-up per mark
+
+
+def test_a_picked_thing_answer_carries_its_receipt(tmp_path):
+    from core.events import EventLog
+    from core.types import Event, Frame
+    from tests.test_visual import pick_qa
+    lg = EventLog(":memory:", str(tmp_path / "snaps"))
+    lg.add(Event(t=0.0, wall=T0 - 300, obj="thing:3", type="APPEARED"),
+           Frame(0.0, T0 - 300, np.full((720, 1280, 3), 90, np.uint8), 1))
+    lg.flush()
+    q, prov = pick_qa(lg, mark=2, label="battery pack")      # unnamed: the pick binds it
+    a = ask(q, "where are my batteries?")
+    assert a.point_at == "thing:3" and a.obj == "thing:3"
+    assert [e["type"] for e in a.evidence] == ["APPEARED"]
+    lg.close()
