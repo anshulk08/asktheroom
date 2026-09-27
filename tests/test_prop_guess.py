@@ -72,3 +72,32 @@ def test_the_freshest_of_several_guessed_things_answers():
     assert ask(w).point_at == "thing:20"
     w.set("thing:20", status=Status.UNKNOWN)
     assert ask(w).point_at == "thing:15"
+
+
+def test_a_lost_prop_defers_to_a_fresher_grok_named_thing():
+    """Rig: the detector caught the real wallet once (prop 'wallet' seen, then LOST_TRACK), while the
+    same wallet lived on as a Grok-named thing carried to the side table."""
+    w = world()
+    w.set("wallet", status=Status.UNKNOWN, pos_cm=(80.0, 60.0), last_seen=NOW - 120, confidence=0.4)
+    w.entities["thing:15"].last_seen = NOW - 5
+    w.find_guess = lambda said: [("thing:15", 3.0)] if "wallet" in said else []
+    a = answer(Intent("WHERE", "wallet", "where is my wallet"), w, w.events, CFG, now=NOW)
+    assert "I think" in a.text and a.point_at == "thing:15" and "lost track" not in a.text
+
+
+def test_a_visible_or_hidden_prop_still_answers_itself():
+    w = world()
+    w.set("wallet", status=Status.UNDER, parent="notebook", pos_cm=(20.0, 20.0), last_seen=NOW - 30, confidence=0.85)
+    w.entities["thing:15"].last_seen = NOW
+    w.find_guess = lambda said: [("thing:15", 3.0)] if "wallet" in said else []
+    a = answer(Intent("WHERE", "wallet", "where is my wallet"), w, w.events, CFG, now=NOW)
+    assert a.point_at == "wallet" and "under the notebook" in a.text
+
+
+def test_an_older_grok_thing_does_not_override_a_more_recently_seen_prop():
+    w = world()
+    w.set("wallet", status=Status.UNKNOWN, pos_cm=(80.0, 60.0), last_seen=NOW - 10, confidence=0.4)
+    w.entities["thing:15"].last_seen = NOW - 300
+    w.find_guess = lambda said: [("thing:15", 3.0)] if "wallet" in said else []
+    a = answer(Intent("WHERE", "wallet", "where is my wallet"), w, w.events, CFG, now=NOW)
+    assert a.point_at == "wallet"
