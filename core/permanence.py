@@ -348,14 +348,18 @@ class Permanence:
             return added
 
     def enroll_dir(self, root: Optional[str] = None) -> int:
-        """Load <refs_dir>/<name>/*.jpg for every name there. Returns the views added."""
+        """Load <refs_dir>/<name>/*.jpg for every name there (X.ctx.jpg beside X.jpg is its context patch, what
+        Grok is shown). Returns the views added."""
         base = Path(root or self.c.refs_dir)
         base = base if base.is_absolute() else ROOT / base
         n = 0
         for d in sorted(p for p in base.glob("*") if p.is_dir()) if base.exists() else []:
             for f in sorted(d.glob("*.jpg")) + sorted(d.glob("*.png")):
+                if f.name.endswith(".ctx.jpg"):
+                    continue
                 img = cv2.imread(str(f))
-                n += bool(img is not None and self.add_ref(d.name, img))
+                ctx = cv2.imread(str(f.with_name(f.stem + ".ctx.jpg")))
+                n += bool(img is not None and self.add_ref(d.name, img, context=ctx))
         return n
 
     def teach(self, name: str, img: np.ndarray, box: BoxPx) -> bool:
@@ -1097,6 +1101,57 @@ def full_box(e, table, rect) -> Optional[BoxPx]:
 
 # ================================================================================ command line
 
+def save_ref(img: np.ndarray, box, name: str, refs_dir: str, stem: str) -> Path:
+    """Write a reference crop (and its context patch, X.ctx.jpg) under <refs_dir>/<name>/."""
+    d = Path(refs_dir)
+    d = (d if d.is_absolute() else ROOT / d) / name
+    d.mkdir(parents=True, exist_ok=True)
+    box = tuple(int(round(v)) for v in box)
+    out = d / f"{stem}_{box[0]}_{box[1]}.jpg"
+    cv2.imwrite(str(out), _crop(img, box, 0.0))
+    cv2.imwrite(str(out.with_name(out.stem + ".ctx.jpg")), ref_patch(img, box))
+    return out
+
+
+def enroll_auto(img: np.ndarray, names: Sequence[str], detect: Callable, ask: Callable, refs_dir: str, stem: str,
+                display: Optional[dict] = None, tiles: tuple = (3, 2), sheet: Optional[str] = None) -> dict:
+    """Enroll each name from one raw still without typing boxes: YOLOE proposes over the tiles, Grok picks the
+    name among numbered marks (per tile, most likely tile first by box count), and the pick is saved with its
+    context. Returns name -> saved path (or None). sheet: a contact sheet of the picks, to check by eye."""
+    c = PermanenceConfig(mode="registry", tiles=tiles, verify=False)
+    p = Permanence(c, detect, lambda im, bs: [np.ones(4, np.float32) / 2] * len(bs))
+    vs = p.views(img.shape[1], img.shape[0])
+    per_view = []
+    for i, vb in enumerate(vs):
+        _, cands = p._detect_view(img, vb)
+        per_view.append([k.box for k in cands if not k.in_person])
+    out, picks = {}, []
+    for name in names:
+        said = (display or {}).get(name, name.replace("_", " "))
+        out[name] = None
+        for i in sorted(range(len(vs)), key=lambda j: -len(per_view[j])):
+            boxes = per_view[i]
+            keep = distinct(boxes)[:12]
+            if not keep:
+                continue
+            x1, y1 = vs[i][0], vs[i][1]
+            local = [(boxes[j][0] - x1, boxes[j][1] - y1, boxes[j][2] - x1, boxes[j][3] - y1) for j in keep]
+            view_img = img[vs[i][1]:vs[i][3], vs[i][0]:vs[i][2]]
+            q, _ = question_image(view_img, local)
+            r = ask(said, [], q, len(local))
+            if r and 1 <= int(r[0]) <= len(local) and float(r[1]) >= 0.7:
+                box = boxes[keep[int(r[0]) - 1]]
+                out[name] = str(save_ref(img, box, name, refs_dir, stem))
+                picks.append((said, ref_patch(img, box)))
+                break
+    if sheet and picks:
+        h = 240
+        tiles_ = [cv2.putText(cv2.resize(pp, (round(pp.shape[1] * h / pp.shape[0]), h)), s_, (6, 22),
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2) for s_, pp in picks]
+        cv2.imwrite(sheet, np.hstack(tiles_))
+    return out
+
+
 def main(argv: Optional[list] = None) -> int:
     ap = argparse.ArgumentParser(description="Object permanence registry (spec 0011)")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -1105,19 +1160,31 @@ def main(argv: Optional[list] = None) -> int:
     en.add_argument("--image", required=True)
     en.add_argument("--box", type=float, nargs=4, required=True, metavar=("X1", "Y1", "X2", "Y2"))
     en.add_argument("--dir", default=None)
+    au = sub.add_parser("enroll-auto", help="enroll named props from a raw still: YOLOE proposes, Grok picks each")
+    au.add_argument("--image", required=True)
+    au.add_argument("--names", nargs="+", required=True)
+    au.add_argument("--dir", default=None)
+    au.add_argument("--sheet", default="data/registry/enrolled.jpg", help="contact sheet of the picks, to check")
     a = ap.parse_args(argv)
     from core.config import load_config
-    c = PermanenceConfig.from_dict(load_config().get("permanence"))
+    cfg = load_config()
+    c = PermanenceConfig.from_dict(cfg.get("permanence"))
     img = cv2.imread(a.image)
     if img is None:
         ap.error(f"can't read {a.image}")
-    crop = _crop(img, a.box, 0.0)
-    d = Path(a.dir or c.refs_dir)
-    d = (d if d.is_absolute() else ROOT / d) / a.name
-    d.mkdir(parents=True, exist_ok=True)
-    out = d / f"{Path(a.image).stem}_{int(a.box[0])}_{int(a.box[1])}.jpg"
-    cv2.imwrite(str(out), crop)
-    print(out)
+    if a.cmd == "enroll":
+        print(save_ref(img, a.box, a.name, a.dir or c.refs_dir, Path(a.image).stem))
+        return 0
+    from core.proposals import YOLOEProposer
+    ask = grok_marks(cfg, c.verify_timeout_s)
+    if ask is None:
+        ap.error("no Grok provider (XAI_API_KEY)")
+    model = YOLOEProposer((cfg.get("proposals") or {}).get("yoloe")).model
+    res = enroll_auto(img, a.names, yoloe_detect(model, c.imgsz, c.conf), ask, a.dir or c.refs_dir,
+                      Path(a.image).stem, cfg.get("display_names") or {}, c.tiles, a.sheet)
+    for n, path in res.items():
+        print(f"{n}: {path or 'NOT FOUND (enroll it with --box)'}")
+    print(f"check the picks: {a.sheet}")
     return 0
 
 

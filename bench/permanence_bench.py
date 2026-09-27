@@ -51,12 +51,17 @@ def main(argv=None) -> int:
     ap.add_argument("--image", required=True, help="a raw full camera frame (e.g. 2560x1440)")
     ap.add_argument("--steps", type=int, default=60, help="views per case")
     ap.add_argument("--min-avail-mb", type=float, default=1500)
+    ap.add_argument("--providers", nargs="+", default=None, help="reid providers, e.g. tensorrt cuda cpu, or cpu")
+    ap.add_argument("--threads", type=int, default=None, help="reid CPU threads (config: 2)")
     a = ap.parse_args(argv)
 
     from core.config import load_config
     from core.permanence import Permanence, PermanenceConfig, load_places, r_box, registry_embedder, yoloe_detect
     from core.proposals import YOLOEProposer
     cfg = load_config()
+    if a.providers or a.threads:
+        cfg["reid"] = {**(cfg.get("reid") or {}), **({"providers": a.providers} if a.providers else {}),
+                       **({"threads": a.threads} if a.threads else {})}
     if mem_available_mb() < a.min_avail_mb:
         print(f"MemAvailable {mem_available_mb():.0f} MB < {a.min_avail_mb:.0f}: not starting")
         return 2
@@ -71,7 +76,8 @@ def main(argv=None) -> int:
         print("no re-ID model (reid.model)")
         return 2
     load_s = time.perf_counter() - t0
-    out = {"image": list(img.shape[:2][::-1]), "load_s": round(load_s, 1), "mem_avail_start_mb": _mb(mem_available_mb())}
+    out = {"image": list(img.shape[:2][::-1]), "load_s": round(load_s, 1),
+           "reid_providers": (cfg.get("reid") or {}).get("providers"), "mem_avail_start_mb": _mb(mem_available_mb())}
     for case, extra in (("still", {}), ("busy", {"reuse_iou": 2.0})):
         c = PermanenceConfig.from_dict({**(cfg.get("permanence") or {}), "mode": "registry", "verify": False, **extra})
         places = load_places(cfg, c)
