@@ -193,6 +193,24 @@ the next step" and show the phone map instead. Do not bring an unlabelled laser 
 - Devpost (before 8 AM): the 60-second script, a GIF of a run, the honesty line ("I think": the rig
   never asserts identity), open-source credits.
 
+## 5b. Progress log (Sat evening)
+
+- **21:00** P0-3 and P0-4 merged (`24edca7`), then two rig-found fixes: the fast cadence halved the table's
+  fps whenever a foot at the table edge "left" (now every second frame, 30 s, dwell-gated: `a3722ef`), and
+  the couch-sitter's feet were handed off as "sock" (body/clothing names never open a handoff: `30f571a`).
+- **Object trials** (`scripts/room_trials.py`, couch / side table / counter, return to table after each):
+  remote 5/5 (earlier); wallet: couch and counter pass, side table timed out on the old build; glasses: 3/3
+  handoffs (side table 4 s, counter 10 s, couch 52 s then flickered to "can't see"); pill bottle: couch 6 s,
+  side table 9 s, counter landed in the adjacent stove zone. Table returns: all pass except when asked
+  within ~2 s of putting the object back (the table namer's 10/min cap was eaten by feet).
+- **Rig config (config.local.yaml):** prop labels off (`conf_threshold` 0.9), `absent_min_s` 8, `stale_min_s`
+  5, `auto_name.max_per_minute` 30; the stove zone deleted (three zones: couch, side table, counter).
+- **fps:** 9-10 idle, 7-8 during a carry (was 5.8 with the every-frame cadence).
+- **Phone:** the BLE bridge runs from `~/askroom_room` against port 8080; it needs the one-time
+  `sudo hcitool` LE-mask command after every Jetson boot before phones can connect.
+- **Not done yet:** speaker/mic (no USB audio on the Jetson yet), decoy runs on the rig, retrain (P1-1),
+  merge back to `main`.
+
 ## 6. Tonight's schedule (EDT)
 
 | When | Rig (one person + me driving) | Code (subagents) | Team |
