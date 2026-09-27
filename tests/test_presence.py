@@ -36,6 +36,32 @@ def test_the_window_spans_n_reference_periods_whatever_the_rate(fps):
     assert 10 <= p.hits() < 10 + 15 / fps + 1e-9 and p.hits() >= 6      # below 3.3 fps too
 
 
+def test_after_a_slow_step_one_miss_does_not_drop_a_present_object():
+    p = Presence(n=10, hz=15)
+    for i in range(20):
+        p.push(i / 15, True)
+    p.push(19 / 15 + 0.6, False)                 # a 0.6 s step (hot room cadence), then one miss
+    assert p.hits() > 1                          # absent_max 1: still not absent
+
+
+def test_after_a_slow_step_one_false_hit_does_not_make_an_absent_object_present():
+    p = Presence(n=10, hz=15)
+    for i in range(20):
+        p.push(i / 15, False)
+    p.push(19 / 15 + 0.45, True)                 # a 0.45 s step, then one false detection
+    assert p.hits() < 6                          # present_k 6: not present
+
+
+def test_the_weight_is_continuous_with_no_jump_between_counting_modes():
+    """At the room build's 10-13 fps a few ms of jitter must never switch a weight by 0.25 (a hard snap did)."""
+    from core.presence import SNAP, weight
+    for edge in (1 + SNAP, 1 + 2 * SNAP, 1 - SNAP, 1 - 2 * SNAP):
+        assert abs(weight(edge + 1e-4) - weight(edge - 1e-4)) < 1e-3
+    assert weight(1.2) == 1.0 and weight(1.5) == 1.5 and weight(2.14) == pytest.approx(2.14)   # 12, 10, 7 fps
+    xs = [0.5 + i / 1000 for i in range(2000)]
+    assert all(weight(b) >= weight(a) for a, b in zip(xs, xs[1:]))                          # monotone
+
+
 def test_a_stall_is_no_evidence_one_miss_after_it_keeps_the_object():
     p = Presence(n=10, hz=15)
     for i in range(20):
