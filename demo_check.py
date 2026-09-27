@@ -420,11 +420,19 @@ def check_laser(rig: Rig) -> Result:
     centre = Region.from_cfg(rig.cfg, laser.table_size).centre     # the tabletop's, if outlined
     try:
         err = laser.aim(centre)
+        first = laser.last_aim.get("first_err_cm")
     finally:
         laser.off()
     msg = f"fit {med:.2f} cm median ({mx:.2f} max, {laser.fit.n_points} pts); centre test "
     msg += "dot not seen" if math.isinf(err) else f"{err:.2f} cm"
-    return med < MAX_LASER_FIT_CM and err < MAX_LASER_AIM_CM, msg
+    # The closed loop hides a bad prediction (a camera bumped since the fit, remapped wrongly), so the
+    # first, open-loop look must land too.
+    open_ok = first is not None and first < MAX_LASER_AIM_CM
+    if first is not None:
+        msg += f" (open loop {first:.2f} cm)"
+        if not open_ok:
+            msg += ": the fit no longer predicts the dot; camera or head moved? python -m act.calibrate --rig"
+    return med < MAX_LASER_FIT_CM and err < MAX_LASER_AIM_CM and open_ok, msg
 
 
 def check_audio(rig: Rig) -> Result:

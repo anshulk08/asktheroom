@@ -365,8 +365,9 @@ class Room:
         fit = getattr(self.laser, "fit", None) if self.laser is not None else None
         if moved > 2.0 and fit is not None:
             if getattr(fit, "table_px_to_cm", None) is not None:
-                log.info("the table frame moved %.1f cm: laser aims are remapped through the camera (recalibrate "
-                         "the laser only if the camera or the laser head moved)", moved)
+                log.warning("the table frame moved %.1f cm: laser aims are remapped through the camera, which is "
+                            "right only if the camera did not move. If the camera was bumped, recalibrate the "
+                            "laser (python -m act.calibrate --rig)", moved)
             else:
                 log.warning("the table frame moved %.1f cm: recalibrate the laser (python -m act.calibrate --rig) "
                             "or it will point off", moved)
@@ -699,8 +700,9 @@ def make_laser(cfg: dict, frames, table):
     else:
         moved = laser.refit_moved_cm()
         if moved is not None and moved > 0.5:
-            log.info("table refitted since the laser fit (frame moved %.1f cm): aims are remapped through the "
-                     "camera; recalibrate the laser only if the camera or the laser head moved", moved)
+            log.warning("table refitted since the laser fit (frame moved %.1f cm): aims are remapped through the "
+                        "camera, which is right only if the camera did not move. If it was bumped, recalibrate "
+                        "the laser (python -m act.calibrate --rig)", moved)
     return laser
 
 

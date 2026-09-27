@@ -307,3 +307,19 @@ def test_a_hung_part_fails_its_check_and_later_ones_fast(fake_rig):
         assert ok is False and "hung while starting" in msg
     finally:
         gate.set()
+
+
+def test_laser_check_fails_when_only_the_closed_loop_lands(fake_rig):
+    """A remap after a bumped camera: the prediction is 5 cm off, the loop still corrects onto the
+    centre. The open-loop look must fail the check."""
+    laser = fake_rig.part("laser")
+    ok, msg = dc.check_laser(fake_rig)
+    assert ok and "open loop" in msg, msg
+    H = laser.fit.table_px_to_cm
+    laser.fit.table_px_to_cm = np.array([[1, 0, 5.0], [0, 1, 0], [0, 0, 1]]) @ H
+    try:
+        ok, msg = dc.check_laser(fake_rig)
+    finally:
+        laser.fit.table_px_to_cm = H
+    assert not ok and "camera or head moved" in msg, msg
+    assert float(msg.split("centre test ")[1].split(" cm")[0]) < 3.0         # the loop itself landed
