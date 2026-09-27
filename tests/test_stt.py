@@ -2,6 +2,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import numpy as np
@@ -626,3 +627,124 @@ def test_last_speech_s_is_the_speech_span_and_last_clip_s_the_recording(monkeypa
     s, _ = make(monkeypatch, quiet(500), no_speech_s=1)
     s.record_until_silence()
     assert s.last_speech_s == 0.0
+
+
+# -- cloud speech to text, for questions only
+
+class FakeCloud:
+    provider, timeout_s = "xai", 0.5
+
+    def __init__(self, text="What color is my pill bottle?", fail=None, delay=0.0, key="k"):
+        self.text, self.fail, self.delay, self._key, self.calls = text, fail, delay, key, 0
+
+    def key(self):
+        return self._key
+
+    def transcribe(self, audio, prompt, audio_ctx=0):
+        self.calls += 1
+        time.sleep(self.delay)
+        if self.fail:
+            raise self.fail
+        return self.text
+
+
+def cloud_stt(monkeypatch, cloud, local="What car is my belt?"):
+    s, _ = make(monkeypatch, quiet(10) + loud(20) + quiet(200))
+    s._backend, s.cloud = FakeBackend(local), cloud
+    return s
+
+
+def test_a_question_is_transcribed_in_the_cloud_and_overheard_speech_never_is(monkeypatch):
+    """Rig: base.en heard "What color is my pill bottle?" as "What car is my belt?"."""
+    c = FakeCloud()
+    s = cloud_stt(monkeypatch, c)
+    assert s.listen() == "What color is my pill bottle?" and s.last_by == "xai" and s.backend.calls == []
+    s2 = cloud_stt(monkeypatch, c)
+    assert s2.hear() == "What car is my belt?" and c.calls == 1 and s2.last_by == "local"
+
+
+@pytest.mark.parametrize("cloud", [FakeCloud(fail=RuntimeError("HTTP 429")), FakeCloud(delay=2.0),
+                                   FakeCloud(key="")])
+def test_the_local_model_answers_when_the_cloud_fails_is_slow_or_has_no_key(monkeypatch, cloud):
+    s = cloud_stt(monkeypatch, cloud)
+    t0 = time.monotonic()
+    assert s.listen() == "What car is my belt?" and s.last_by == "local" and time.monotonic() - t0 < 1.5
+
+
+def test_after_a_cloud_failure_the_cloud_rests_for_retry_after_s(monkeypatch):
+    c = FakeCloud(fail=RuntimeError("down"))
+    s = cloud_stt(monkeypatch, c)
+    s.listen()
+    c.fail = None
+    s2 = cloud_stt(monkeypatch, c)
+    s2._cloud_failed_t, s2.cloud_down_s = time.monotonic(), 60
+    assert s2.listen() == "What car is my belt?" and c.calls == 1
+    s2._cloud_failed_t = time.monotonic() - 61
+    s3 = cloud_stt(monkeypatch, c)
+    assert s3.listen() == "What color is my pill bottle?"
+
+
+def test_cloud_setup_from_config():
+    assert stt.make_cloud(CFG) is None                                       # off by default
+    c = stt.make_cloud(dict(CFG, stt=dict(CFG["stt"], cloud={"provider": "xai"})))
+    assert c.provider == "xai" and c.model == "grok-voice-transcribe-2.0" and c.key_env == "XAI_API_KEY"
+    assert "Room" in c.keyterms and "pill bottle" in c.keyterms and "meds" in c.keyterms
+    g = stt.make_cloud(dict(CFG, stt=dict(CFG["stt"], cloud={"provider": "groq", "timeout_s": 3})))
+    assert g.model == "whisper-large-v3-turbo" and g.timeout_s == 3
+    with pytest.raises(ValueError):
+        stt.make_cloud(dict(CFG, stt=dict(CFG["stt"], cloud={"provider": "nope"})))
+
+
+def test_cloud_requests_carry_keyterms_or_the_prompt(monkeypatch):
+    sent = []
+
+    class Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"text": " What color is my pill bottle? "}
+
+    class Session:
+        def post(self, url, headers, data, files, timeout):
+            sent.append((url, headers, data, files, timeout))
+            return Resp()
+
+    monkeypatch.setenv("XAI_API_KEY", "x-key")
+    monkeypatch.setenv("GROQ_API_KEY", "g-key")
+    audio = np.zeros(RATE, np.float32)
+    x = stt.CloudBackend("xai", keyterms=["Room", "pill bottle"], session=Session())
+    assert x.transcribe(audio, "Hey Room!").strip() == "What color is my pill bottle?"
+    url, headers, data, files, _ = sent[-1]
+    assert url == "https://api.x.ai/v1/stt" and headers["Authorization"] == "Bearer x-key"
+    assert ("keyterm", "pill bottle") in data and ("model", "grok-voice-transcribe-2.0") in data
+    assert files["file"][1][:4] == b"RIFF"
+    g = stt.CloudBackend("groq", session=Session())
+    g.transcribe(audio, "Hey Room!")
+    url, headers, data, _, _ = sent[-1]
+    assert url.endswith("/openai/v1/audio/transcriptions") and data["prompt"] == "Hey Room!"
+    assert data["model"] == "whisper-large-v3-turbo" and headers["Authorization"] == "Bearer g-key"
+
+
+def test_a_question_gets_the_question_prompt_and_overheard_speech_the_greetings(monkeypatch):
+    """Question words in the prompt fix "What color is my pill bottle?" (heard "What car is my belt?"), but
+    Whisper writes a prompt's questions back on babble, so overheard speech keeps the short greeting prompt."""
+    s, _ = make(monkeypatch, quiet(10) + loud(20) + quiet(200))
+    s.listen()
+    s2, _ = make(monkeypatch, quiet(10) + loud(20) + quiet(200))
+    s2.hear()
+    asked, overheard = s.backend.calls[-1][1], s2.backend.calls[-1][1]
+    assert "What color is my pill bottle?" in asked and asked == stt.question_prompt(CFG)
+    assert overheard == stt.initial_prompt(CFG, synonyms=True) and "What color" not in overheard
+
+
+@pytest.mark.parametrize("text", ["Room. Room. Room. Room.", "Room, room, room, room, room, room.", "no no no"])
+def test_one_word_over_and_over_is_whisper_on_noise(text, monkeypatch):
+    assert stt.filler_only(text)
+    s, _ = make(monkeypatch, quiet(10) + loud(20) + quiet(200))
+    s._backend = FakeBackend(text)
+    assert s.hear() == ""
+
+
+def test_room_twice_is_still_a_wake_word():
+    assert not stt.filler_only("Room, room.") and not stt.filler_only("Okay Room. Room.")

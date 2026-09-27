@@ -260,6 +260,10 @@ stt:
   server_port: 8178           # 127.0.0.1; a healthy server already on this port is reused
   audio_ctx: 0                # sized (clip length) | N fixed | 0 = full 30 s window; sized clips garbled here
   prompt_synonyms: true       # Whisper prompt also lists the synonyms (fixed 'meds' -> 'mids')
+  # The prompt for a question (after the wake word or a click; overheard speech keeps the one above): questions
+  # as the demo hears them. Whisper writes a prompt's questions back on babble, so it is never used overheard.
+  question_prompt: "Hey Room! Okay Room. Room, what do you see? What color is my pill bottle? Where are my keys?
+    What's on the kitchen counter? What changed? Where did I leave my wallet, glasses, phone, remote, meds, specs?"
   end_drop_db: 10             # crowd noise: after speech, blocks this far below the asker's level are quiet; null = Silero only
   threads: 4
   max_s: 6
@@ -269,6 +273,13 @@ stt:
                               # which writes "you" or "Thank you." for it
   vad_threshold: 0.5          # Silero speech probability; off threshold is this - 0.15
   input_device: null          # sounddevice device index or name; null = default mic
+  cloud:                      # questions only (after the wake word or a click); overheard speech never leaves the rig
+    provider: none            # none | xai ($XAI_API_KEY, grok-voice-transcribe-2.0, keyterms) | groq ($GROQ_API_KEY,
+                              # whisper-large-v3-turbo, free tier); the local model answers when it fails (voice/stt.py)
+    model: ""                 # "" = the provider's default
+    timeout_s: 2.0            # slower than this: the local model transcribes instead
+    retry_after_s: 60         # after a failure, the local model alone for this long
+    keyterms: [laptops, kitchen counter, couch]   # besides the wake word and the object names
 
 main:
   clicker_name: ""            # part of the evdev device name, if more than one keyboard sends PageDown
