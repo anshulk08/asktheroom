@@ -96,6 +96,8 @@ final class MockRoom: RoomTransport {
             s.e[i].ls = s.e[i].ls.map { $0 + offset }
         }
         s.update("pill_bottle") { $0.ls = now.timeIntervalSince1970 - 25 * 60 }
+        // A Grok room look just saw the lost glasses on the couch: a "seen" ring on the map.
+        s.sg = SightingList([Sighting(name: "glasses", zone: "couch", t: now.timeIntervalSince1970 - 2 * 60, source: "look")])
         return s
     }
 

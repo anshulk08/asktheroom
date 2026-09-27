@@ -81,9 +81,10 @@ struct RoomPlan: Equatable {
 /// origin + its table position), "+N" where a zone is full, things in no drawn zone in an
 /// "Elsewhere" strip along the bottom, and the "You" marker.
 struct RoomMapLayout: Equatable {
-    /// How a pin looks: seen, hidden, carried, or a faded hollow "ghost" where it was last seen.
+    /// How a pin looks: seen, hidden, carried, a faded hollow "ghost" where it was last seen, or
+    /// a full-strength hollow ring where the camera just saw it (a live sighting, state `sg`).
     enum PinStyle: CaseIterable, Equatable {
-        case visible, hidden, carried, ghost
+        case visible, hidden, carried, ghost, sighted
 
         init(_ presence: Entity.Presence) {
             switch presence {
@@ -100,6 +101,7 @@ struct RoomMapLayout: Equatable {
             case .hidden: return "Hidden"
             case .carried: return "Carried"
             case .ghost: return "Last seen"
+            case .sighted: return "Seen by the camera"
             }
         }
     }
@@ -127,6 +129,10 @@ struct RoomMapLayout: Equatable {
         var labelRect: CGRect?
         var opacity: Double
         var accessibilityLabel: String
+        /// The thing a tap selects; the pin's id unless the id is a sighting's.
+        var entityName: String? = nil
+
+        var selects: String { entityName ?? id }
 
         var isOnTable: Bool { zone == nil }
         var dotRect: CGRect {
@@ -181,7 +187,11 @@ struct RoomMapLayout: Equatable {
     /// Things on the room map that are in no drawn zone: `room`, or an id the layout lacks.
     static func needsElsewhere(_ plan: RoomPlan, snapshot: Snapshot) -> Bool {
         snapshot.entities.contains { e in shows(e) && e.zone.map { plan.zone($0) == nil } == true }
+            || snapshot.liveSightings.contains { plan.zone($0.zone) == nil }
     }
+
+    /// A sighting pin's id, kept apart from the entity pins' ids.
+    static func sightingID(_ name: String) -> String { "sg:" + name }
 
     /// Width over height for a view showing the whole plan, its margins and any strip.
     static func aspectRatio(for plan: RoomPlan, snapshot: Snapshot, width: CGFloat = 390) -> CGFloat {
@@ -228,12 +238,20 @@ struct RoomMapLayout: Equatable {
             }
         }
 
-        for zone in zones {
-            guard let things = inZone[zone.id] else { continue }
-            place(things, in: zone, cells: cells(for: zone), snapshot: snapshot)
+        // Things the camera just saw ("I see glasses on the couch") that the map can't otherwise place.
+        var seenInZone: [String: [Sighting]] = [:]
+        var seenAway: [Sighting] = []
+        for s in snapshot.liveSightings {
+            if plan.zone(s.zone) != nil { seenInZone[s.zone, default: []].append(s) } else { seenAway.append(s) }
         }
-        if let elsewhere, !away.isEmpty {
-            place(away, in: elsewhere, cells: stripCells(elsewhere), snapshot: snapshot)
+
+        for zone in zones {
+            let things = inZone[zone.id] ?? [], seen = seenInZone[zone.id] ?? []
+            guard !things.isEmpty || !seen.isEmpty else { continue }
+            place(things, sightings: seen, in: zone, cells: cells(for: zone), snapshot: snapshot)
+        }
+        if let elsewhere, !away.isEmpty || !seenAway.isEmpty {
+            place(away, sightings: seenAway, in: elsewhere, cells: stripCells(elsewhere), snapshot: snapshot)
         }
         placeOnTable(onTable, plan: plan, snapshot: snapshot)
     }
@@ -329,20 +347,34 @@ struct RoomMapLayout: Equatable {
                                        width: w, height: Self.cellHeight) }
     }
 
-    private mutating func place(_ things: [Entity], in zone: ZoneBox, cells: [CGRect], snapshot: Snapshot) {
-        // Seen things first, then by name, so pins keep their places while others come and go.
-        let sorted = things.sorted {
-            let a = (Self.style(for: $0) == .ghost ? 1 : 0, $0.displayName.lowercased(), $0.name)
-            let b = (Self.style(for: $1) == .ghost ? 1 : 0, $1.displayName.lowercased(), $1.name)
-            return a < b
+    private enum Placed {
+        case thing(Entity)
+        case sighting(Sighting)
+    }
+
+    private mutating func place(_ things: [Entity], sightings: [Sighting] = [], in zone: ZoneBox, cells: [CGRect],
+                                snapshot: Snapshot) {
+        // Seen things first, then fresh sightings, then ghosts; by name within each, so pins keep
+        // their places while others come and go.
+        func key(_ p: Placed) -> (Int, String, String) {
+            switch p {
+            case .thing(let e): return (Self.style(for: e) == .ghost ? 2 : 0, e.displayName.lowercased(), e.name)
+            case .sighting(let s): return (1, Self.sightingName(s, in: snapshot).lowercased(), s.name)
+            }
         }
+        let sorted = (things.map(Placed.thing) + sightings.map(Placed.sighting)).sorted { key($0) < key($1) }
         let fits = sorted.count <= cells.count ? sorted.count : cells.count - 1
-        for (e, cell) in zip(sorted.prefix(fits), cells) {
+        for (item, cell) in zip(sorted.prefix(fits), cells) {
             let d = Self.pinSize
             let dot = CGPoint(x: cell.minX + d / 2 + 1, y: cell.midY)
             let labelX = dot.x + d / 2 + Self.labelGap
             let label = CGRect(x: labelX, y: cell.midY - 8, width: max(0, cell.maxX - labelX - 2), height: 16)
-            pins.append(pin(e, at: dot, diameter: d, zone: zone.id, label: label, snapshot: snapshot))
+            switch item {
+            case .thing(let e):
+                pins.append(pin(e, at: dot, diameter: d, zone: zone.id, label: label, snapshot: snapshot))
+            case .sighting(let s):
+                pins.append(Self.sightingPin(s, at: dot, diameter: d, zone: zone.id, label: label, snapshot: snapshot))
+            }
         }
         if sorted.count > fits {
             overflows.append(Overflow(id: zone.id, count: sorted.count - fits, rect: cells[fits]))
@@ -427,6 +459,29 @@ struct RoomMapLayout: Equatable {
         Pin(id: e.name, name: e.displayName, point: p, diameter: diameter, style: Self.style(for: e), zone: zone,
             labelRect: label, opacity: Self.opacity(for: e),
             accessibilityLabel: Self.accessibilityLabel(for: e, in: snapshot))
+    }
+
+    /// The thing's name as the map shows it: its display name if the room knows it, else the name.
+    static func sightingName(_ s: Sighting, in snapshot: Snapshot) -> String {
+        snapshot.entity(named: s.name)?.displayName ?? Entity.displayName(for: s.name)
+    }
+
+    /// "glasses · seen 4:37 PM".
+    static func sightingLabel(_ s: Sighting, in snapshot: Snapshot, now: Date = Date()) -> String {
+        "\(sightingName(s, in: snapshot)) · seen \(Banners.when(s.time, now: now))"
+    }
+
+    /// "Glasses, seen on the couch at 4:37 PM".
+    static func sightingAccessibilityLabel(_ s: Sighting, in snapshot: Snapshot, now: Date = Date()) -> String {
+        let words = Dashboard.sightingWords(s, in: snapshot, now: now)
+        return "\(Dashboard.capitalized(sightingName(s, in: snapshot))), \(words.prefix(1).lowercased() + words.dropFirst())"
+    }
+
+    private static func sightingPin(_ s: Sighting, at p: CGPoint, diameter: CGFloat, zone: String, label: CGRect,
+                                    snapshot: Snapshot) -> Pin {
+        Pin(id: sightingID(s.name), name: sightingLabel(s, in: snapshot), point: p, diameter: diameter, style: .sighted,
+            zone: zone, labelRect: label, opacity: 1,
+            accessibilityLabel: sightingAccessibilityLabel(s, in: snapshot), entityName: s.name)
     }
 
     /// Things drawn on the room map: every thing with a name, and anything the registry keeps.

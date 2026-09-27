@@ -462,6 +462,7 @@ struct EntityDetailView: View {
     }
 
     static func statusWords(_ e: Entity, in snapshot: Snapshot) -> String {
+        if let words = Dashboard.sightingWhereabouts(e, in: snapshot) { return words }
         if let words = Dashboard.roomWhereabouts(e, in: snapshot) { return words }
         let parent = e.parent.map { snapshot.entity(named: $0)?.displayName ?? Entity.displayName(for: $0) }
         let words: String

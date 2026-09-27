@@ -368,8 +368,34 @@ struct Snapshot: Codable, Equatable {
     /// keeps the last one and checks it against this.
     var lh: String?
     var lay: RoomLayout?
+    /// Recent camera sightings (`sg`), newest first. Optional and tolerant: a bad row is skipped
+    /// and a bad `sg` reads as none, never failing the state message.
+    var sg: SightingList? = nil
 
     var entities: [Entity] { e }
+    var sightings: [Sighting] { sg?.rows ?? [] }
+
+    /// The newest sighting of a thing the map can't place right now: it has no zone and no
+    /// table position, or it's lost, gone or unknown. Nil once a real placed pin exists.
+    func sighting(for name: String) -> Sighting? {
+        if let e = entity(named: name), !Self.isUnplaced(e) { return nil }
+        return sightings.first { $0.name == name }
+    }
+
+    /// Sightings to draw: the newest per name, only for things not placed.
+    var liveSightings: [Sighting] {
+        var seen: Set<String> = []
+        return sightings.filter { s in
+            guard !seen.contains(s.name) else { return false }
+            seen.insert(s.name)
+            return sighting(for: s.name) == s
+        }
+    }
+
+    static func isUnplaced(_ e: Entity) -> Bool {
+        let hasPlace = e.zone != nil || e.drawPoint != nil
+        return !hasPlace || [.lost, .gone].contains(e.status) || [.unknown, .lastSeen].contains(e.rg)
+    }
     var tableSize: TablePoint { table ?? Self.defaultTable }
     var time: Date? { t.map(Date.init(timeIntervalSince1970:)) }
 
@@ -393,6 +419,67 @@ struct Snapshot: Codable, Equatable {
             next = entity.isInHand ? nil : entity.p
         }
         return out
+    }
+}
+
+/// "I see glasses on the couch": the rig's camera found a thing in a room zone (state `sg` row
+/// `[name, zone, unix time, source]`, source `look` or `recall`).
+struct Sighting: Equatable, Hashable {
+    var name: String
+    var zone: String
+    var t: Double
+    var source: String
+
+    var time: Date { Date(timeIntervalSince1970: t) }
+}
+
+/// The `sg` array. Decoding never throws: a non-array reads as empty and malformed rows are dropped.
+struct SightingList: Codable, Equatable {
+    var rows: [Sighting]
+
+    init(_ rows: [Sighting]) { self.rows = rows }
+
+    private struct Row: Decodable {
+        var sighting: Sighting?
+
+        init(from decoder: Decoder) throws {
+            guard var c = try? decoder.unkeyedContainer() else { return }
+            let name = try? c.decode(String.self)
+            let zone = try? c.decode(String.self)
+            let t = try? c.decode(Double.self)
+            let source = (try? c.decode(String.self)) ?? "look"
+            guard let name, let zone, let t, t.isFinite,
+                  !name.trimmingCharacters(in: .whitespaces).isEmpty,
+                  !zone.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+            sighting = Sighting(name: name, zone: zone, t: t, source: source)
+        }
+    }
+
+    /// Stands in for any element so a bad one still advances the container.
+    private struct Skip: Decodable { init(from decoder: Decoder) throws {} }
+
+    init(from decoder: Decoder) throws {
+        rows = []
+        guard var c = try? decoder.unkeyedContainer() else { return }
+        while !c.isAtEnd {
+            if (try? c.decodeNil()) == true { continue }
+            if let row = try? c.decode(Row.self) {
+                if let s = row.sighting { rows.append(s) }
+            } else if (try? c.decode(Skip.self)) == nil {
+                break
+            }
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.unkeyedContainer()
+        for s in rows {
+            var row = c.nestedUnkeyedContainer()
+            try row.encode(s.name)
+            try row.encode(s.zone)
+            try row.encode(s.t)
+            try row.encode(s.source)
+        }
     }
 }
 

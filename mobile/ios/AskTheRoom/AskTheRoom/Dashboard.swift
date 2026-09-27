@@ -133,8 +133,19 @@ enum Dashboard {
         return e.isUncertain || e.isTentative ? "Probably " + words.prefix(1).lowercased() + words.dropFirst() : words
     }
 
+    /// "Seen on the couch at 4:37 PM": where the camera last saw a thing (state `sg`).
+    static func sightingWords(_ s: Sighting, in snapshot: Snapshot, now: Date = Date()) -> String {
+        "Seen \(place(zone: s.zone, layout: snapshot.lay)) at \(Banners.when(s.time, now: now))"
+    }
+
+    /// The sighting words for a thing the map can't otherwise place, else nil.
+    static func sightingWhereabouts(_ e: Entity, in snapshot: Snapshot, now: Date = Date()) -> String? {
+        snapshot.sighting(for: e.name).map { sightingWords($0, in: snapshot, now: now) }
+    }
+
     /// "On the table", "Inside the box", "Off the table, on the left side"… Sentence case.
     static func whereabouts(_ e: Entity, in snapshot: Snapshot) -> String {
+        if let words = sightingWhereabouts(e, in: snapshot) { return words }
         if let words = roomWhereabouts(e, in: snapshot) { return words }
         let parent = e.parent.map { snapshot.entity(named: $0)?.displayName ?? Entity.displayName(for: $0) }
         let it = isPlural(e.displayName) ? "them" : "it"

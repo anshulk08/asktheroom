@@ -18,6 +18,7 @@ enum RoomTheme {
         case .hidden: return s == .dark ? hex(0x8EC5FF) : hex(0x2F7FD0)
         case .carried: return s == .dark ? hex(0xF2B84B) : hex(0xC7860B)
         case .ghost: return ink(s)
+        case .sighted: return pin(.visible, s)
         }
     }
 
@@ -136,13 +137,21 @@ struct RoomMapView: View {
         .accessibilityLabel("You")
     }
 
-    /// Ghosts are hollow rings; the rest are solid dots in their state's colour.
+    /// A tap on a pin selects its thing; a sighting of a thing the room doesn't track selects nothing.
+    private func tap(_ pin: RoomMapLayout.Pin) {
+        guard pin.style != .sighted || snapshot.entity(named: pin.selects) != nil else { return }
+        onSelect(pin.selects)
+    }
+
+    /// Ghosts and sightings are hollow rings; the rest are solid dots in their state's colour.
     private func pinDot(_ pin: RoomMapLayout.Pin) -> some View {
         let color = RoomTheme.pin(pin.style, scheme)
-        let isSelected = pin.id == selected
+        let isSelected = pin.selects == selected
         return ZStack {
             if pin.style == .ghost {
                 Circle().strokeBorder(color, lineWidth: 2)
+            } else if pin.style == .sighted {
+                Circle().strokeBorder(color, lineWidth: 2.5)
             } else {
                 Circle().fill(color)
                     .overlay(Circle().strokeBorder(RoomTheme.mat(scheme).opacity(0.8), lineWidth: 1.5))
@@ -157,7 +166,7 @@ struct RoomMapView: View {
         .frame(width: 30, height: 30)
         .contentShape(Rectangle())
         .position(pin.point)
-        .onTapGesture { onSelect(pin.id) }
+        .onTapGesture { tap(pin) }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(pin.accessibilityLabel)
         .accessibilityAddTraits(.isButton)
@@ -176,7 +185,7 @@ struct RoomMapView: View {
                 .opacity(pin.opacity)
                 .position(x: r.midX, y: r.midY)
                 .contentShape(Rectangle())
-                .onTapGesture { onSelect(pin.id) }
+                .onTapGesture { tap(pin) }
                 .accessibilityHidden(true)
         }
     }
@@ -195,6 +204,8 @@ struct RoomMapLegend: View {
                         Group {
                             if style == .ghost {
                                 Circle().strokeBorder(Color.primary, lineWidth: 2).opacity(RoomMapLayout.ghostOpacity)
+                            } else if style == .sighted {
+                                Circle().strokeBorder(RoomTheme.pin(style, scheme), lineWidth: 2.5)
                             } else {
                                 Circle().fill(RoomTheme.pin(style, scheme))
                             }
