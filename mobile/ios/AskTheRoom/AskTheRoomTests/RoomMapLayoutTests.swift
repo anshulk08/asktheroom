@@ -252,4 +252,16 @@ final class RoomMapLayoutTests: XCTestCase {
         XCTAssertTrue(zone("doorway", in: l).labelVertical || zone("doorway", in: l).rect.width > 80,
                       "a narrow door's label runs up its side")
     }
+
+    func testOnlyNamedThingsAreLabelledOnTheTableInset() {
+        let named = Entity(n: "keys", k: .target, s: .visible)
+        var taught = Entity(n: "thing:3", k: .target, s: .visible)
+        taught.a = ["charger"]
+        var guessed = Entity(n: "thing:4", k: .target, s: .visible)
+        guessed.a = []
+        guessed.g = "phone charger"
+        XCTAssertTrue(RoomMapLayout.namedOnTable(named))
+        XCTAssertTrue(RoomMapLayout.namedOnTable(taught))
+        XCTAssertFalse(RoomMapLayout.namedOnTable(guessed))
+    }
 }

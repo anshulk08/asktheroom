@@ -375,7 +375,12 @@ struct RoomMapLayout: Equatable {
             placed.append((dot, e))
         }
         taken += dots
-        for (dot, e) in placed {
+        // The inset is small: only named things (configured or taught) get a name; guesses stay plain dots
+        // (VoiceOver and a tap still say them).
+        for (dot, e) in placed where !Self.namedOnTable(e) {
+            pins.append(pin(e, at: dot, diameter: d, zone: nil, label: nil, snapshot: snapshot))
+        }
+        for (dot, e) in placed where Self.namedOnTable(e) {
             let w = Self.nameWidth(e.displayName, onTable: true)
             let h = Self.tableLabelHeight
             let candidates = [
@@ -389,6 +394,10 @@ struct RoomMapLayout: Equatable {
             pins.append(pin(e, at: dot, diameter: d, zone: nil, label: label, snapshot: snapshot))
         }
     }
+
+    /// A thing on the table inset gets a printed name only if it has a real one: a configured object or a
+    /// taught name, not a guess.
+    static func namedOnTable(_ e: Entity) -> Bool { !e.isThing || !e.aliases.isEmpty }
 
     /// `p`, or the nearest spot around it clear of the dots already placed.
     private static func freeSpot(near p: CGPoint, diameter d: CGFloat, avoiding dots: [CGRect], in area: CGRect) -> CGPoint {
