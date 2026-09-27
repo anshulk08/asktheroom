@@ -559,6 +559,38 @@ class Room:
         self._note_drift(getattr(r, "first_err_px", None), getattr(r, "reason", None), self.drift_px)
         return r.on_target
 
+    def laser_rehome(self, step: str, level_confirmed: bool = False) -> dict:
+        """Re-home the turret without switching the stepper battery (which rebooted the Jetson twice), through
+        this app's own serial port (a second opener would reset the Uno): 'release' turns the laser off and
+        frees the motors (E 0; aims are refused meanwhile) so the head can be set level and facing like the
+        camera by hand; 'zero' makes that pose 0,0 (Z), holds it again (E 1) and clears the drift and
+        board-reset lockouts, since the zero is known again. 'zero' needs level_confirmed: the zero is
+        wherever the head points, so a call with the head still off would bake a wrong zero in."""
+        tur = getattr(getattr(self.laser, "act", None), "_turret", None)
+        if tur is None:
+            return {"ok": False, "why": "no stepper turret (actuator is not turret)"}
+        with self._aim_lock:
+            self._safe_off()
+            if step == "release":
+                tur.release()
+                self.laser_locked = "re-homing: the motors are released (POST /laser/rehome zero when level)"
+            elif step == "zero":
+                if not level_confirmed:
+                    return {"ok": False, "why": "zero needs level_confirmed: the head set level, facing like the "
+                                                "camera, by a person looking at it"}
+                was = self.laser_locked
+                tur.zero()
+                tur._command("E 1", "OK E")
+                tur.reset_seen = False
+                act = self.laser.act
+                act.pan = act.tilt = getattr(act, "center_us", 1500.0)
+                self.laser_locked, self._drift_n = None, 0          # only after Z and E 1 succeeded
+                log.warning("laser re-homed (level confirmed); lock cleared (was: %s)", was)
+            else:
+                return {"ok": False, "why": f"step must be release or zero, not {step!r}"}
+        log.warning("laser re-home: %s", step)
+        return {"ok": True, "step": step, "locked": self.laser_locked}
+
     def _note_drift(self, first, reason, limit: float) -> None:
         """Count aims whose first seen dot landed over `limit` from the target, or that lit and looked but never
         saw it (after a big shift the dot lands out of view); drift_aims in a row lock the laser off (the head
@@ -1132,7 +1164,8 @@ class Room:
         app = create_app(self.cfg, self.world, self.events, frames=self.frames,
                          ask_fn=self.ask_and_act, table=self.table, care=getattr(self, "care", None),
                          voice_fn=getattr(self.tts, "set_voice", None),
-                         listening_fn=lambda: bool(getattr(self.indicator, "lit", False)))
+                         listening_fn=lambda: bool(getattr(self.indicator, "lit", False)),
+                         rehome_fn=self.laser_rehome)
         self.record_answer = app.state.record_answer
         self.server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level="warning",
                                                     timeout_graceful_shutdown=2))

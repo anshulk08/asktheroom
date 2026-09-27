@@ -197,7 +197,8 @@ def canned_ask(cfg: dict, world) -> AskFn:
 
 def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = None,
                table=None, care=None, voice_fn: Optional[Callable[..., Any]] = None,
-               listening_fn: Optional[Callable[[], bool]] = None) -> FastAPI:
+               listening_fn: Optional[Callable[[], bool]] = None,
+               rehome_fn: Optional[Callable[[str], dict]] = None) -> FastAPI:
     apply_saved(cfg)                     # the seat the phone chose last time (data/viewer.json), into cfg
     scfg = cfg.get("server") or {}
     push_period = 1.0 / float(scfg.get("push_hz", 5) or 5)
@@ -427,6 +428,18 @@ def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = 
         except Exception:
             # client went away (WebSocketDisconnect / closed transport) or the app is shutting down
             pass
+
+    @app.post("/laser/rehome")
+    async def laser_rehome(body: dict, request: Request):
+        """{"step": "release"} frees the turret's motors (laser off) to set it level by hand; {"step": "zero",
+        "level_confirmed": true} makes that pose home. Through the app's own serial port: no battery switch,
+        no second opener. Only from this machine (an operator's ssh), never the phone or the dashboard."""
+        if rehome_fn is None:
+            raise HTTPException(404, "no laser here")
+        if request.client is None or request.client.host not in ("127.0.0.1", "::1", "localhost"):
+            raise HTTPException(403, "laser re-home only from the rig itself (ssh, then curl localhost)")
+        b = body or {}
+        return await asyncio.to_thread(rehome_fn, str(b.get("step", "")), bool(b.get("level_confirmed", False)))
 
     @app.get("/state")
     async def state_route():

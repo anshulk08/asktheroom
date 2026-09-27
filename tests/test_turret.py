@@ -60,6 +60,12 @@ class FakeBoard:
                 self._say(f"POS {self.pan:.2f} {self.tilt:.2f} 0 {self.laser}")
             elif op in ("V", "C"):
                 self._say("OK V 120.0 120.0 C 600.0")
+            elif op == "E":
+                self.enabled = int(nums[0] != 0) if nums else 1
+                self._say(f"OK E {self.enabled}")
+            elif op == "Z":
+                self.pan = self.tilt = 0.0
+                self._say("OK Z")
             elif op == "X":
                 self.laser = 0
                 self._say("OK X")
@@ -364,3 +370,34 @@ def test_the_firmware_never_lights_the_beam_above_its_tilt_limit_but_parks_level
     assert board.laser == 1
     t.laser(False)
     t.close()
+
+
+def test_rehome_without_the_battery_releases_then_zeroes_through_the_apps_port():
+    """Switching the stepper battery rebooted the Jetson twice: re-home with E 0 / Z / E 1 instead."""
+    import main
+    from act.laser import Laser
+    a, board = turret_act()
+    laser = Laser(a, None, None, "", cfg=dict(CFG))
+    room = main.Room({"frame_size_px": [1280, 720]}, type("W", (), {"laser": {}})(), None, None, None, laser, None)
+    room.laser_locked = "the laser's zero moved"
+    assert room.laser_rehome("release")["ok"] and board.enabled == 0 and board.laser == 0
+    assert room.laser_locked.startswith("re-homing")
+    board.pan, board.tilt = 12.0, -7.0                    # the user turns the free head level by hand
+    refused = room.laser_rehome("zero")                   # no confirmation: nothing zeroed, still locked
+    assert not refused["ok"] and (board.pan, board.tilt) == (12.0, -7.0) and room.laser_locked
+    r = room.laser_rehome("zero", level_confirmed=True)
+    assert r["ok"] and r["locked"] is None and (board.pan, board.tilt) == (0.0, 0.0) and board.enabled == 1
+    assert not room.laser_rehome("spin")["ok"]
+
+
+def test_the_rehome_endpoint_answers_only_this_machine():
+    from fastapi.testclient import TestClient
+    from core.fakeworld import demo_world
+    from server.app import create_app
+    calls = []
+    app = create_app({"server": {}}, demo_world(), None, rehome_fn=lambda step, ok: calls.append((step, ok)) or {"ok": True})
+    far = TestClient(app, client=("10.90.84.50", 5000))
+    assert far.post("/laser/rehome", json={"step": "release"}).status_code == 403 and calls == []
+    near = TestClient(app, client=("127.0.0.1", 5000))
+    assert near.post("/laser/rehome", json={"step": "zero", "level_confirmed": True}).json() == {"ok": True}
+    assert calls == [("zero", True)]
