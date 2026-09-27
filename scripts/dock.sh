@@ -21,6 +21,10 @@ envf=(); [ -f .env ] && envf=(--env-file .env)   # API keys (e.g. XAI_API_KEY); 
 cams=()
 if [ "${ASKROOM_DEV_BIND:-1}" = 1 ]; then
   cams=(--device-cgroup-rule='c 81:* rmw' -v /dev:/dev)
+  # Same for sound (ALSA, major 116): a USB hub reset re-enumerates the Brio and its mic gets new /dev/snd
+  # nodes, which --device /dev/snd (passed at start) doesn't cover (rig, Sun 27 Sep 03:41: "Device unavailable"
+  # until a restart). With the rule the mic comes back on its own.
+  cams+=(--device-cgroup-rule='c 116:* rmw')
 elif [ -d /dev/v4l ]; then
   cams=(-v /dev/v4l:/dev/v4l:ro)                # stable camera paths only (no replug)
 fi
