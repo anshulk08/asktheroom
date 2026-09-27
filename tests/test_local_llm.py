@@ -31,7 +31,8 @@ def test_hidden_on_table_privacy_help_meds(world):
     assert "keys inside the box" in templated("which things are hidden right now", world, CFG).text
     assert templated("how many things are on the table", world, CFG).text == \
         "I can see the wallet, the box and the notebook on the table."
-    assert "never save a recording" in templated("are you recording me", world, CFG).text
+    privacy = templated("are you recording me", world, CFG).text
+    assert "never save a recording" in privacy and "Grok" in privacy and "picture of the table" in privacy
     assert "your pill bottle" in templated("what can you do", world, CFG).text
     a = templated("did I take my meds", world, CFG)
     assert (a.text, a.point_at) == (PILLS_SAFE, "pill_bottle")
@@ -92,3 +93,15 @@ def test_ask_local_never_raises(world, monkeypatch):
     assert ask_local("is my wallet safe", world, world.events, CFG).text == FALLBACK_TEXT
     off = dict(CFG, understand=dict(CFG["understand"], enabled=False))
     assert ask_local("is my wallet safe", world, world.events, off).text == FALLBACK_TEXT
+
+
+def test_any_taken_missed_or_skipped_medication_claim_is_blocked():
+    from voice.llm import to_answer
+    for text in ("You missed your pills this morning.", "You skipped your meds.",
+                 "You had your medication at 8.", "Your tablets were taken.",
+                 "You took your pills, but I can't see the bottle now.",
+                 "The bottle is on the shelf. You forgot your vitamins."):
+        assert to_answer(text, None, NAMES, CFG).text == PILLS_SAFE, text
+    for text in ("Your pill bottle is on the shelf, next to the mug.",
+                 "You had coffee next to the pill bottle.", "The pill bottle was moved at 8:05."):
+        assert to_answer(text, None, NAMES, CFG).text == text

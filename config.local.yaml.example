@@ -1,0 +1,31 @@
+# Copy to config.local.yaml on a device (gitignored). Merged over config.yaml at startup:
+# nested sections merge key by key, anything else replaces. Only put what differs on this device.
+
+# The rig (Jetson):
+actuator: pca9685            # the committed default is fake, which never moves the servos
+
+# The laptop running n8n, or the rig if it reports to it:
+# n8n:
+#   webhook_url: http://192.168.55.100:5678/webhook/ask-the-room
+
+# Room memory (spec 0009 M0) on the rig: the camera at 1920x1080, zoom 100. table_view_rect is measured
+# once (python -m core.room --measure-rect --full FULL.jpg --ref REF.jpg prints it); zones drawn with
+# python -m core.room --zone NAME --say TEXT --poly x,y x,y x,y ... must match it (demo_check.py check 10).
+# room_memory:
+#   enabled: true
+#   table_view_rect: [x1, y1, x2, y2]
+
+# The room demo (spec 0010): 'room' is said all the time in a room demo, so use a wake phrase nobody says by
+# accident. Overheard RESET / RECAL also need it to open the sentence ("ask the room, reset"). Whisper writes
+# the phrase several ways; list them. hold_notices: nothing speaks unasked while judges are at the rig.
+# listen:
+#   wake_words: [ask the room, askroom, ask room]
+# demo:
+#   hold_notices: true
+# Mic and speaker at chest height near the judge (docs/runbooks/room-voice.md), by part of the device name:
+# (python -m voice.stt --devices / python -m voice.tts --devices list them; pick a part only that device has,
+# not "USB Audio", which the Brio, a USB mic and a USB speaker all share)
+# stt:
+#   input_device: "<part of your mic's name>"
+# tts:
+#   output_device: "<part of your speaker's name>"

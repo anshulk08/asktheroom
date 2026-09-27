@@ -1,14 +1,36 @@
 """Dashboard + phone server (spec V7, V8, V11).
 
-create_app(cfg, world, events, frames=None, ask_fn=None, table=None) -> FastAPI
+create_app(cfg, world, events, frames=None, ask_fn=None, table=None, care=None) -> FastAPI
 
   GET  /                 dashboard (server/web/index.html; everything served locally, works offline)
   GET  /video            MJPEG of the latest frame with the world drawn on it (server/overlay.py)
+  GET  /frame.jpg, /full.jpg   one frame drawn on like /video (the table view; room memory: the whole frame);
+                         ?raw=1 the camera frame as captured, nothing drawn (full.jpg at capture size)
   WS   /ws             WorldState JSON at server.push_hz plus new events since the last push
   GET  /events?since=t   events with wall >= t (oldest first), each with a snapshot_url
   GET  /snapshots/{name} one event snapshot jpg (snapshot dir only)
-  POST /ask              {"text"} -> {"text", "point_at", "action", "latency_ms"}
+  POST /ask              {"text", "source"?: "dashboard" | "phone"} -> {"text", "point_at", "action", "latency_ms"}
+  POST /voice            {"engine"?: "grok" | "rig" | "builtin", "grok_voice"?, "speed"?} the phone app's
+                         voice for the rig's speaker (BLE bridge) -> the stored {"engine", "grok_voice", "speed"}
+  POST /orientation      {"front": "bottom" | "right" | "top" | "left" | null} the user's seat, the camera-frame side of
+                         the table they sit at (the phone's "I sit here", BLE bridge; core/viewframe.py): used by
+                         the next answer, saved in data/viewer.json (null: back to config viewer.front) -> the new
+                         view {"front", "table", "m", "outline"}
   POST /sms              Twilio webhook (signature checked, whitelist only)
+
+/state and /ws also carry "view": the user's frame (core/viewframe.py View.to_json(): {"front", "table": [w, h]
+cm from the seat, "m": 2x3 affine camera table cm -> viewer cm, "outline"}) and, when config viewer.sides is
+set, "sides": {camera side: label}. Positions in "state" stay camera-frame; the BLE bridge turns them.
+
+With care=voice.care.Care (reminders, reports; see voice/care.py), additively:
+  /state and /ws         also carry "notices": [{id, t, kind, text, point_at, acknowledged, ...}] and
+                         "answers": the last 10 answers from every source [{seq, t, src, q, text, point_at, action}]
+  POST /notices/{id}/ack acknowledge a notice (the phone app's button)
+  GET  /report?date=YYYY-MM-DD&format=markdown|text|json   the caregiver summary for a day
+
+Room handoff scoreboard (server/scoreboard.py: real scripts/room_trials.py results only):
+  GET  /scoreboard?date=today|yesterday|all|YYYY-MM-DD      handoffs / returns passed of tried, per object and zone
+  POST /scoreboard/trials?object=NAME   body: a room_trials.py results list; stored in scoreboard.trials_dir
 
 Run the dev version with fake data:  python -m server.app --fake
 """
@@ -16,6 +38,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import collections
+import dataclasses
 import json
 import logging
 import math
@@ -35,17 +59,20 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from core.types import Answer, Event, Status
-from server import overlay
+from core.viewframe import View, apply_saved, set_front
+from server import overlay, scoreboard
 
 log = logging.getLogger("askroom.server")
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 BOUNDARY = "askroomframe"
 SNAP_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.(jpg|jpeg|png)$")
-ASK_TIMEOUT_S = 10.0          # dashboard: ask_fn has its own 4 s LLM timeout; this is a backstop
+ASK_TIMEOUT_S = 10.0          # dashboard: ask_fn has its own 4 s LLM timeout; this is a backstop (main.ANSWER_LATE_S)
+ASK_SOURCES = {"dashboard", "phone"}       # /ask sources a client may name; both are spoken and aimed
 SMS_TIMEOUT_S = 10.0          # Twilio gives a webhook 15 s
 INITIAL_EVENTS = 200          # events sent on a fresh WS connection
 EMPTY_TWIML = '<?xml version="1.0" encoding="UTF-8"?><Response></Response>'
+SCORE_MAX_BYTES = 256 * 1024  # a room_trials.py results file is a few KB
 AskFn = Callable[[str, str], Answer]
 
 
@@ -133,9 +160,9 @@ def canned_ask(cfg: dict, world) -> AskFn:
             return Answer(f"The {name} {is_} under the {spoken(e.parent)}.", point_at=obj, action="point")
         if st == "HELD":
             return Answer(f"Someone is holding the {name} right now.")
-        if st == "GONE":
-            side = e.edge or "edge"
-            return Answer(f"The {name} {'were' if is_ == 'are' else 'was'} carried off the {side} side of the table.",
+        if st == "GONE":                      # spoken from the user's seat; the sweep is the laser's (camera frame)
+            side = View.from_cfg(cfg).off_table(e.edge)
+            return Answer(f"The {name} {'were' if is_ == 'are' else 'was'} carried off {side}.",
                           action=f"sweep:{e.edge}" if e.edge else None)
         return Answer(f"I lost track of the {name}. I last saw {'them' if is_ == 'are' else 'it'} here.", point_at=obj, action="circle")
 
@@ -145,7 +172,8 @@ def canned_ask(cfg: dict, world) -> AskFn:
 # ---------------------------------------------------------------- app
 
 def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = None,
-               table=None) -> FastAPI:
+               table=None, care=None, voice_fn: Optional[Callable[..., Any]] = None) -> FastAPI:
+    apply_saved(cfg)                     # the seat the phone chose last time (data/viewer.json), into cfg
     scfg = cfg.get("server") or {}
     push_period = 1.0 / float(scfg.get("push_hz", 5) or 5)
     mjpeg_period = 1.0 / float(scfg.get("mjpeg_fps", 10) or 10)
@@ -156,6 +184,19 @@ def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = 
 
     app = FastAPI(title="Ask the Room", docs_url=None, redoc_url=None)
     app.state.last_answer = None
+    app.state.answers = collections.deque(maxlen=10)   # recent answers from every source, for the phone
+    app.state.answer_seq = 0
+    answers_lock = threading.Lock()
+
+    def record_answer(question: str, ans: Answer, source: str) -> None:
+        """Log an answer for /state 'answers' (main.py calls this for voice questions too)."""
+        with answers_lock:
+            app.state.answer_seq += 1
+            app.state.answers.append({"seq": app.state.answer_seq, "t": time.time(), "src": source,
+                                      "q": question, "text": ans.text, "point_at": ans.point_at,
+                                      "action": ans.action})
+
+    app.state.record_answer = record_answer
     placeholder_img = overlay.placeholder()
 
     # -- snapshot urls
@@ -180,7 +221,20 @@ def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = 
         return d
 
     def meta() -> dict:
-        return {"last_answer": app.state.last_answer, "server_t": time.time()}
+        out = {"last_answer": app.state.last_answer, "server_t": time.time(), "answers": list(app.state.answers)}
+        try:                                                   # the user's frame, for the phone (BLE bridge)
+            out["view"] = View.from_cfg(cfg).to_json()
+        except Exception:
+            log.exception("viewer frame failed")
+        sides = (cfg.get("viewer") or {}).get("sides")
+        if isinstance(sides, dict) and sides:
+            out["sides"] = {str(k): str(v) for k, v in sides.items()}
+        if care is not None:                                   # care layer: additive key
+            try:
+                out["notices"] = care.notices_json()
+            except Exception:
+                log.exception("care notices failed")
+        return out
 
     # -- pages
     @app.get("/", response_class=HTMLResponse)
@@ -243,9 +297,69 @@ def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = 
                      "X-Accel-Buffering": "no"},
         )
 
+    def render_raw(full: bool) -> Optional[bytes]:
+        """The camera frame as captured, nothing drawn (?raw=1): the table view, or the full frame at capture
+        size. For reading tabletop corners (python -m core.table --outline-full) and demo_check's view check."""
+        get = getattr(frames, "latest_full" if full else "latest", None)
+        f = get() if callable(get) else None
+        if f is None or getattr(f, "img", None) is None:
+            return None
+        ok, buf = cv2.imencode(".jpg", f.img, [cv2.IMWRITE_JPEG_QUALITY, 92])
+        return buf.tobytes() if ok else None
+
     @app.get("/frame.jpg")
-    async def frame_jpg():
-        jpg = await asyncio.to_thread(render_jpeg)
+    async def frame_jpg(raw: bool = False):
+        jpg = await asyncio.to_thread(render_raw, False) if raw else await asyncio.to_thread(render_jpeg)
+        if jpg is None:
+            raise HTTPException(404, "no camera frame yet")
+        return Response(jpg, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+    # -- room memory (spec 0009): the whole camera frame with the zones, the table view and room places
+    room_zones: dict = {}
+
+    def render_full() -> Optional[bytes]:
+        latest_full = getattr(frames, "latest_full", None)
+        if not callable(latest_full):
+            return None
+        f = latest_full()
+        if f is None or getattr(f, "img", None) is None:
+            return None
+        img = f.img.copy()
+        if "zones" not in room_zones:
+            try:
+                from core.room_zones import Zones
+                path = (cfg.get("room_memory") or {}).get("zones_path", "room_zones.json")
+                room_zones["zones"] = list(Zones.load(path).zones.values())
+            except Exception:
+                room_zones["zones"] = []
+        for z in room_zones["zones"]:
+            pts = np.array(z.poly, np.int32).reshape(-1, 1, 2)
+            cv2.polylines(img, [pts], True, (0, 220, 0), 3)
+            cv2.putText(img, z.say, (int(z.poly[0][0]) + 6, int(z.poly[0][1]) + 28), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.9, (0, 220, 0), 2)
+        rect = getattr(frames, "rect", None)
+        if rect is not None:
+            cv2.rectangle(img, (int(rect[0]), int(rect[1])), (int(rect[2]), int(rect[3])), (255, 160, 0), 3)
+        try:
+            places = (world.state_json() or {}).get("room") or {}
+        except Exception:
+            places = {}
+        for name, st in places.items():
+            if isinstance(st, dict) and st.get("box_px"):
+                x1, y1, x2, y2 = (int(v) for v in st["box_px"])
+                cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 255), 3)
+                cv2.putText(img, name, (x1, max(20, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
+        h, w = img.shape[:2]
+        if w > 1280:
+            img = cv2.resize(img, (1280, round(h * 1280 / w)), interpolation=cv2.INTER_AREA)
+        ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        return buf.tobytes() if ok else None
+
+    @app.get("/full.jpg")
+    async def full_jpg(raw: bool = False):
+        jpg = await asyncio.to_thread(render_raw, True) if raw else await asyncio.to_thread(render_full)
+        if jpg is None:
+            raise HTTPException(404, "no full camera frame (room memory is off)")
         return Response(jpg, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
     # -- live state
@@ -308,6 +422,7 @@ def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = 
         app.state.last_answer = {"question": text, "text": ans.text, "point_at": ans.point_at,
                                  "action": ans.action, "latency_ms": ms, "source": source,
                                  "t": time.time()}
+        record_answer(text, ans, source)
         return ans, ms
 
     @app.post("/ask")
@@ -319,7 +434,8 @@ def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = 
         text = str((body or {}).get("text", "")).strip() if isinstance(body, dict) else ""
         if not text:
             raise HTTPException(400, "text is required")
-        ans, ms = await run_ask(text[:500], "dashboard", ASK_TIMEOUT_S)
+        source = body.get("source") if body.get("source") in ASK_SOURCES else "dashboard"
+        ans, ms = await run_ask(text[:500], source, ASK_TIMEOUT_S)
         return JSONResponse({"text": ans.text, "point_at": ans.point_at, "action": ans.action,
                              "latency_ms": ms})
 
@@ -341,6 +457,34 @@ def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = 
         body = ('<?xml version="1.0" encoding="UTF-8"?><Response><Message>'
                 + escape(text[:1500]) + "</Message></Response>")
         return Response(body, media_type="application/xml")
+
+    @app.post("/voice")
+    async def voice_route(request: Request):
+        if voice_fn is None:
+            raise HTTPException(503, "no speaker on this rig")
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(400, "expected JSON {\"engine\", \"grok_voice\", \"speed\"}")
+        if not isinstance(body, dict):
+            raise HTTPException(400, "expected a JSON object")
+        v = voice_fn(body.get("engine"), body.get("grok_voice"), body.get("speed"))
+        return JSONResponse(dataclasses.asdict(v) if dataclasses.is_dataclass(v) else v)
+
+    @app.post("/orientation")
+    async def orientation_route(request: Request):
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(400, "expected JSON {\"front\": \"bottom\" | \"right\" | \"top\" | \"left\"}")
+        if not isinstance(body, dict) or "front" not in body:
+            raise HTTPException(400, "expected a JSON object with \"front\"")
+        try:
+            front = await asyncio.to_thread(set_front, cfg, body["front"])
+        except ValueError as ex:
+            raise HTTPException(400, str(ex))
+        log.info("viewer: the user sits at the camera's %s side", front)
+        return JSONResponse(View.from_cfg(cfg).to_json())
 
     @app.post("/sms")
     async def sms(request: Request):
@@ -364,6 +508,51 @@ def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = 
             return twiml("Text me a question, like: where are my keys?")
         ans, _ = await run_ask(text[:500], "sms", SMS_TIMEOUT_S)
         return twiml(ans.text)
+
+    # -- care layer (voice/care.py): acknowledge a notice, the caregiver summary
+    if care is not None:
+        @app.post("/notices/{notice_id}/ack")
+        async def ack_notice(notice_id: int):
+            if not await asyncio.to_thread(care.ack, notice_id):
+                raise HTTPException(404, "no such notice")
+            return {"ok": True}
+
+        @app.get("/report")
+        async def report(date: Optional[str] = None, format: str = "markdown"):
+            fmt = format if format in ("markdown", "text", "json") else "markdown"
+            try:
+                out = await asyncio.to_thread(care.report, date, fmt)
+            except ValueError:
+                raise HTTPException(400, "date must be YYYY-MM-DD, today or yesterday")
+            if fmt == "json":
+                return JSONResponse(out)
+            return Response(out, media_type="text/markdown; charset=utf-8" if fmt == "markdown"
+                            else "text/plain; charset=utf-8")
+
+    # -- room handoff scoreboard (server/scoreboard.py): real trial results, uploaded from the laptop
+    score_dir = scoreboard.trials_dir(cfg)
+
+    @app.get("/scoreboard")
+    async def scoreboard_route(date: Optional[str] = None):
+        try:
+            runs = await asyncio.to_thread(scoreboard.load_runs, score_dir)
+            return scoreboard.summarize(runs, date)
+        except ValueError:
+            raise HTTPException(400, "date must be today, yesterday, all or YYYY-MM-DD")
+
+    @app.post("/scoreboard/trials")
+    async def scoreboard_upload(request: Request, object: str = ""):
+        body = await request.body()
+        if len(body) > SCORE_MAX_BYTES:
+            raise HTTPException(413, "results file too large")
+        try:
+            records = json.loads(body or b"null")
+            path = await asyncio.to_thread(scoreboard.save_upload, score_dir, object, records)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        log.info("scoreboard: %d room trial runs for %r saved to %s", len(records), object, path)
+        runs = await asyncio.to_thread(scoreboard.load_runs, score_dir)
+        return {"ok": True, "saved": path.name, "runs": len(records), "today": scoreboard.summarize(runs)}
 
     app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
     return app

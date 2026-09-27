@@ -260,8 +260,8 @@ def test_lifted_cover_waits_for_reappear_time_before_losing_track(scene, world, 
 
 def test_cover_taken_out_of_view_counts_as_lifted(scene, world, cfg):
     cover_keys(scene, world)
-    scene.remove('notebook')
-    events = scene.run(world, 1.0 + cfg.reappear_wait_s + 0.2)
+    scene.remove('notebook')                       # unexplained, so it is lost only after lost_grace_s
+    events = scene.run(world, cfg.lost_grace_s + cfg.reappear_wait_s + 0.2)
     assert EventType.LOST_TRACK in types(events)
     assert world.get('keys').status == Status.UNKNOWN
 
@@ -405,7 +405,7 @@ def test_object_there_since_startup_then_removed_is_lost_track_not_under_unknown
     rscene.place('keys', 40, 30)
     let_background_settle(rscene, world, cfg)
     rscene.remove('keys')
-    events = rscene.run(world, 1.5)
+    events = rscene.run(world, cfg.lost_grace_s + 0.3)
     assert types(events) == [EventType.LOST_TRACK]
     assert world.get('keys').status == Status.UNKNOWN
 
@@ -539,3 +539,185 @@ def test_object_carried_in_view_off_the_left_edge_is_one_pick_up_then_exited_vie
     events += scene.run(world, 1.5)
     assert types(events) == [EventType.PICKED_UP, EventType.EXITED_VIEW]
     assert world.get('keys').status == Status.GONE and world.get('keys').edge == 'left'
+
+
+# ----- a hand over an object hides it: decide when the hand has left the spot ------------------------
+
+def wave(scene, world, xs, y=30, hid=1):
+    """The hand sweeps through xs, one position per batch."""
+    events = []
+    for x in xs:
+        scene.hand(hid, x, y)
+        events += world.update(*scene.step())
+    return events
+
+
+def test_hand_waving_over_keys_that_the_detector_misses_logs_nothing(rscene, world):
+    """A slow wave back and forth over the keys: the detector misses them the whole time (a moving arm
+    nearby), long enough to count as absence. Uncovered, their pixels show they are there; covered,
+    the spot cannot be seen until the hand moves on, and then they are there."""
+    rscene.place('keys', 60, 30)
+    rscene.run(world, 2.0)
+    rscene.miss('keys')
+    events = wave(rscene, world, [52, 56, 60, 64, 68, 64, 60, 56, 52, 56, 60, 64, 68, 64, 60])
+    events += wave(rscene, world, [75, 85, 95])
+    rscene.miss('keys', False)
+    events += wave(rscene, world, [105, 115])
+    rscene.hand_off(1)
+    events += rscene.run(world, 1.0)
+    assert events == []
+    assert world.get('keys').status == Status.VISIBLE
+
+
+def test_keys_gone_when_the_waving_hand_moves_on_are_picked_up_by_it(scene, world):
+    scene.place('keys', 60, 30)
+    scene.run(world, 1.0)
+    scene.hand(1, 60, 30)
+    scene.run(world, 0.2)
+    scene.remove('keys')                            # grabbed, and the hand is already moving on
+    events = wave(scene, world, [57, 63, 57, 63, 57, 63, 57, 63])
+    assert events == []                             # the moving hand still covers the spot: undecided
+    events += wave(scene, world, [75, 85, 90, 90, 90])
+    assert types(events) == [EventType.PICKED_UP]
+    assert (world.get('keys').status, world.get('keys').parent) == (Status.HELD, 'hand:1')
+
+
+def test_a_hand_over_part_of_the_box_is_not_a_pick_up(scene, world):
+    """The detector's box shrinks to the part of the box the hand leaves uncovered: its centre moves 6 cm
+    with a hand on it, but the box has not left where it lay. Partly hidden, not carried."""
+    scene.place('box', 40, 30)                      # 20 x 15 cm: x 30-50, y 22.5-37.5
+    scene.run(world, 1.0)
+    scene.hand(1, 40, 30)
+    scene.place('box', 34, 30, w=8, h=15)           # only the left end shows
+    events = scene.run(world, 1.0)
+    scene.hand_off(1)
+    scene.place('box', 40, 30)
+    events += scene.run(world, 1.0)
+    assert events == []
+    assert world.get('box').status == Status.VISIBLE
+
+
+# ----- briefly unseen: an undetected arm or a detector miss is not a loss (shell_1) -------------------
+
+def test_keys_unseen_briefly_then_seen_in_place_log_nothing(scene, world, cfg):
+    """No image, no hand: the detector drops the keys for most of the grace, then sees them where they were."""
+    scene.place('keys', 40, 30)
+    scene.run(world, 1.0)
+    scene.miss('keys')
+    events = scene.run(world, cfg.lost_grace_s - 0.3)
+    assert world.get('keys').status == Status.VISIBLE
+    assert world.resolve('keys') == (pytest.approx((40, 30)), ['keys'])     # 'where is it': its spot
+    scene.miss('keys', False)
+    events += scene.run(world, 1.0)
+    assert events == []
+    assert world.get('keys').status == Status.VISIBLE
+
+
+def test_untouched_keys_half_hidden_by_an_undetected_arm_log_nothing(cfg, world):
+    """shell_1: an arm reaching past (no hand detected) hides part of the wallet, which was there since
+    start-up, and the detector drops it for ~1.8 s. Its patch does not match while the arm is over it and
+    the background never saw that spot. Seen again where it was: no LOST_TRACK / CORRECTED churn."""
+    s = Scene(cfg, fps=10, t0=1000.0, render=True)
+    s.place('keys', 40, 30)
+    let_background_settle(s, world, cfg)
+    s.miss('keys')
+    s.overlay('sleeve', 46, 30, 20, 10)            # x 36-56: over most of the keys (x 37-43)
+    events = s.run(world, 1.8)
+    assert world.get('keys').status == Status.VISIBLE
+    del s.overlays['sleeve']
+    s.miss('keys', False)
+    events += s.run(world, 1.0)
+    assert events == []
+    assert world.get('keys').status == Status.VISIBLE
+
+
+def test_keys_removed_without_a_hand_are_lost_when_the_grace_runs_out(scene, world, cfg):
+    scene.place('keys', 40, 30)
+    scene.run(world, 1.0)
+    scene.remove('keys')
+    assert scene.run(world, cfg.lost_grace_s - 0.2) == []
+    events = scene.run(world, 0.4)
+    assert types(events) == [EventType.LOST_TRACK]
+    assert world.get('keys').status == Status.UNKNOWN
+
+
+def test_keys_covered_while_unseen_are_covered_at_once(scene, world, cfg):
+    """The grace only defers LOST_TRACK: a cover slid over keys the detector already missed is COVERED
+    as soon as it lies over them."""
+    scene.place('keys', 40, 30)
+    scene.place('notebook', 90, 30)
+    scene.run(world, 1.0)
+    scene.miss('keys')
+    scene.run(world, 1.0)                          # absence declared, grace running
+    events = slide(scene, world, 'notebook', (90, 30), (40, 30))
+    assert types(of(events, 'keys')) == [EventType.COVERED]
+    assert world.get('keys').parent == 'notebook'
+
+
+def test_a_hand_seen_at_keys_already_unseen_does_not_pick_them_up(scene, world, cfg):
+    """shell_1 24.25 s: the arm reaching for the notebook hid the phone (no hand detected), then one frame
+    of a hand over the phone. The phone's absence was already unexplained before that hand came: it did
+    not take the phone, which is seen again where it was."""
+    scene.place('keys', 40, 30)
+    scene.run(world, 1.0)
+    scene.miss('keys')
+    events = scene.run(world, 1.0)                 # absent with nothing to explain it: waiting
+    scene.hand(1, 40, 30)
+    events += scene.run(world, 0.1)                # one frame of a hand at rest over the spot
+    scene.hand_off(1)
+    events += scene.run(world, 0.3)
+    scene.miss('keys', False)
+    events += scene.run(world, 1.0)
+    assert events == []
+    assert world.get('keys').status == Status.VISIBLE
+
+
+def test_keys_taken_while_already_unseen_are_lost_when_the_grace_runs_out(scene, world, cfg):
+    scene.place('keys', 40, 30)
+    scene.run(world, 1.0)
+    scene.remove('keys')
+    events = scene.run(world, 1.0)
+    scene.hand(1, 40, 30)
+    events += scene.run(world, 0.3)
+    scene.hand_off(1)
+    events += scene.run(world, cfg.lost_grace_s)
+    assert types(events) == [EventType.LOST_TRACK]
+    assert world.get('keys').status == Status.UNKNOWN
+
+
+# ----- a configured label jumping away while the object's pixels stay put ----------------------------
+
+def test_a_label_jumping_away_from_keys_still_in_place_is_another_object(rscene, world, cfg):
+    """The detector calls a neighbour 'keys' for a few frames (a label swap) while the real keys lie
+    untouched where they were: their pixels still match there, so the keys do not move."""
+    from tests.synth import DEFAULT_SIZE_CM
+    w, h = DEFAULT_SIZE_CM['target']
+    rscene.place('keys', 40, 30)
+    rscene.run(world, 2.0)
+    rscene.hand(1, 36, 30)                          # a hand brushes the keys just before
+    rscene.run(world, 0.2)
+    rscene.hand_off(1)
+    rscene.overlay('keys', 40, 30, w, h)            # the real keys stay drawn at their spot ...
+    rscene.place('keys', 48, 30)                    # ... while the 'keys' detection is 8 cm away
+    events = rscene.run(world, 0.5)
+    assert abs(world.get('keys').pos_cm[0] - 40) < 2
+    rscene.place('keys', 40, 30)
+    events += rscene.run(world, 1.0)
+    assert events == []
+    keys = world.get('keys')
+    assert keys.status == Status.VISIBLE and abs(keys.pos_cm[0] - 40) < 2
+
+
+def test_keys_the_detector_stops_naming_while_a_proposal_still_outlines_them_stay(scene, world, cfg):
+    """blanket_1t: the phone's screen lit up and the fine-tuned detector stopped calling it 'phone' (it
+    called the tape roll 'phone' instead); YOLOE still proposed the phone's box. Its pixels changed, so
+    the patch check failed and the phone was lost after the grace, then reborn as a new thing:N. A
+    class-agnostic proposal on the object's own box, with no hand there, is the object still there."""
+    scene.place('keys', 40, 30)
+    scene.thing('keys seen as a thing', 40, 30, 6, 4)
+    scene.run(world, 1.5)
+    scene.miss('keys')
+    events = scene.run(world, cfg.lost_grace_s + 1.5)
+    assert events == []
+    assert world.get('keys').status == Status.VISIBLE
+    assert not [n for n in world.entities if n.startswith('thing:')]

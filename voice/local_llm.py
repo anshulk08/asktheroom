@@ -1,6 +1,7 @@
-"""Open (OTHER) questions answered by the local Qwen, on the Jetson: "what's in the box",
-"which things are hidden", "is anything under the notebook". Replaces Grok on the voice path, so
-nothing a visitor says leaves the device and open questions work offline.
+"""Fixed answers for the common open (OTHER) questions (templated(), used by voice.llm.ask_other on
+the voice path), and the local Qwen answerer for the long tail (ask_local: an offline option, no longer
+on the voice path since the team moved all LLM work to Grok): "what's in the box", "which things are
+hidden", "is anything under the notebook".
 
 One call, no tool loop: the prompt carries the compact world state and the last few events
 (voice.llm.compact_state), and a JSON schema makes the reply {action, point_at, text} in that
@@ -75,7 +76,7 @@ def user_prompt(question: str, world, events, cfg: dict) -> str:
         except Exception:
             pass
     state = json.dumps(compact_state(world, cfg), separators=(",", ":"))
-    recent = json.dumps([_event_dict(ev, now, True) for ev in evs], separators=(",", ":"))
+    recent = json.dumps([_event_dict(ev, now, True, cfg=cfg) for ev in evs], separators=(",", ":"))
     return f"State: {state}\nRecent events (s_ago = seconds ago): {recent}\nQuestion: {question}"
 
 
@@ -84,8 +85,8 @@ def _list(names: list[str], cfg: dict) -> str:
     return said[0] if len(said) == 1 else ", ".join(said[:-1]) + f" and {said[-1]}"
 
 
-PRIVACY = ("Video and audio stay on this device, and I never save a recording. I only keep the "
-           "questions you ask me, and a day of snapshots when something moves.")
+PRIVACY = ("Audio stays on this device and I never save a recording. When I'm online, questions I can't "
+           "answer myself go to Grok, sometimes with a picture of the table, and I keep a day of snapshots.")
 _MEDS_TAKEN = re.compile(r"\b(take|took|taken|had|swallow\w*)\b.*\b(pills?|meds|medicine|medication)\b")
 _PRIVACY = re.compile(r"\b(record\w*|camera|listening|spy\w*|video|privacy|private|saving|save)\b")
 _HELP = re.compile(r"\b(what can you do|what do you do|how do(es)? (you|this|it) work|what are you|help)\b")

@@ -224,6 +224,73 @@ final class RoomStoreTests: XCTestCase {
         store.setMock(false)
         XCTAssertNil(store.snapshot)
     }
+
+    // MARK: Link additions
+
+    /// The hello goes first on every connect, before the voice and the seat.
+    func testHelloIsWrittenFirstOnConnect() throws {
+        let voice = VoiceSettings(voice: .init(e: "grok", v: "eve", s: 1))
+        let writes = RoomLink.connectWrites(voice: voice, orient: OrientSettings(front: .right))
+            .map { String(decoding: $0, as: UTF8.self) }
+        XCTAssertEqual(writes.count, 3)
+        XCTAssertEqual(writes[0], #"{"hello":{"z":1}}"#)
+        XCTAssertEqual(writes[1], String(decoding: try XCTUnwrap(voice.encoded()), as: UTF8.self))
+        XCTAssertEqual(writes[2], #"{"orient":{"front":"right"}}"#)
+        XCTAssertEqual(RoomLink.connectWrites(voice: voice, orient: nil).first, Data(#"{"hello":{"z":1}}"#.utf8))
+    }
+
+    /// The layout comes only now and then; the store keeps it, and knows when the rig has moved on.
+    func testLayoutIsKeptAcrossStates() {
+        var withLayout = MockData.sampleSnapshot
+        withLayout.lh = "h1"
+        withLayout.lay = RoomLayout(v: 1, size: [400, 300])
+        store.receive(state: withLayout)
+        XCTAssertEqual(store.layout?.size, [400, 300])
+        XCTAssertTrue(store.layoutIsCurrent)
+
+        var plain = MockData.sampleSnapshot
+        plain.lh = "h1"
+        store.receive(state: plain)
+        XCTAssertEqual(store.layout?.size, [400, 300], "kept")
+        XCTAssertEqual(store.layoutHash, "h1")
+        XCTAssertTrue(store.layoutIsCurrent)
+
+        plain.lh = "h2"
+        store.receive(state: plain)
+        XCTAssertNotNil(store.layout, "the old one is still there to draw")
+        XCTAssertFalse(store.layoutIsCurrent, "but the rig has a newer one")
+
+        withLayout.lh = "h2"
+        withLayout.lay = RoomLayout(v: 1, size: [500, 300])
+        store.receive(state: withLayout)
+        XCTAssertEqual(store.layout?.size, [500, 300])
+        XCTAssertTrue(store.layoutIsCurrent)
+    }
+
+    /// The kept layout rides on the snapshot the state names, so words can use its `say`.
+    func testSnapshotCarriesTheKeptLayout() {
+        store.receive(state: MockData.roomSnapshot)
+        var plain = MockData.roomSnapshot
+        plain.lay = nil
+        store.receive(state: plain)
+        XCTAssertEqual(store.snapshot?.lay, MockData.sampleLayout)
+        XCTAssertEqual(Dashboard.whereabouts(store.snapshot!.entity(named: "headphones")!, in: store.snapshot!),
+                       "On the couch")
+
+        plain.lh = "newer"
+        store.receive(state: plain)
+        XCTAssertNil(store.snapshot?.lay, "not a layout this state names")
+    }
+
+    func testLinkStatsArePublished() {
+        XCTAssertNil(store.linkStats)
+        var stats = LinkStats()
+        stats.state.chunks = 3
+        store.receive(linkStats: stats)
+        XCTAssertEqual(store.linkStats?.state.chunks, 3)
+        store.setMock(false)
+        XCTAssertNil(store.linkStats)
+    }
 }
 
 /// The last live map is kept on the phone, so the app opens on it while it finds the rig.
@@ -298,4 +365,5 @@ final class SavedMapTests: XCTestCase {
         let yesterday = Banners.when(now.addingTimeInterval(-86_400), now: now)
         XCTAssertNotEqual(yesterday, Banners.when(now.addingTimeInterval(-60), now: now))
     }
+
 }

@@ -97,3 +97,58 @@ def test_write_split_yaml(tmp_path):
     d = yaml.safe_load(p.read_text())
     assert d["names"][8] == "hand" and d["val"] == "val.txt"
     assert (tmp_path / "val.txt").read_text().strip().endswith("images/2_000001.jpg")
+
+
+def test_public_hand_frames_always_train_and_never_validate():
+    from scripts.finetune.train import split_by_trial
+    stems = ([f"cap{g}_wallet-{k:02d}" for g in range(4) for k in range(2)] + [f"synth_{i:05d}" for i in range(10)]
+             + [f"pubhand_{i}" for i in range(30)])
+    for seed in range(8):
+        tr, va = split_by_trial(stems, seed=seed)
+        assert va and not any(s.startswith(("pubhand_", "synth_")) for s in va), seed
+        assert sum(s.startswith("pubhand_") for s in tr) == 30
+
+
+def test_negatives_are_counted(tmp_path):
+    (tmp_path / "labels").mkdir()
+    (tmp_path / "labels" / "cap0_empty-00.txt").write_text("")
+    (tmp_path / "labels" / "cap0_mug-00.txt").write_text("\n")
+    (tmp_path / "labels" / "cap0_keys-00.txt").write_text("0 0.5 0.5 0.1 0.1\n")
+    assert train.count_negatives(tmp_path, ["cap0_empty-00", "cap0_mug-00", "cap0_keys-00"]) == 2
+
+
+# ----- corner-view retrain (spec 0010 P1-1): capture what the room build's detector sees, merge the views
+
+def test_room_rect_is_the_table_view_or_a_zone_crop_as_the_room_build_cuts_them(tmp_path):
+    from core.room_zones import Zone, Zones
+    from scripts.finetune.capture import room_rect
+    zp = tmp_path / "room_zones.json"
+    Zones(view="v", size_px=(1920, 1080), zones={
+        "couch": Zone("couch", "the couch", [(100, 500), (1900, 500), (1900, 1000), (100, 1000)]),
+        "shelf": Zone("shelf", "the shelf", [(10, 10), (200, 10), (200, 300), (10, 300)])}).save(zp)
+    cfg = {"frame_size_px": [1280, 720], "room_memory": {"capture_size": [1920, 1080], "zones_path": str(zp),
+                                                         "table_view_rect": [400, 300, 1600, 975], "max_crop_px": 1280}}
+    assert room_rect(cfg, "table") == ((400, 300, 1600, 975), (1280, 720))
+    rect, out = room_rect(cfg, "couch")
+    assert rect == (100, 500, 1901, 1001) and out == (1280, round(501 * 1280 / 1801))   # Zone.bbox is end-exclusive
+    assert room_rect(cfg, "shelf")[1] == (191, 291)                  # small zones are not enlarged
+    with pytest.raises(ValueError):
+        room_rect(cfg, "kitchen")
+
+
+def test_merged_sets_keep_their_groups_and_never_collide(tmp_path):
+    from scripts.finetune.merge_sets import merge, tagged
+    assert tagged("cap0_keys-03", "couch") == "cap0_couch-keys-03" and tagged("synth_12", "t") == "synth_t-12"
+    assert common.trial_of(tagged("cap3_notebook-07", "table")) == "cap3"
+    for tag in ("a", "b"):
+        d = tmp_path / tag
+        (d / "images").mkdir(parents=True)
+        (d / "labels").mkdir()
+        cv2.imwrite(str(d / "images" / "cap0_keys-00.jpg"), np.zeros((8, 8, 3), np.uint8))
+        (d / "labels" / "cap0_keys-00.txt").write_text("0 0.5 0.5 0.2 0.2\n")
+        cv2.imwrite(str(d / "images" / "cap1_nolabel-00.jpg"), np.zeros((8, 8, 3), np.uint8))
+    counts = merge(tmp_path / "out", {"a": tmp_path / "a", "b": tmp_path / "b"})
+    assert counts == {"a": 1, "b": 1}
+    assert sorted(p.name for p in (tmp_path / "out" / "labels").iterdir()) == ["cap0_a-keys-00.txt", "cap0_b-keys-00.txt"]
+    with pytest.raises(ValueError):
+        merge(tmp_path / "out", {"a_b": tmp_path / "a"})

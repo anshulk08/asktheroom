@@ -13,10 +13,27 @@
   6 network     NetMonitor.check_once() agrees with a direct probe, and the dashboard shows it
   7 world       after reset, every object VISIBLE (at config demo_check.home_cm, if set)
   8 kill switch manual: laser on, press the kill switch, confirm the dot went out
+  9 clock       not behind the last saved file (a Jetson offline with no RTC battery boots stale)
+ 10 room memory when room_memory.enabled: the zones file has zones drawn at this camera view (files only)
+ 11 room        when room.enabled: the room dot map matches the camera and mapped dots are hit again
+ 12 room app    the running app answers: perception fresh (fps), and /full.jpg (room memory's full frame)
+ 13 grok        api.x.ai answers GET /models with XAI_API_KEY (no tokens), with the round trip time
+ 14 devices     the mic (stt.input_device) and speaker (tts.output_device) named in config are present
+ 15 memory      MemAvailable >= room_check.min_ram_mb; no NvMapMemAlloc / Traceback in the app log's tail
+ 16 namer       the room namer's queue is bounded (a burst of 100 crops keeps <= 8)
+ 17 table view  table_cal.json was made at this camera view, the scene around the tag spot still matches
+                table_cal_view.png, the view hasn't shifted, and a tabletop outline is set (else WARN)
 
-Missing hardware fails that check with the reason, so this also runs on a laptop. Parts (camera,
+    python demo_check.py --live           # the morning pass while the room app runs (it keeps the camera
+                                          # and mic): checks 6, 9, 10, 12-17 only
+
+[WARN] is not a failure (the run still passes) but says what to fix. Missing hardware fails that check
+with the reason, so this also runs on a laptop. Parts (camera,
 table, detector, laser) are built on first use and shared; one that fails to build fails every
-check that needs it, with the same reason.
+check that needs it, with the same reason. Every check has a deadline (DEADLINE_S: the detector and
+world checks 180 s for a TensorRT load, prompts 300 s, the rest 30 s): a check that hangs (a speaker
+that never takes the tone, a camera that never answers) fails "timed out" with its stack on stderr,
+and the run goes on. Recording and the test tone have their own shorter deadlines.
 
 --fake: the camera is a FrameBuffer over a rendered home layout (server.sim's painter and LAYOUT,
 with ArUco 0-3 drawn in), the detector's backend reads boxes off that layout, the laser is an
@@ -26,6 +43,7 @@ network check is real.
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import math
 import os
 import shutil
@@ -33,8 +51,12 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
-from typing import Callable, Optional
+import traceback
+import weakref
+from collections import deque
+from typing import Callable, Optional, Union
 from urllib.parse import urlparse
 
 import numpy as np
@@ -53,6 +75,12 @@ SPEECH_DBFS = -35.0             # loudest 32 ms block while someone talks, at ar
 SILENT_DBFS = -90.0             # below this the mic is sending digital zeros (muted or wrong device)
 
 Result = tuple[Optional[bool], str]         # ok (None = skipped), message
+WARN = "warning: "                          # (None, WARN + msg) prints [WARN]: not a failure, but act on it
+
+DEADLINE_S = {"detector": 180.0, "world": 180.0}   # may load the TensorRT engine
+MANUAL_DEADLINE_S = 300.0                          # checks that wait for a person to answer
+DEFAULT_DEADLINE_S = 30.0
+AUDIO_GRACE_S = 3.0                                # recording / tone may overrun their length by this
 
 
 # ---------------------------------------------------------------- fake hardware
@@ -64,7 +92,7 @@ FAKE_MARKER_CM = 4.5
 def fake_cfg(cfg: dict) -> dict:
     """The rendered frame is the table (server.sim), with markers inset so they stay in view."""
     t = dict(cfg.get("table") or {}, markers={k: list(v) for k, v in FAKE_MARKERS_CM.items()})
-    return dict(cfg, table=t)
+    return dict(cfg, table=t, table_tag=dict(cfg.get("table_tag") or {}, enabled=False))   # the fake draws 0-3
 
 
 def fake_layout(cfg: dict) -> dict[str, tuple[float, float]]:
@@ -125,18 +153,72 @@ class LayoutBackend:
         return list(self.raw)
 
 
+# ---------------------------------------------------------------- prompts
+
+class PromptReader:
+    """input() for checks that can be abandoned: one thread reads stdin lines into a queue, and a check
+    that timed out while waiting for an answer is marked so it can never take a later answer (a plain
+    input() left blocked would swallow the next Enter)."""
+
+    def __init__(self, stream=None):
+        self.stream = stream if stream is not None else sys.stdin
+        self.lines: deque = deque()
+        self.cv = threading.Condition()
+        self.eof = False
+        self.dead: "weakref.WeakSet[threading.Thread]" = weakref.WeakSet()   # checks that timed out (idents get reused)
+        self._thread: Optional[threading.Thread] = None
+
+    def _run(self) -> None:
+        while True:
+            try:
+                line = self.stream.readline()
+            except (OSError, ValueError):
+                line = ""
+            with self.cv:
+                if not line:
+                    self.eof = True
+                    self.cv.notify_all()
+                    return
+                self.lines.append(line.rstrip("\r\n"))
+                self.cv.notify_all()
+
+    def ask(self, prompt: str) -> str:
+        print(prompt, end="", flush=True)
+        with self.cv:
+            if self._thread is None:
+                self._thread = threading.Thread(target=self._run, name="stdin", daemon=True)
+                self._thread.start()
+            while True:
+                if threading.current_thread() in self.dead:
+                    raise TimeoutError("prompt abandoned: its check timed out")
+                if self.lines:
+                    return self.lines.popleft()
+                if self.eof:
+                    raise EOFError
+                self.cv.wait(0.5)
+
+    def abandon(self, thread: threading.Thread) -> None:
+        with self.cv:
+            self.dead.add(thread)
+            self.cv.notify_all()
+
+
 # ---------------------------------------------------------------- the parts, built on first use
 
 class Rig:
     """Lazily builds and caches each part. A part that fails to build raises the same error again,
     so every check that needs a missing camera reports the camera, not a knock-on error."""
 
-    def __init__(self, cfg: dict, fake: bool = False, camera: int = 0, manual: bool = True,
-                 ask: Callable[[str], str] = input):
+    def __init__(self, cfg: dict, fake: bool = False, camera: Union[int, str] = 0, manual: bool = True,
+                 ask: Optional[Callable[[str], str]] = None):
         self.fake = fake
         self.cfg = fake_cfg(cfg) if fake else cfg
-        self.camera, self.manual, self._ask = camera, manual, ask
+        self.prompts = PromptReader() if ask is None else None
+        self.camera, self.manual = camera, manual
+        self._ask = ask if ask is not None else self.prompts.ask
+        self.live = False                          # --live: the room app is running and holds camera and audio
         self._parts: dict[str, object] = {}
+        self.building: set[str] = set()             # parts being made right now (a hung check marks them)
         self._cleanup: list[Callable[[], None]] = []
         self.tmp = tempfile.mkdtemp(prefix="askroom_check_")
         self.home_cm = (fake_layout(self.cfg) if fake else
@@ -146,11 +228,15 @@ class Rig:
     def part(self, name: str):
         got = self._parts.get(name)
         if got is None:
+            self.building.add(name)
             try:
                 got = getattr(self, f"_make_{name}")()
             except Exception as e:                 # noqa: BLE001 - reported as the check's reason
                 got = e
-            self._parts[name] = got
+            finally:
+                self.building.discard(name)
+            self._parts.setdefault(name, got)      # a timeout may have marked it failed meanwhile
+            got = self._parts[name]
         if isinstance(got, Exception):
             raise got
         return got
@@ -209,6 +295,37 @@ class Rig:
         self._cleanup.append(laser.off)
         return laser
 
+    def _make_room(self):
+        """(laser, frames) for room pointing: the laser with the room map loaded. --fake: the simulated
+        room (act/sim.py RoomRig), swept here."""
+        from act.room_map import RoomMap, sweep
+        if self.fake:
+            from act.sim import RoomRig
+            rig = RoomRig(seed=0)
+            laser = rig.make_laser()
+            laser.room_map = sweep(laser, grid=(12, 9), n_pairs=1)
+            return laser, rig.frames
+        path = self.cfg.get("room_map", "room_map.json")
+        if not os.path.exists(path):
+            raise RuntimeError(f"no {path}: run python -m act.room_map --sweep (nobody in view)")
+        laser = self.part("laser")
+        laser.room_map = RoomMap.load(path)
+        return laser, self.part("frames")
+
+    def laser_off_now(self, timeout: float = 2.0) -> None:
+        """Best effort before exiting: write laser-off straight to the hardware, without the actuator's
+        lock (a timed-out check may still hold it) and with a deadline."""
+        for name in ("laser", "room"):
+            got = self._parts.get(name)
+            laser = got[0] if isinstance(got, tuple) else got
+            act = getattr(laser, "act", None)
+            hw = getattr(act, "_hw_laser", None)
+            if hw is None:
+                continue
+            t = threading.Thread(target=hw, args=(False, time.monotonic()), name="laser-off", daemon=True)
+            t.start()
+            t.join(timeout)
+
     def close(self) -> None:
         for fn in reversed(self._cleanup):
             try:
@@ -223,17 +340,24 @@ class Rig:
         if self.fake:
             t = np.arange(int(seconds * 16000)) / 16000
             return (0.2 * np.sin(2 * np.pi * 220 * t)).astype(np.float32)
-        import sounddevice as sd
-        dev = (self.cfg.get("stt") or {}).get("input_device")
-        a = sd.rec(int(seconds * 16000), samplerate=16000, channels=1, dtype="float32", device=dev)
-        sd.wait()
-        return a[:, 0]
+        from voice.stt import record_seconds         # by name, resampled; a missing named mic raises
+        return record_seconds(seconds, (self.cfg.get("stt") or {}).get("input_device"))
 
     def play(self, pcm: np.ndarray, rate: int) -> None:
+        """The test tone on tts.output_device (what the voice uses; the default is HDMI in the container,
+        which can block forever), on a thread with a deadline."""
         if self.fake:
             return
-        from voice.tts import play_pcm
-        play_pcm(pcm, rate)
+        from voice.tts import play_pcm, resolve_output_device
+        spec = (self.cfg.get("tts") or {}).get("output_device")
+        dev = resolve_output_device(spec)
+        t = threading.Thread(target=play_pcm, args=(pcm, rate, dev), name="tone", daemon=True)
+        t.start()
+        t.join(len(pcm) / rate + AUDIO_GRACE_S)
+        if t.is_alive():
+            raise TimeoutError(f"speaker didn't finish the test tone (tts.output_device {spec!r}"
+                               f"{' = default device' if dev is None else f' = {dev}'}): "
+                               "check it with python -m voice.tts --devices")
 
 
 def dbfs(x: np.ndarray) -> float:
@@ -258,13 +382,14 @@ def run_frames(rig: Rig, seconds: float, fn: Callable) -> tuple[int, float]:
 
 # ---------------------------------------------------------------- checks
 
-def exposure_mode(device: int) -> tuple[Optional[bool], str]:
+def exposure_mode(device: Union[int, str]) -> tuple[Optional[bool], str]:
     """(locked?, detail) from v4l2-ctl. auto_exposure 1 is manual on UVC cameras."""
     if not sys.platform.startswith("linux"):
         return None, "exposure lock only readable on Linux (v4l2)"
     if shutil.which("v4l2-ctl") is None:
         return None, "v4l2-ctl missing (apt install v4l-utils)"
-    out = subprocess.run(["v4l2-ctl", "-d", f"/dev/video{device}", "-C", "auto_exposure",
+    dev = device if isinstance(device, str) else f"/dev/video{device}"
+    out = subprocess.run(["v4l2-ctl", "-d", dev, "-C", "auto_exposure",
                           "-C", "exposure_time_absolute"], capture_output=True, text=True, timeout=5).stdout
     vals = dict(ln.split(":", 1) for ln in out.splitlines() if ":" in ln)
     mode = vals.get("auto_exposure", "").strip()
@@ -308,6 +433,8 @@ def check_markers(rig: Rig) -> Result:
     import core.table
     table = rig.part("table")
     img = rig.part("frames").latest().img
+    if getattr(table, "tag_mode", False):
+        return _check_tag(table, img)
     found = core.table.find_markers(img)
     ids = [i for i in core.table.TABLE_IDS if i in found]
     if len(ids) < 4:
@@ -322,10 +449,32 @@ def check_markers(rig: Rig) -> Result:
     return bool(err.max() < MAX_MARKER_CM), msg
 
 
+def _check_tag(table, img) -> Result:
+    """One-tag mode: the tag is usually picked up after calibrating, so it need not be in view. If it is,
+    its corners must land where they did during calibration (else the camera or table moved)."""
+    import json
+
+    import core.table
+    w, h = table.size_cm
+    c = core.table.tag_corners(img, table.tag_id, table._det)
+    try:
+        saved = json.loads(open(table.cal_path).read()).get("markers_px", {}).get("tag")
+    except (OSError, ValueError):
+        saved = None
+    if c is None or saved is None:
+        return True, (f"one-tag calibration loaded ({w:g} x {h:g} cm); tag not in view, drift not checked "
+                      f"here (check 17 compares the scene; put it down and say 'recalibrate' if the camera moved)")
+    err = float(np.linalg.norm(table.px_to_cm(c) - table.px_to_cm(np.array(saved)), axis=1).max())
+    msg = f"tag {table.tag_id}, max drift {err:.2f} cm"
+    if err >= MAX_MARKER_CM:
+        msg += ": recalibrate (python -m core.table, or say 'recalibrate')"
+    return err < MAX_MARKER_CM, msg
+
+
 def check_laser(rig: Rig) -> Result:
     laser = rig.part("laser")
     if laser.fit is None:
-        return False, f"not calibrated ({laser.cal_path} missing): run python -m act.calibrate"
+        return False, f"not calibrated ({laser.cal_path} missing): run python -m act.calibrate --rig"
     fe = laser.fit.fit_error_cm or {}
     med, mx = float(fe.get("median", math.inf)), float(fe.get("max", math.inf))
     w, h = laser.table_size
@@ -442,6 +591,634 @@ def check_kill_switch(rig: Rig) -> Result:
     return False, "dot stayed on: the kill switch must cut laser power before the demo"
 
 
+def check_clock(rig: Rig) -> Result:
+    import main
+    import net
+    behind = net.clock_behind(main.clock_files(rig.cfg))
+    if behind is not None:
+        return False, (f"{behind / 60:.0f} min behind the last saved file: spoken times will be wrong; "
+                       "join the hotspot (NTP) or `sudo date -s`")
+    return True, time.strftime("%a %b %d %H:%M %Z")
+
+
+def check_room_memory(rig: Rig) -> Result:
+    """Room memory (spec 0009 M0), when enabled: table_view_rect is measured, and the zones file exists, has
+    zones and was drawn at this view (capture size, zoom, table_view_rect). Files only: no camera."""
+    from core.room_types import RoomConfig
+    rc = RoomConfig.from_dict(rig.cfg.get("room_memory"))
+    if not rc.enabled:
+        return None, "room memory off (room_memory.enabled: false)"
+    from core.room_zones import Zones, view_version
+    draw = "python -m core.room --zone NAME --say TEXT --poly x,y x,y x,y"
+    if rc.table_view_rect is None:
+        return False, ("no room_memory.table_view_rect: measure it (python -m core.room --measure-rect "
+                       "--full FULL.jpg --ref REF.jpg) and put it in config.local.yaml")
+    try:
+        zones = Zones.load(rc.zones_path)
+    except FileNotFoundError:
+        return False, f"no {rc.zones_path}: draw the zones ({draw})"
+    if not zones.zones:
+        return False, f"{rc.zones_path} has no zones: draw them ({draw})"
+    view = view_version(rc.capture_size, rc.zoom, rc.table_view_rect)
+    if zones.view != view:
+        return False, (f"zones drawn at view {zones.view}, the config gives {view} (capture size, zoom or "
+                       f"table_view_rect changed): redraw them ({draw})")
+    names = ", ".join(f"{n} ({z.say})" for n, z in zones.zones.items())
+    return True, f"{len(zones.zones)} zones at view {view}: {names}"
+
+
+def check_room(rig: Rig) -> Result:
+    """Room pointing (spec 0006), when enabled: the map matches the camera, has zones, and three mapped
+    dots spread over the room are hit again. The first look (the map's open-loop guess) must land within
+    2 x tol_px: the loop would converge anyway, so that's what catches a moved camera or head."""
+    if not (rig.cfg.get("room") or {}).get("enabled"):
+        return None, "room pointing off (room.enabled: false)"
+    laser, frames = rig.part("room")
+    rm = laser.room_map
+    f = frames.latest()
+    if f is not None and f.img is not None and (f.img.shape[1], f.img.shape[0]) != rm.size_px:
+        return False, f"map is {rm.size_px[0]}x{rm.size_px[1]}, camera is {f.img.shape[1]}x{f.img.shape[0]}: sweep again"
+    idx = np.nonzero(rm.seen)[0]
+    if len(idx) < 10:
+        return False, f"only {len(idx)} dots in the map: sweep again with the room lit normally"
+    picks = [rm.px[idx[int(q * (len(idx) - 1))]] for q in (0.2, 0.5, 0.8)]
+    errs = []
+    try:
+        for uv in picks:
+            r = laser.aim_px(uv)
+            errs.append(r.first_err_px if r.on_target and r.first_err_px is not None else math.inf)
+    finally:
+        laser.off()
+    shown = ", ".join("not hit" if math.isinf(e) else f"{e:.1f}" for e in errs)
+    zones = ", ".join(rm.zones) or "none"
+    if any(e > 2 * laser.tol_px for e in errs):
+        return False, (f"map guess off by {shown} px: camera or head moved? sweep again "
+                       "(python -m act.room_map --sweep)")
+    if not rm.zones and not rig.fake:
+        return False, f"re-hit {shown} px, but no zones: draw them (python -m act.room_map --zone NAME --poly ...)"
+    return True, f"{rm.n_seen} dots, zones: {zones}; re-hit {shown} px"
+
+
+# ---------------------------------------------------------------- the running room app (spec 0010 P1-3)
+
+def _rc(rig: Rig) -> dict:
+    return rig.cfg.get("room_check") or {}
+
+
+def saved_port(path: str = "data/room/app.args") -> Optional[int]:
+    """--port from the args scripts/room_app.sh started the app with (one per line), if any."""
+    try:
+        args = open(path).read().split("\n")
+    except OSError:
+        return None
+    for i, a in enumerate(args):
+        v = a[len("--port="):] if a.startswith("--port=") else (args[i + 1] if a == "--port" and i + 1 < len(args) else "")
+        if v.strip().isdigit():
+            return int(v)
+    return None
+
+
+def app_url(cfg: dict, args_path: str = "data/room/app.args") -> str:
+    """room_check.app_url; else the --port scripts/room_app.sh saved; else server.port."""
+    url = str((cfg.get("room_check") or {}).get("app_url") or "").strip()
+    if url:
+        return url.rstrip("/")
+    port = saved_port(args_path) or (cfg.get("server") or {}).get("port", 8000)
+    return f"http://127.0.0.1:{port}"
+
+
+def check_room_app(rig: Rig, get: Optional[Callable] = None) -> Result:
+    """The running app (not this process) answers: /state is fresh (perception alive, its fps), and with
+    room memory on, /full.jpg serves the full camera frame (the room pipeline is up)."""
+    if rig.fake and get is None:
+        return None, "skipped: no running app in --fake"
+    import requests
+    get = get or requests.get
+    url = app_url(rig.cfg)
+    try:
+        st = get(f"{url}/state", timeout=5).json().get("state") or {}
+    except Exception as e:                                  # noqa: BLE001
+        return False, (f"no room app at {url} ({type(e).__name__}): start it (scripts/room_app.sh start) "
+                       "or check room_check.app_url")
+    age = time.time() - float(st.get("t") or 0.0)
+    fps = float(st.get("fps") or 0.0)
+    max_age = float(_rc(rig).get("max_frame_age_s", 5))
+    msg = f"app at {url}: {fps:.1f} fps, state {age:.1f} s old"
+    if age > max_age or fps <= 0:
+        return False, msg + ": perception has stalled (camera unplugged or busy?): restart the app"
+    if not (rig.cfg.get("room_memory") or {}).get("enabled"):
+        return True, msg + "; room memory off"
+    try:
+        r = get(f"{url}/full.jpg", timeout=10)
+        ok = r.status_code == 200 and r.content[:2] == b"\xff\xd8"
+    except Exception as e:                                  # noqa: BLE001
+        return False, msg + f"; /full.jpg failed ({type(e).__name__})"
+    if not ok:
+        return False, msg + f"; no full camera frame (HTTP {r.status_code}): room memory isn't running"
+    places = [n for n, v in (st.get("room") or {}).items() if isinstance(v, dict)]
+    return True, msg + f"; room memory up ({len(places)} object(s) in zones)"
+
+
+def _xai_key() -> str:
+    """XAI_API_KEY from the environment, else from ./.env (never printed)."""
+    key = os.environ.get("XAI_API_KEY", "").strip()
+    if key or not os.path.isfile(".env"):
+        return key
+    for ln in open(".env", encoding="utf-8", errors="ignore"):
+        k, _, v = ln.strip().partition("=")
+        if k.strip().removeprefix("export ").strip() == "XAI_API_KEY":
+            return v.strip().strip("'\"")
+    return ""
+
+
+def check_grok(rig: Rig, get: Optional[Callable] = None) -> Result:
+    """api.x.ai reachable with our key: GET /models (no tokens), timed. Room naming stops without it."""
+    import requests
+
+    from core.xai import BASE_URL
+    injected, get = get is not None, get or requests.get
+    key = _xai_key()
+    if not key:
+        if rig.fake and not injected:
+            return None, "skipped: no XAI_API_KEY in --fake"
+        return False, "no XAI_API_KEY (environment or .env): Grok naming and answers are off"
+    base = ((rig.cfg.get("llm") or {}).get("base_url") or BASE_URL).rstrip("/")
+    t0 = time.monotonic()
+    try:
+        r = get(f"{base}/models", headers={"Authorization": f"Bearer {key}"},
+                timeout=float(_rc(rig).get("grok_timeout_s", 10)))
+    except Exception as e:                                  # noqa: BLE001
+        return False, (f"{base} unreachable ({type(e).__name__}): offline, room naming stops. Switch to the "
+                       "phone hotspot (docs/HOTSPOT.md)")
+    ms = (time.monotonic() - t0) * 1000
+    if r.status_code in (401, 403):
+        return False, f"Grok refused the key (HTTP {r.status_code}) in {ms:.0f} ms: check XAI_API_KEY"
+    if r.status_code >= 400:
+        return False, f"Grok answered HTTP {r.status_code} in {ms:.0f} ms"
+    slow = "; slow: answers will need the thinking cue" if ms > 1500 else ""
+    return True, f"Grok reachable, {ms:.0f} ms round trip{slow}"
+
+
+def _find_device(devices: list, spec, kind: str) -> tuple[Optional[dict], str]:
+    """(device, why) for a config spec: an index, or part of a name (case-insensitive), among devices
+    that have `kind` channels."""
+    ch = "max_input_channels" if kind == "input" else "max_output_channels"
+    cands = [dict(d, index=i) for i, d in enumerate(devices) if d.get(ch, 0) > 0]
+    if isinstance(spec, int) or str(spec).strip().isdigit():
+        hit = [d for d in cands if d["index"] == int(spec)]
+        return (hit[0], "") if hit else (None, f"no {kind} device #{spec}")
+    hit = [d for d in cands if str(spec).strip().lower() in str(d.get("name", "")).lower()]
+    if not hit:
+        return None, f"no {kind} device named like {spec!r}"
+    return hit[0], (f" ({len(hit)} match, first used)" if len(hit) > 1 else "")
+
+
+def asound_cards(root: str = "/proc/asound") -> list[dict]:
+    """ALSA's own card list: [{'num', 'name' (id, driver, long names: matched), 'label' (shown), 'capture',
+    'playback', 'busy_c', 'busy_p'}]. Unlike PortAudio, it lists a card the running app has open, and says so (a substream in
+    state RUNNING)."""
+    import glob
+    import re
+    try:
+        lines = open(os.path.join(root, "cards")).read().splitlines()
+    except OSError:
+        return []
+    cards = []
+    for i, ln in enumerate(lines):
+        m = re.match(r"\s*(\d+)\s+\[([^\]]*)\]:\s*(.*)", ln)
+        if not m:
+            continue
+        num = int(m.group(1))
+        more = lines[i + 1].strip() if i + 1 < len(lines) and not re.match(r"\s*\d+\s+\[", lines[i + 1]) else ""
+        card = {"num": num, "name": f"{m.group(2).strip()} {m.group(3).strip()} {more}".strip(),
+                "label": m.group(3).split(" - ", 1)[-1].strip()}
+        for d in ("c", "p"):
+            pcms = glob.glob(os.path.join(root, f"card{num}", f"pcm*{d}"))
+            card["capture" if d == "c" else "playback"] = bool(pcms)
+            busy = False
+            for st in glob.glob(os.path.join(root, f"card{num}", f"pcm*{d}", "sub*", "status")):
+                try:
+                    busy |= "RUNNING" in open(st).read()
+                except OSError:
+                    pass
+            card["busy_" + d] = busy
+        cards.append(card)
+    return cards
+
+
+AUDIO_DEVICES = (("input", "stt", "input_device"), ("output", "tts", "output_device"))
+
+
+def _check_devices_alsa(rig: Rig, root: str, which=AUDIO_DEVICES) -> Result:
+    """--live: the app holds the mic and speaker, and PortAudio hides a busy device, so look in ALSA's card
+    list instead. A card in use counts as present (the app has it)."""
+    cards = asound_cards(root)
+    if not cards:
+        return None, f"no {root}/cards (not Linux?): devices not checked"
+    parts, problems = [], []
+    for kind, section, key in which:
+        spec = (rig.cfg.get(section) or {}).get(key)
+        label = "mic" if kind == "input" else "speaker"
+        d = "c" if kind == "input" else "p"
+        if spec is None or (isinstance(spec, str) and not spec.strip()):
+            problems.append(f"{section}.{key} not set: the {label} would be the default "
+                            f"({'Brio in the corner' if kind == 'input' else 'HDMI, silent'})")
+            continue
+        if isinstance(spec, int) or str(spec).strip().isdigit():
+            problems.append(f"{section}.{key} is an index ({spec}): indexes shift on replug, set part of the "
+                            f"{label}'s name instead")
+            continue
+        hits = [c for c in cards if str(spec).strip().lower() in c["name"].lower()
+                and c["capture" if kind == "input" else "playback"]]
+        if not hits:
+            problems.append(f"no {kind} card named like {spec!r}: plug the {label} in (cat {root}/cards)")
+            continue
+        c = hits[0]
+        parts.append(f"{label} card {c['num']} {c['label']}"
+                     + (" (in use by the app)" if c["busy_" + d] else ""))
+    return not problems, "; ".join(parts + problems)
+
+
+PULSE_WORDS = ("pulse", "default")
+
+
+def default_pactl() -> Optional[Callable[[list], "subprocess.CompletedProcess"]]:
+    if shutil.which("pactl") is None:
+        return None
+    return lambda args: subprocess.run(["pactl", *args], capture_output=True, text=True, timeout=5)
+
+
+def _pulse_device(rig: Rig, kind: str, spec, pactl) -> Optional[tuple[Optional[bool], str]]:
+    """The device through PulseAudio (a Bluetooth speaker lives there, not in ALSA; scripts/dock.sh passes
+    the host socket as PULSE_SERVER). Generic specs (null, 'pulse', 'default') check the default sink or
+    source, which must match room_check.pulse_sink / pulse_source when set (e.g. 'bluez'). A named spec
+    returns None when PulseAudio has nothing by that name, so the ALSA lookup gets its turn."""
+    label = "mic" if kind == "input" else "speaker"
+    generic = spec is None or str(spec).strip().lower() in ("",) + PULSE_WORDS
+    shown = "default" if spec is None or not str(spec).strip() else str(spec)
+    if pactl is None:
+        if not generic:
+            return None
+        return None, f"{label} via PulseAudio ({shown}): not checked (no pactl here), check it by ear"
+    what = "sinks" if kind == "output" else "sources"
+    try:
+        r = pactl(["list", "short", what])
+        err = (r.stderr or "").strip()[:80]
+    except Exception as e:                                  # noqa: BLE001 - timeout, missing binary
+        r, err = None, type(e).__name__
+    if r is None or r.returncode != 0:
+        if not generic:
+            return None
+        return False, (f"{label} via PulseAudio: pactl failed ({err}): is the host's PulseAudio running and "
+                       f"PULSE_SERVER right ({os.environ.get('PULSE_SERVER', 'unset')})?")
+    rows = [ln.split("\t") for ln in r.stdout.splitlines() if ln.strip()]
+    names = [(f[1], f[-1]) for f in rows if len(f) >= 2 and not f[1].endswith(".monitor")]
+    if not generic:
+        hit = [(n, st) for n, st in names if str(spec).strip().lower() in n.lower()]
+        return (True, f"{label} via PulseAudio: {hit[0][0]} ({hit[0][1]})") if hit else None
+    if not names:
+        return False, (f"no PulseAudio {what[:-1]}: "
+                       + ("is the Bluetooth speaker connected?" if kind == "output" else "is the mic connected?"))
+    default = None
+    try:
+        info = pactl(["info"])
+        key = "Default Sink:" if kind == "output" else "Default Source:"
+        default = next((ln.split(":", 1)[1].strip() for ln in info.stdout.splitlines() if ln.startswith(key)), None)
+    except Exception:                                       # noqa: BLE001
+        pass
+    name, state = next(((n, st) for n, st in names if n == default), names[0])
+    want = str(_rc(rig).get("pulse_sink" if kind == "output" else "pulse_source") or "").strip()
+    if want and want.lower() not in name.lower():
+        return False, (f"{label} via PulseAudio is {name}, not like {want!r}: "
+                       + ("reconnect the Bluetooth speaker (bluetoothctl connect <MAC>)" if kind == "output"
+                          else "select the right mic (pactl set-default-source ...)"))
+    return True, f"{label} via PulseAudio: {name} ({state})"
+
+
+def check_devices(rig: Rig, query: Optional[Callable[[], list]] = None, asound: str = "/proc/asound",
+                  pactl="auto") -> Result:
+    """The mic and speaker named in config are plugged in. Null means the default device, which on the
+    rig is the Brio's mic in the corner and HDMI (no speaker), so both must be named, unless PulseAudio
+    carries the audio (PULSE_SERVER set: the askroom:audio image and a Bluetooth speaker): then null,
+    'pulse' and 'default' mean PulseAudio's default, checked with pactl, and a name pactl knows (a bluez
+    sink) is found there. The rest: --live reads ALSA's card list, since the running app has the devices
+    open; otherwise PortAudio's list."""
+    if rig.fake and query is None:
+        return None, "skipped: no audio devices in --fake"
+    pactl = default_pactl() if pactl == "auto" else pactl
+    pulse_env = bool(os.environ.get("PULSE_SERVER"))
+    parts, problems, skipped, rest = [], [], [], []
+    for kind, section, key in AUDIO_DEVICES:
+        spec = (rig.cfg.get(section) or {}).get(key)
+        word = "" if spec is None else str(spec).strip().lower()
+        if word in PULSE_WORDS or (pulse_env and not word.isdigit()):
+            got = _pulse_device(rig, kind, spec, pactl)
+            if got is not None:
+                ok, text = got
+                (parts if ok else skipped if ok is None else problems).append(text)
+                continue
+        rest.append((kind, section, key))
+    if rest:
+        ok, text = _check_devices_rest(rig, rest, query, asound)
+        if text:
+            (parts if ok else skipped if ok is None else problems).append(text)
+    msg = "; ".join(parts + skipped + problems)
+    if problems:
+        return False, msg
+    return (True if parts else None), msg
+
+
+def _check_devices_rest(rig: Rig, which, query, asound) -> Result:
+    if rig.live and query is None:
+        return _check_devices_alsa(rig, asound, which)
+    if query is None:
+        import sounddevice as sd
+        query = lambda: list(sd.query_devices())            # noqa: E731
+    devices = query()
+    parts, problems = [], []
+    for kind, section, key in which:
+        spec = (rig.cfg.get(section) or {}).get(key)
+        label = "mic" if kind == "input" else "speaker"
+        if spec is None or (isinstance(spec, str) and not spec.strip()):
+            problems.append(f"{section}.{key} not set: the {label} would be the default "
+                            f"({'Brio in the corner' if kind == 'input' else 'HDMI, silent'})")
+            continue
+        d, why = _find_device(devices, spec, kind)
+        if d is None:
+            problems.append(f"{why}: plug the {label} in (python -m voice.tts --devices lists them)")
+        else:
+            parts.append(f"{label} #{d['index']} {d.get('name')}{why}")
+    msg = "; ".join(parts + problems)
+    return not problems, msg
+
+
+def meminfo_available_mb(path: str = "/proc/meminfo") -> Optional[float]:
+    try:
+        for ln in open(path):
+            if ln.startswith("MemAvailable:"):
+                return int(ln.split()[1]) / 1024
+    except OSError:
+        return None
+    return None
+
+
+def log_tail(path: str, n: int) -> Optional[list[str]]:
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - 400 * n))                  # ~400 bytes a line is plenty
+            return f.read().decode(errors="replace").splitlines()[-n:]
+    except OSError:
+        return None
+
+
+def check_memory(rig: Rig, meminfo: str = "/proc/meminfo") -> Result:
+    """RAM left with the app running, and the app log's tail free of GPU allocation failures
+    (NvMapMemAlloc) and tracebacks. The Orin Nano's 8 GB are shared with the GPU."""
+    if rig.fake and meminfo == "/proc/meminfo":
+        return None, "skipped: no room app in --fake"
+    rc = _rc(rig)
+    avail = meminfo_available_mb(meminfo)
+    need = float(rc.get("min_ram_mb", 1024))
+    problems, parts = [], []
+    if avail is None:
+        parts.append("RAM not readable here (no /proc/meminfo)")
+    else:
+        parts.append(f"{avail / 1024:.1f} GB available")
+        if avail < need:
+            problems.append(f"under {need / 1024:.1f} GB: turn the visual-memory archive or narration off, "
+                            "or restart the app")
+    path, n = str(rc.get("app_log", "data/room/app.log")), int(rc.get("log_lines", 500))
+    tail = log_tail(path, n)
+    if tail is None:
+        problems.append(f"no app log at {path}")
+    else:
+        nvmap = sum("NvMapMemAlloc" in ln for ln in tail)
+        tb = sum(ln.startswith("Traceback") for ln in tail)
+        parts.append(f"log tail ({len(tail)} lines): {nvmap} NvMapMemAlloc, {tb} tracebacks")
+        if nvmap:
+            problems.append("GPU memory allocation failures in the log: the app is short of memory")
+        if tb:
+            problems.append(f"tracebacks in {path}: read them")
+    return not problems, "; ".join(parts + problems)
+
+
+def check_namer(rig: Rig) -> Result:
+    """The room namer (Grok names for room crops) keeps a bounded queue: a burst of 100 crops from a busy
+    room must not grow memory or starve newer objects. Checked on the code the app runs, offline."""
+    from core.room import RoomNamer
+    namer = RoomNamer(lambda img: None, online=lambda: False, start=False)
+    img = np.zeros((8, 8, 3), np.uint8)
+    track = type("T", (), {"tid": "t", "zone": "z", "guess": None})()
+    for _ in range(100):
+        namer.submit(track, img)
+    n = namer.pending()
+    cap = (rig.cfg.get("room_memory") or {}).get("names_per_minute", "?")
+    return n <= 8, f"100 crops queued offline -> {n} kept (cap 8); Grok calls <= {cap}/min"
+
+
+# ---------------------------------------------------------------- table calibration vs the view now
+
+def _dcfg(rig: Rig) -> dict:
+    return rig.cfg.get("demo_check") or {}
+
+
+def table_view_now(rig: Rig, get: Optional[Callable] = None) -> tuple[Optional[np.ndarray], str]:
+    """(the table view as the app cuts it now, or None, and where it came from or why not). --live: the
+    app's /full.jpg?raw=1 (capture size, nothing drawn) cut to room_memory.table_view_rect. Otherwise the
+    camera: with room memory on its frame is the full view (any size of the capture's aspect), cut the
+    same way."""
+    import cv2
+
+    from core.room_view import cut
+    from core.table_area import view_rect
+    rect = view_rect(rig.cfg)
+    out = tuple(rig.cfg.get("frame_size_px") or (1280, 720))
+    if rig.live or get is not None:
+        if rect is None:
+            return None, "--live without room memory: the app's /frame.jpg carries the overlay"
+        import requests
+        url = f"{app_url(rig.cfg)}/full.jpg?raw=1"
+        try:
+            r = (get or requests.get)(url, timeout=10)
+        except Exception as e:                                  # noqa: BLE001
+            return None, f"no frame from {url} ({type(e).__name__})"
+        img = (cv2.imdecode(np.frombuffer(r.content, np.uint8), cv2.IMREAD_COLOR)
+               if r.status_code == 200 else None)
+        if img is None:
+            return None, f"no frame from {url} (HTTP {r.status_code})"
+        src = "the app's /full.jpg"
+    else:
+        f = rig.part("frames").latest()
+        if f is None or f.img is None:
+            return None, "no camera frame"
+        img, src = f.img, "the camera"
+        if rig.fake or rect is None:
+            return img, src
+    cw, ch = (rig.cfg.get("room_memory") or {}).get("capture_size") or (1920, 1080)
+    sx, sy = img.shape[1] / cw, img.shape[0] / ch
+    return cut(img, (rect[0] * sx, rect[1] * sy, rect[2] * sx, rect[3] * sy), out), src
+
+
+def patch_ncc(saved: np.ndarray, now: np.ndarray, box, mask_poly=None) -> tuple[Optional[float], int]:
+    """(normalized correlation, pixels compared) of two grey thumbnails inside box, outside mask_poly
+    (thumbnail px). Mean and contrast drop out, so a lighting change keeps it high; a moved camera or
+    table does not. None when there's too little to compare (under 50 px, or a flat patch)."""
+    import cv2
+    h, w = saved.shape[:2]
+    x1, y1, x2, y2 = (int(round(v)) for v in box)
+    x1, y1, x2, y2 = max(0, x1), max(0, y1), min(w, x2), min(h, y2)
+    m = np.zeros((h, w), np.uint8)
+    if x2 > x1 and y2 > y1:
+        m[y1:y2, x1:x2] = 1
+    if mask_poly is not None:
+        cv2.fillPoly(m, [np.round(np.asarray(mask_poly)).astype(np.int32).reshape(-1, 1, 2)], 0)
+    sel = m.astype(bool)
+    n = int(sel.sum())
+    if n < 50:
+        return None, n
+    a = cv2.GaussianBlur(saved.astype(np.float32), (0, 0), 1.0)[sel]
+    b = cv2.GaussianBlur(now.astype(np.float32), (0, 0), 1.0)[sel]
+    a, b = a - a.mean(), b - b.mean()
+    den = float(np.sqrt((a * a).sum() * (b * b).sum()))
+    if den <= 0 or a.std() < 2.0:
+        return None, n
+    return float((a * b).sum() / den), n
+
+
+def view_shift(saved: np.ndarray, now: np.ndarray) -> tuple[float, float, float]:
+    """(dx, dy, response): how far the whole thumbnail moved (phase correlation, Hanning window). Objects
+    moving on the table barely move the peak; response under ~0.05 means no clear answer."""
+    import cv2
+    a = cv2.GaussianBlur(saved.astype(np.float32), (0, 0), 1.0)
+    b = cv2.GaussianBlur(now.astype(np.float32), (0, 0), 1.0)
+    win = cv2.createHanningWindow((a.shape[1], a.shape[0]), cv2.CV_32F)
+    (dx, dy), resp = cv2.phaseCorrelate(a, b, win)
+    return float(dx), float(dy), float(resp)
+
+
+def _outline_state(rig: Rig, table) -> Optional[int]:
+    """Corners of the tabletop outline the app would use (a valid table_area.json, else config
+    table_area.polygon_cm), or None."""
+    from core.table_area import TableArea, area_path, load_saved
+    p = area_path(rig.cfg)
+    pts = load_saved(p, table.H) if p.exists() else None
+    if pts:
+        return len(pts)
+    area = TableArea.from_dict(rig.cfg.get("table_area"))
+    return len(area.polygon_cm) if area.defined else None
+
+
+def check_table_view(rig: Rig, get: Optional[Callable] = None) -> Result:
+    """The table calibration still fits the camera (spec 0010 rig, 27 Sep): table_cal.json's recorded view
+    is the config's (resolution-independent), the scene around the tag spot still matches the calibration
+    thumbnail (normalized correlation >= demo_check.patch_min_ncc, so lighting doesn't matter), the whole
+    view hasn't shifted over demo_check.view_max_shift of the frame, a tag still in view lands where it
+    did, and a tabletop outline is set. No view recorded (a table_cal.json from before) or no outline: WARN."""
+    import hashlib
+    import json
+
+    import cv2
+
+    import core.table
+    table = rig.part("table")
+    tag = bool(getattr(table, "tag_mode", False))
+    redo = ("lay the tag flat on the table and recalibrate" if tag else
+            "put markers 0-3 in view and recalibrate")
+    fails, warns, notes = [], [], []
+    try:
+        d = json.loads(open(table.cal_path).read())
+    except (OSError, ValueError) as e:
+        return False, f"can't read {table.cal_path} ({type(e).__name__}): recalibrate"
+    view = d.get("view")
+    cur = core.table.config_view(rig.cfg)
+    if not view:
+        warns.append("no view recorded: recalibrate (" + ("lay the tag flat on the table, say 'recalibrate')"
+                                                          if tag else "python -m core.table)"))
+    else:
+        same, why = core.table.same_view(view, cur)
+        if not same:
+            fails.append(f"calibrated at another view ({why}): {redo}")
+        else:
+            notes.append("calibrated at this view")
+
+    # the scene now against the calibration thumbnail
+    patch = d.get("tag_patch") or {}
+    png = os.path.join(os.path.dirname(os.path.abspath(table.cal_path)), str(patch.get("file") or ""))
+    saved = None
+    if view and patch.get("file"):
+        try:
+            raw = open(png, "rb").read()
+            if patch.get("sha1") in (None, hashlib.sha1(raw).hexdigest()):
+                saved = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_GRAYSCALE)
+        except OSError:
+            pass
+        if saved is None:
+            warns.append(f"no calibration image ({core.table.SIDECAR} missing or from another calibration): "
+                         "scene not compared; recalibrate")
+    if saved is not None and not fails:
+        img, src = table_view_now(rig, get)
+        if img is None:
+            warns.append(f"scene not compared: {src}")
+        else:
+            fails, notes = _compare_scene(rig, table, d, patch, saved, img, src, fails, notes)
+
+    n = _outline_state(rig, table)
+    if n is None:
+        warns.append("no tabletop outline: the map shows the camera's whole view; draw it "
+                     "(python -m core.table --outline)")
+    else:
+        notes.append(f"tabletop outline {n} corners")
+    if fails:
+        return False, "; ".join(fails + warns + notes)
+    if warns:
+        return None, WARN + "; ".join(warns + notes)
+    return True, "; ".join(notes)
+
+
+def _compare_scene(rig: Rig, table, d: dict, patch: dict, saved: np.ndarray, img: np.ndarray, src: str,
+                   fails: list, notes: list) -> tuple[list, list]:
+    import core.table
+    now = core.table.thumb(img, saved.shape[1])
+    if now.shape != saved.shape:
+        return fails + [f"{src} is {img.shape[1]}x{img.shape[0]}, not the calibration's shape: recalibrate"], notes
+    fw = float((d.get("view") or {}).get("frame_px", [img.shape[1]])[0])
+    k = saved.shape[1] / fw                                   # table-view px -> thumbnail px
+    notes = notes + [f"compared with {src}"]
+    c = core.table.tag_corners(img, table.tag_id, table._det) if getattr(table, "tag_mode", False) else None
+    quad = (d.get("markers_px") or {}).get("tag")
+    if c is not None and quad is not None:                    # the tag still lies there: its corners say it best
+        s = img.shape[1] / fw
+        err = float(np.linalg.norm(table.px_to_cm(c / s) - table.px_to_cm(np.array(quad)), axis=1).max())
+        if err >= MAX_MARKER_CM:
+            fails = fails + [f"the tag is {err:.2f} cm from where it was calibrated: camera or table moved; recalibrate"]
+        else:
+            notes = notes + [f"tag in view, drift {err:.2f} cm"]
+    if patch.get("box") and patch.get("mask") is not None:
+        min_ncc = float(_dcfg(rig).get("patch_min_ncc", 0.5))
+        box = [v * k for v in patch["box"]]
+        ncc, _ = patch_ncc(saved, now, box, np.asarray(patch["mask"], dtype=np.float64) * k)
+        if ncc is None:
+            notes = notes + ["tag spot too small or plain to compare"]
+        elif ncc < min_ncc:
+            fails = fails + [f"the scene at the tag spot changed (match {ncc:.2f} < {min_ncc:g}): camera or "
+                             "table moved; recalibrate"]
+        else:
+            notes = notes + [f"tag spot matches ({ncc:.2f})"]
+    dx, dy, resp = view_shift(saved, now)
+    frac = max(abs(dx) / saved.shape[1], abs(dy) / saved.shape[0])
+    max_frac = float(_dcfg(rig).get("view_max_shift", 0.03))
+    if frac > max_frac and resp >= 0.05:
+        fails = fails + [f"the view shifted {dx / k:+.0f},{dy / k:+.0f} px ({100 * frac:.1f}% of the frame): "
+                         "camera moved; recalibrate"]
+    else:
+        notes = notes + [f"view shift {100 * frac:.1f}%" + (" (unclear)" if resp < 0.05 else "")]
+    return fails, notes
+
+
+LIVE_CHECKS = {"network", "clock", "room memory", "room app", "grok", "devices", "memory", "namer", "table view"}
+
 CHECKS: list[tuple[str, Callable[[Rig], Result]]] = [
     ("camera", check_camera),
     ("detector", check_detector),
@@ -451,6 +1228,15 @@ CHECKS: list[tuple[str, Callable[[Rig], Result]]] = [
     ("network", check_network),
     ("world", check_world),
     ("kill switch", check_kill_switch),
+    ("clock", check_clock),
+    ("room memory", check_room_memory),
+    ("room", check_room),
+    ("room app", check_room_app),
+    ("grok", check_grok),
+    ("devices", check_devices),
+    ("memory", check_memory),
+    ("namer", check_namer),
+    ("table view", check_table_view),
 ]
 
 
@@ -461,8 +1247,48 @@ def run_check(rig: Rig, fn: Callable[[Rig], Result]) -> Result:
         return False, f"{type(e).__name__}: {e}"
 
 
+def deadline_for(name: str, rig: Rig) -> float:
+    if rig.manual and name in ("audio", "kill switch"):
+        return MANUAL_DEADLINE_S
+    return DEADLINE_S.get(name, DEFAULT_DEADLINE_S)
+
+
+def run_check_with_deadline(rig: Rig, name: str, fn: Callable[[Rig], Result],
+                            timeout: Optional[float] = None) -> Result:
+    """run_check on a daemon thread. Past the deadline the check fails "timed out", its stack goes to
+    stderr, and any part it was still building is marked failed so later checks don't wait on it too."""
+    timeout = deadline_for(name, rig) if timeout is None else timeout
+    box: list[Result] = []
+    t = threading.Thread(target=lambda: box.append(run_check(rig, fn)), name=f"check-{name}", daemon=True)
+    try:                                                   # a long check shows where it is, every minute
+        faulthandler.dump_traceback_later(60, repeat=True, file=sys.__stderr__)
+    except (AttributeError, OSError, ValueError):          # no real stderr (e.g. under a test runner)
+        pass
+    try:
+        t.start()
+        t.join(timeout)
+    finally:
+        faulthandler.cancel_dump_traceback_later()
+    if box:
+        return box[0]
+    frame = sys._current_frames().get(t.ident or -1)
+    where = ""
+    if frame is not None:
+        stack = traceback.extract_stack(frame)
+        print(f"--- check {name!r} stuck after {timeout:.0f} s:", file=sys.stderr)
+        print("".join(traceback.format_list(stack)), file=sys.stderr, flush=True)
+        where = f" in {stack[-1].name} ({os.path.basename(stack[-1].filename)}:{stack[-1].lineno})"
+    if rig.prompts is not None:
+        rig.prompts.abandon(t)                        # it can't take a later check's answer
+    for part in list(rig.building):
+        rig._parts[part] = TimeoutError(f"{part} hung while starting (check {name!r} timed out)")
+    return False, f"timed out after {timeout:.0f} s{where}"
+
+
 def line(i: int, name: str, ok: Optional[bool], msg: str, color: bool = True) -> str:
     tag, c = ("PASS", GREEN) if ok else ("SKIP", YELLOW) if ok is None else ("FAIL", RED)
+    if ok is None and msg.startswith(WARN):
+        tag, msg = "WARN", msg[len(WARN):]
     s = f"[{tag}] {i} {name:<12s} {msg}"
     return f"{c}{s}{RESET}" if color else s
 
@@ -471,29 +1297,44 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--fake", action="store_true", help="no hardware: rendered layout, simulated laser")
     ap.add_argument("--skip-manual", action="store_true", help="no prompts; the kill switch is skipped")
-    ap.add_argument("--camera", type=int, default=None, help="camera index (default: config demo_check.camera)")
+    ap.add_argument("--camera", default=None,
+                    help="camera index or /dev/v4l/by-id/ path (default: config demo_check.camera)")
     ap.add_argument("--only", type=int, nargs="*", help="run only these check numbers")
+    ap.add_argument("--live", action="store_true",
+                    help="the room app is running: only the checks that leave it the camera and mic")
     ap.add_argument("--config")
     a = ap.parse_args(argv)
 
     cfg = load_config(a.config)
-    camera = a.camera if a.camera is not None else int((cfg.get("demo_check") or {}).get("camera", 0))
+    camera = str(a.camera if a.camera is not None else (cfg.get("demo_check") or {}).get("camera", 0)).strip()
+    camera = int(camera) if camera.isdigit() else camera       # an index moves on replug; a by-id path does not
     manual = not a.skip_manual and sys.stdin.isatty()
     color = sys.stdout.isatty()
     rig = Rig(cfg, fake=a.fake, camera=camera, manual=manual)
+    rig.live = a.live
     failed = 0
     try:
         for i, (name, fn) in enumerate(CHECKS, 1):
             if a.only and i not in a.only:
                 continue
-            ok, msg = run_check(rig, fn)
+            if a.live and name not in LIVE_CHECKS:
+                continue
+            ok, msg = run_check_with_deadline(rig, name, fn)
             print(line(i, name, ok, msg, color), flush=True)
             failed += ok is False
     finally:
-        rig.close()
-    print(f"{failed} failed" if failed else "all checks passed")
+        rig.laser_off_now()                                 # even if a hung check holds the actuator
+        closer = threading.Thread(target=rig.close, name="close", daemon=True)
+        closer.start()
+        closer.join(10.0)
+        if closer.is_alive():
+            print("(cleanup still running after 10 s; exiting anyway)", file=sys.stderr)
+    print(f"{failed} failed" if failed else "all checks passed", flush=True)
     return 1 if failed else 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    code = main()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)           # a hung check's thread or an audio library's exit hook can't hold the process

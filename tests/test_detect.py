@@ -81,3 +81,108 @@ def test_class_list_is_every_prompt_plus_hand_with_a_label_map():
     assert "key ring" in classes and "hand" in classes and len(classes) == len(set(classes))
     assert to_obj["key ring"] == "keys" and to_obj["tv remote"] == "remote" and to_obj["hand"] == "hand"
     assert to_obj["keys"] == "keys"          # a fine-tuned model's class names are the object names
+
+
+def test_reset_proposals_recaptures_the_reference_and_forgets_crops():
+    from core.crops import CropStore
+    from core.types import Detection
+
+    class Prop:
+        resets = 0
+
+        def reset(self):
+            self.resets += 1
+
+    store, prop = CropStore(), Prop()
+    img = np.random.default_rng(0).integers(0, 255, (120, 160, 3), dtype=np.uint8)
+    store.update(img, [Detection('thing', 0.9, (20, 20, 60, 60), (3.0, 3.0), (2, 2, 4, 4))], [], 1.0)
+    det = Detector({}, table=None, backend=object(), proposer=prop, crops=store)
+    assert len(store) == 1
+    det.reset_proposals()
+    assert prop.resets == 1 and len(store) == 0
+
+
+# ----- detect_filter: known-object boxes that are a hand or not a tabletop object
+
+class BoundedTable(TenPxPerCm):
+    size_cm = (90, 60)
+
+    def in_bounds(self, cm, margin=0.0):
+        x, y = cm
+        return -margin <= x <= 90 + margin and -margin <= y <= 60 + margin
+
+
+def run_bounded(raw, cfg=CFG):
+    return Detector(cfg, table=BoundedTable(), backend=FakeBackend(raw), proposer=None, crops=None).detect(frame())
+
+
+def test_a_hand_also_labelled_as_an_object_stays_a_hand():
+    d = run_bounded([("hand", 0.5, (400, 300, 520, 420)), ("phone", 0.7, (405, 305, 515, 425))])
+    assert d.items == [] and [h.cls for h in d.hands] == ["hand"]
+
+
+def test_the_real_object_wins_when_the_hand_lookalike_scored_higher():
+    d = run_bounded([("hand", 0.5, (400, 300, 520, 420)), ("phone", 0.8, (405, 305, 515, 425)),
+                     ("phone", 0.6, (100, 100, 160, 200))])
+    [p] = d.items
+    assert p.box_px == (100, 100, 160, 200)
+
+
+def test_an_object_held_in_a_hand_is_kept():
+    d = run_bounded([("hand", 0.8, (400, 300, 560, 460)), ("phone", 0.7, (450, 340, 510, 440))])
+    assert [i.cls for i in d.items] == ["phone"]
+
+
+def test_a_box_too_big_for_any_prop_is_dropped():
+    d = run_bounded([("notebook", 0.6, (0, 0, 800, 600)), ("wallet", 0.6, (100, 100, 180, 160))])
+    assert [i.cls for i in d.items] == ["wallet"]
+
+
+def test_an_object_off_the_table_is_dropped():
+    d = run_bounded([("phone", 0.9, (1000, 650, 1060, 700)), ("keys", 0.6, (100, 100, 150, 140))])
+    assert [i.cls for i in d.items] == ["keys"]           # phone centre (103, 67.5) cm is off a 90 x 60 table
+
+
+class _FakeYOLO:
+    """ultralytics.YOLO stand-in: fixed class names; set_classes fails like a baked (CLIP-less) .pt."""
+    names = {0: "keys", 1: "phone", 2: "hand"}
+    calls = []
+
+    def __init__(self, path):
+        self.path = path
+
+    def set_classes(self, classes):
+        _FakeYOLO.calls.append(classes)
+        raise RuntimeError("no CLIP text encoder")
+
+
+def _backend(monkeypatch, path, cfg=CFG):
+    import sys
+    import types
+    from core.detect import UltralyticsBackend
+    monkeypatch.setitem(sys.modules, "ultralytics", types.SimpleNamespace(YOLO=_FakeYOLO))
+    return UltralyticsBackend(cfg, path)
+
+
+def test_the_backend_logs_its_weights_and_warns_about_objects_it_cannot_see(monkeypatch, tmp_path, caplog):
+    w = tmp_path / "brio.engine"
+    w.write_bytes(b"x" * 123)
+    with caplog.at_level("INFO", logger="core.detect"):
+        b = _backend(monkeypatch, str(w))
+    assert b.info["path"] == str(w) and b.info["size"] == 123 and b.info["mtime"]
+    assert b.info["names"] == ["keys", "phone", "hand"]
+    assert "wallet" in b.info["missing"] and "keys" not in b.info["missing"] and "hand" not in b.info["missing"]
+    assert "brio.engine" in caplog.text and "no class for" in caplog.text and "wallet" in caplog.text
+
+
+def test_a_baked_world_pt_whose_set_classes_fails_keeps_its_baked_classes(monkeypatch, tmp_path):
+    _FakeYOLO.calls.clear()
+    b = _backend(monkeypatch, str(tmp_path / "yolov8s-worldv2-askroom.pt"))
+    assert _FakeYOLO.calls and b.names == _FakeYOLO.names and b.info["size"] is None
+
+
+def test_missing_objects_maps_prompt_labels_back_to_objects():
+    from core.detect import missing_objects
+    cfg = {"objects": {"keys": "target", "box": "container"}, "prompts": {"box": ["cardboard box"]}}
+    assert missing_objects(cfg, {0: "cardboard box", 1: "hand"}) == ["keys"]
+    assert missing_objects(cfg, ["keys", "box", "hand"]) == []

@@ -18,7 +18,8 @@ A judge runs the shell game on the real table (keys under the notebook, notebook
 ## Decisions (settled)
 
 - The mic is always listening (`listen.mode: always`). The clicker is a "listen now" override and interrupts an answer (barge-in).
-- A local Qwen on the Jetson turns speech into commands. Grok is used only on the detection side.
+- Grok does all LLM/VLM work (team decision, Fri night): spoken questions the rules can't read, open questions, visual questions and narration. Rules and templates answer first and are the offline fallback. Local Qwen is optional and not installed on the Jetson.
+- YOLO stays Stage 1 (Sat research, spec 0007): a VLM can't give hand and object boxes at 10 fps, place boxes well, or work offline. Fix YOLO with the fine-tune fast path; Grok only checks the table when it settles.
 - Audio and transcripts that aren't used are deleted: audio lives only in RAM, and ignored speech is never logged.
 - The world model stays rule-based and deterministic.
 
@@ -33,6 +34,7 @@ A judge runs the shell game on the real table (keys under the notebook, notebook
 | Stream the answer action-first | **Deferred** | Qwen answers in about 0.3–0.5 s on the laptop and templates are instant, so there isn't much to gain yet. The schema is already action-first | spec 0001 |
 | Always-listening pipeline | **Adopted, done** | VAD → whisper → keyword gate → addressed check → rules/Qwen. The mic is shut while speaking plus `echo_tail_s`. Wake and click modes exist. It still needs the 10-minute hall-noise acceptance run on the Jetson | spec 0002 |
 | Grok on the detection side (auto-label, second opinion, find_new) | **Spec only; measure first** | Measure box error on 20 frames against ArUco ground truth before building anything. xAI spend needs team OK. (a) auto-labelling is the most likely to survive | spec 0003 |
+| Replace Stage 1 YOLO with Grok + SQLite positions and times | **Rejected; adapted as the Grok settle check** | Hands need boxes at 10 fps or more; VLM boxes are weak (ours 0–2/5 vs marks 5/5); offline would see nothing. `core/grok_check.py` checks the tracked marks when the table settles and stores verdict rows in `grok_checks`. Off by default; `--eval` needs team spend OK | spec 0007 |
 | Judge-run shell game | **Adopted** | This is what sets us apart. Covered by the world rules and `tests/test_world_rules.py` | README demo flow |
 | Laser circles hidden/unsure targets | **Exists** | `act/laser.py` `circle()`. Used for UNKNOWN and low confidence, and by `local_llm` for hidden objects. Traced history is deferred | spec 0001 |
 | Live scoreboard from real trials | **Adopted** | Built on `eval.record` / `eval.replay` / `eval.report`. Never quote the synthetic 255/300 as real | spec 0004 |
@@ -74,4 +76,4 @@ Owners are TBD until the team assigns them.
 - Detector throttling while Qwen generates, if F2 shows GPU contention.
 - Streaming action-first answers.
 - Qwen3-4B-Instruct-2507, only if `tegrastats` shows headroom.
-- Lamp-head enclosure. Floor search camera and room map (config `floor_zones`, `room_map`).
+- Lamp-head enclosure. Floor search camera and room map (config `floor_zones`, `room_map`); room calibration with laser-guided tag placement is specced in `docs/specs/0005-room-calibration.md`; room pointing without depth (dot map + pixel-space loop) is built off by default on branch `room-pointing`, spec `docs/specs/0006-room-pointing.md`.

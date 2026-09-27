@@ -113,3 +113,266 @@ def test_video_source_in_realtime_takes_the_clip_length(clip):
     assert src.done.wait(3.0)
     assert time.monotonic() - t0 >= 0.9                       # 20 frames at 0.05 s
     src.stop()
+
+
+# ----- a camera that drops off USB is reopened and gets its settings back ---------------------------------
+
+class DyingCam(FakeCam):
+    """Works for `good` reads, then fails forever (unplugged)."""
+    def __init__(self, good=20, **kw):
+        super().__init__(**kw)
+        self.good = good
+
+    def read(self):
+        time.sleep(self.dt)
+        self.n += 1
+        return (True, np.zeros((4, 4, 3), np.uint8)) if self.n <= self.good else (False, None)
+
+
+class Controls:
+    def __init__(self):
+        self.snaps, self.restored = [], []
+
+    def snapshot(self, path):
+        self.snaps.append(path)
+        return ["exposure=333", "focus=40"]
+
+    def restore(self, path, snap):
+        self.restored.append((path, list(snap)))
+        return len(snap)
+
+
+def test_a_camera_that_drops_off_usb_is_reopened_with_its_settings_restored():
+    first, second = DyingCam(good=20), FakeCam()
+    opened = []
+
+    def opener(src):
+        opened.append(src)
+        if len(opened) == 1:
+            return first
+        if len(opened) == 2:
+            raise RuntimeError("can't open camera")          # still re-enumerating
+        return second
+
+    ctl = Controls()
+    fb = FrameBuffer("/dev/v4l/by-id/cam", opener=opener, controls=ctl, reopen_after_s=0.05, retry_s=0.02)
+    try:
+        assert wait_for(lambda: fb.reconnects == 1 and fb.latest() is not None and fb.latest().idx > 40)
+        assert opened == ["/dev/v4l/by-id/cam"] * 3 and first.released.is_set()
+        assert ctl.snaps == ["/dev/v4l/by-id/cam"]               # snapshot once, when first opened
+        assert ctl.restored == [("/dev/v4l/by-id/cam", ["exposure=333", "focus=40"])]
+    finally:
+        fb.stop()
+
+
+def test_a_test_source_without_a_device_is_never_reopened():
+    fb = FrameBuffer(DyingCam(good=5), reopen_after_s=0.02, retry_s=0.01)
+    try:
+        time.sleep(0.2)
+        assert fb.reconnects == 0 and fb.failures > 0
+    finally:
+        fb.stop()
+
+
+class RaisingCam(FakeCam):
+    """cv2.error-like exceptions on some reads (a corrupt MJPG frame, a driver hiccup)."""
+    def read(self):
+        ok, img = super().read()
+        if self.n % 4 == 0:
+            raise cv2.error("corrupt frame")
+        return ok, img
+
+
+def test_a_read_that_raises_never_ends_the_capture_thread():
+    fb = FrameBuffer(RaisingCam(fps=200))
+    try:
+        assert wait_for(lambda: fb.failures >= 5 and fb.latest() is not None and fb.latest().idx >= 30)
+        assert fb._thread.is_alive() and fb.age() < 0.5
+    finally:
+        fb.stop()
+
+
+def test_an_error_outside_the_read_is_survived_too(monkeypatch):
+    fb = FrameBuffer(FakeCam(fps=200))
+    try:
+        assert wait_for(lambda: fb.latest() is not None)
+        real, calls = fb._fresh.notify_all, []
+
+        def boom():
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError("boom")
+            real()
+        monkeypatch.setattr(fb._fresh, "notify_all", boom)
+        n = fb.latest().idx
+        assert wait_for(lambda: fb.latest().idx > n + 10) and fb._thread.is_alive()
+    finally:
+        fb.stop()
+
+
+# ----- decode only what the app uses: grab every frame, retrieve (JPEG decode) at most decode_fps -----
+
+class GrabCam(FakeCam):
+    """grab() takes a frame off the camera; retrieve() decodes the last grabbed one (counted)."""
+    def __init__(self, fps=200.0):
+        super().__init__(fps=fps)
+        self.decodes = 0
+
+    def grab(self):
+        time.sleep(self.dt)
+        self.n += 1
+        return True
+
+    def retrieve(self):
+        self.decodes += 1
+        return True, np.full((4, 4, 3), self.n % 256, np.uint8)
+
+    def read(self):                                 # OpenCV's read() is grab() + retrieve()
+        return (self.retrieve() if self.grab() else (False, None))
+
+
+def test_frames_are_grabbed_at_camera_rate_but_decoded_at_most_decode_fps():
+    cam = GrabCam(fps=200)
+    fb = FrameBuffer(cam, decode_fps=20)
+    try:
+        time.sleep(1.0)
+        grabbed, decoded = cam.n, cam.decodes
+    finally:
+        fb.stop()
+    assert grabbed > 100                            # the driver is drained at camera rate
+    assert 12 <= decoded <= 24                      # but only ~20 frames a second are decoded
+    assert fb.latest() is not None
+
+
+def test_the_newest_decoded_frame_is_fresh():
+    cam = GrabCam(fps=200)
+    fb = FrameBuffer(cam, decode_fps=20)
+    try:
+        time.sleep(0.5)
+        f = fb.latest()
+        assert f is not None and time.monotonic() - f.t < 0.1     # at most one decode period old
+        assert (cam.n - int(f.img[0, 0, 0])) % 256 < 12        # decoded from a grab ~one period ago at most
+    finally:
+        fb.stop()
+
+
+def test_without_decode_fps_every_frame_is_decoded_as_before():
+    cam = GrabCam(fps=200)
+    fb = FrameBuffer(cam)
+    try:
+        time.sleep(0.3)
+    finally:
+        fb.stop()
+    assert cam.decodes >= cam.n - 1
+
+
+def test_a_source_without_grab_still_works_with_decode_fps():
+    fb = FrameBuffer(FakeCam(fps=100), decode_fps=10)
+    try:
+        assert wait_for(lambda: fb.latest() is not None)
+    finally:
+        fb.stop()
+
+
+def test_skipped_decodes_are_not_failures_and_a_raising_decode_is_survived():
+    """Merged room/detector's crash guard around capture-decode's _next(): a grabbed-not-decoded frame is
+    neither a failure nor a reason to reopen; a retrieve() that raises counts as one failed read and the
+    thread carries on."""
+    cam = GrabCam(fps=200)
+    fb = FrameBuffer(cam, decode_fps=20)
+    try:
+        time.sleep(0.6)
+        assert cam.n > 60 and fb.failures == 0 and fb.reconnects == 0 and fb.age() < 0.5
+        real, calls = cam.retrieve, []
+
+        def flaky():
+            calls.append(1)
+            if len(calls) % 3 == 0:
+                raise cv2.error("corrupt frame")
+            return real()
+        cam.retrieve = flaky
+        assert wait_for(lambda: len(calls) >= 9)
+        assert fb._thread.is_alive() and 1 <= fb.failures <= len(calls) and fb.age() < 0.5
+    finally:
+        fb.stop()
+
+
+# ----- skipped decodes vs failures (the crash guard merged with decode_fps)
+
+def test_skipped_decodes_are_not_failures_and_keep_the_newest_frame_fresh():
+    cam = GrabCam(fps=200)
+    fb = FrameBuffer(cam, decode_fps=20)
+    try:
+        time.sleep(0.6)
+        assert fb.failures == 0 and fb.reconnects == 0 and fb.age() < 0.1
+    finally:
+        fb.stop()
+
+
+class NeverDecodes(GrabCam):
+    """Grabs fine, but every decode fails (a format the driver garbles): the camera must be reopened."""
+    def retrieve(self):
+        self.decodes += 1
+        return False, None
+
+
+def test_a_camera_whose_decodes_all_fail_is_reopened_despite_the_skipped_grabs():
+    cams = [NeverDecodes(fps=200), GrabCam(fps=200)]
+    fb = FrameBuffer("/dev/v4l/by-id/cam", opener=lambda src: cams.pop(0), controls=Controls(),
+                     reopen_after_s=0.2, retry_s=0.02, decode_fps=20)
+    try:
+        assert wait_for(lambda: fb.reconnects == 1 and fb.latest() is not None, 3.0)
+    finally:
+        fb.stop()
+
+
+class NoneReads(FakeCam):
+    """read() says ok but gives no image, and has no grab/retrieve: a failed read, not a skipped decode."""
+    def read(self):
+        time.sleep(self.dt)
+        return True, None
+
+
+def test_a_read_giving_no_image_is_a_failure_and_reopens_the_camera():
+    cams = [NoneReads(fps=200), FakeCam(fps=200)]
+    fb = FrameBuffer("/dev/v4l/by-id/cam", opener=lambda src: cams.pop(0), controls=Controls(),
+                     reopen_after_s=0.2, retry_s=0.02, decode_fps=20)
+    try:
+        assert wait_for(lambda: fb.reconnects == 1 and fb.latest() is not None, 3.0)
+        assert fb.failures > 0
+    finally:
+        fb.stop()
+
+
+class SometimesRaisingDecode(GrabCam):
+    def retrieve(self):
+        self.decodes += 1
+        if self.decodes % 3 == 0:
+            raise cv2.error("corrupt MJPEG")
+        return True, np.full((4, 4, 3), self.n % 256, np.uint8)
+
+
+def test_a_raising_decode_is_a_failure_the_thread_survives_and_frames_stay_fresh():
+    fb = FrameBuffer(SometimesRaisingDecode(fps=200), decode_fps=20)
+    try:
+        assert wait_for(lambda: fb.failures >= 2)
+        time.sleep(0.2)
+        assert fb._thread.is_alive() and fb.age() < 0.15
+    finally:
+        fb.stop()
+
+
+def test_reopen_keeps_the_capture_size():
+    """capture_size 2560x1440: the reopened camera is opened by the same opener, at the same size."""
+    sizes, cams = [], [DyingCam(good=10), FakeCam(fps=200)]
+
+    def opener(src, w=2560, h=1440):
+        sizes.append((w, h))
+        return cams.pop(0)
+    fb = FrameBuffer("/dev/v4l/by-id/cam", opener=lambda src: opener(src), controls=Controls(),
+                     reopen_after_s=0.05, retry_s=0.02, decode_fps=20)
+    try:
+        assert wait_for(lambda: fb.reconnects == 1 and fb.latest() is not None)
+        assert sizes == [(2560, 1440), (2560, 1440)]
+    finally:
+        fb.stop()

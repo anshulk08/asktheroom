@@ -411,3 +411,28 @@ def test_connections_of_finished_threads_are_not_accumulated(log):
         _in_thread(lambda: log.last('keys'))
     _in_thread(lambda: log.last('keys'))
     assert len(log._conns) <= 2   # this thread's + at most the latest reader's
+
+
+def test_max_number_is_the_highest_numbered_obj_with_the_prefix(log):
+    assert log.max_number('thing:') == 0
+    for obj in ('thing:2', 'thing:10', 'thing:9', 'keys', 'things'):
+        log.add(ev(obj=obj))
+    assert log.max_number('thing:') == 10
+
+
+def test_newest_means_latest_wall_time_across_reboots(log):
+    """t is monotonic and restarts at every boot; wall is not. Yesterday's run had a large t (up for
+    days), today's a small one: the newest event is today's."""
+    log.add(ev('keys', EventType.PUT_INSIDE, t=500000.0, wall=1000.0, parent='box'))      # yesterday
+    log.add(ev('keys', EventType.PICKED_UP, t=12.0, wall=2000.0))                           # today, after a reboot
+    log.add(ev('keys', EventType.MOVED, t=15.0, wall=2003.0))
+    assert [e.type for e in log.last('keys', 2)] == [EventType.MOVED, EventType.PICKED_UP]
+    assert log.last_of_type('keys', [EventType.PUT_INSIDE, EventType.PICKED_UP]).type == EventType.PICKED_UP
+
+
+def test_newest_events_query_by_wall_uses_an_index(tmp_path, log):
+    db = sqlite3.connect(str(tmp_path / 'events.db'))
+    plan = ' '.join(r[3] for r in db.execute(
+        "EXPLAIN QUERY PLAN SELECT t FROM events WHERE obj = ? ORDER BY wall DESC, id DESC LIMIT 3", ('keys',)))
+    db.close()
+    assert 'events_obj_wall' in plan and 'TEMP B-TREE' not in plan

@@ -14,7 +14,26 @@
     VISIBLE: C.visible, HELD: C.held, INSIDE: C.hidden, UNDER: C.hidden, GONE: C.gone, UNKNOWN: C.gone,
   };
 
-  const nice = (n) => (n || "").replace(/^hand:(\d+)$/, "hand $1").replace(/_/g, " ");
+  // Open-world things go by their taught name, or "unnamed object 7", never "thing:7" (core/labels.py).
+  let thingNames = new Map(); // thing:N (merged ids too) -> name, from the latest state
+  const nice = (n) => thingNames.get(n) ||
+    (n || "").replace(/^thing:(\d+)$/, "unnamed object $1").replace(/^hand:(\d+)$/, "hand $1").replace(/_/g, " ");
+  function learnNames(state) {
+    const m = new Map();
+    for (const e of state.entities || []) {
+      if (String(e.name).indexOf("thing:") === 0) m.set(e.name, e.label || (String(e.name).replace(/^thing:/, "unnamed object ")
+        + (e.guess && e.guess.name ? " (" + e.guess.name + "?)" : "")));
+    }
+    const merged = state.merged || {};
+    for (const old of Object.keys(merged)) {
+      let into = merged[old];
+      for (let i = 0; i < 8 && merged[into]; i++) into = merged[into];
+      if (m.has(into)) m.set(old, m.get(into));
+    }
+    const changed = m.size !== thingNames.size || [...m].some(([k, v]) => thingNames.get(k) !== v);
+    thingNames = m;
+    return changed;
+  }
   const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 
   // server clock may differ from the laptop's (the Jetson may have no NTP on a hotspot)
@@ -70,7 +89,8 @@
     return {
       id: e.name,
       label: "<b>" + nice(e.name) + "</b>\n" + whereText(e),
-      title: nice(e.name) + ": " + whereText(e) + " (" + Math.round(conf * 100) + "% sure)",
+      title: nice(e.name) + ": " + whereText(e) + " (" + Math.round(conf * 100) + "% sure)" +
+        (e.maybe_same_as && e.maybe_same_as.length ? ". Maybe the same as " + e.maybe_same_as.map((m) => nice(m[0])).join(" or ") : ""),
       shape: "box",
       borderWidth: e.kind === "target" ? 2 : 3,
       shapeProperties: { borderRadius: e.kind === "target" ? 4 : 1, borderDashes: dashed ? [5, 4] : false },
@@ -461,7 +481,68 @@
     const lz = $("st-laser");
     lz.dataset.on = L.on ? "true" : "false";
     setText(lz, L.on ? (L.target ? "Laser on " + nice(L.target) : "Laser on") : "Laser off");
+    // Narration / visual memory / Grok check (off by default): shown only when on; the tooltip is the
+    // privacy disclosure and the last results.
+    const N = state.narration, V = state.visual_memory, A = state.auto_name, G = state.grok_check, mem = $("st-memory");
+    mem.hidden = !(N || V || A || G);
+    if (N || V || A || G) {
+      const GL = G && G.last, gOff = GL && !GL.error ? (GL.phantom || []).length + (GL.relabel || []).length +
+        (GL.unmarked || []).length : 0;
+      setText(mem, [N && ("narration" + (N.queued ? " (" + N.queued + " queued)" : "")), V && "visual", A && "naming",
+        G && ("check" + (gOff ? " (" + gOff + " to review)" : ""))]
+        .filter(Boolean).join(" + ") + " \u2192 " + ((N || V || A || G).provider || "cloud"));
+      mem.title = [N && N.disclosure, V && V.disclosure, A && A.disclosure, G && G.disclosure,
+        N && N.last_summary && ("Last: " + N.last_summary),
+        GL && ("Last check: " + (GL.error ? "failed, " + GL.error : GL.text))]
+        .filter(Boolean).join("\n");
+    }
   }
+
+  // ------------------------------------------------------------------ room trial scoreboard
+  // Real scripts/room_trials.py results only (GET /scoreboard); hidden until a run was recorded today.
+
+  function frac(x) { return x.passed + "/" + x.total; }
+
+  function scoreRow(label, x, head) {
+    const tr = document.createElement("tr");
+    if (head) tr.className = "score-all";
+    const cells = [label, x.handoffs.total ? frac(x.handoffs) : "\u2013",
+      x.returns.total ? frac(x.returns) : "\u2013", x.median_s != null ? x.median_s + " s" : "\u2013"];
+    cells.forEach((v, i) => {
+      const td = document.createElement(i ? "td" : "th");
+      if (!i) td.scope = "row";
+      td.textContent = v;
+      tr.appendChild(td);
+    });
+    return tr;
+  }
+
+  function renderScore(sb) {
+    const chip = $("st-score"), box = $("score");
+    const has = sb && sb.runs > 0;
+    chip.hidden = !has;
+    box.hidden = !has;
+    if (!has) return;
+    const h = sb.handoffs;
+    setText(chip, frac(h) + (sb.median_s != null ? " \u00b7 " + sb.median_s + " s" : ""));
+    chip.title = "Room handoffs passed today, of " + h.total + " tried" +
+      (sb.skipped ? " (" + sb.skipped + " skipped: not seen on the table first)" : "") +
+      "; table returns " + frac(sb.returns) + ". From real scripts/room_trials.py runs.";
+    $("score-sum").textContent = "Room trials today: " + frac(h) + " handoffs, " + frac(sb.returns) + " returns";
+    const rows = $("score-rows");
+    rows.replaceChildren(scoreRow("All", sb, true));
+    Object.keys(sb.by_object).forEach((o) => rows.appendChild(scoreRow(nice(o), sb.by_object[o])));
+    Object.keys(sb.by_zone).forEach((z) => rows.appendChild(scoreRow("at " + z.replace(/_/g, " "), sb.by_zone[z])));
+  }
+
+  async function pollScore() {
+    try {
+      const r = await fetch("/scoreboard", { cache: "no-store" });
+      if (r.ok) renderScore(await r.json());
+    } catch (e) { /* the dashboard works without it */ }
+  }
+  pollScore();
+  setInterval(pollScore, 30000);
 
   function setLink(state) {
     const el = $("st-link");
@@ -597,6 +678,7 @@
       setLink("live");
       if (msg.server_t) clockOffset = msg.server_t - Date.now() / 1000;
       if (msg.state) {
+        if (learnNames(msg.state) && haveRenderedOnce) renderEvents(); // a name was taught: relabel the timeline
         try { updateGraph(msg.state); } catch (e) { console.error(e); }
         updateStatus(msg.state, msg);
       }

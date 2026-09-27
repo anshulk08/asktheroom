@@ -74,9 +74,9 @@ def test_tools_return_facts_from_demo_world(world):
     t = llm._Tools(world, world.events, CFG)
     loc = t.call("locate", {"object": "keys"})
     assert loc["status"] == "INSIDE" and loc["parent"] == "box" and loc["chain"] == ["keys", "box"]
-    assert loc["area"] == "right"                         # box at x=70.4 of 90
+    assert loc["area"] == "your right"                    # box at x=70.4 of 90, from the default seat
     assert t.call("locate", {"object": "pills"})["parent"] == "notebook"   # synonym
-    assert t.call("locate", {"object": "phone"})["edge"] == "left"
+    assert t.call("locate", {"object": "phone"})["edge"] == "your left"
     assert t.call("locate", {"object": "glasses"})["status"] == "UNKNOWN"
 
     h = t.call("history", {"object": "keys", "limit": 5})
@@ -196,11 +196,9 @@ def test_timeout_returns_fallback_within_budget(monkeypatch, world, key):
     assert_fallback(a)
 
 
-def test_sdk_timeout_error_returns_fallback(monkeypatch, world, key):
-    import httpx
-    import openai
-    err = openai.APITimeoutError(request=httpx.Request("POST", "https://api.x.ai/v1/chat/completions"))
-    install(monkeypatch, FakeClient([err]))
+def test_http_timeout_returns_fallback(monkeypatch, world, key):
+    import requests
+    install(monkeypatch, FakeClient([requests.Timeout("read timed out")]))
     assert_fallback(ask_grok("anything", world, world.events, CFG))
 
 
@@ -243,3 +241,63 @@ def test_world_error_never_raises(monkeypatch, key):
 def test_status_values_match_prompt():
     for s in Status:
         assert s.value in llm.SYSTEM_TEMPLATE
+
+
+def test_compact_state_uses_the_room_zone_not_a_table_area():
+    """Spec 0009: a room entity goes to Grok with its zone; a table flicker's pos_cm is not a table area."""
+    from voice.llm import compact_state
+
+    class W:
+        def state_json(self):
+            return {"entities": [
+                {"name": "keys", "status": "VISIBLE", "pos_cm": [10.0, 10.0], "confidence": 1.0},
+                {"name": "wallet", "status": "UNKNOWN", "pos_cm": None, "confidence": 0.5},
+                {"name": "remote", "status": "VISIBLE", "pos_cm": [45.0, 30.0], "confidence": 1.0}],
+                "room": {"keys": {"say": "the bookshelf", "absent": False},
+                         "wallet": {"say": "the couch", "absent": True}, "conflicts": []}}
+
+    by = {d["name"]: d for d in compact_state(W(), {})}
+    assert by["keys"]["room_zone"] == "the bookshelf" and "area" not in by["keys"]
+    assert by["wallet"]["room_zone"] == "the couch" and by["wallet"]["not_seen_there_now"] is True
+    assert "room_zone" not in by["remote"]
+
+
+# ------------------------------------------------------------------ the user's seat (core/viewframe.py)
+
+def seat(front):
+    return {**CFG, "table": {**CFG["table"], "size_cm": [100, 60]}, "table_area": {"polygon_cm": []},
+            "viewer": {"front": front}}
+
+
+# Camera points: top left, top right, bottom left, bottom right, left middle, top middle, centre.
+CAM = [(5, 5), (90, 5), (5, 55), (95, 55), (5, 30), (50, 5), (50, 30)]
+AREA_WORDS = {
+    "bottom": ["far left", "far right", "near left", "near right", "your left", "far side", "middle"],
+    "top": ["near right", "near left", "far right", "far left", "your right", "near side", "middle"],
+    "right": ["far right", "near right", "far left", "near left", "far side", "your right", "middle"],
+    "left": ["near left", "far left", "near right", "far right", "near side", "your left", "middle"],
+}
+LEFT_EDGE = {"bottom": "your left", "top": "your right", "right": "far side", "left": "near side"}
+
+
+@pytest.mark.parametrize("front", AREA_WORDS)
+def test_area_words_are_from_the_seat(front):
+    assert [llm._area(seat(front), p) for p in CAM] == AREA_WORDS[front]
+    assert llm._area(seat(front), None) is None
+
+
+@pytest.mark.parametrize("front", LEFT_EDGE)
+def test_edges_in_the_facts_are_from_the_seat(world, front):
+    cfg = seat(front)
+    phone = next(d for d in llm.compact_state(world, cfg) if d["name"] == "phone")
+    assert phone["edge"] == LEFT_EDGE[front]                  # carried off the camera's left
+    t = llm._Tools(world, world.events, cfg)
+    assert t.call("locate", {"object": "phone"})["edge"] == LEFT_EDGE[front]
+    h = t.call("history", {"object": "phone", "limit": 5})
+    assert [e["edge"] for e in h["events"] if "edge" in e] == [LEFT_EDGE[front]]
+
+
+def test_prompt_says_areas_and_edges_are_from_the_seat():
+    s = llm.SYSTEM_TEMPLATE
+    assert "from the person's seat" in s and "near is the side nearest them" in s and "far is across" in s
+    assert "camera view" not in s

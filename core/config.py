@@ -1,7 +1,12 @@
 """Load config.yaml into a plain dict. Every module takes this dict as `cfg`; the world model
-reads the same file through the typed Config view at the bottom."""
+reads the same file through the typed Config view at the bottom.
+
+A gitignored config.local.yaml next to it (per device: the rig's `actuator: pca9685`, the laptop's
+n8n webhook) is merged over it: nested sections merge key by key, anything else replaces.
+ASKROOM_NO_LOCAL_CONFIG=1 skips it (the tests set it, so they read the committed file only)."""
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field, fields
 from pathlib import Path
@@ -11,10 +16,30 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 
 
+LOCAL_NAME = "config.local.yaml"
+
+
 def load_config(path: str | os.PathLike | None = None) -> dict:
     p = Path(path) if path else ROOT / "config.yaml"
     with open(p) as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f)
+    local = p.with_name(LOCAL_NAME)
+    if local != p and local.is_file() and not os.environ.get("ASKROOM_NO_LOCAL_CONFIG"):
+        with open(local) as f:
+            over = yaml.safe_load(f) or {}
+        merge_into(cfg, over)
+        logging.getLogger("askroom.config").info("%s overrides: %s", local.name, ", ".join(sorted(over)))
+    return cfg
+
+
+def merge_into(base: dict, over: dict) -> dict:
+    """Deep-merge `over` into `base` in place: dicts merge recursively, other values replace."""
+    for k, v in over.items():
+        if isinstance(v, dict) and isinstance(base.get(k), dict):
+            merge_into(base[k], v)
+        else:
+            base[k] = v
+    return base
 
 
 def display_name(cfg: dict, obj: str) -> str:
@@ -39,10 +64,13 @@ class Config:
     table_size_cm: tuple[float, float] = (90.0, 60.0)
     frame_size_px: tuple[int, int] = (1280, 720)
 
-    conf_threshold: float = 0.35
+    conf_threshold: float = 0.35                                          # the default cut-off
+    conf_thresholds: dict[str, float] = field(default_factory=dict)       # per object, over the default
     present_k: int = 6
     present_n: int = 10
     absent_max: int = 1
+    # presence.hz: k of n count updates of a loop at this rate, by time (None: updates, whatever the fps)
+    presence_hz: float | None = None
 
     contact_overlap: float = 0.30
     contact_window_s: float = 1.0
@@ -74,10 +102,26 @@ class Config:
     bg_change_threshold: float = 25.0
     appearance_match: float = 0.7
     bg_update_every_s: float = 1.0
+    # An object on the table unseen (no detection, no patch match) for less than this is kept where it
+    # was before LOST_TRACK: an arm the detectors miss, or a detector that drops objects near an arm.
+    lost_grace_s: float = 2.0
 
     synonyms: dict[str, str] = field(default_factory=dict)
     edge_drop_cm: float = 10.0
     floor_zones: list[dict] = field(default_factory=list)
+
+    # Open world (core/things.py): the openworld: section, read there; a square on the table where a
+    # new thing is shown to be named ('this is my charger'), or None for 'most recently put down'.
+    openworld: dict = field(default_factory=dict)
+    teach_zone_cm: tuple[float, float, float, float] | None = None
+    # The tabletop outline (core/table_area.py, table_area: section): new things are born only inside it.
+    table_area: dict = field(default_factory=dict)
+    # Large unnamed things that hold others (core/things.py ContainerConfig, thing_containers: section).
+    thing_containers: dict = field(default_factory=dict)
+    # Fewer duplicate things (core/things.py IdentityConfig, thing_identity: section).
+    thing_identity: dict = field(default_factory=dict)
+    # A cover with no detector class laid over objects (core/surround.py UnknownCoverConfig, unknown_cover:).
+    unknown_cover: dict = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, raw: dict) -> "Config":
@@ -88,11 +132,18 @@ class Config:
         kw["objects"] = [ObjectSpec(n, k, list(prompts.get(n, []))) for n, k in (raw.get("objects") or {}).items()]
         ct = raw.get("conf_threshold")
         if ct is not None:
-            kw["conf_threshold"] = ct.get("default", 0.35) if isinstance(ct, dict) else ct
+            if isinstance(ct, dict):
+                kw["conf_threshold"] = float(ct.get("default", 0.35))
+                kw["conf_thresholds"] = {k: float(v) for k, v in ct.items() if k != "default"}
+            else:
+                kw["conf_threshold"] = float(ct)
         if "present_k_of_n" in raw:
             kw["present_k"], kw["present_n"] = raw["present_k_of_n"]
         if "absent_k_of_n" in raw:
             kw["absent_max"] = raw["absent_k_of_n"][0]
+        if "hz" in (raw.get("presence") or {}):
+            hz = raw["presence"]["hz"]
+            kw["presence_hz"] = float(hz) if hz else None
         size = (raw.get("table") or {}).get("size_cm")
         if size:
             kw["table_size_cm"] = tuple(size)
@@ -105,6 +156,11 @@ class Config:
     @classmethod
     def load(cls, path: str | os.PathLike | None = None) -> "Config":
         return cls.from_dict(load_config(path))
+
+    def threshold(self, name: str) -> float:
+        """The detector's cut-off for this object (conf_threshold.<name>, else .default): the World
+        applies the same per-object cut as core/detect.py, so a lower per-object value takes effect."""
+        return self.conf_thresholds.get(name, self.conf_threshold)
 
     def kind_of(self, name: str) -> str:
         for o in self.objects:

@@ -96,8 +96,46 @@ enum Dashboard {
         e.kind == .target && (!e.isThing || e.hasTaughtName)
     }
 
+    /// Where a thing off the table is, in the room: "on the couch", "by the doorway",
+    /// "somewhere in the room". Nil for a thing on the table.
+    static func place(of e: Entity, in snapshot: Snapshot) -> String? {
+        e.zone.map { place(zone: $0, layout: snapshot.lay) }
+    }
+
+    /// The layout's own words for a zone ("the kitchen counter"), else its id tidied up
+    /// ("side_table" -> "the side table"). `room` is the registry's "somewhere, no zone drawn".
+    static func place(zone id: String, layout: RoomLayout?) -> String {
+        if id == "room" { return "somewhere in the room" }
+        if let zone = layout?.zones?.first(where: { $0.id == id }) {
+            let say = zone.say?.trimmingCharacters(in: .whitespaces) ?? ""
+            let name = say.isEmpty ? "the " + id.replacingOccurrences(of: "_", with: " ") : say
+            return (zone.kind == "door" ? "by " : "on ") + name
+        }
+        return "on the " + id.replacingOccurrences(of: "_", with: " ")
+    }
+
+    /// "On the couch", "Inside the box, on the couch", "Last seen by the doorway"… for a thing
+    /// in a room zone; nil for one on the table.
+    static func roomWhereabouts(_ e: Entity, in snapshot: Snapshot) -> String? {
+        guard let place = place(of: e, in: snapshot) else { return nil }
+        let words: String
+        switch e.presence {
+        case .seen:
+            words = capitalized(place)
+        case .hidden:
+            let parent = e.parent.map { snapshot.entity(named: $0)?.displayName ?? Entity.displayName(for: $0) }
+            words = parent.map { "\(e.status == .under ? "Under" : "Inside") \(the($0)), \(place)" } ?? "Hidden \(place)"
+        case .carried:
+            words = "Carried, last seen \(place)"
+        case .lastSeen:
+            return "Last seen \(place)"
+        }
+        return e.isUncertain || e.isTentative ? "Probably " + words.prefix(1).lowercased() + words.dropFirst() : words
+    }
+
     /// "On the table", "Inside the box", "Off the table, on the left side"… Sentence case.
     static func whereabouts(_ e: Entity, in snapshot: Snapshot) -> String {
+        if let words = roomWhereabouts(e, in: snapshot) { return words }
         let parent = e.parent.map { snapshot.entity(named: $0)?.displayName ?? Entity.displayName(for: $0) }
         let it = isPlural(e.displayName) ? "them" : "it"
         let words: String
@@ -116,7 +154,7 @@ enum Dashboard {
 
     /// "Last seen 5 minutes ago", for things off the table or out of sight.
     static func lastSeen(_ e: Entity, now: Date) -> String? {
-        guard [.gone, .lost].contains(e.status), let seen = e.lastSeen else { return nil }
+        guard [.gone, .lost].contains(e.status) || e.presence == .lastSeen, let seen = e.lastSeen else { return nil }
         return "Last seen \(ago(seen, now: now).lowercased())"
     }
 
@@ -132,8 +170,10 @@ enum Dashboard {
         var out: [Notice] = []
         for e in snapshot.entities {
             let name = e.displayName
+            // Off the table but somewhere in the room: the room knows where, so no "left the table".
+            let place = self.place(of: e, in: snapshot)
             switch e.status {
-            case .gone where !e.isThing || e.hasTaughtName:
+            case .gone where (!e.isThing || e.hasTaughtName) && place == nil:
                 let side = e.edge.map { ", on the \($0.rawValue) side" } ?? ""
                 out.append(Notice(kind: .leftTable, entity: e.name,
                                   text: "\(capitalized(your(e))) \(was(name)) moved off the table\(side).",
@@ -143,7 +183,7 @@ enum Dashboard {
                                   text: "The room can't see \(your(e)) right now.",
                                   question: question(for: e),
                                   lastSeen: e.lastSeen,
-                                  seenWords: "\(isPlural(name) ? "They" : "It") \(was(name)) last seen on the table"))
+                                  seenWords: "\(isPlural(name) ? "They" : "It") \(was(name)) last seen \(place ?? "on the table")"))
             default:
                 break
             }
@@ -154,7 +194,7 @@ enum Dashboard {
                     .first { !$0.isThing || $0.hasTaughtName }
                 let guess = known.map { " It might be \(your($0))." } ?? ""
                 out.append(Notice(kind: .unnamed, entity: e.name,
-                                  text: "Something new is on the table.\(looks)\(guess)",
+                                  text: "Something new is \(place ?? "on the table").\(looks)\(guess)",
                                   question: nil))
             }
         }
@@ -172,11 +212,25 @@ enum Dashboard {
         var out: [ActivityEvent] = []
         for e in new.entities where !e.isNameless {
             let name = e.phrase
+            let place = self.place(of: e, in: new)
             guard let before = old.entity(named: e.name) else {
                 if e.kind == .target {
-                    out.append(ActivityEvent(entity: e.name, text: "\(capitalized(name)) appeared on the table", time: time))
+                    out.append(ActivityEvent(entity: e.name, text: "\(capitalized(name)) appeared \(place ?? "on the table")", time: time))
                 }
                 continue
+            }
+            // Moving between the table and the room's zones says where it went.
+            if e.zone != before.zone {
+                var text: String?
+                if let place, e.presence != .lastSeen {
+                    text = "\(capitalized(name)) \(isPlural(name) ? "are" : "is") \(place) now"
+                } else if e.zone == nil, e.status == .visible {
+                    text = "\(capitalized(name)) came back to the table"
+                }
+                if let text {
+                    out.append(ActivityEvent(entity: e.name, text: text, time: time))
+                    continue
+                }
             }
             let parent = e.parent.map { new.entity(named: $0)?.displayName ?? Entity.displayName(for: $0) }
             let oldParent = before.parent.map { old.entity(named: $0)?.displayName ?? Entity.displayName(for: $0) }

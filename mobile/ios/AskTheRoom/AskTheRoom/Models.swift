@@ -154,6 +154,41 @@ enum Seat {
     }
 }
 
+/// Object permanence (entity `rg`): what the rig's registry believes about a thing it has
+/// seen, whether or not it can see it now. An unknown word reads as `unrecognized`.
+enum RegistryState: String, Codable {
+    case visible, hidden, carried, lastSeen = "last_seen", unknown, unrecognized
+
+    init(from decoder: Decoder) throws {
+        let raw = try? decoder.singleValueContainer().decode(String.self)
+        self = raw.flatMap(RegistryState.init(rawValue:)) ?? .unrecognized
+    }
+}
+
+/// A 0/1 flag on the wire (`rt: 1`). Also takes `true`/`false`, and anything else reads as
+/// false, so an odd value never fails the whole state message.
+struct WireFlag: Codable, Equatable {
+    var isOn: Bool
+
+    init(_ isOn: Bool) { self.isOn = isOn }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.singleValueContainer()
+        if let i = try? c.decode(Int.self) {
+            isOn = i != 0
+        } else if let b = try? c.decode(Bool.self) {
+            isOn = b
+        } else {
+            isOn = false
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        try c.encode(isOn ? 1 : 0)
+    }
+}
+
 /// "Possibly the same as": an unconfirmed link to an older thing, sent as `[name, score]`.
 struct MaybeSame: Codable, Equatable, Hashable {
     var name: String
@@ -194,9 +229,14 @@ struct Entity: Codable, Equatable, Identifiable {
     var gc: Double?
     /// `as` on the wire: "grok" when `a[0]` was set by Grok, not taught by a person.
     var aliasSource: String?
+    /// The room zone it is in when it's off the table (`couch`, `counter`); such a thing has no `xy`/`r`.
+    var z: String?
+    /// The object-permanence registry's state, and whether that's still tentative (`rt: 1`).
+    var rg: RegistryState?
+    var rt: WireFlag?
 
     private enum CodingKeys: String, CodingKey {
-        case n, k, s, p, xy, r, c, edge, a, m, ls, g, gc
+        case n, k, s, p, xy, r, c, edge, a, m, ls, g, gc, z, rg, rt
         case aliasSource = "as"
     }
 
@@ -209,6 +249,31 @@ struct Entity: Codable, Equatable, Identifiable {
     var aliases: [String] { a ?? [] }
     var maybeSameAs: [MaybeSame] { m ?? [] }
     var lastSeen: Date? { ls.map(Date.init(timeIntervalSince1970:)) }
+    /// The room zone it is in, off the table. "table" (or empty) means it's on the table.
+    var zone: String? { z.flatMap { $0.isEmpty || $0 == "table" ? nil : $0 } }
+    var registry: RegistryState? { rg }
+    var isTentative: Bool { rt?.isOn ?? false }
+
+    /// Seen, hidden, carried, or only last seen: the registry's word when there is one, else the status.
+    enum Presence: CaseIterable, Equatable {
+        case seen, hidden, carried, lastSeen
+    }
+
+    var presence: Presence {
+        switch rg {
+        case .visible: return .seen
+        case .hidden: return .hidden
+        case .carried: return .carried
+        case .lastSeen, .unknown: return .lastSeen
+        case .unrecognized, nil: break
+        }
+        switch s {
+        case .visible: return .seen
+        case .inside, .under: return .hidden
+        case .held: return .carried
+        case .gone, .lost, .unrecognized: return .lastSeen
+        }
+    }
 
     /// Where to draw and highlight: the resolved position, else where it was last seen.
     var drawPoint: TablePoint? { r ?? xy }
@@ -296,6 +361,13 @@ struct Snapshot: Codable, Equatable {
     /// Present when the rig has turned the map to the person's frame. Missing from older rigs,
     /// whose maps are in the camera's frame.
     var view: ViewInfo?
+    /// State-characteristic chunks the bridge had sent before this message, for measuring link
+    /// loss (`LinkStats`). Diagnostics only; missing from older bridges.
+    var tx: Int?
+    /// Hash of the room layout. `lay` comes only when it changes or on subscribe, so the store
+    /// keeps the last one and checks it against this.
+    var lh: String?
+    var lay: RoomLayout?
 
     var entities: [Entity] { e }
     var tableSize: TablePoint { table ?? Self.defaultTable }
@@ -321,6 +393,76 @@ struct Snapshot: Codable, Equatable {
             next = entity.isInHand ? nil : entity.p
         }
         return out
+    }
+}
+
+/// The room around the table (state `lay`): its size, the table's place in it, named zones and
+/// where the person is. Every field is optional, and a field of the wrong type is ignored rather
+/// than failing the whole state message.
+struct RoomLayout: Codable, Equatable {
+    struct Table: Codable, Equatable {
+        var rect: [Double]?
+        var origin: [Double]?
+
+        init(rect: [Double]? = nil, origin: [Double]? = nil) {
+            self.rect = rect
+            self.origin = origin
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try? decoder.container(keyedBy: CodingKeys.self)
+            rect = try? c?.decodeIfPresent([Double].self, forKey: .rect)
+            origin = try? c?.decodeIfPresent([Double].self, forKey: .origin)
+        }
+    }
+
+    struct Zone: Codable, Equatable {
+        var id: String?
+        var say: String?
+        var rect: [Double]?
+        var kind: String?
+
+        init(id: String? = nil, say: String? = nil, rect: [Double]? = nil, kind: String? = nil) {
+            self.id = id
+            self.say = say
+            self.rect = rect
+            self.kind = kind
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try? decoder.container(keyedBy: CodingKeys.self)
+            id = try? c?.decodeIfPresent(String.self, forKey: .id)
+            say = try? c?.decodeIfPresent(String.self, forKey: .say)
+            rect = try? c?.decodeIfPresent([Double].self, forKey: .rect)
+            kind = try? c?.decodeIfPresent(String.self, forKey: .kind)
+        }
+    }
+
+    var v: Int?
+    var size: [Double]?
+    var front: String?
+    var table: Table?
+    var zones: [Zone]?
+    var you: [Double]?
+
+    init(v: Int? = nil, size: [Double]? = nil, front: String? = nil, table: Table? = nil,
+         zones: [Zone]? = nil, you: [Double]? = nil) {
+        self.v = v
+        self.size = size
+        self.front = front
+        self.table = table
+        self.zones = zones
+        self.you = you
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try? decoder.container(keyedBy: CodingKeys.self)
+        v = try? c?.decodeIfPresent(Int.self, forKey: .v)
+        size = try? c?.decodeIfPresent([Double].self, forKey: .size)
+        front = try? c?.decodeIfPresent(String.self, forKey: .front)
+        table = try? c?.decodeIfPresent(Table.self, forKey: .table)
+        zones = try? c?.decodeIfPresent([Zone].self, forKey: .zones)
+        you = try? c?.decodeIfPresent([Double].self, forKey: .you)
     }
 }
 
@@ -439,6 +581,26 @@ struct OrientSettings: Codable, Equatable {
 
     /// Nil for a reset (or a side this app doesn't know).
     var front: Side? { orient.front.flatMap(Side.init(rawValue:)) }
+
+    /// The JSON to write to the question characteristic, like `VoiceSettings`.
+    func encoded() -> Data? {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        guard let data = try? encoder.encode(self), data.count <= Question.maxBytes else { return nil }
+        return data
+    }
+}
+
+/// Written first on every connect (PROTOCOL.md): tells the bridge this app can inflate
+/// compressed messages (`z`: 1), so it may set the COMPRESSED flag. Exactly `{"hello":{"z":1}}`.
+struct Hello: Codable, Equatable {
+    struct Caps: Codable, Equatable {
+        var z: Int
+    }
+
+    var hello: Caps
+
+    static let current = Hello(hello: Caps(z: 1))
 
     /// The JSON to write to the question characteristic, like `VoiceSettings`.
     func encoded() -> Data? {

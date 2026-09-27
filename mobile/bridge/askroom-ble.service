@@ -1,0 +1,20 @@
+# systemd unit for the Ask the Room BLE bridge (Jetson host). Runs as root so the bridge can
+# re-apply the Realtek LE event-mask workaround (mobile/PROTOCOL.md section 10) after every adapter
+# power-on; run_bridge.sh does the rest without sudo. Install once:
+#   sudo cp ~/askroom/mobile/bridge/askroom-ble.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now askroom-ble
+#   journalctl -u askroom-ble -f
+[Unit]
+Description=Ask the Room BLE bridge (GATT peripheral for the iPhone app)
+After=bluetooth.service
+Wants=bluetooth.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/guru/askroom
+ExecStart=/usr/bin/python3 -u /home/guru/askroom/mobile/bridge/ble_bridge.py --repo /home/guru/askroom
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

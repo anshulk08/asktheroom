@@ -1,5 +1,123 @@
 # Fine-tuning the detector (spec P7)
 
+## Fast path (no hand labelling)
+
+**Room demo (Brio in the corner):** follow `docs/corner_retrain.md` instead: `capture.py --room table` captures
+exactly what the room build's detector sees, and the go/no-go runs on the Mac.
+
+Labels come from background subtraction: each object lies **alone** on the empty table, so what changed
+is that object (`bglabel.py`). YOLO-World isn't used (it scored the wallet 0.00 and glasses <0.2 from
+overhead). `synthesize.py` then pastes the cutouts into multi-object, occluded, hand-over-object scenes
+with exact boxes. Validation is real captures only: group `cap3` (poses 4 and 8 of every object, a
+quarter of the hand frames), which is never pasted. Synthetic `synth_*` images always train.
+
+**Jetson** (`ssh guru@10.90.84.178` (Wi-Fi; `guru@192.168.55.1` over USB), `cd ~/askroom`). The app holds the camera, so stop it first:
+```
+docker ps --filter ancestor=askroom:latest --format '{{.ID}} {{.Command}}' | grep main.py | cut -d' ' -f1 | xargs -r docker stop
+scripts/camera_setup.sh                          # lamp on: labels need a lit, still table
+mv data/finetune data/finetune-oldcam            # new camera only: no old-camera captures mixed in
+.venv/bin/python scripts/finetune/capture.py --distractors airpods deodorant mug charger lipbalm
+                                                 # ~18 min: empty table, 8 objects x 8 poses,
+                                                 # 5 distractors x 4 poses, 40 s of hands
+nohup scripts/dock.sh python3 -u main.py --no-voice > main.log 2>&1 &    # app back up (old model)
+```
+Capture prompts for each pose, waits until the view has been still for 0.7 s (hand gone), and retakes
+the shot with a reason if the change is missing, split in pieces, too big/small, or touches the frame
+edge (arm in view). Redo objects with `--only glasses keys`, a distractor with
+`--distractors airpods --only airpods` (a distractor named in `--only` must also be in `--distractors`).
+Look at `data/finetune/qa_capture.jpg`: objects boxed, distractors and the empty table unboxed.
+
+**Distractors (negatives).** A model trained only on our eight props and an empty table has never seen
+anything else, so it calls an unknown thing its nearest class: the first model scored an AirPods case
+0.53 `phone`, a small thing at the table edge up to 0.72 `phone`, against 0.87-0.97 for real props.
+`--distractors` captures other everyday things exactly like objects (alone on the empty table,
+`--distractor-poses 4` by default, same prompt `[airpods 1/4] Place the airpods alone on the table, ...`),
+but their real images get an **empty label** (a negative for every class) and their cutouts are marked
+`"distractor": true`. `synthesize.py` pastes them into scenes like objects (they cover and are
+covered, and near a prop they teach "this one, not that one") but never boxes them; `--p-distractor`
+(default 0.5) is the share of scenes that draw from objects and distractors together, so some scenes
+are distractors only. Their held-out group (`cap3`) lands in validation, so validation precision now
+counts false positives on unknown things; `train.py` prints how many negatives each split has.
+Names are one word (`\w+`), not a class, `hand` or `empty`. Pick five or more things of different
+shapes and colours that a judge might put down (earbud case, mug, deodorant, charger brick, lip balm,
+a coaster, a snack bar); **don't** pick another thing of a class (someone else's keys, sunglasses,
+another phone), or the model learns that the class's own look is "not it".
+
+**Mac** (`cd ~/askroom`):
+```
+mv data/finetune data/finetune-oldcam                                      # new camera only (as on the Jetson)
+rsync -a "guru@10.90.84.178:askroom/data/finetune/" data/finetune/           # ~1 min
+cp data/hands_public/images/pubhand_* data/finetune/images/ && \
+    cp data/hands_public/labels/pubhand_* data/finetune/labels/            # optional: EgoHands hands (public_hands.py)
+open data/finetune/qa_capture.jpg                                          # every box right?
+.venv/bin/python scripts/finetune/synthesize.py --n 500                    # ~20 s; check qa_synth.jpg
+PYTORCH_ENABLE_MPS_FALLBACK=1 .venv/bin/python scripts/finetune/train.py \
+    --model models/yolo26s.pt --device mps --batch 8 --epochs 30 --val-trials cap3 --name askroom-yolo26s
+cp <the "best weights:" path it prints> models/askroom-yolo26s.pt          # usually ~/runs/detect/runs/askroom/askroom-yolo26s/weights/best.pt
+scp models/askroom-yolo26s.pt "guru@10.90.84.178:askroom/models/"
+```
+Training on the M-series Mac runs ~1.4 s/iteration at 640 px, batch 8 (batch 16 swaps on 16 GB), so
+30 epochs of ~650 images is roughly 60-70 min; a cloud GPU is much faster. If YOLO26 gives any trouble,
+use `--model yolo11s.pt`.
+
+**Jetson** again:
+```
+scripts/dock.sh yolo export model=models/askroom-yolo26s.pt format=engine half=True imgsz=640   # ~10 min
+# config.yaml -> detect: model: models/askroom-yolo26s.engine
+docker ps --filter ancestor=askroom:latest --format '{{.ID}} {{.Command}}' | grep main.py | cut -d' ' -f1 | xargs -r docker stop
+nohup scripts/dock.sh python3 -u main.py --no-voice > main.log 2>&1 &
+```
+**P6 check** on a recorded clip (`eval/record.py`), inside the container for real engine speed:
+```
+scripts/dock.sh python3 -m eval.replay_video --video trials/<id>/video.mp4 --model models/askroom-yolo26s.engine
+```
+It reports fps, per-object detection rate and every disappearance event (PICKED_UP, COVERED,
+PUT_INSIDE, EXITED_VIEW, LOST_TRACK) of an object no hand touched; pass = none at >= 10 fps.
+
+Then score the guided clips (eval/guided.py) against the old detector, with the rig's config:
+```
+for c in still_1 hands_1 place_1 shell_1 exit_1; do
+  scripts/dock.sh python3 -m eval.score_clip data/clips/$c --config config.yaml --detect-model models/askroom-yolo26s.engine
+done
+```
+Revisit the rig's per-class `conf_threshold` (wallet / phone are at 0.6 because the first model called
+unknown things by those names at up to 0.72): with distractors in training the confusions should
+score lower, and a lower cut-off confirms placements sooner.
+
+## Corner camera (spec 0009/0010: the Brio high in the room corner, zoom 100, 1080p)
+
+The detector then sees the **table view**: the 1080p frame cut to `room_memory.table_view_rect`
+(config.local.yaml) and resized to 1280x720 (`core/room_view.TableView`). `capture.py` opens the camera the
+same way whenever room memory is on in config, so the captures are exactly what the model gets on the rig
+(`--full-frame` keeps the uncut 1080p frame instead). Leave the camera controls as the demo runs them
+(no `camera_setup.sh`: zoom 100 is the view; the model must work in the demo's own light).
+
+```
+cd ~/askroom_room                                        # the demo checkout; the host venv lives in ~/askroom
+docker ps --filter ancestor=askroom:latest --format '{{.ID}} {{.Command}}' | grep main.py | cut -d' ' -f1 | xargs -r docker stop
+~/askroom/.venv/bin/python scripts/finetune/capture.py \
+    --device /dev/v4l/by-id/usb-046d_Logitech_BRIO_3675F8D2-video-index0 \
+    --distractors airpods mug charger lipbalm coaster --roi 20,30,1250,660
+```
+`--roi` is the coffee-table top in table-view px (1280x720): the strip above it is floor and chair legs,
+where the person placing objects would otherwise count as a change. The table is dark wood: keep the room
+lamp on and prefer poses that don't stack a black object on the darkest grain. Then on the Mac (any
+checkout; `data/finetune-*` is gitignored), with the corner switches:
+
+```
+rsync -a "guru@10.90.84.178:askroom_room/data/finetune/" data/finetune/
+.venv/bin/python scripts/finetune/synthesize.py --n 500 --max-rot 25         # +-25 degrees: nothing is upside down
+PYTORCH_ENABLE_MPS_FALLBACK=1 .venv/bin/python scripts/finetune/train.py --model models/yolo26s.pt \
+    --device mps --batch 8 --epochs 30 --val-trials cap3 --flipud 0 --name askroom-yolo26s-corner
+scp <best.pt> "guru@10.90.84.178:askroom_room/models/askroom-yolo26s-corner.pt"
+```
+Engine as above (`scripts/dock.sh yolo export model=models/askroom-yolo26s-corner.pt format=engine half=True
+imgsz=640`, from `~/askroom_room`, when the Jetson is free), then in config.local.yaml: `detect.model` to the
+new engine and the per-prop `conf_threshold` back from 0.99 to ~0.6. Done when notebook, box and keys score
+>= 0.6 on the coffee table and the shell game passes (spec 0010 P1-1).
+
+## Slow path (label trial-video frames by hand)
+
 Classes are exactly the config objects in order, then `hand`:
 `keys pill_bottle wallet glasses phone remote box notebook hand`. `core/detect.py` maps a model's
 class names to objects by name, so don't rename them.

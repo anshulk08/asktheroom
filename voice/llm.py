@@ -1,6 +1,7 @@
-"""Grok for open-ended (OTHER) questions (spec V10). Off the voice path: the team decided Grok only
-helps the detector, so voice/pipeline.py uses voice/local_llm.py, which reuses compact_state,
-to_answer and the pill filter from here. ask_grok stays for scripts/grok_smoke.py.
+"""Grok for open-ended (OTHER) questions (spec V10), on the voice path: voice/pipeline.py's default
+answerer is ask_other(), which tries voice/local_llm.py's fixed templates first (instant, exact) and
+then ask_grok(). Offline, it gives the fallback sentence. (Team decision, Fri night: all LLM/VLM work
+goes through Grok; the local Qwen answerer, voice.local_llm.ask_local, is no longer on the path.)
 
 Only question text and a compact world-state JSON leave the device. The model gets the state in
 the system prompt, may call locate / history / changes_since, and must finish with respond().
@@ -27,7 +28,10 @@ from datetime import datetime
 from typing import Any, Optional
 
 from core.config import display_name, load_config
+from core.labels import thing_labels
+from core.narration_store import med_claim
 from core.types import Answer, Status
+from core.viewframe import View
 
 log = logging.getLogger(__name__)
 
@@ -47,14 +51,15 @@ Rules:
 - Use only facts from the world state and tool results below. Never guess or invent objects, people, or events.
 - Never say or imply that medication or pills were taken, swallowed, or missed. You can only report where the pill bottle is and when it was picked up, moved, or covered.
 - If an object's confidence is below {plain}, hedge with "probably". If its status is UNKNOWN, say "I lost track of" it and where it was last seen.
-- Status meanings: VISIBLE on the table; HELD in a hand; INSIDE a container (parent); UNDER a cover (parent); GONE left the camera view (edge tells which side); UNKNOWN lost track.
+- Status meanings: VISIBLE on the table; HELD in a hand; INSIDE a container (parent); UNDER a cover (parent); GONE carried off the table (edge tells which side); UNKNOWN lost track.
+- area and edge are from the person's seat: left and right are theirs, near is the side nearest them, far is across the table. Say it that way ("on your left", "the far side").
 - Say object names with spaces (pill bottle, not pill_bottle). Times: say "a minute ago", "about 5 minutes ago", etc.
-- The objects are: {objects}.
+- The objects are: {objects}. Things the person named appear by that name; "unnamed object N" is one nobody has named yet (describe it by where it is, not by its number). maybe_same_as lists objects that may be the same physical object.
 - Always finish by calling respond(text, point_at). Set point_at to the object the answer is about when pointing at it helps (for hidden objects, point at the object itself; the laser follows it to its container), otherwise leave it empty.
 - You may call locate, history, or changes_since first, but only if the state below is not enough. Be quick.
 
 Current local time: {now_iso}
-World state (JSON; area = which third of the table, seen_s_ago = seconds since last seen):
+World state (JSON; area = where on the table from the person's seat, seen_s_ago = seconds since last seen):
 {state}"""
 
 
@@ -87,11 +92,7 @@ def _tools(names: list[str]) -> list[dict]:
 # ---------------------------------------------------------------- world -> compact facts
 
 def _area(cfg: dict, pos) -> Optional[str]:
-    if not pos:
-        return None
-    width = float(((cfg.get("table") or {}).get("size_cm") or [90, 60])[0])
-    x = float(pos[0])
-    return "left" if x < width / 3 else ("right" if x > 2 * width / 3 else "middle")
+    return View.from_cfg(cfg).area_word(pos)
 
 
 def _ago(wall: Optional[float], now: float) -> Optional[int]:
@@ -99,21 +100,36 @@ def _ago(wall: Optional[float], now: float) -> Optional[int]:
 
 
 def compact_state(world, cfg: dict) -> list[dict]:
-    """world.state_json() minus noise (fps, laser, raw coordinates, redundant edges)."""
+    """world.state_json() minus noise (fps, laser, raw coordinates, redundant edges). Open-world
+    things go by their taught name or 'unnamed object N', never the internal id (core/labels.py)."""
     now = time.time()
     out = []
-    for e in world.state_json().get("entities", []):
-        d: dict[str, Any] = {"name": e["name"], "status": e["status"]}
+    st = world.state_json()
+    labels = thing_labels(st)
+    view = View.from_cfg(cfg)
+    room = st.get("room") or {}                # spec 0009: entities in a room zone (none when it's off)
+    for e in st.get("entities", []):
+        d: dict[str, Any] = {"name": labels.get(e["name"], e["name"]), "status": e["status"]}
         if e.get("parent") and e["status"] != Status.VISIBLE.value:
-            d["parent"] = e["parent"]
-        area = _area(cfg, e.get("resolved_cm") or e.get("pos_cm"))
-        if area:
-            d["area"] = area
+            d["parent"] = labels.get(e["parent"], e["parent"])
+        r = room.get(e["name"]) if e["name"] != "conflicts" else None
+        if isinstance(r, dict) and r.get("say"):
+            d["room_zone"] = r["say"]          # 'the bookshelf': no table area (pos_cm may be a flicker)
+            if r.get("absent"):
+                d["not_seen_there_now"] = True
+        else:
+            area = _area(cfg, e.get("resolved_cm") or e.get("pos_cm"))
+            if area:
+                d["area"] = area
         d["confidence"] = round(float(e.get("confidence", 1.0)), 2)
         if e.get("candidates"):
-            d["candidates"] = e["candidates"]
+            d["candidates"] = [labels.get(c, c) for c in e["candidates"]]
         if e.get("edge"):
-            d["edge"] = e["edge"]
+            d["edge"] = view.edge_word(e["edge"])
+        if len(e.get("aliases") or []) > 1:
+            d["also_called"] = e["aliases"][1:]
+        if e.get("maybe_same_as"):
+            d["maybe_same_as"] = [labels.get(m[0], m[0]) for m in e["maybe_same_as"]]
         ago = _ago(e.get("last_seen"), now)
         if ago is not None:
             d["seen_s_ago"] = ago
@@ -121,16 +137,18 @@ def compact_state(world, cfg: dict) -> list[dict]:
     return out
 
 
-def _event_dict(ev, now: float, with_obj: bool) -> dict:
+def _event_dict(ev, now: float, with_obj: bool, labels: Optional[dict] = None,
+                cfg: Optional[dict] = None) -> dict:
+    labels = labels or {}
     d: dict[str, Any] = {}
     if with_obj:
-        d["object"] = ev.obj
+        d["object"] = labels.get(ev.obj, ev.obj)
     d["type"] = ev.type
     d["s_ago"] = _ago(ev.wall, now)
     if ev.parent:
-        d["parent"] = ev.parent
+        d["parent"] = labels.get(ev.parent, ev.parent)
     if ev.edge:
-        d["edge"] = ev.edge
+        d["edge"] = View.from_cfg(cfg or {}).edge_word(ev.edge)
     if ev.confidence is not None and ev.confidence < 1.0:
         d["confidence"] = round(ev.confidence, 2)
     return d
@@ -152,9 +170,20 @@ class _Tools:
     def __init__(self, world, events, cfg: dict):
         self.world, self.events, self.cfg = world, events, cfg
         self.names = _entity_names(world)
+        self.labels = _labels(world)          # thing:N -> what Grok calls it
+        self.ids = {v.lower(): k for k, v in self.labels.items() if k in self.names}
+
+    def _say(self, name: Optional[str]) -> Optional[str]:
+        return self.labels.get(name, name) if name else name
 
     def _name(self, raw: Any) -> str:
         n = str(raw or "").strip().lower()
+        if n in self.ids:                     # a thing by its taught name / 'unnamed object N'
+            return self.ids[n]
+        find = getattr(self.world, "find", None)
+        hit = find(n) if callable(find) and n else None     # 'my charger', plurals, taught aliases
+        if hit in self.names:
+            return hit
         n = (self.cfg.get("synonyms") or {}).get(n, n).replace(" ", "_")
         if n not in self.names:
             raise ValueError(f"unknown object {raw!r}")
@@ -164,16 +193,16 @@ class _Tools:
         name = self._name(object)
         e = self.world.get(name)
         pos, chain = self.world.resolve(name)
-        d: dict[str, Any] = {"object": name, "status": e.status.value, "chain": chain,
-                             "confidence": round(e.confidence, 2)}
+        d: dict[str, Any] = {"object": self._say(name), "status": e.status.value,
+                             "chain": [self._say(c) for c in chain], "confidence": round(e.confidence, 2)}
         if e.parent and e.status != Status.VISIBLE:
-            d["parent"] = e.parent
+            d["parent"] = self._say(e.parent)
         if _area(self.cfg, pos):
             d["area"] = _area(self.cfg, pos)
         if e.candidates:
-            d["candidates"] = list(e.candidates)
+            d["candidates"] = [self._say(c) for c in e.candidates]
         if e.edge:
-            d["edge"] = e.edge
+            d["edge"] = View.from_cfg(self.cfg).edge_word(e.edge)
         if e.last_seen is not None:
             d["seen_s_ago"] = _ago(e.last_seen, time.time())
         return d
@@ -182,8 +211,8 @@ class _Tools:
         name = self._name(object)
         n = max(1, min(10, int(limit or 3)))
         now = time.time()
-        return {"object": name,
-                "events": [_event_dict(ev, now, False) for ev in self.world.history(name, n)]}
+        return {"object": self._say(name),
+                "events": [_event_dict(ev, now, False, self.labels, self.cfg) for ev in self.world.history(name, n)]}
 
     def changes_since(self, iso_time: str) -> dict:
         t = _parse_iso(iso_time)
@@ -191,7 +220,7 @@ class _Tools:
         evs = sorted(log_.since(t), key=lambda ev: ev.wall) if log_ is not None else []
         now = time.time()
         return {"since_s_ago": _ago(t, now), "count": len(evs),
-                "events": [_event_dict(ev, now, True) for ev in evs[-MAX_EVENTS:]]}
+                "events": [_event_dict(ev, now, True, self.labels, self.cfg) for ev in evs[-MAX_EVENTS:]]}
 
     def call(self, name: str, args: dict) -> dict:
         try:
@@ -213,13 +242,25 @@ def _entity_names(world) -> list[str]:
         return []
 
 
+def _labels(world) -> dict[str, str]:
+    try:
+        return thing_labels(world.state_json())
+    except Exception:
+        return {}
+
+
 # ---------------------------------------------------------------- answer post-processing
 
 _MD = re.compile(r"[*_#`>\[\]]+")
-_MEDS = r"\b(pills?(?!\s*bottle)|medication|medicine|meds|doses?)\b"
-_PILLS_TAKEN = re.compile(
-    r"\b(took|taken|takes|swallow\w*)\b[^.?!]*" + _MEDS
-    + r"|" + _MEDS + r"[^.?!]*\b(taken|took|swallowed)\b", re.I)
+_BOTTLE = re.compile(r"\bpill[ _]bottles?\b", re.I)   # the object, not medication
+
+
+def _med_claim(text: str) -> bool:
+    """Any sentence saying medication was taken, missed or skipped (narration_store.med_claim, the
+    wider rule the visual answers use); 'pill bottle' is the object and doesn't count as medication."""
+    return any(med_claim(_BOTTLE.sub("bottle", s)) for s in re.split(r"(?<=[.!?])\s+", text))
+
+
 PILLS_SAFE = ("I can't tell whether medication was taken; I can only tell you where the pill "
               "bottle is and when it was moved.")
 
@@ -232,16 +273,18 @@ def clean_text(text: str) -> str:
     return " ".join(parts[:2]).strip()
 
 
-def to_answer(text: str, point_at: Optional[str], names: list[str], cfg: dict) -> Answer:
-    """respond(...) args -> Answer; drops unknown point_at and blocks 'pills were taken' claims."""
+def to_answer(text: str, point_at: Optional[str], names: list[str], cfg: dict,
+              labels: Optional[dict] = None) -> Answer:
+    """respond(...) args -> Answer; drops unknown point_at and blocks 'pills were taken' claims.
+    labels (thing:N -> name, see core/labels.py) turn a thing's name back into its entity id."""
     text = clean_text(text)
     if not text:
         return fallback()
     p = (point_at or "").strip().lower()
-    p = (cfg.get("synonyms") or {}).get(p, p).replace(" ", "_")
+    ids = {v.lower(): k for k, v in (labels or {}).items() if k in names}
+    p = ids.get(p) or (cfg.get("synonyms") or {}).get(p, p).replace(" ", "_")
     target = p if p in names else None
-    if _PILLS_TAKEN.search(text) and not re.search(r"\b(can't|cannot|can not|don't know)\b",
-                                                   text, re.I):
+    if _med_claim(text):
         text, target = PILLS_SAFE, ("pill_bottle" if "pill_bottle" in names else None)
     return Answer(text, target, "point" if target else None)
 
@@ -249,9 +292,9 @@ def to_answer(text: str, point_at: Optional[str], names: list[str], cfg: dict) -
 # ---------------------------------------------------------------- the call
 
 def _make_client(base_url: str, api_key: str, timeout: float):
-    """Seam for tests."""
-    from openai import OpenAI
-    return OpenAI(base_url=base_url, api_key=api_key, timeout=timeout, max_retries=0)
+    """Seam for tests. core.xai: plain requests on the shared, pre-warmed connection to xAI."""
+    from core.xai import Client
+    return Client(base_url, api_key, timeout=timeout)
 
 
 def _args(tc) -> dict:
@@ -266,7 +309,8 @@ def _run(question: str, world, events, cfg: dict, api_key: str, deadline: float)
     llm = cfg.get("llm") or {}
     names = _entity_names(world)
     tools = _Tools(world, events, cfg)
-    objects = ", ".join(f"{n} ({display_name(cfg, n)})" if "_" in n else n for n in names)
+    said = [tools.labels.get(n, n) for n in names]        # things by name, never thing:N
+    objects = ", ".join(f"{n} ({display_name(cfg, n)})" if "_" in n else n for n in said)
     system = SYSTEM_TEMPLATE.format(
         plain=cfg.get("answer_plain", 0.7), objects=objects,
         now_iso=datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -287,17 +331,17 @@ def _run(question: str, world, events, cfg: dict, api_key: str, deadline: float)
         last = rnd == MAX_ROUNDS - 1
         choice = ({"type": "function", "function": {"name": "respond"}} if last else "required")
         resp = client.chat.completions.create(
-            model=llm.get("model", "grok-4.3"), messages=messages, tools=_tools(names),
+            model=llm.get("model", "grok-4.3"), messages=messages, tools=_tools(said),
             tool_choice=choice, max_completion_tokens=300, timeout=remaining, **extra)
         msg = resp.choices[0].message
         calls = list(msg.tool_calls or [])
         for tc in calls:
             if tc.function.name == "respond":
                 a = _args(tc)
-                return to_answer(a.get("text", ""), a.get("point_at"), names, cfg)
+                return to_answer(a.get("text", ""), a.get("point_at"), names, cfg, tools.labels)
         if not calls:
             # model ignored tool_choice; accept plain content if any
-            return to_answer(msg.content or "", None, names, cfg)
+            return to_answer(msg.content or "", None, names, cfg, tools.labels)
         messages.append({"role": "assistant", "content": msg.content or "",
                          "tool_calls": [{"id": tc.id, "type": "function",
                                          "function": {"name": tc.function.name,
@@ -308,6 +352,25 @@ def _run(question: str, world, events, cfg: dict, api_key: str, deadline: float)
             messages.append({"role": "tool", "tool_call_id": tc.id,
                              "content": json.dumps(result, separators=(",", ":"))})
     return fallback()
+
+
+def ask_other(question: str, world, events, cfg: dict | None = None, online: bool = True) -> Answer:
+    """The pipeline's answerer for OTHER: fixed templates for the common open questions, then Grok
+    when online, else the fallback sentence. understand.backend qwen (or auto, offline) uses the local
+    Qwen (voice.local_llm) instead. Never raises."""
+    try:
+        cfg = cfg if cfg is not None else load_config()
+        from voice.local_llm import ask_local, templated
+        fixed = templated(question, world, cfg)
+        if fixed is not None:
+            return fixed
+        backend = str((cfg.get("understand") or {}).get("backend", "grok"))
+        has_key = bool(os.environ.get("XAI_API_KEY", "").strip())
+        if backend == "qwen" or (backend == "auto" and not (online and has_key)):
+            return ask_local(question, world, events, cfg)
+    except Exception:
+        log.exception("templated answer failed")
+    return ask_grok(question, world, events, cfg, online=online)
 
 
 def ask_grok(question: str, world, events, cfg: dict | None = None,

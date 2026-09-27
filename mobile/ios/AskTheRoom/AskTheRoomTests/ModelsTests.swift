@@ -343,4 +343,110 @@ final class ModelsTests: XCTestCase {
             XCTAssertEqual(Edge.allCases.compactMap { try? view(f).name(at: $0) }, ["couch"], f)
         }
     }
+
+    // MARK: Link additions
+
+    func testStateTxIsOptional() throws {
+        let with = try XCTUnwrap(Wire.decode(Snapshot.self, from: Data(#"{"e":[],"tx":812}"#.utf8)))
+        XCTAssertEqual(with.tx, 812)
+        let without = try XCTUnwrap(Wire.decode(Snapshot.self, from: Data(#"{"e":[]}"#.utf8)))
+        XCTAssertNil(without.tx)
+        XCTAssertNil(try XCTUnwrap(Wire.decode(Snapshot.self, from: Data(MockData.sampleSnapshotJSON.utf8))).tx)
+    }
+
+    func testHelloBytesAreExact() throws {
+        let data = try XCTUnwrap(Hello.current.encoded())
+        XCTAssertEqual(String(decoding: data, as: UTF8.self), #"{"hello":{"z":1}}"#)
+        XCTAssertEqual(data, Data(#"{"hello":{"z":1}}"#.utf8))
+    }
+
+    func testLayoutAndHashDecode() throws {
+        let json = #"""
+        {"e":[],"lh":"a1b2c3","lay":{"v":1,"size":[400,300],"front":"right",
+         "table":{"rect":[150,100,90,60],"origin":[150,100]},
+         "zones":[{"id":"door","say":"the door","rect":[0,0,40,10],"kind":"door"}],
+         "you":[200,280]}}
+        """#
+        let snap = try XCTUnwrap(Wire.decode(Snapshot.self, from: Data(json.utf8)))
+        XCTAssertEqual(snap.lh, "a1b2c3")
+        let lay = try XCTUnwrap(snap.lay)
+        XCTAssertEqual(lay.v, 1)
+        XCTAssertEqual(lay.size, [400, 300])
+        XCTAssertEqual(lay.front, "right")
+        XCTAssertEqual(lay.table, RoomLayout.Table(rect: [150, 100, 90, 60], origin: [150, 100]))
+        XCTAssertEqual(lay.zones, [RoomLayout.Zone(id: "door", say: "the door", rect: [0, 0, 40, 10], kind: "door")])
+        XCTAssertEqual(lay.you, [200, 280])
+
+        let plain = try XCTUnwrap(Wire.decode(Snapshot.self, from: Data(#"{"e":[]}"#.utf8)))
+        XCTAssertNil(plain.lh)
+        XCTAssertNil(plain.lay)
+    }
+
+    /// A layout with odd fields mustn't cost the whole state message.
+    func testLayoutIsTolerant() throws {
+        let json = #"{"e":[{"n":"keys","k":"t","s":"V"}],"lh":"x","lay":{"v":"one","size":[1,"b"],"front":3,"table":[],"zones":[{"id":7,"say":"sofa"},5],"you":null,"extra":{}}}"#
+        let snap = try XCTUnwrap(Wire.decode(Snapshot.self, from: Data(json.utf8)))
+        XCTAssertEqual(snap.entities.count, 1)
+        let lay = try XCTUnwrap(snap.lay)
+        XCTAssertNil(lay.v)
+        XCTAssertNil(lay.size)
+        XCTAssertNil(lay.front)
+        XCTAssertEqual(lay.table, RoomLayout.Table())
+        XCTAssertEqual(lay.zones, [RoomLayout.Zone(say: "sofa"), RoomLayout.Zone()])
+        XCTAssertNil(lay.you)
+
+        let notAnObject = try XCTUnwrap(Wire.decode(Snapshot.self, from: Data(#"{"e":[],"lay":"soon"}"#.utf8)))
+        XCTAssertEqual(notAnObject.lay, RoomLayout())
+    }
+
+    /// Room memory (spec 0010/0011): a thing off the table carries its zone and the registry's word.
+    func testZoneAndRegistryDecode() throws {
+        let json = #"{"e":[{"n":"wallet","k":"t","s":"V","z":"couch","rg":"last_seen","rt":1},"#
+            + #"{"n":"keys","k":"t","s":"V","xy":[1,2]},{"n":"mug","k":"t","s":"H","z":"table","rg":"carried","rt":true},"#
+            + #"{"n":"cup","k":"t","s":"V","rg":"teleported","rt":"yes"}]}"#
+        let snap = try XCTUnwrap(Wire.decode(Snapshot.self, from: Data(json.utf8)))
+        let wallet = try XCTUnwrap(snap.entity(named: "wallet"))
+        XCTAssertEqual(wallet.zone, "couch")
+        XCTAssertNil(wallet.drawPoint)
+        XCTAssertEqual(wallet.registry, .lastSeen)
+        XCTAssertTrue(wallet.isTentative)
+        XCTAssertEqual(wallet.presence, .lastSeen, "the registry's word beats the status")
+
+        let keys = try XCTUnwrap(snap.entity(named: "keys"))
+        XCTAssertNil(keys.zone)
+        XCTAssertNil(keys.registry)
+        XCTAssertFalse(keys.isTentative)
+        XCTAssertEqual(keys.presence, .seen)
+
+        let mug = try XCTUnwrap(snap.entity(named: "mug"))
+        XCTAssertNil(mug.zone, "on the table")
+        XCTAssertEqual(mug.registry, .carried)
+        XCTAssertTrue(mug.isTentative, "a bool works too")
+
+        let cup = try XCTUnwrap(snap.entity(named: "cup"), "odd values don't cost the thing")
+        XCTAssertEqual(cup.registry, .unrecognized)
+        XCTAssertFalse(cup.isTentative)
+        XCTAssertEqual(cup.presence, .seen, "an unknown registry word falls back to the status")
+
+        // Round trip, as the saved map does.
+        let again = try JSONDecoder().decode(Snapshot.self, from: JSONEncoder().encode(snap))
+        XCTAssertEqual(again, snap)
+    }
+
+    func testPresenceFromStatus() {
+        func presence(_ s: EntityStatus, _ rg: RegistryState? = nil) -> Entity.Presence {
+            Entity(n: "x", k: .target, s: s, rg: rg).presence
+        }
+        XCTAssertEqual(presence(.visible), .seen)
+        XCTAssertEqual(presence(.inside), .hidden)
+        XCTAssertEqual(presence(.under), .hidden)
+        XCTAssertEqual(presence(.held), .carried)
+        XCTAssertEqual(presence(.lost), .lastSeen)
+        XCTAssertEqual(presence(.gone), .lastSeen)
+        XCTAssertEqual(presence(.visible, .hidden), .hidden)
+        XCTAssertEqual(presence(.visible, .carried), .carried)
+        XCTAssertEqual(presence(.visible, .unknown), .lastSeen)
+        XCTAssertEqual(presence(.lost, .visible), .seen)
+    }
 }
+

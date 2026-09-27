@@ -41,6 +41,19 @@ def test_first_sighting_becomes_visible_without_event(scene, world):
     assert events == []
 
 
+@pytest.mark.parametrize('wallet_cut, visible', [(None, False), (0.2, True)])
+def test_the_world_applies_the_per_object_threshold_not_only_the_default(cfg, wallet_cut, visible):
+    """conf_threshold.wallet below the default: the detector keeps a 0.25 wallet, so must the World."""
+    from core.types import Detection, Detections
+    if wallet_cut is not None:
+        cfg.conf_thresholds['wallet'] = wallet_cut
+    world = World(cfg)
+    d = Detection(cls='wallet', conf=0.25, box_px=(400, 300, 480, 350), center_cm=(40, 30), box_cm=(36, 28, 44, 32))
+    for i in range(12):
+        world.update(Detections(t=1000 + i / 10, frame_idx=i, items=[d], hands=[]), None)
+    assert (world.get('wallet').status == Status.VISIBLE) is visible
+
+
 @pytest.mark.parametrize('missed', [2, 3])
 def test_visible_object_survives_a_few_missed_batches(scene, world, missed):
     scene.place('keys', 40, 30)
@@ -57,7 +70,7 @@ def test_vanishing_without_a_hand_is_lost_track(scene, world):
     scene.place('keys', 40, 30)
     scene.run(world, 1.0)
     scene.remove('keys')
-    events = scene.run(world, 1.0)
+    events = scene.run(world, world.cfg.lost_grace_s + 0.2)       # unseen that long: lost
     keys = world.get('keys')
     assert types(events) == [EventType.LOST_TRACK]
     assert keys.status == Status.UNKNOWN
@@ -196,7 +209,7 @@ def test_reappearing_after_lost_track_is_corrected(scene, world):
     scene.place('keys', 40, 30)
     scene.run(world, 1.0)
     scene.remove('keys')
-    scene.run(world, 1.0)
+    scene.run(world, world.cfg.lost_grace_s + 0.2)
     scene.place('keys', 40, 30)
     assert types(scene.run(world, 1.0)) == [EventType.CORRECTED]
 
@@ -243,7 +256,7 @@ def test_confidence_decays_for_hidden_beliefs_but_not_for_visible_ones(scene, wo
     scene.place('keys', 40, 30)
     scene.run(world, 1.0)
     scene.remove('keys')
-    scene.run(world, 1.0)
+    scene.run(world, cfg.lost_grace_s + 0.2)
     before = world.get('keys').confidence
     scene.dt = 60.0                   # one batch per simulated minute
     scene.run(world, 10 * 60.0)
@@ -408,3 +421,33 @@ def test_put_down_then_quick_hand_withdrawal_is_put_back_not_lost(scene, world):
     scene.place('keys', 40, 30)
     events += scene.run(world, 1.0)
     assert types(events) == [EventType.PUT_BACK]
+
+
+def test_history_of_a_merged_thing_is_ordered_by_wall_time(cfg, tmp_path):
+    """Merged identities' events are interleaved by wall time: monotonic t restarts with every boot, so an
+    event from an earlier run can carry a larger t than today's."""
+    from core.events import EventLog
+    from core.types import Entity, Event
+    log = EventLog(':memory:', str(tmp_path))
+    world = World(cfg, events=log)
+    for n in ('thing:1', 'thing:2'):
+        world.entities[n] = Entity(name=n, kind='target')
+    world.entities['thing:2'].merged_into = 'thing:1'
+    log.add(Event(t=9000.0, wall=1000.0, obj='thing:2', type=EventType.APPEARED))    # earlier run
+    log.add(Event(t=50.0, wall=2000.0, obj='thing:1', type=EventType.MOVED))         # this run
+    assert types(world.history('thing:1')) == [EventType.MOVED, EventType.APPEARED]
+    log.close()
+
+
+def test_a_put_down_object_is_confirmed_on_its_present_k_th_sighting(cfg):
+    """Latency budget (place_1 on the rig, 15 fps): the world adds only the debounce to a put-down,
+    (present_k - 1) batches, ~0.33 s. A hand still on the object does not hold a configured object back
+    (the wallet was confirmed while the hand still rested on it). Anything slower is a regression."""
+    scene, world = Scene(cfg, fps=15, t0=1000.0), World(cfg)
+    scene.place('wallet', 40, 30)
+    scene.hand(1, 40, 30)
+    for n in range(1, cfg.present_k + 1):
+        if n == 3:
+            scene.hand_off(1)
+        world.update(*scene.step())
+        assert (world.get('wallet').status == Status.VISIBLE) == (n == cfg.present_k), n

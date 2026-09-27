@@ -32,6 +32,51 @@ detect:
   half: true
   min_conf: 0.05             # model floor; per-object cut-offs are conf_threshold below
 
+# Open-world proposals (core/proposals.py): class-agnostic 'thing' boxes for core/things.py. The
+# Detector builds the proposer from here; kind switches between change detection and YOLOE.
+proposals:
+  enabled: true
+  kind: change               # change (empty-table reference, no model) | yoloe (prompt-free checkpoint)
+  roi_margin_cm: 2.0         # proposals only inside the calibrated table outline grown by this
+  dedupe:                    # a proposal that is a known object or a hand is dropped (px boxes)
+    known_iou: 0.5
+    known_inside: 0.7        # share of the proposal inside a known box
+    known_contain: 0.8       # share of a known box inside the proposal ...
+    known_grow: 2.0          # ... when the proposal is at most this many times its area
+    hand_iou: 0.3
+    hand_inside: 0.5
+    self_iou: 0.5
+    self_inside: 0.8
+  change:
+    work_px: 480             # working long side: Mac 2.3 ms/frame; Orin Nano ~13 ms (320: ~7.5, 640: ~17)
+    ref_frames: 10           # empty-table reference = median of this many frames (startup, reset)
+    reference: null          # or a saved empty-table image (same camera pose) to start from
+    adopt_frames: 5
+    k_sigma: 4.0
+    noise_cap: 3.0
+    floor_l: 10.0            # LAB 0-255 units
+    floor_c: 7.0
+    shadow_ratio: [0.35, 0.95]
+    shadow_chroma: 10.0
+    min_area_frac: 0.0004    # of the frame (~370 px at 720p)
+    max_area_frac: 0.15
+    refresh_alpha: 0.03
+    drift_alpha: 0.002
+    rebuild_frac: 0.4
+    rebuild_frames: 45
+    ignore_px: []            # extra [x1, y1, x2, y2] boxes never to propose in
+  yoloe:
+    model: models/yoloe-26s-seg-pf.pt   # or a .engine exported from it in the Jetson container
+    conf: 0.15
+    imgsz: 640
+    half: false              # .pt on a GPU only; an .engine has its precision baked in
+    masks: false
+  crops:                     # core/crops.py: best-clean + latest crop per object / proposal
+    enabled: true
+    size_px: 128
+    max_tracks: 48
+    recent_every_s: 0.5
+
 # Spoken names -> object names (used by intents and answers)
 synonyms:
   key: keys
@@ -129,8 +174,28 @@ serial_timeout_s: 0.1
 camera_latency_s: 0.06       # measure on the rig with act.calibrate.measure_latency, then set
 laser_channel: 15
 laser_timeout_s: 10
+laser_tol_cm: 2.0             # closed-loop aim stops within this (1 cm makes SG90-class servos hunt)
 shiny_objects: [phone, keys]  # aim 3 cm to the side
 shiny_offset_cm: 3
+
+# Open world (core/things.py): class-agnostic 'thing' proposals become entities thing:1, thing:2, ...
+# Every key is optional (defaults in ThingsConfig). Identity is causal first; appearance only
+# confirms, and needs an embedder injected as World(cfg, events, embed=...).
+# teach_zone_cm: [0, 45, 20, 60]   # the teach square in table cm (x1, y1, x2, y2); unset: the thing
+                                   # put down most recently (within openworld.teach_recent_s) is named
+openworld:
+  enabled: true
+  proposal_conf: 0.25        # 'thing' proposals below this are ignored
+  area_cm2: [4, 900]         # plausible object size; bigger blobs are table / background
+  gate_cm: 8                 # a visible thing keeps the nearest proposal within this, per frame
+  hand_gate_cm: 4            # a held thing is the proposal at its hand's boxes of the last ...
+  hand_trail_s: 2.0          # ... this many seconds
+  emerge_cm: 12              # 'next to' the box / notebook when a hidden thing comes out
+  resurrect_sim: 0.92        # appearance alone brings a thing back only above this ...
+  resurrect_margin: 0.10     # ... and this far ahead of every other thing (a twin blocks it)
+  maybe_sim: 0.70            # a new thing is linked 'maybe the same as' an old one above this
+  exemplar_max: 8            # appearance views kept per thing
+  teach_recent_s: 30
 
 # Stretch (D15, D16)
 floor_zones: {}               # per zone: table edge, ArUco 4-7 positions in table cm, head preset pan/tilt
@@ -158,11 +223,12 @@ tts:
   elevenlabs_voice_id: ""     # set in .env as ELEVENLABS_VOICE_ID to override
   elevenlabs_model: eleven_flash_v2_5
   piper_voice: en_US-lessac-medium
+  output_device: null         # sounddevice index or part of the name (python -m voice.tts --devices); null = default (HDMI in the container)
 
 net:
   check_host: https://api.x.ai
   interval_s: 5
-  timeout_s: 0.3
+  timeout_s: 1.5                # per HEAD; offline takes 2 failed probes in a row (net.py)
 
 server:
   host: 0.0.0.0
@@ -174,9 +240,16 @@ sms:
   whitelist: []               # E.164 numbers allowed to text questions, e.g. "+14045550123"
 
 stt:
-  backend: pywhispercpp       # pywhispercpp (laptop) | cli (whisper-cli from a whisper.cpp build, Jetson)
+  # auto: whisper-server (model stays loaded) > whisper-cli > pywhispercpp, whichever this machine has,
+  # so one config works on the Mac (build-mac) and the Jetson (build). scripts/build_whisper.sh builds both.
+  backend: auto               # auto | server | cli | pywhispercpp
   model: base.en              # ggml model name (models/whisper/ggml-base.en.bin) or a path
-  cli_binary: whisper-cli
+  cli_binary: whisper-cli     # name, path, or found in third_party/whisper.cpp/build{,-mac}/bin
+  server_binary: whisper-server
+  server_port: 8178           # 127.0.0.1; a healthy server already on this port is reused
+  audio_ctx: 0                # sized (clip length) | N fixed | 0 = full 30 s window; sized clips garbled here
+  prompt_synonyms: true       # Whisper prompt also lists the synonyms (fixed 'meds' -> 'mids')
+  end_drop_db: 10             # crowd noise: after speech, blocks this far below the asker's level are quiet; null = Silero only
   threads: 4
   max_s: 6
   silence_ms: 700             # this long below the VAD's off threshold after speech ends the question
@@ -190,13 +263,16 @@ main:
   net_copy_s: 5
 
 demo_check:
-  camera: 0
+  camera: /dev/v4l/by-id/usb-046d_Logitech_BRIO_3675F8D2-video-index0   # the rig's Brio; an index moves on replug
   home_cm: {}                 # object: [x, y] table cm of the demo layout; empty = check 7 only needs VISIBLE
   home_tol_cm: 5
+  patch_min_ncc: 0.5          # check 17: the table around the tag spot vs table_cal_view.png (normalized correlation,
+                              # light doesn't count); below this the camera or table moved since the calibration
+  view_max_shift: 0.03        # check 17: the whole table view moved more than this fraction of it: the camera moved
 
 understand:
   enabled: true               # false = rule parser only
-  url: http://127.0.0.1:8081/v1   # llama-server on the Jetson (scripts/qwen_server.sh)
+  url: http://127.0.0.1:8081/v1   # local Qwen (llama-server, scripts/qwen_server.sh): only for backend qwen or auto (default grok; not installed on the Jetson)
   model: Qwen3-1.7B-Q4_K_M.gguf   # in models/qwen/ (scripts/qwen_server.sh; scripts/eval_understand.py scores it)
   timeout_s: 1.5              # slower than this, the rule parser answers instead
   answer_timeout_s: 4         # open questions (voice/local_llm.py); slower = the fallback sentence
@@ -207,6 +283,371 @@ n8n:
 
 listen:
   mode: always                # always: answer what's meant for the rig | wake: only "room, ..." | click: clicker only
-  wake_words: [room]          # also lets overheard speech reset or ask open questions ("room, reset")
+  wake_words: [room, ask the room]   # also lets overheard speech reset or ask open questions ("room, reset",
+                              # "ask the room, reset"; the wake word must open a reset). Room demo: see
+                              # config.local.yaml.example
+  chime: true                 # a chime when the rig listens for a question ("Hey Room!" alone, a clicker press),
+                              # a short tone when "Room, <question>" is accepted (voice/cues.py)
+  indicator:                  # the listening light, on while the rig listens for a question
+    backend: none             # none (no LEDs yet: log only) | gpio (an LED on a GPIO line, libgpiod)
+    gpio_chip: gpiochip0
+    gpio_line: null           # the line offset of the header pin the LED is on
+    active_low: false         # true for an LED wired from 3.3 V to the pin
   idle_s: 8                   # reopen the mic after this long with nobody talking
   echo_tail_s: 0.4            # keep the mic shut this long after the rig stops speaking
+  log_overheard: false        # debug only: log every transcript, including dropped chatter (privacy: keep false)
+
+# Re-ID crop embedder (core/embed.py) for open-world identity: World(cfg, events, embed=make_embedder(cfg)).
+# Off: the world has no appearance evidence (as before). DINOv2-S/14 ONNX from
+# experiments/openset/weights (not in git). The first TensorRT build takes ~75 s on the Orin and runs
+# on a background thread (no appearance until it is done); later starts load models/cache/reid.
+reid:
+  enabled: false
+  model: models/reid/dinov2_s14.onnx
+  providers: [tensorrt, cuda, cpu]   # tried in order; drop cpu to stay off if the GPU paths fail
+  input_size: 224
+  margin: 0.08               # of the box, each side
+  fit: letterbox             # letterbox | stretch
+  max_batch: 8               # TensorRT profile 1..max_batch
+  cache_dir: models/cache/reid
+
+# Episode narration (core/narration.py): after each burst of activity at the table, a VLM describes what
+# the person did, grounded in the world model's events, for 'what was I doing before lunch?' and 'what
+# happened while I was away?'. PRIVACY: when enabled, keyframes of the table (hands and objects; the
+# camera sees nothing else) are sent to the provider below; the dashboard state says so. Off by default.
+narration:
+  enabled: false
+  provider: grok             # grok (xAI, OpenAI-compatible) | claude | fake (offline demo / tests)
+  model: grok-4.3
+  base_url: https://api.x.ai/v1
+  api_key_env: XAI_API_KEY   # read from the environment only, never logged
+  reasoning_effort: none     # none: ~3.5 s per 8-frame episode vs ~9.6 s at low, same summaries (grok-4.3, Sat)
+  quiet_s: 4                 # no hands and no world events this long ends an episode
+  max_episode_s: 120         # longer episodes are split
+  min_episode_s: 2           # shorter ones without a world event are not narrated
+  keyframe_every_s: 1.0      # plus one at every world event
+  keyframes: 24              # kept per episode (thinned evenly beyond this)
+  frame_px: 640              # keyframe long side (JPEG under snapshots/narration, pruned after keep_h)
+  max_images: 8              # per VLM call
+  max_per_hour: 30           # VLM calls per hour (cost cap)
+  max_queued: 20             # episodes kept for later while offline (oldest dropped first)
+  timeout_s: 30
+  keep_h: 24
+
+# Visual memory (core/visual_memory.py, voice/visual.py): questions about what the camera sees now
+# ('what does the note say?') or saw before ('was there a red mug here this morning?'). PRIVACY: when
+# enabled, the current frame and (for past questions) up to recall_frames saved frames are sent to the
+# provider below; the archive itself stays on this device. On for the demo (Sat 26 Sep); needs
+# XAI_API_KEY and internet, and offline these questions say they need the connection.
+visual_memory:
+  enabled: true
+  provider: grok
+  model: grok-4.3
+  base_url: https://api.x.ai/v1
+  api_key_env: XAI_API_KEY
+  reasoning_effort: none     # on the voice path: answer fast
+  timeout_s: 8
+  max_per_hour: 60           # VLM calls per hour; over it, questions fall back to the world model
+  look_px: 1280              # current frame long side sent
+  crop_px: 384               # close-ups of named objects are upscaled to this
+  max_crops: 3
+  abstain_below: 0.5         # VLM confidence under this: "I can't tell from here."
+  recall_frames: 6           # saved frames sent per past-tense question
+  recall_px: 768
+  archive:
+    archive_every_s: 30      # a frame is kept at least this often ...
+    check_every_s: 1.0       # ... and on a settled scene change, checked this often
+    change_thr: 0.3          # % of 128x72 thumbnail pixels changed by > 20 grey levels
+    frame_px: 1280
+    jpeg_quality: 80
+    max_mb: 500              # disk cap for saved frames (oldest go first)
+    keep_h: 24
+  embed:
+    embed: onnx              # onnx (MobileCLIP2-S0: python scripts/export_mobileclip.py) | fake | none
+    image_model: models/mobileclip2_s0_image.onnx
+    text_model: models/mobileclip2_s0_text.onnx
+    vocab: assets/bpe_simple_vocab_16e6.txt.gz
+    providers: [tensorrt, cuda, cpu]
+    cache_dir: models/cache/clip
+    tiles: [3, 2]            # tile grid embedded besides the whole frame (small objects)
+    min_sim: 0.21            # best text match below this: "I don't remember seeing that"
+
+# Care layer (voice/care.py): reminders, morning report + caregiver summary, follow-up questions, profile
+# facts. Proactive speech is capped; notices past the cap or in quiet hours are recorded, not spoken.
+care:
+  enabled: true
+  tick_s: 10                  # scheduler: reminders checked against the event log this often
+  quiet_hours: []             # e.g. ["22:00", "07:00"]: reminders recorded but not spoken in between; off for the hackathon
+  max_notices_per_hour: 4
+  notice_expiry_min: 30       # unacknowledged notices leave /state after this
+  ack_window_s: 60            # 'okay' / 'thanks' / 'done' this soon after a notice acknowledges it
+  late_grace_min: 30          # a reminder found this late (app was off) is skipped, not fired
+  morning_report: true
+  morning_after: "06:00"      # the first question or table activity after this (and before noon) gets it
+  morning_until: "12:00"
+  morning_on_activity: true
+  conversation_ttl_s: 120     # follow-ups ('and my glasses?') use the last turns until this much silence
+  conversation_turns: 5
+  profile_llm: true           # online: free-form 'about me' statements go to Grok (llm: section) as strict JSON
+
+# Demo behaviour (main.py, voice/care.py).
+demo:
+  thinking_cue_s: 1.0         # no answer this long after a spoken question (Grok reading or answering it):
+                              # say a short phrase so the rig isn't silent; 0 = off
+  thinking_phrases: ["Let me look.", "One moment.", "Hmm, let me check."]   # used in turn
+  hold_notices: false         # true: nothing speaks unasked (reminders, morning report); notices still
+                              # show on /state and the phone. Turn on if reminders would talk over a judge.
+
+# One-tag table calibration (core/table.py): ONE printed AprilTag 36h11 lying anywhere on the table replaces
+# markers 0-3, so nothing is measured. Print: python scripts/make_markers.py --tag (160 mm), then set size_cm
+# to the black square's side as printed (check with a ruler). The tracked area becomes what the camera sees
+# of the table; it is saved with the calibration and applied at the next start. false = four markers.
+table_tag:
+  enabled: true
+  family: apriltag_36h11
+  id: 0
+  size_cm: 16.0               # black square side as printed
+  frames: 15                  # corner positions averaged over this many consecutive frames
+  max_cm: 250                 # cap on the tracked area (a steep camera sees far across the plane)
+
+# Tabletop outline (core/table_area.py). The calibrated area is all the camera sees of the table plane,
+# floor, chairs and knees beside the table included; this outline says where the tabletop is. Proposals
+# (change and yoloe) whose centre is outside it are never made, and a NEW thing:N is created only inside
+# it at least edge_cm from its edge. Inside that edge band existing things are still followed, so one
+# slid off the table still leaves with its exit event. Set it on the rig: python -m core.table --outline
+# (writes table_area.json next to table_cal.json; used while that calibration stands, and read at start).
+# polygon_cm here applies when no valid saved outline exists. Empty: the camera's whole view (as before).
+table_area:
+  polygon_cm: []              # [[x, y], ...] tabletop corners in table cm, in order around the table
+  edge_cm: 3.0                # band inside the outline where existing things are followed but none is born
+
+# Automatic names for new things (core/auto_name.py). When a new unnamed thing:N appears, one close-up of
+# it goes to Grok once (visual_memory:'s provider/model/timeout), in the background and only while online,
+# for a soft guess of what it is ('deodorant stick'). The guess is not a taught name: "where's my
+# deodorant?" falls back to it only when no configured name or taught alias matches, and the answer hedges
+# ("Your deodorant, I think, is under the notebook."). A thing with a taught name is never sent.
+auto_name:
+  enabled: true
+  max_per_minute: 10          # Grok calls per minute; more new things wait their turn
+  min_confidence: 0.5         # a guess below this is not kept (and not asked again)
+  retry_after_s: 30           # a failed call is tried once more this much later
+
+# Briefly unseen is not lost (core/world.py, rule 4). An object on the table that no rule explains (no hand
+# took it, no cover, nothing new over its spot) stays where it was, still visible, until it has been unseen
+# this long: no detection and no match of its remembered patch. The fine-tuned detector drops objects while
+# an arm is near them and dim-light arms are often not detected as hands; on shell_1 untouched objects were
+# unseen for up to 1.9 s and then found in place (LOST_TRACK then CORRECTED churn). Seen again in the
+# window: nothing is logged. Only LOST_TRACK waits: hand, cover, container and 'unknown' cover rules
+# still decide at once. A removed object is lost this long after it was last seen.
+lost_grace_s: 2.0
+
+# Things as containers (core/things.py, world rules 7-8). Besides the configured box, a large unnamed
+# thing:N (a tub, a bag, a hat, a mug) holds what a hand leaves in it, by the same evidence: the hand that
+# holds an object dwells inside the thing's box (container_dwell_s), leaves, and the object is not seen
+# again within reappear_wait_s -> PUT_INSIDE that thing; its contents then follow it (resolve()). Only a
+# thing lying on the table with at least this footprint qualifies; the configured box wins when the hand
+# was in both, and a hand that crossed the thing (in one side, out the other) was carrying something past
+# it (a placemat, a sheet of paper), not into it. Code defaults match these values.
+thing_containers:
+  enabled: true
+  min_area_cm2: 100           # footprint in table cm2: a mug or larger; keys, a coin, an AirPods case are not
+
+grok_check:                   # Grok checks the tracker each time the table settles (core/grok_check.py, spec 0007)
+  enabled: false              # true: one still frame of the table goes to Grok per settle (privacy: README)
+  provider: grok              # grok | fake (canned agreement, for --fake runs)
+  model: grok-4.3
+  reasoning_effort: none
+  quiet_s: 1.5                # no hands and no world events this long = settled
+  min_gap_s: 5                # between calls; a newer settle replaces a waiting one
+  max_per_hour: 120           # cost cap (~$0.003 per call)
+  look_px: 1280
+  timeout_s: 8
+  min_conf: 0.6               # below: stored as 'unsure', no effect
+  bind_names: true            # an unnamed thing:N takes Grok's label (never over a taught name) ...
+  bind_conf: 0.9              # ... at or above this confidence (on the rig, 0.7-0.8 named one thing
+                              # 'phone' and 'phone charger' on two checks; at 0.9 names held up)
+  merge_same: false           # one per kind: a new thing Grok names what a lost thing answers to is that
+                              # thing. Off: a visitor's second mug would be folded into yours (review, spec 0008)
+  belief_enabled: false       # an unnamed thing's top-3 guesses, summed over checks, name it or retire it
+  min_obs: 3                  # checks before the belief acts
+  name_p: 0.6                 # top label's share to name it, name_margin ahead of the next
+  name_margin: 0.2
+  retire_p: 0.7               # 'not an object' share to retire it as clutter (never one a hand touched)
+  half_life_s: 120            # older checks count half after this
+  veto_s: 120                 # no new thing where retired clutter lay, this long
+  sighting_max_age_s: 900     # WHERE falls back to a sighting no older than this
+  keep_h: 24                  # rows older than this are deleted on start
+
+# One object, one thing:N (core/things.py IdentityConfig). Without an appearance embedder (reid off, as on
+# the rig) only a thing lost in place with no hand came back as itself; one picked up and put back, one a
+# passing hand hid (a false pick-up), or an arm at the edge came back as a new thing:N each time (31 of 39
+# births in 13 min on the rig were within 5 cm of an earlier thing). Now a thing lost this recently and
+# seen again, of its size, where it was last seen or picked up from is that thing again.
+thing_identity:
+  rebirth_s: 0                # 0 = off. Off for the demo: a held thing's identity went to a different object
+                              # put at its spot (review, Sat 26 Sep), and replays showed no gain; spec 0008
+  rebirth_cm: 5.0
+
+# Known-object boxes dropped before the world sees them (core/detect.py). Zero-shot YOLO-World labels a
+# hand as 'phone' / 'wallet' next to its 'hand' box (per-class NMS keeps both): a known box this close to
+# a hand box is the hand. Also dropped: boxes too big for any prop, and boxes whose centre is off the
+# table (a phone in someone's pocket). The change proposer and thing candidates also reject motion
+# (proposals.change still_frames / moving_frac, openworld still_cm / still_s; defaults in the code).
+detect_filter:
+  hand_iou: 0.6
+  max_area_frac: 0.25         # of the frame
+  table_margin_cm: 5.0        # null = keep boxes off the table
+
+# Room pointing (spec 0006, roadmap: off for the demo). The laser points at image pixels anywhere the camera
+# can see the dot, with no depth: a dot map (python -m act.room_map --sweep, nobody in view) gives the first
+# guess, and a pixel-space closed loop finishes. Fires only inside zones drawn on the map
+# (python -m act.room_map --zone NAME --poly x,y ...), never with a hand or person box on the beam path,
+# and for at most room_dwell_s. The map path is the `room_map` key above.
+room:
+  enabled: false
+  grid: [20, 15]              # sweep pulse grid (pan x tilt) over servo_limits; ~2-3 min on the rig
+  n_pairs: 3                  # laser on/off pairs averaged per look (a far dot is faint)
+  tol_px: 12                  # stop when the dot is this close to the target (or inside the object's box)
+  deadband_us: 8              # SG90 dead band: smaller steps don't update the Jacobian
+  jump_px: 30                 # dot moved this much more than predicted: it landed on something nearer
+  max_map_gap_px: 60          # refuse targets farther than this from every mapped dot
+  room_dwell_s: 5             # room aims turn off after this (the table keeps laser_timeout_s)
+  require_zone: true          # fire only inside a zone polygon (floor, furniture tops; never eye level)
+  head_px: null               # [u, v] where the pan-tilt head appears in the image, for the beam-path check
+  hand_recent_s: 2            # hand boxes seen this recently block a room aim
+  person_check: true          # also run OpenCV HOG for standing people before each room aim
+  person_clear_s: 5           # the sweep needs nobody seen for this long, and stops when someone appears
+
+# Room memory (spec 0009 M0, off by default): "where are my keys?" answers "on the bookshelf" when a prop is
+# carried from the table to a drawn room zone. The Brio runs at 1920x1080, zoom 100; the table pipeline
+# sees the zoom-160 region cut out and resized to 1280x720 (core/room_view.TableView). Every room_every_n
+# perception frames one zone is cropped at full resolution and run through the prop model (core/room.py).
+# Live camera only (never --fake or --video). Per rig, in config.local.yaml: enabled, table_view_rect.
+# Zones: python -m core.room --zone NAME --say TEXT --poly x,y x,y x,y ...; demo_check.py check 10.
+room_memory:
+  enabled: false
+  capture_size: [1920, 1080]  # full camera frame, px (the camera runs at this size when enabled)
+  zoom: 100                   # Brio zoom_absolute the room runs at (scripts/camera_setup.sh)
+  ref_zoom: 160               # zoom the table pipeline was tuned at (the table view)
+  table_view_rect: null       # [x1, y1, x2, y2] full-frame px of the table view; null = centred default
+                              # (python -m core.room --measure-rect, into config.local.yaml)
+  zones_path: room_zones.json # drawn zones, spoken names and the view they were drawn at
+  ring_s: 1.0                 # FrameBuffer ring when enabled (1080p frames: the 10 s default is ~1.8 GB)
+  room_every_n: 5             # process one zone every N perception frames, round-robin
+  confirm_visits: 2           # consecutive matched visits to confirm a room track
+  handoff_s: 120              # a table departure lets one room track take the prop this long
+  table_fresh_s: 2.0          # a prop seen VISIBLE on the table this recently is on the table
+  room_prop_conf: 0.45        # class score a room detection needs
+  absent_visits: 3            # valid empty visits of its zone before a room prop is UNKNOWN
+  absent_min_s: 3.0           # ... and this long since its last match (a zone is visited ~3x a second)
+  fresh_visits: 2             # present tense ("is on") needs fewer valid misses than this ...
+  fresh_s: 10.0               # ... and a match this recent; else "I last saw"
+  stale_min_s: 2.0            # fresh_visits misses only make it stale once it is this long unmatched
+  lum_lo: 25                  # a box darker than this mean grey is not a valid visit
+  lum_hi: 235                 # ... or brighter than this
+  hand_iou: 0.6               # a prop box this much on a hand box is the hand
+  blocker_overlap: 0.3        # a hand or change blob covering this much of a track box: invalid visit
+  change_thr: 40              # grey-level change between visits of a zone counted as change
+  change_area_ratio: 1.5      # a change blob this much bigger than the track box blocks it
+  max_crop_px: 1280           # zone crops with a longer side are resized down to this
+  things: true                # also unnamed objects (YOLOE) in zones, handed off by departure + Grok name match
+  thing_name_wait_s: 45.0     # a confirmed room object waits this long for its Grok answer (queued behind the cap)
+  name_match_min: 2.0         # how well two Grok names must match (core.auto_name.match_score; 2 = same head noun)
+  names_per_minute: 60        # Grok calls for room crops, at most (only while a handoff is possible; xAI allows
+                              # 3 requests/s on grok-4.3, so latency is the limit, not this)
+  room_every_n_hot: 2         # while a handoff is open (something just left the table) process one zone every
+                              # N frames instead of room_every_n, so a far zone is seen within a frame or two
+                              # (spec 0010 P0-3; the cost is one more prop + YOLOE pass per frame: measure fps)
+  confirm_visits_arrival: 1   # visits to confirm a track whose spot changed when it appeared (an arrival);
+                              # static clutter keeps confirm_visits
+  hot_max_s: 30.0             # the fast cadence lasts this long after a departure (the handoff stays open for
+                              # handoff_s at the normal cadence); a foot at the table edge must not halve the fps for 2 min
+  handoff_min_dwell_s: 4.0    # a thing counts as carried off only if it sat on the table this long first (feet, sleeves)
+  ignore_names: [sock, sneaker, shoe, foot, feet, hand, arm, sleeve, leg, knee, shirt, jeans, pants, shorts, fabric, cloth, person]
+                              # a departed thing Grok named like one of these is a body part or clothing at the table
+                              # edge (the couch-sitter's feet were handed off as "sock" on the rig): never a handoff
+
+# Covers no detector knows (core/world.py rule 4, core/surround.py). A blanket, jacket or napkin laid over
+# objects by hand: the hands touch what it covers, so the hand rule alone read each touched object as
+# picked up, then lost when the hands left (blanket_1t: 4 of 10 checkpoints, the phone "lost"). A real
+# pick-up leaves the band of table around the object's spot as it was once the hand is off it; a cover
+# leaves it changed all round. The band (ring_cm wide) is remembered in colour once it looked the same for
+# adopt_s with the object detected and no hand over it. An object that vanishes with sides_min sides of its
+# band changed (pixel_diff per channel on side_changed of a side's pixels, hand boxes left out; on average
+# mean_changed) and at rest (as it was settle_s before) is UNDER the cover: a named cover that qualifies, a
+# thing laid over it (a napkin the proposer sees whole), else 'unknown'. An absence waits on an unclear band (hands hide it) or a settling
+# one at most wait_max_s. An object no hand touched is judged by its band only when the lost grace runs out
+# (an undetected arm lying across it looks alike for a while). A HELD object whose band settles covered was
+# covered, not carried. Lifted: objects seen again are UNCOVERED as themselves; one whose band is bare again
+# and is not seen within reappear_wait_s is lost. Code defaults match these values.
+unknown_cover:
+  enabled: true
+  ring_cm: 4.0                # band of table around an object's box
+  pixel_diff: 30              # 0-255, in any colour channel (grey could not tell a red blanket from wood)
+  side_changed: 0.5           # share of a side's pixels that differ: that side is changed
+  sides_min: 3                # sides changed (of left, right, top, bottom): something lies over the spot ...
+  mean_changed: 0.75          # ... and those sides changed this much on average (a dim sleeve: about 0.55)
+  settle_s: 0.5               # the covered band unchanged over this long: a cover at rest, not a moving arm
+  adopt_s: 1.0                # the band must look the same this long before it is remembered
+  wait_max_s: 2.0             # longest wait on an unclear or settling band before the other rules decide
+
+# Room handoff scoreboard on the dashboard (server/scoreboard.py, spec 0010 P2-2). Real trial results only:
+# scripts/room_trials.py writes them on the laptop; upload each file with
+#   curl -X POST -H 'content-type: application/json' --data @data/room/trials.json 'http://<rig>:8080/scoreboard/trials?object=remote'
+# GET /scoreboard?date=today|yesterday|all|YYYY-MM-DD returns the counts; the dashboard shows today's.
+scoreboard:
+  trials_dir: data/room       # uploaded results files (and any room_trials.py file copied here)
+
+# Voice path guards (main.py voice_loop / _ask_with_cue). An error answering one question is logged and met
+# with a short sorry, and the loop listens again; a watchdog restarts the loop if it ever exits. A voice answer
+# not ready after answer_limit_s (Wi-Fi stalled mid-Grok) is replaced by the rules' and templates' answer, so
+# the mic never stays shut waiting on the network.
+voice_guard:
+  answer_limit_s: 10          # longest wait for a voice answer before the rules answer instead
+  sorry_every_s: 10           # say "Sorry, something went wrong" at most this often
+
+# Morning checks of the running room app (demo_check.py checks 12-16; `--live` runs only the checks that
+# leave the camera and mic to the app). Read by demo_check.py only.
+room_check:
+  app_url: ""                 # the running app's dashboard; "" = http://127.0.0.1:<server.port>
+  app_log: data/room/app.log  # its log (scripts/room_app.sh appends here); the last log_lines are scanned
+  log_lines: 500
+  min_ram_mb: 1024            # MemAvailable with the app running (Jetson: 8 GB shared with the GPU)
+  max_frame_age_s: 5          # /state's last perception update must be this fresh
+  grok_timeout_s: 10          # GET /models on api.x.ai (no tokens) must answer within this
+  pulse_sink: ""              # with PulseAudio (PULSE_SERVER): the default sink must contain this, e.g. "bluez"
+  pulse_source: ""            # ... and the default source this ("" = any)
+
+# Perception health (main.py Room). The live loop finishing no step for stale_s (camera or detector stuck):
+# answers about where things are start "My camera view is not updating right now." and /state has perception.stale.
+# voice_recalibrate false: a spoken "recalibrate" is refused (set it so in config.local.yaml for the demo,
+# once the table calibration is frozen: a refit mid-demo moves the frame under the world and the laser).
+perception_guard:
+  stale_s: 2.0
+  voice_recalibrate: true
+
+# Presence debounce by time (core/presence.py, core/world.py rule 1): present_k_of_n and absent_k_of_n count
+# updates of a loop at hz (main.perception_max_fps, the rate eval.score_clip replays at), measured in
+# seconds: a live rig slowed to 7 fps flips after the same time as at 15 fps (6 of 10 = 0.4 s of
+# sightings), where before it took twice as long. null = count updates, whatever the rate.
+presence:
+  hz: 15
+
+# Camera decoding (core/capture.py). The camera sends 30 frames a second and each MJPEG frame costs a CPU
+# decode (measured on the Jetson: ~23 ms at 1920x1080, ~41 ms at 2560x1440, ~80 ms at 4K). Every frame is
+# still taken off the camera (so none queue up and the newest is always fresh), but only this many a second
+# are decoded: perception runs at main.perception_max_fps (15), so the rest were decoded for nothing.
+# null decodes every frame (the old behaviour).
+capture:
+  decode_fps: 20
+
+# The user's seat (core/viewframe.py). Table cm are the camera's frame (x left to right across its table view,
+# y from the view's far top edge to its bottom); what a person hears ("on your left", "carried off the far side") and the
+# phone's map are turned to the side of the table they sit at. front is that side, named in the CAMERA's
+# frame: bottom (the camera's side, as before), right, top or left. With an outline (table_area:) the map
+# is the tabletop squared to it. The phone's "I sit here" (POST /orientation) overrides front and is saved in
+# data/viewer.json (paths.viewer, if set), which wins at the next start. The world, the laser and the events
+# stay camera-frame.
+viewer:
+  front: bottom
+  sides: {}                   # optional labels per CAMERA side for the phone's "I sit here", e.g. {right: couch}
