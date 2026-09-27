@@ -31,7 +31,7 @@
 html, body { margin: 0; height: 100%; }
 
 body {
-  background: var(--mat);
+  background: #050b0a;
   color: var(--ink);
   font-family: var(--f);
   font-size: 20px;
@@ -41,14 +41,19 @@ body {
   overflow: hidden;
 }
 
+/* A fixed 1920x1080 stage, scaled to the window by demo.js (fitStage): the same picture at any size, never a
+   scrollbar or a clipped panel (1440x900 shows it at 75%, letterboxed). */
 .demo {
+  background: var(--mat);
+  position: absolute; left: 0; top: 0;
+  width: 1920px; height: 1080px;
+  transform-origin: 0 0;
   display: grid;
   grid-template-columns: 60fr 40fr;
   grid-template-rows: 46fr 54fr;
   grid-template-areas: "left map" "left talk";
   gap: 14px;
   padding: 14px;
-  height: 100vh;
 }
 
 h2 {
@@ -166,11 +171,11 @@ h2 {
 .answers { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; min-height: 0; overflow: hidden; }
 .answers li { border-top: 1px solid var(--rule); padding-top: 10px; }
 .answers li:first-child { border-top: 0; padding-top: 0; }
-.q { color: var(--ink-2); font-size: 19px; }
+.q { color: var(--ink-2); font-size: 23px; }
 .q::before { content: "\201C"; }
 .q::after { content: "\201D"; }
-.q .when { color: var(--ink-3); font-size: 15px; margin-left: 8px; }
-.a { font-size: 25px; font-weight: 700; line-height: 1.25; margin-top: 2px; }
+.q .when { color: var(--ink-3); font-size: 18px; margin-left: 8px; }
+.a { font-size: 31px; font-weight: 700; line-height: 1.22; margin-top: 2px; }
 .answers li.old .a { font-size: 19px; font-weight: 600; color: var(--ink-2); }
 .answers li.old .q { font-size: 16px; }
 
@@ -182,22 +187,22 @@ h2 {
 .shot img { height: 150px; width: auto; max-width: 340px; object-fit: contain; border-radius: 4px; background: #000; }
 .shot canvas { position: absolute; left: 0; top: 0; pointer-events: none; }
 .shot .inset { position: absolute; right: 6px; bottom: 6px; height: 64px; border: 2px solid var(--found); border-radius: 3px; }
-.cap { display: flex; flex-direction: column; justify-content: center; gap: 4px; font-size: 19px; }
-.cap .tag { font-size: 14px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; color: var(--found); }
-.cap .time { color: var(--ink-2); font-size: 17px; }
+.cap { display: flex; flex-direction: column; justify-content: center; gap: 4px; font-size: 22px; }
+.cap .tag { font-size: 16px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; color: var(--found); }
+.cap .time { color: var(--ink-2); font-size: 20px; }
 .answers li.old .card { display: none; }
 .talk.has-eyes .answers li.old { display: none; }          /* Grok's eyes takes the older answer's room */
 
 .eyes { margin-top: auto; border-top: 2px solid var(--rule); padding-top: 8px; }
 .eyes-head { display: flex; align-items: baseline; gap: 12px; }
-.eyes-title { font-size: 17px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; color: var(--found); }
-.eyes-meta { font-size: 16px; color: var(--ink-2); }
+.eyes-title { font-size: 19px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; color: var(--found); }
+.eyes-meta { font-size: 18px; color: var(--ink-2); }
 .eyes-body { display: flex; gap: 12px; margin-top: 6px; align-items: flex-start; }
 .eyes-imgs { display: flex; gap: 8px; flex: 0 0 auto; }
 .eyes-imgs img { height: 132px; width: auto; max-width: 240px; object-fit: contain; border-radius: 4px; background: #000; border: 1px solid var(--rule); }
 .eyes-text { min-width: 0; font-size: 17px; }
-.eyes-req { color: var(--ink-3); font-size: 15px; max-height: 3.9em; overflow: hidden; }
-.eyes-reply { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 16px; color: var(--ink); margin-top: 4px;
+.eyes-req { color: var(--ink-3); font-size: 16px; max-height: 2.7em; overflow: hidden; }
+.eyes-reply { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 18px; color: var(--ink); margin-top: 4px;
   white-space: pre-wrap; word-break: break-word; max-height: 6.2em; overflow: hidden; }
 .empty { color: var(--ink-3); font-size: 21px; margin: auto 0; text-align: center; }
 
