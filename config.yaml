@@ -622,3 +622,11 @@ perception_guard:
 # sightings), where before it took twice as long. null = count updates, whatever the rate.
 presence:
   hz: 15
+
+# Camera decoding (core/capture.py). The camera sends 30 frames a second and each MJPEG frame costs a CPU
+# decode (measured on the Jetson: ~23 ms at 1920x1080, ~41 ms at 2560x1440, ~80 ms at 4K). Every frame is
+# still taken off the camera (so none queue up and the newest is always fresh), but only this many a second
+# are decoded: perception runs at main.perception_max_fps (15), so the rest were decoded for nothing.
+# null decodes every frame (the old behaviour).
+capture:
+  decode_fps: 20

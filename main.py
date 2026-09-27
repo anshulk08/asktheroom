@@ -901,8 +901,9 @@ def open_frames(cfg: dict, camera) -> tuple[object, Optional[tuple[int, int, int
     import core.capture
     from core.room_types import RoomConfig
     rc = RoomConfig.from_dict(cfg.get("room_memory"))
+    decode_fps = (cfg.get("capture") or {}).get("decode_fps")      # grab every frame, decode only this many
     if not rc.enabled:
-        return core.capture.FrameBuffer(camera), None
+        return core.capture.FrameBuffer(camera, decode_fps=decode_fps), None
     from core.room_view import TableView, default_rect
     out = tuple(cfg.get("frame_size_px", (1280, 720)))
     rect = rc.table_view_rect
@@ -912,7 +913,7 @@ def open_frames(cfg: dict, camera) -> tuple[object, Optional[tuple[int, int, int
                     "(python -m core.room --measure-rect) and put it in config.local.yaml", list(rect))
     w, h = rc.capture_size
     fb = core.capture.FrameBuffer(camera, ring_s=rc.ring_s,
-                                  opener=lambda src: core.capture.open_camera(src, w, h))
+                                  opener=lambda src: core.capture.open_camera(src, w, h), decode_fps=decode_fps)
     log.info("room memory: camera at %dx%d, table view %s", w, h, list(rect))
     return TableView(fb, rect, out), rect
 
