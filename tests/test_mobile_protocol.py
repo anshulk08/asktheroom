@@ -437,6 +437,10 @@ class FakeHTTP:
     def get_json(self, path, timeout=1.0):
         if self.down:
             raise B.RoomDown("connection refused")
+        if path == "/room_layout":
+            if getattr(self, "layout", None) is None:
+                raise B.RoomDown("HTTP 404")
+            return json.loads(json.dumps(self.layout))
         assert path == "/state"
         return {"state": json.loads(json.dumps(self.state)), "last_answer": None, "server_t": 0,
                 **json.loads(json.dumps(self.meta))}
@@ -1064,3 +1068,204 @@ def test_an_orient_write_turns_the_map_at_once_and_is_never_answered():
     assert phone.msgs["state"][-1]["view"] == {"f": "right", "o": False}
     assert phone.msgs["state"][-1]["table"] == [60.0, 100.0]
     assert core.asks.empty() and phone.msgs["answer"] == [] and http.asked == []
+
+
+# ---------------------------------------------------------------- the link fix (27 Sep): compression, pacing, cap
+
+def room_rig_state(n_dupes: int = 150, now: float = 1790001000.0) -> dict:
+    """The rig's /state at 00:42 on 27 Sep in shape: 100+ unnamed duplicates of one object piled on one
+    spot, a few named props, most things long gone. It made 18-28 KB state messages."""
+    st = big_state(0)
+    for i in range(n_dupes):
+        st["entities"].append({"name": f"thing:{3100 + i}", "kind": "target",
+                               "status": ["VISIBLE", "UNKNOWN", "GONE"][i % 3], "pos_cm": [65.6, 27.0],
+                               "resolved_cm": [65.6, 27.0], "confidence": 0.62, "last_seen": now - 300 + i,
+                               "zone": "table", "aliases": [], "belief": [["charging cable", 0.61]]})
+    return st
+
+
+def test_deflate_round_trip_and_bad_input():
+    raw = P.dumps(P.compact_state(room_rig_state(), (100, 60), 1790000100.0))
+    z = P.deflate(raw)
+    assert P.inflate(z) == raw and len(z) < len(raw) / 4
+    with pytest.raises(ValueError):
+        P.inflate(b"not deflate at all")
+    with pytest.raises(ValueError):
+        P.inflate(z[:len(z) // 2])                       # truncated
+    with pytest.raises(ValueError):
+        P.inflate(P.deflate(b"x" * 5000), max_bytes=1000)
+
+
+def test_python_fixture_the_phone_test_uses():
+    """ModelsTests/FramingTests on iOS inflate exactly these bytes."""
+    import base64
+    js = b'{"v":1,"t":1.0,"table":[90,60],"online":true,"laser":{"on":false,"target":null},"e":[]}'
+    z = base64.b64decode("q1YqU7Iy1FEqAZJ6BkA6MSknVckq2tJAx8wgVkcpPy8nMw8oUFJUmqqjlJNYnFqkZFUNFFaySkvMKU4F6ShKTwVqzyvNyanVUQJpjq0FAA==")
+    assert P.inflate(z) == js and P.deflate(js) == z
+
+
+def test_compressed_frames_carry_the_flag_on_every_chunk_and_reassemble():
+    raw = P.dumps(P.compact_state(room_rig_state(), (100, 60), 1790000100.0))
+    chunks = P.frame(9, P.deflate(raw), 185, compressed=True)
+    assert len(chunks) > 3 and all(c[2] & P.FLAG_Z for c in chunks)
+    assert [c[2] & P.FLAG_FINAL for c in chunks] == [0] * (len(chunks) - 1) + [1]
+    r = P.Reassembler()
+    out = [r.feed(c) for c in chunks]
+    assert out[-1] == raw and r.compressed == 1 and r.completed == 1 and r.chunks == len(chunks)
+    assert P.frame(1, b"{}", 185) == [bytes((1, 0, 1)) + b"{}"]      # uncompressed: flags as before
+
+
+def test_a_compressed_message_that_does_not_inflate_is_dropped():
+    r = P.Reassembler()
+    bad = P.frame(3, b"definitely not deflate", 185, compressed=True)
+    assert [r.feed(c) for c in bad] == [None] and r.dropped == 1 and r.completed == 0
+    assert r.feed(P.frame(4, b'{"ok":1}', 185)[0]) == b'{"ok":1}'
+
+
+def test_parse_hello():
+    assert P.parse_hello(P.dumps({"hello": {"z": 1}})) == {"z": True}
+    assert P.parse_hello(P.dumps({"hello": {"z": True}})) == {"z": True}
+    assert P.parse_hello(P.dumps({"hello": {}})) == {"z": False}
+    for raw in (P.dumps({"q": "where are my keys?"}), P.dumps({"orient": {"front": "right"}}), b"nope",
+                P.dumps({"hello": "hi"}), P.dumps({"hello": {"z": 1, "pad": "x" * 200}})):
+        assert P.parse_hello(raw) is None, raw
+
+
+def test_cap_state_cuts_the_least_useful_first():
+    c = P.compact_state(room_rig_state(), (100, 60), 1790000100.0)
+    assert len(P.dumps(c)) > 12_000                          # what the rig sent
+    capped = P.cap_state(c, 12_000)
+    assert len(P.dumps(capped)) <= 12_000 and capped["more"] == len(c["e"]) - len(capped["e"]) > 0
+    kept = {e["n"] for e in capped["e"]}
+    assert {"keys", "pill_bottle", "wallet", "box", "notebook"} <= kept      # named props always stay
+    cut = [e for e in c["e"] if e["n"] not in kept]
+    assert all(e["n"].startswith("thing:") for e in cut)
+    # lost and gone duplicates go before visible ones
+    assert sum(e["s"] == "V" for e in cut) == 0 or all(
+        e["s"] == "V" for e in c["e"] if e["n"] in kept and e["n"].startswith("thing:"))
+    small = P.compact_state(big_state(2), (90, 60), 1790000000.0)
+    assert P.cap_state(small, 12_000) is small and "more" not in small
+
+
+def test_pacer_limits_bytes_per_second():
+    clock = Clock()
+    pacer = P.Pacer(1000, 500, clock)
+    assert pacer.take(500) and not pacer.take(1)             # the burst, then nothing
+    clock.t += 0.2
+    assert pacer.take(200) and not pacer.take(1)
+    clock.t += 10
+    assert pacer.take(500) and not pacer.take(1)             # never more than the burst saved up
+
+
+def test_outbox_peek_is_what_pop_returns():
+    ob = P.Outbox()
+    assert ob.peek() is None
+    ob.push("state", [b"s0", b"s1"])
+    ob.push("answer", [b"a0"])
+    assert ob.peek() == b"a0" and ob.pop(1) == [("answer", b"a0")]
+    assert ob.peek() == b"s0"
+
+
+def phone_with_z(core, phone, device="/dev_phone"):
+    core.note_mtu(device, 185)
+    core.on_question(P.dumps({"hello": {"z": 1}}), device)
+
+
+def test_hello_turns_compression_on_for_that_phone_only():
+    core, http, phone, mono = make()
+    http.state = room_rig_state()
+    core.poll_once()
+    core.set_notifying("state", True)
+    plain = phone.chunk_counts["state"][-1]
+    assert not core.compress
+    phone_with_z(core, phone)
+    assert core.compress
+    last = phone.msgs["state"][-1]
+    assert phone.chunk_counts["state"][-1] < plain / 3             # the same snapshot, compressed
+    assert phone.asm["state"].compressed >= 1 and last["e"] and "tx" in last
+    assert not phone.msgs["answer"]                                # a hello is never answered
+    core.note_mtu("/dev_mac", 185)                                 # a second central that never said hello
+    assert not core.compress
+    core.forget_device("/dev_mac")
+    assert core.compress
+    core.forget_device("/dev_phone")
+    assert not core.compress
+
+
+def test_the_rigs_28_kb_state_goes_out_small():
+    """The regression: 150 duplicates made 28 KB states (about 55 chunks at MTU 517, 155 at 185) at 1.5 Hz.
+    Capped and compressed, one state is a handful of chunks."""
+    core, http, phone, mono = make()
+    http.state = room_rig_state()
+    phone_with_z(core, phone)
+    core.poll_once()
+    core.set_notifying("state", True)
+    assert core.stats["state_bytes"] < 3000 and phone.chunk_counts["state"][-1] <= 17
+    assert phone.msgs["state"][-1]["more"] > 0
+
+
+def test_a_state_waits_while_the_last_is_still_going_out():
+    core, http, phone, mono = make()
+    core.poll_once()
+    core.set_notifying("state", True)
+    n = len(phone.msgs["state"])
+    queued = {"state": 5}
+    core.pending = lambda char: queued.get(char, 0)
+    http.state["entities"][0]["status"] = "HELD"
+    mono.t += 1.0
+    core.poll_once()
+    assert len(phone.msgs["state"]) == n and core.stats["deferred"] >= 1
+    queued["state"] = 0
+    core.poll_once()
+    assert len(phone.msgs["state"]) == n + 1 and phone.msgs["state"][-1]["e"]
+
+
+def test_tx_counts_the_state_chunks_sent_before_each_message():
+    core, http, phone, mono = make()
+    core.poll_once()
+    core.set_notifying("state", True)
+    for i in range(3):
+        http.state["entities"][0]["pos_cm"] = [10.0 + 5 * i, 10.0]
+        mono.t += 1.0
+        core.poll_once()
+    txs = [m["tx"] for m in phone.msgs["state"]]
+    counts = phone.chunk_counts["state"]
+    assert txs[0] == 0 and all(txs[i + 1] - txs[i] == counts[i] for i in range(len(txs) - 1))
+
+
+def test_room_layout_goes_to_the_phone_when_it_changes():
+    core, http, phone, mono = make()
+    http.layout = {"v": 1, "size": [400, 300], "front": "right", "table": {"rect": [100, 100, 73, 100]},
+                   "zones": [{"id": "couch", "say": "the couch", "rect": [0, 250, 200, 50], "kind": "seat"}],
+                   "you": [136, 290]}
+    core.poll_once()
+    core.set_notifying("state", True)
+    first = phone.msgs["state"][-1]
+    assert first["lay"] == http.layout and first["lh"]
+    mono.t += 6.0                                         # the next heartbeat carries only the hash
+    core.poll_once()
+    assert "lay" not in phone.msgs["state"][-1] and phone.msgs["state"][-1]["lh"] == first["lh"]
+    http.layout["zones"][0]["say"] = "the sofa"
+    mono.t += 31.0                                        # re-fetched every 30 s
+    core.poll_once()
+    assert phone.msgs["state"][-1]["lay"]["zones"][0]["say"] == "the sofa"
+    assert phone.msgs["state"][-1]["lh"] != first["lh"]
+    http.layout = None                                    # 404: no room map
+    mono.t += 31.0
+    core.poll_once()
+    assert "lh" not in phone.msgs["state"][-1] and "lay" not in phone.msgs["state"][-1]
+
+
+def test_pump_paces_chunks_and_keeps_priority():
+    clock = Clock()
+    ob, sent = P.Outbox(), []
+    pacer = P.Pacer(1000, 300, clock)                     # 1 KB/s, a 300 B burst
+    ob.push("state", [bytes(100)] * 10)
+    assert P.pump(ob, pacer, lambda c, v: sent.append(c), 4) == 3     # the burst: 3 chunks of 100 B
+    ob.push("answer", [bytes(50)])
+    clock.t += 0.06
+    assert P.pump(ob, pacer, lambda c, v: sent.append(c), 4) == 1 and sent[-1] == "answer"   # jumps the queue
+    for _ in range(100):                                   # 10 ms ticks for a second: ~1000 B more
+        clock.t += 0.01
+        P.pump(ob, pacer, lambda c, v: sent.append(c), 4)
+    assert sent.count("state") == 10 and ob.pending() == 0

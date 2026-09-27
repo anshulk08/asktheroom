@@ -6,6 +6,11 @@
     .venv/bin/python mobile/bridge/test_client.py -q "where are my keys?" --watch 20
     .venv/bin/python mobile/bridge/test_client.py --reconnects 3        # disconnect / reconnect cycles
     .venv/bin/python mobile/bridge/test_client.py --json                # machine-readable summary
+    .venv/bin/python mobile/bridge/test_client.py --soak 180 -q "what changed?"   # link health, as the phone sees it
+
+--soak/--watch report chunks, messages (compressed ones), chunks lost (the state's "tx" against what arrived),
+dropped partial messages and the longest silence: 15 s of nothing is when the phone's watchdog reconnects.
+It says hello like the phone ({"hello": {"z": 1}}: compressed messages); --no-z for the plain protocol.
 
 Needs `bleak` (pip install bleak). macOS asks once for Bluetooth permission for the terminal app.
 """
@@ -41,13 +46,23 @@ class Link:
         self.messages: dict[str, list[dict]] = {c: [] for c in self.asm}
         self.waiters: dict[str, list[asyncio.Future]] = {c: [] for c in self.asm}
         self.bad_json = 0
+        self.total: dict[str, int] = {c: 0 for c in self.asm}      # chunks received per characteristic
+        self.rx_at_start: dict[str, int] = {}
+        self.last_chunk_t: Optional[float] = None
+        self.max_silence = 0.0                                      # longest gap between any two chunks
+        self.disconnected_t: Optional[float] = None
 
     def handler(self, char: str):
         def on_notify(_sender, data: bytearray):
             t = now()
+            if self.last_chunk_t is not None:
+                self.max_silence = max(self.max_silence, t - self.last_chunk_t)
+            self.last_chunk_t = t
             if len(data) >= 2 and data[1] == 0:
                 self.first_chunk_t[char] = t
                 self.chunks[char] = 0
+                self.rx_at_start[char] = self.total[char]
+            self.total[char] += 1
             self.chunks[char] = self.chunks.get(char, 0) + 1
             msg = self.asm[char].feed(bytes(data))
             if msg is None:
@@ -59,7 +74,8 @@ class Link:
                 print(f"  ! {char}: {len(msg)} bytes that are not JSON")
                 return
             rec = {"t": t, "t0": self.first_chunk_t.get(char, t), "bytes": len(msg),
-                   "chunks": self.chunks.get(char, 1), "obj": obj}
+                   "chunks": self.chunks.get(char, 1), "obj": obj, "rx0": self.rx_at_start.get(char, 0),
+                   "z": bool(data[2] & P.FLAG_Z) if len(data) > 2 else False}
             self.messages[char].append(rec)
             if self.verbose:
                 print(f"  <- {char} {len(msg)} B in {rec['chunks']} chunk(s): {msg[:160].decode(errors='replace')}")
@@ -80,6 +96,22 @@ class Link:
                 return None
             if pred is None or pred(rec):
                 return rec
+
+
+def link_health(link: "Link", recs: list[dict], seconds: float) -> dict:
+    """Loss from the bridge's "tx" (state chunks it sent before each message) against chunks that arrived."""
+    sent = got = 0
+    for a, b in zip(recs, recs[1:]):
+        if isinstance(a["obj"].get("tx"), int) and isinstance(b["obj"].get("tx"), int):
+            sent += b["obj"]["tx"] - a["obj"]["tx"]
+            got += b["rx0"] - a["rx0"]
+    silence = max(link.max_silence, (now() - link.last_chunk_t) if link.last_chunk_t else seconds)
+    return {"seconds": seconds, "state_msgs": len(recs), "compressed": sum(r["z"] for r in recs),
+            "chunks": dict(link.total), "tx_chunks": sent, "rx_chunks": got,
+            "lost_chunks": max(0, sent - got) if sent else None,
+            "dropped_partials": sum(a.dropped for a in link.asm.values()),
+            "max_silence_s": round(silence, 2), "disconnected": link.disconnected_t is not None,
+            "sizes": [min((r["bytes"] for r in recs), default=0), max((r["bytes"] for r in recs), default=0)]}
 
 
 def describe_state(obj: dict) -> str:
@@ -109,7 +141,12 @@ async def session(args, results: dict, questions: list[str], qid0: int) -> int:
 
     link = Link(args.verbose)
     t_conn = now()
-    async with BleakClient(dev, timeout=20.0) as client:
+
+    def gone(_client):
+        link.disconnected_t = now()
+        print(f"  ! disconnected {link.disconnected_t - t_conn:.1f} s after connecting")
+
+    async with BleakClient(dev, timeout=20.0, disconnected_callback=gone) as client:
         connect_s = now() - t_conn             # includes GATT service discovery
         mtu = client.mtu_size
         print(f"connected + services discovered in {connect_s:.2f} s, MTU {mtu}")
@@ -125,6 +162,8 @@ async def session(args, results: dict, questions: list[str], qid0: int) -> int:
         raw = await client.read_gatt_char(P.STATUS_UUID)
         print(f"status read ({(now() - t) * 1000:.0f} ms): {raw.decode()}")
         results["status_read"] = json.loads(raw.decode())
+        if not args.no_z:                      # like the phone: this client inflates compressed messages
+            await client.write_gatt_char(P.QUESTION_UUID, P.dumps({"hello": {"z": 1}}), response=True)
         t_sub = now()
         for char, uuid in (("answer", P.ANSWER_UUID), ("status", P.STATUS_UUID), ("state", P.STATE_UUID)):
             await client.start_notify(uuid, link.handler(char))
@@ -164,11 +203,27 @@ async def session(args, results: dict, questions: list[str], qid0: int) -> int:
                                                       "bytes": rec["bytes"], "chunks": rec["chunks"],
                                                       "answer": a})
             await asyncio.sleep(args.gap)
-        if args.watch > 0:
+        watch = max(args.watch, args.soak)
+        if watch > 0:
             n0 = len(link.messages["state"])
-            print(f"watching state for {args.watch} s ...")
-            await asyncio.sleep(args.watch)
+            print(f"watching state for {watch:g} s ...")
+            end = now() + watch
+            while now() < end and link.disconnected_t is None:
+                await asyncio.sleep(min(10.0, max(0.05, end - now())))
+                h = link_health(link, link.messages["state"][n0:], watch - max(0.0, end - now()))
+                print(f"  {h['seconds']:.0f} s: {h['state_msgs']} states ({h['compressed']} compressed), "
+                      f"chunks {h['chunks']['state']}, lost {h['lost_chunks']}, partials dropped "
+                      f"{h['dropped_partials']}, longest silence {h['max_silence_s']} s")
             recs = link.messages["state"][n0:]
+            health = link_health(link, recs, watch)
+            results["health"] = health
+            if health["max_silence_s"] >= 15 or health["disconnected"]:
+                print(f"  LINK FAILED: {'disconnected' if health['disconnected'] else 'silent'} "
+                      f"(longest silence {health['max_silence_s']} s; the phone reconnects at 15 s)")
+                results["error"] = "link failed"
+            else:
+                print(f"  link OK: longest silence {health['max_silence_s']} s, lost {health['lost_chunks']} of "
+                      f"{health['tx_chunks']} state chunks")
             if recs:
                 gaps = [b["t"] - a["t"] for a, b in zip(recs, recs[1:])]
                 print(f"  {len(recs)} state messages, sizes {min(r['bytes'] for r in recs)}-"
@@ -176,7 +231,7 @@ async def session(args, results: dict, questions: list[str], qid0: int) -> int:
                       f"{max((r['t'] - r['t0']) * 1000 for r in recs):.0f} ms"
                       + (f", interval median {statistics.median(gaps):.2f} s" if gaps else ""))
                 print("   last:", describe_state(recs[-1]["obj"]))
-            results.setdefault("watch", []).append({"seconds": args.watch, "state_msgs": len(recs)})
+            results.setdefault("watch", []).append({"seconds": watch, "state_msgs": len(recs)})
         st = link.messages["status"]
         if st:
             print("last status notify:", st[-1]["obj"])
@@ -207,7 +262,7 @@ async def amain(args) -> int:
         print(f"  snapshot: {s['bytes']} B, {s['chunks']} chunks, {s['delivery_ms']} ms first->last chunk")
     if args.json:
         print(json.dumps(results, indent=1, default=str))
-    return 1 if results.get("error") or not rts else 0
+    return 1 if results.get("error") or (not rts and not args.soak) else 0
 
 
 def main(argv=None) -> int:
@@ -219,6 +274,8 @@ def main(argv=None) -> int:
     ap.add_argument("--gap", type=float, default=0.5, help="seconds between questions")
     ap.add_argument("--scan-timeout", type=float, default=15.0)
     ap.add_argument("--answer-timeout", type=float, default=15.0)
+    ap.add_argument("--soak", type=float, default=0, help="seconds of link-health watching (fails on 15 s silence)")
+    ap.add_argument("--no-z", action="store_true", help="don't say hello: plain (uncompressed) messages")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("-v", "--verbose", action="store_true")
     return asyncio.run(amain(ap.parse_args(argv)))
