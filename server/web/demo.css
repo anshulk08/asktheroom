@@ -82,6 +82,13 @@ h2 {
 .cam.listening { outline-color: var(--laser); }
 .cam canvas, .tcam canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
 .tcam { position: relative; flex: 1; min-height: 0; background: #000; border-radius: 6px; overflow: hidden; }
+.sheet {
+  position: absolute; inset: 0; z-index: 2; background: rgba(5, 11, 10, 0.94);
+  display: flex; flex-direction: column; align-items: center; padding: 10px 14px; gap: 8px;
+}
+.sheet-head { display: flex; gap: 16px; align-items: baseline; align-self: stretch; }
+.sheet-pick { font-size: 22px; font-weight: 800; color: var(--ink); }
+.sheet img { flex: 1; min-height: 0; max-width: 100%; object-fit: contain; }
 .tcam-tag {
   position: absolute; left: 14px; top: 10px; padding: 4px 12px; border-radius: 6px;
   background: rgba(8, 18, 16, 0.78); font-size: 18px; font-weight: 700; letter-spacing: 0.06em;
