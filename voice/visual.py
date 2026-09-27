@@ -939,6 +939,12 @@ class VisualQA:
         mk = ob.marks[m - 1]
         ent = mk.name
         label = _label(d.get("label"))
+        if ent.startswith("thing:") and not names.get(ent) and self._guess_disagrees(ent, said):
+            # Its own name guess says it's something else (rig 27 Sep 05:17: 'laptop' picked the notebook,
+            # guessed 'notebook' 0.8, while the laptop was on the couch): no pick, no name taught.
+            log.info("visual pick: %s picked for '%s' but guessed '%s'; not taken", ent, said,
+                     (self.world.thing_guess(ent) or {}).get("name"))
+            return self.look_room(question) if room else Answer(f"I can't see your {said} on the table right now.")
         holds = self._still_holds(mk)       # checked before any naming: a thing that moved keeps no name
         if holds and ent.startswith("thing:"):
             names[ent] = self._names().get(ent) or names.get(ent)      # a name taught during the call wins
@@ -967,6 +973,18 @@ class VisualQA:
         out = self._verified(text or f"I think this is your {said}.", mk)
         out.evidence, out.obj = list(where.evidence or []), ent    # the picked thing's receipt
         return out
+
+    def _guess_disagrees(self, ent: str, said: str) -> bool:
+        """The auto-namer's guess for ent (core/auto_name) is confident (>= BIND_CONF) and fits `said` not at
+        all, alternatives included (match_score 0)."""
+        try:
+            g = self.world.thing_guess(ent) if hasattr(self.world, "thing_guess") else None
+        except Exception:
+            return False
+        if not isinstance(g, dict) or float(g.get("confidence") or 0) < BIND_CONF:
+            return False
+        from core.auto_name import match_score
+        return match_score(said, g) <= 0
 
     def _pick_sheet(self, ob, shown: dict, said: str, question: str) -> dict:
         """The pick again on a sheet of the marked things' close-ups (the first SHEET_MAX marks); {} if the

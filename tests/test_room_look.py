@@ -479,3 +479,32 @@ def test_a_picked_thing_answer_carries_its_receipt(tmp_path):
     assert a.point_at == "thing:3" and a.obj == "thing:3"
     assert [e["type"] for e in a.evidence] == ["APPEARED"]
     lg.close()
+
+
+# -- a pick the thing's own name guess contradicts (rig 27 Sep 05:17: "where is my laptop?" picked the notebook,
+# which the auto-namer guessed 'notebook' at 0.8, and taught it the name 'laptop'; the laptop was on the couch)
+
+def guessed_pick_qa(log, guess):
+    from tests.test_visual import pick_qa
+    q, prov = pick_qa(log, mark=2, label="laptop")
+    q.world.thing_guess = lambda n: guess if n == "thing:3" else None
+    return q, prov
+
+
+def test_a_pick_its_own_guess_contradicts_is_not_taken_and_teaches_no_name(log):
+    q, prov = guessed_pick_qa(log, {"name": "notebook", "also": ["binder", "folder"], "confidence": 0.8})
+    q.frames, q.room_zones = RoomFrames(), [("couch", "the couch")]
+    prov.replies = [json.dumps({"mark": 2, "label": "laptop", "confidence": 0.9}),
+                    room_reply("Your laptop is on the couch.")]
+    a = ask(q, "where is my laptop?")
+    assert a.text == "Your laptop is on the couch." and a.point_at is None
+    assert q.world.labels.get("thing:3") is None                       # no name taught
+
+
+def test_a_pick_that_fits_the_guess_or_a_weak_guess_is_taken(log):
+    for guess in ({"name": "laptop computer", "also": [], "confidence": 0.9},        # fits (head noun)
+                  {"name": "notebook", "also": ["laptop"], "confidence": 0.8},       # an alternative fits
+                  {"name": "notebook", "also": [], "confidence": 0.5}):              # too unsure to veto
+        q, prov = guessed_pick_qa(log, guess)
+        a = ask(q, "where is my laptop?")
+        assert a.point_at == "thing:3" and q.world.labels.get("thing:3") == "laptop", guess
