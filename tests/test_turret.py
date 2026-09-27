@@ -395,7 +395,8 @@ def test_the_rehome_endpoint_answers_only_this_machine():
     from core.fakeworld import demo_world
     from server.app import create_app
     calls = []
-    app = create_app({"server": {}}, demo_world(), None, rehome_fn=lambda step, ok: calls.append((step, ok)) or {"ok": True})
+    app = create_app({"server": {}}, demo_world(), None,
+                     rehome_fn=lambda step, ok, dp=0.0, dt=0.0: calls.append((step, ok)) or {"ok": True})
     far = TestClient(app, client=("10.90.84.50", 5000))
     assert far.post("/laser/rehome", json={"step": "release"}).status_code == 403 and calls == []
     near = TestClient(app, client=("127.0.0.1", 5000))
@@ -405,3 +406,36 @@ def test_the_rehome_endpoint_answers_only_this_machine():
     assert calls[-1] == ("zero", False)
     r = near.post("/laser/rehome", json={"step": "release"}, headers={"X-Forwarded-For": "10.0.0.9"})
     assert r.status_code == 403 and len(calls) == 2                                   # a tunnel posing as local
+
+
+def test_rehome_jogs_the_head_dark_within_limits_then_zeroes_without_releasing():
+    """Closed-loop drivers undo a hand move on re-enable: jog by the motors instead, then zero there."""
+    import main
+    from act.laser import Laser
+    a, board = turret_act()
+    laser = Laser(a, None, None, "", cfg=dict(CFG))
+    room = main.Room({"frame_size_px": [1280, 720]}, type("W", (), {"laser": {}})(), None, None, None, laser, None)
+    board.pan, board.tilt = 3.0, -20.0                     # the head points down after a bad zero
+    assert not room.laser_rehome("jog", dpan=0, dtilt=15)["ok"]           # more than 10 deg at once
+    assert not room.laser_rehome("jog", dpan="up", dtilt=0)["ok"]
+    for _ in range(2):
+        r = room.laser_rehome("jog", dpan=-1.5, dtilt=10)
+        assert r["ok"] and room.laser_locked and board.laser == 0
+    assert (board.pan, board.tilt) == (0.0, 0.0)                         # 2 x (-1.5, +10) from (3, -20)
+    assert not room.laser_rehome("jog", dpan=0, dtilt=10.5)["ok"]         # over the step limit
+    board.tilt = 5.0
+    assert not room.laser_rehome("jog", dpan=0, dtilt=6)["ok"]            # would leave the range above +10
+    r = room.laser_rehome("zero", level_confirmed=True)
+    assert r["ok"] and room.laser_locked is None and (board.pan, board.tilt) == (0.0, 0.0)
+
+
+def test_the_rehome_endpoint_passes_jog_steps_through():
+    from fastapi.testclient import TestClient
+    from core.fakeworld import demo_world
+    from server.app import create_app
+    calls = []
+    app = create_app({"server": {}}, demo_world(), None,
+                     rehome_fn=lambda step, ok, dp=0.0, dt=0.0: calls.append((step, ok, dp, dt)) or {"ok": True})
+    near = TestClient(app, client=("127.0.0.1", 5000))
+    near.post("/laser/rehome", json={"step": "jog", "dpan": -2, "dtilt": 5})
+    assert calls == [("jog", False, -2, 5)]

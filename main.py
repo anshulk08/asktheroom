@@ -571,13 +571,21 @@ class Room:
         self._note_drift(getattr(r, "first_err_px", None), getattr(r, "reason", None), self.drift_px)
         return r.on_target
 
-    def laser_rehome(self, step: str, level_confirmed: bool = False) -> dict:
+    REHOME_JOG_MAX_DEG = 10.0                                  # one jog step at most
+    REHOME_RANGE = ((-60.0, 60.0), (-70.0, 10.0))              # where a jog may take the head (pan, tilt), dark
+
+    def laser_rehome(self, step: str, level_confirmed: bool = False, dpan: float = 0.0,
+                     dtilt: float = 0.0) -> dict:
         """Re-home the turret without switching the stepper battery (which rebooted the Jetson twice), through
         this app's own serial port (a second opener would reset the Uno): 'release' turns the laser off and
         frees the motors (E 0; aims are refused meanwhile) so the head can be set level and facing like the
         camera by hand; 'zero' makes that pose 0,0 (Z), holds it again (E 1) and clears the drift and
         board-reset lockouts, since the zero is known again. 'zero' needs level_confirmed: the zero is
-        wherever the head points, so a call with the head still off would bake a wrong zero in."""
+        wherever the head points, so a call with the head still off would bake a wrong zero in.
+        'jog' (dpan, dtilt degrees, each at most REHOME_JOG_MAX_DEG, the head kept inside REHOME_RANGE) moves
+        the head dark by the motors instead: the SERVO42D drivers are closed loop, so after 'release' and a
+        hand move, re-enabling them (E 1) servos the head back to where it was and undoes the hand re-home.
+        Jog until a person sees it level and facing like the camera, then 'zero'."""
         tur = getattr(getattr(self.laser, "act", None), "_turret", None)
         if tur is None:
             return {"ok": False, "why": "no stepper turret (actuator is not turret)"}
@@ -586,6 +594,24 @@ class Room:
             if step == "release":
                 tur.release()
                 self.laser_locked = "re-homing: the motors are released (POST /laser/rehome zero when level)"
+                log.warning("laser re-home: motors released. The drivers are closed loop: re-enabling them may snap "
+                            "the head back to where it was; prefer step 'jog'")
+            elif step == "jog":
+                try:
+                    dp, dt = float(dpan), float(dtilt)
+                except (TypeError, ValueError):
+                    return {"ok": False, "why": "jog needs numbers dpan and dtilt (degrees)"}
+                if max(abs(dp), abs(dt)) > self.REHOME_JOG_MAX_DEG:
+                    return {"ok": False, "why": f"a jog is at most {self.REHOME_JOG_MAX_DEG:g} deg per axis"}
+                pan, tilt, _, _ = tur.position()
+                (plo, phi), (tlo, thi) = self.REHOME_RANGE
+                if not (plo <= pan + dp <= phi and tlo <= tilt + dt <= thi):
+                    return {"ok": False, "why": f"that jog leaves the re-home range {self.REHOME_RANGE} "
+                                                f"(now at pan {pan:.1f}, tilt {tilt:.1f})"}
+                self.laser_locked = "re-homing: jogging the head (POST /laser/rehome zero when level)"
+                pan, tilt = tur.nudge(dp, dt, wait=True)
+                log.warning("laser re-home: jogged %+.1f, %+.1f deg, now at pan %.1f tilt %.1f", dp, dt, pan, tilt)
+                return {"ok": True, "step": step, "pan": pan, "tilt": tilt, "locked": self.laser_locked}
             elif step == "zero":
                 if not level_confirmed:
                     return {"ok": False, "why": "zero needs level_confirmed: the head set level, facing like the "
