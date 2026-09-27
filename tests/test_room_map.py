@@ -122,6 +122,7 @@ def test_aim_px_recovers_from_a_wrong_jacobian(mapped, scale, monkeypatch):
         g.J, g.pulses = g.J * scale, (g.pulses[0] + 30, g.pulses[1] - 25)
         return g
     monkeypatch.setattr(rm, "pulses_for_px", skewed)
+    monkeypatch.setattr(laser, "max_on_s", 60.0)           # convergence, not the on-time budget (tested apart)
     rig.act.move(1500, 1500)                               # start far away: the feedforward is exact-ish
     t = center(rig.box_px("table"))
     t = (t[0] + 20, t[1] - 5)                              # off the sample grid
@@ -374,3 +375,55 @@ def test_people_are_looked_for_on_the_perception_thread(room_main):
     t.start()
     assert room._people_now(None) == [(1, 2, 3, 4)] and seen == ["perception"]
     t.join(2)
+
+
+# ----- eye safety inside aim_px (review of ws/laser): dark moves, per-try check, jumps, the on-time budget
+
+def lit_moves(act, since: float) -> list:
+    """Servo writes made while the laser was on, after `since`."""
+    log = [(t, on) for t, on in act.laser_log]
+    bad = []
+    for t, pan, tilt in act.writes:
+        if t < since:
+            continue
+        state = [on for tl, on in log if tl <= t]
+        if state and state[-1]:
+            bad.append((t, pan, tilt))
+    return bad
+
+
+def test_aim_px_never_moves_the_head_with_the_laser_on(mapped):
+    rig, laser, rm = mapped
+    t0 = rig.clock.now()
+    for box in ("table", "shelf"):
+        laser.aim_px(center(rig.box_px(box)), room_map=rm)      # the second aim slews from the first spot
+    assert lit_moves(rig.act, t0) == []
+    laser.off()
+
+
+def test_aim_px_stops_dark_when_the_safety_check_objects(mapped):
+    rig, laser, rm = mapped
+    calls = []
+
+    def check():
+        calls.append(1)
+        return "a person near the beam" if len(calls) >= 2 else None
+    r = laser.aim_px(center(rig.box_px("table")), room_map=rm, tol_px=0.01, check=check)
+    assert r.reason == "unsafe" and not r.on_target and rig.act.laser_on is False
+    assert laser.last_aim["unsafe"] == "a person near the beam"
+
+
+def test_aim_px_stops_dark_at_a_jump(mapped, monkeypatch):
+    rig, laser, rm = mapped
+    dots = iter([(100.0, 100.0), (600.0, 400.0), (100.0, 100.0), (100.0, 100.0)])   # 2nd look jumps far
+    monkeypatch.setattr(laser, "find_dot_px", lambda *a, **k: next(dots))
+    r = laser.aim_px(center(rig.box_px("table")), room_map=rm, tol_px=0.01)
+    assert r.reason == "jumped" and r.tries == 2 and not r.on_target and rig.act.laser_on is False
+
+
+def test_aim_px_stops_dark_at_the_on_time_budget(mapped, monkeypatch):
+    rig, laser, rm = mapped
+    monkeypatch.setattr(laser, "max_on_s", 0.3)
+    r = laser.aim_px(center(rig.box_px("table")), room_map=rm, tol_px=0.01)
+    assert r.reason == "budget" and not r.on_target and rig.act.laser_on is False
+    assert laser.last_aim["lit_s"] >= 0.3

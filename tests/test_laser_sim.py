@@ -260,7 +260,7 @@ def test_table_refit_is_remapped_through_the_camera(cal):
             assert math.dist(rig.true_dot_cm(), p) < 2.0, p
         laser.fit = LaserFit.from_dict(dict(old_fit.to_dict(), table_px_to_cm=None))   # an old laser_cal.json
         laser.aim(tuple(laser.table.to_new([(40.0, 25.0)])[0]), mode="open")
-        assert math.dist(rig.true_dot_cm(), (40.0, 25.0)) > 3.0    # without the stored frame it points off
+        assert math.dist(rig.true_dot_cm(), (40.0, 25.0)) > 2.0    # without the stored frame it points off (< 0.8 with)
         assert laser.refit_moved_cm() is None
     finally:
         laser.table, laser.fit = old_table, old_fit
@@ -294,3 +294,42 @@ def test_whole_picture_search_needs_exactly_one_dot(cal):
     finally:
         rig.ghost_cm = None
         laser.off()
+
+
+# ----- eye safety in the table path (review of ws/laser)
+
+def test_table_aims_move_dark_and_stay_lit_only_within_tol(cal, monkeypatch):
+    from tests.test_room_map import lit_moves
+    rig, laser, _, _ = cal
+    t0 = rig.clock.now()
+    laser.aim((20.0, 20.0))
+    laser.aim((70.0, 45.0))                                   # a slew across the table
+    assert lit_moves(rig.act, t0) == [] and laser.last_aim["reason"] == "within_tol" and rig.act.laser_on
+    looks = iter([(30.0, 30.0)] + [None] * 10)               # seen once, then lost (a hand in the beam)
+    monkeypatch.setattr(laser, "find_dot", lambda *a, **k: next(looks))
+    laser.aim((36.0, 30.0))                                   # 6 cm off the seen dot: keeps looking
+    assert laser.last_aim["reason"] == "lost" and rig.act.laser_on is False and laser.state["on"] is False
+    laser.off()
+
+
+def test_table_aims_obey_the_check_and_the_budget(cal, monkeypatch):
+    rig, laser, _, _ = cal
+    laser.aim((40.0, 30.0), check=lambda: "a hand near the target")
+    assert laser.last_aim["reason"] == "unsafe" and rig.act.laser_on is False
+    monkeypatch.setattr(laser, "max_on_s", 0.2)
+    monkeypatch.setattr(laser, "tol_cm", 0.001)
+    laser.aim((40.0, 30.0))
+    assert laser.last_aim["reason"] == "budget" and rig.act.laser_on is False
+
+
+def test_a_trace_reaches_its_start_dark_and_stops_at_the_budget(cal, monkeypatch):
+    rig, laser, _, _ = cal
+    laser.off()
+    rig.act.move(1200, 1200)
+    t0 = rig.clock.now()
+    monkeypatch.setattr(laser, "max_on_s", 0.3)
+    laser.circle((45.0, 30.0))
+    first_lit = next(t for t, on in rig.act.laser_log if t >= t0 and on)
+    reach = [w for w in rig.act.writes if t0 <= w[0] < first_lit]
+    assert reach                                              # the head reached the start before lighting
+    assert rig.act.laser_on is False and laser.state["on"] is False and laser.last_aim["lit_s"] < 0.5

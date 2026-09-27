@@ -309,6 +309,9 @@ class Laser:
         self.deadband_us = float(room.get("deadband_us", 8))
         self.jump_px = float(room.get("jump_px", 30))
         self.max_map_gap_px = float(room.get("max_map_gap_px", 60))
+        # Eye safety (laser_room:): an aim's laser is never lit longer than this, counted from its first light;
+        # blinks and re-lights don't reset it (the actuator and the firmware timers alone would).
+        self.max_on_s = float((cfg.get("laser_room") or {}).get("max_on_s", 4.0))
         self.fit: Optional[LaserFit] = None
         self.disabled: Optional[str] = None   # why the hardware isn't usable (set by the app); aims refuse
         self.state = {"on": False, "target": None, "err_cm": None}
@@ -354,6 +357,14 @@ class Laser:
     def _clamp(self, pan: float, tilt: float) -> tuple[float, float]:
         (plo, phi), (tlo, thi) = self.act.limits()
         return min(phi, max(plo, float(pan))), min(thi, max(tlo, float(tilt)))
+
+    def _move_dark(self, pan: float, tilt: float, duration_s: float = 0.3) -> None:
+        """Every move is made with the laser off: a lit head slewing between spots sweeps the room unchecked."""
+        self.act.laser(False)
+        self.move_to(pan, tilt, duration_s=duration_s)
+
+    def _over_budget(self, lit_at: Optional[float]) -> bool:
+        return lit_at is not None and self.clock.now() - lit_at >= self.max_on_s
 
     def move_to(self, pan: float, tilt: float, duration_s: float = 0.3) -> None:
         """Move, always finishing from below on both axes so servo backlash is repeatable
@@ -467,24 +478,36 @@ class Laser:
         cm = self.table.px_to_cm(np.array([px], dtype=np.float64)).reshape(-1)
         return float(cm[0]), float(cm[1])
 
-    def aim(self, target_cm: tuple, mode: str = "point") -> float:
+    def aim(self, target_cm: tuple, mode: str = "point", check=None) -> float:
         """Point at target_cm. mode 'point' closes the loop on the seen dot (<= 8 tries, stop < tol_cm);
         'open' just moves to the prediction and measures once. Only a dot within first_dot_cm of the
         target counts; if the first look misses, one whole-picture search (find_dot_wide) may find a
         dot that is further off (knocked head), and the loop corrects from there. After MAX_MISSES
         looks in a row without it, stop and hold the pose. Returns the last measured error in cm (inf if
         the dot was never seen). Leaves the laser on, except when the dot was never seen: an unconfirmed
-        dot could be anywhere, so the laser goes off. The actuator's auto-off timer restarts."""
+        dot could be anywhere, so the laser goes off. The actuator's auto-off timer restarts.
+        Eye safety: every move is dark; check() (if given) runs before each look and a reason it returns
+        stops the aim ('unsafe'); the aim stops at max_on_s after its first light ('budget'); the laser is
+        left on only for 'within_tol'."""
         fit = self._need_fit()
         target = np.asarray(target_cm, dtype=np.float64)
         target_fit = self.to_fit_cm(target)
         tries = 1 if mode == "open" else self.max_tries
         err, first, n, misses, reason, wide = math.inf, None, 0, 0, "max_tries", False
+        lit_at, unsafe = None, None
         with self._locked():
             cmd = np.array(self._clamp(*fit.predict(target_fit)))
-            self.move_to(*cmd)
+            self._move_dark(*cmd)
             for i in range(tries):
                 self.clock.sleep(self.settle_s)
+                unsafe = check() if check is not None else None
+                if unsafe is not None:
+                    reason = "unsafe"
+                    break
+                if self._over_budget(lit_at):
+                    reason = "budget"
+                    break
+                lit_at = self.clock.now() if lit_at is None else lit_at
                 dot = self.find_dot(near_cm=target)
                 n += 1
                 if dot is None and first is None and not wide and mode != "open":
@@ -509,12 +532,14 @@ class Laser:
                     break
                 e = target_fit - self.to_fit_cm(np.asarray(dot))
                 cmd = np.array(self._clamp(*(cmd + self.gain * fit.jacobian(target_fit) @ e)))
-                self.move_to(*cmd, duration_s=0.1)
-            if first is None:
+                self._move_dark(*cmd, duration_s=0.1)
+            if first is None and reason not in ("unsafe", "budget"):
                 reason = "not_seen"
-            self.act.laser(reason != "not_seen")
-        self.last_aim = {"tries": n, "first_err_cm": first, "err_cm": err, "reason": reason, "wide": wide}
-        self.state = {"on": reason != "not_seen", "target": None,
+            lit = reason == "within_tol"             # only a confirmed hit stays lit ('lost' is often a hand)
+            self.act.laser(lit)
+        self.last_aim = {"tries": n, "first_err_cm": first, "err_cm": err, "reason": reason, "wide": wide,
+                         "unsafe": unsafe, "lit_s": 0.0 if lit_at is None else self.clock.now() - lit_at}
+        self.state = {"on": lit, "target": None,
                       "err_cm": None if math.isinf(err) else round(err, 2)}
         return err
 
@@ -532,13 +557,15 @@ class Laser:
         return err
 
     def aim_px(self, target_px, box_px=None, *, room_map=None, n_pairs: Optional[int] = None,
-               tol_px: Optional[float] = None) -> PxAim:
+               tol_px: Optional[float] = None, check=None) -> PxAim:
         """Point at image pixel target_px anywhere in the room (spec 0006), with no depth: the dot seen
         inside the object's box is on the object. Feedforward from the room dot map, then a P step
         through the local pixel/pulse Jacobian, which a Broyden update corrects after every step
         (a Jacobian mapped on the floor is ~2x off on a near shelf). Stops when the dot is inside
-        box_px shrunk 20%, or within tol_px. Leaves the laser on; the caller turns it off when
-        on_target is False (dot never seen, lost, or it jumped: something nearer is in the way)."""
+        box_px shrunk 20%, or within tol_px. Leaves the laser on only when on_target; off otherwise (dot
+        never seen, lost, or it jumped: something nearer is in the way). Eye safety: every move is dark;
+        check() (if given) runs before each look, and a reason it returns stops the aim ('unsafe'); a jump
+        stops it at once; the aim stops at max_on_s after its first light ('budget')."""
         rm = room_map if room_map is not None else self.room_map
         if rm is None:
             raise RuntimeError("no room map; run python -m act.room_map --sweep")
@@ -553,11 +580,20 @@ class Laser:
         n, misses, first, err = 0, 0, None, math.inf
         seen, jumped, dot, reason = False, False, None, "max_tries"
         prev_cmd = prev_dot = None
+        lit_at, unsafe = None, None
         with self._locked():
             cmd = np.array(self._clamp(*g.pulses))
-            self.move_to(*cmd)
+            self._move_dark(*cmd)
             for i in range(self.max_tries):
                 self.clock.sleep(self.settle_s)
+                unsafe = check() if check is not None else None
+                if unsafe is not None:
+                    reason = "unsafe"
+                    break
+                if self._over_budget(lit_at):
+                    reason = "budget"
+                    break
+                lit_at = self.clock.now() if lit_at is None else lit_at
                 d = self.find_dot_px(pairs, src=self.px_source)
                 n += 1
                 if d is None:
@@ -571,7 +607,9 @@ class Laser:
                     du, ds = cmd - prev_cmd, dot - prev_dot
                     pred = J @ du
                     if np.linalg.norm(ds - pred) > self.jump_px + 1.5 * np.linalg.norm(pred):
-                        jumped = True                   # discontinuity: landed on something nearer
+                        jumped = True                   # discontinuity: landed on something nearer (a
+                        reason = "jumped"               # person?): stop at once, dark
+                        break
                     elif np.linalg.norm(du) > self.deadband_us:
                         J2 = J + np.outer(ds - pred, du) / float(du @ du)
                         if np.linalg.det(J2) * np.linalg.det(J) > 0 and np.linalg.cond(J2) < 1e3:
@@ -591,30 +629,36 @@ class Laser:
                 k = float(np.max(np.abs(step) / cap))
                 prev_cmd, prev_dot = cmd, dot
                 cmd = np.array(self._clamp(*(cmd + (step / k if k > 1 else step))))
-                self.move_to(*cmd, duration_s=0.1)
-            self.act.laser(True)
-        if seen and dot is None and reason == "max_tries":
-            reason = "lost"
-        if jumped and reason in ("in_box", "within_tol", "max_tries"):
-            reason = "jumped"
-        ok = reason in ("in_box", "within_tol")
+                self._move_dark(*cmd, duration_s=0.1)
+            if seen and dot is None and reason == "max_tries":
+                reason = "lost"
+            ok = reason in ("in_box", "within_tol") and not jumped
+            self.act.laser(ok)
         res = PxAim(err, ok, seen, n, None if dot is None else (float(dot[0]), float(dot[1])),
                     reason, first)
-        self.last_aim = {"tries": n, "first_err_px": first, "err_px": err, "reason": reason}
-        self.state = {"on": True, "target": None, "err_cm": None,
+        self.last_aim = {"tries": n, "first_err_px": first, "err_px": err, "reason": reason, "unsafe": unsafe,
+                         "lit_s": 0.0 if lit_at is None else self.clock.now() - lit_at}
+        self.state = {"on": ok, "target": None, "err_cm": None,
                       "err_px": None if math.isinf(err) else round(err, 1)}
         return res
 
     def _trace(self, pts_cm: np.ndarray, seg_s: float) -> None:
+        """Trace a path lit: reach its start dark, light, follow it, and stop (dark) at max_on_s."""
         fit = self._need_fit()
         with self._locked():
             pul = fit.predict(self.to_fit_cm(pts_cm))
-            self.act.laser(True)
+            self.act.laser(False)
             self.act.move(*self._clamp(*pul[0]), duration_s=0.3)
+            self.act.laser(True)
+            lit_at, lit = self.clock.now(), True
             for p in pul[1:]:
+                if self._over_budget(lit_at):
+                    self.act.laser(False)
+                    lit = False
+                    break
                 self.act.move(*self._clamp(*p), duration_s=seg_s)
-            self.act.laser(True)       # restart the auto-off timer at the end
-        self.state["on"] = True
+        self.last_aim = {"reason": "trace", "lit_s": self.clock.now() - lit_at}
+        self.state["on"] = lit
 
     def sweep_edge(self, edge: str, inset_cm: float = 4.0, passes: int = 2) -> None:
         """Run the dot back and forth along one table edge ('carried off the left side')."""
