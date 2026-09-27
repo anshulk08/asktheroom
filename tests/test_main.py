@@ -1120,3 +1120,22 @@ def test_the_bare_wake_log_line_says_how_much_speech_and_if_it_was_the_prompt(tm
     assert lines[0].endswith("(speech 350 ms, clip 1.20 s, prompt echo True)")
     assert lines[1].endswith("prompt echo False)")
     assert not any("Room" in m for m in lines)
+
+
+def test_the_wake_word_opening_a_fragment_listens_for_the_question(tmp_path, cal_path):
+    """Rig, 01:09 Sun 27 Sep: "Room that person." was answered. Now it is the wake word alone: chime, listen."""
+    stt = ListensSTT(["where is my wallet"], overheard=["Room that person."])
+    room = wake_room(tmp_path, cal_path, stt)
+    t = always_on(room)
+    assert wait_for(lambda: room.tts.said)
+    stop_voice(room, t)
+    assert len(room.tts.said) == 1 and "wallet" in room.tts.said[0].lower() and stt.listens == []
+
+
+def test_a_fragment_after_a_bare_wake_word_listens_again(tmp_path, cal_path):
+    stt = ListensSTT(["Room, the guy.", "where is my wallet"], overheard=["Room!"])
+    room = wake_room(tmp_path, cal_path, stt)
+    t = always_on(room)
+    assert wait_for(lambda: room.tts.said)
+    stop_voice(room, t)
+    assert "wallet" in room.tts.said[0].lower() and stt.listens == []

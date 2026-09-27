@@ -1,4 +1,4 @@
-{"about": "Every transcript the rig's always-on mic logged on Sat 26 Sep 2026, 21:44-00:25 (listen.mode wake, log_overheard on; ~/askroom_room/data/room/app.log*), in order per log file. answered: the rig answered it then; woke: it opened the mic as a bare wake word. label: false (answered, not said to the rig), genuine (said to the rig: answer it), unclear, wake (a bare wake word or misheard greeting: open the mic). Unlabelled lines are chatter. scripts/eval_wake.py replays them.",
+{"about": "Every transcript the rig's always-on mic logged on Sat 26 Sep 2026, 21:44-00:25 (listen.mode wake, log_overheard on; ~/askroom_room/data/room/app.log*), in order per log file. answered: the rig answered it then; woke: it opened the mic as a bare wake word. label: false (answered, not said to the rig), genuine (said to the rig: answer it), unclear, wake (a bare wake word or misheard greeting: open the mic). Unlabelled lines are chatter. scripts/eval_wake.py replays them. Sessions 'fragment ...' (one line each): the wake word opening a fragment, heard live on the rig Sun 27 Sep 01:09 ('Room that person.' answered through Grok), and short questions that must stay answered.",
  "sessions": [
   {"log": "app.log.before-bose-2203", "lines": [
    {"t": "21:44:10", "s": 1.1, "text": "you"},
@@ -962,5 +962,29 @@
    {"t": "00:22:56", "s": 1.1, "text": ""},
    {"t": "00:23:09", "s": 5.2, "text": "I'm going to finish it. You already brought it so far this week."},
    {"t": "00:23:21", "s": 1.9, "text": "Oh, is he on here?"}
+  ]},
+  {"log": "fragment: Room that person.", "lines": [
+   {"t": "01:09:36", "s": 0, "text": "Room that person.", "label": "false"}
+  ]},
+  {"log": "fragment: Room, the guy.", "lines": [
+   {"t": "", "s": 0, "text": "Room, the guy.", "label": "false"}
+  ]},
+  {"log": "fragment: Room over there", "lines": [
+   {"t": "", "s": 0, "text": "Room over there", "label": "false"}
+  ]},
+  {"log": "fragment: Okay room, that one.", "lines": [
+   {"t": "", "s": 0, "text": "Okay room, that one.", "label": "false"}
+  ]},
+  {"log": "fragment: Room, keys?", "lines": [
+   {"t": "", "s": 0, "text": "Room, keys?", "label": "genuine"}
+  ]},
+  {"log": "fragment: Room, what changed", "lines": [
+   {"t": "", "s": 0, "text": "Room, what changed", "label": "genuine"}
+  ]},
+  {"log": "fragment: Room, describe the couch.", "lines": [
+   {"t": "", "s": 0, "text": "Room, describe the couch.", "label": "genuine"}
+  ]},
+  {"log": "fragment: Room, my wallet?", "lines": [
+   {"t": "", "s": 0, "text": "Room, my wallet?", "label": "genuine"}
   ]}
  ]}
