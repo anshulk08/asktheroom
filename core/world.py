@@ -35,6 +35,8 @@ LABEL_ON_THING_IOU = 0.5    # a configured label on a thing's box overlapping th
 ESTABLISHED_S = 2.0         # ... in place this long before the object was last seen elsewhere: the thing
 PARTLY_HIDDEN_INSIDE = 0.8  # a smaller box this much inside the box an object rests in: part of it is hidden
 THING_COVER_AREA = 1.5      # a thing at least this many times an object's footprint can lie over it
+PERSON_OVER = 0.5           # a person box over this share of an object's box hides its spot (_person_over)
+PERSON_HOLD_S = 20.0        # ... for at most this long (unknown_cover.person_hold_s)
 OUTLINE_IOU = 0.5           # a class-agnostic proposal this much like a configured object's box outlines it
 
 # A rule verdict is (Status, parent, confidence, EventType[, candidates]), or NO_CHANGE: the rule
@@ -117,6 +119,8 @@ class World(ThingRules, RoomRules):
             self._ucfg = UnknownCoverConfig.from_config(self.cfg)
             self._bands = SurroundMemory(self._ucfg)    # the band of table around each object (unknown covers)
             self._laid_wait: dict[str, float] = {}      # obj -> since when its absence waits on the band
+            self._person_wait: dict[str, float] = {}    # obj -> since when a person has hidden its spot
+            self._people: list = []                     # this update's person boxes (cm), from the proposer
             self._bare_at: dict[str, float] = {}        # obj UNDER 'unknown' -> since when its band looks bare
             self._unknown_uncovered: set[str] = set()   # last seen again from under 'unknown'
             self._reset_things()
@@ -132,6 +136,7 @@ class World(ThingRules, RoomRules):
             self._now, self._wall, self._frame = dets.t, frame.wall if frame else dets.t, frame
             self._gray_img = None
             self._batch_things = [d for d in dets.items if d.cls == 'thing']
+            self._people = [d.box_cm for d in getattr(dets, 'people', None) or ()]
             out: list[Event] = []
             seen = self._best_detections(dets.items, dets.hands)
             self._track_covers(seen)
@@ -424,6 +429,9 @@ class World(ThingRules, RoomRules):
         if self._hand_over(ent):            # the hand hides the spot (a wave, or a grab in progress):
             self._present[name] = True      # decided once it moves on, by the rules below
             return []
+        if self._person_over(name, ent):    # someone is in front of it: decided once they move away
+            self._present[name] = True
+            return []
         waiting = self._now - self._waiting.get(name, -1e18) <= self.cfg.lost_grace_s
         if not waiting:                     # already unexplained: a hand that comes after did not take it
             slid_over = self._slid_over_by_hand(name, ent)
@@ -486,6 +494,22 @@ class World(ThingRules, RoomRules):
         """UNKNOWN at the last known position; confidence is left as it was."""
         ent.status, ent.parent, ent.candidates, ent.held_since = Status.UNKNOWN, None, [], None
         return [self._emit(name, EventType.LOST_TRACK)]
+
+    def _person_over(self, name: str, ent: Entity) -> bool:
+        """WS2 proposal (room demo, Sun 27 Sep): a person box (YOLOE 'person', 'arm', a worn shoe; from the
+        proposer) over PERSON_OVER of the object's last box hides the spot, as a moving hand does. Live at
+        03:00, 52 'COVERED by something' in 20 min on 13 real props were a torso, a head or an arm leaning
+        over the table with no hand box (median 3 s, 13 of them 10 s or more): the spot is not seen, so
+        nothing is decided until they move away, for at most person_hold_s (someone parked in front of
+        it: then the other rules decide, as before)."""
+        if ent.box_cm is None or not any(geom.overlap_frac(p, ent.box_cm) >= PERSON_OVER for p in self._people):
+            self._person_wait.pop(name, None)
+            return False
+        since = self._person_wait.get(name)
+        if since is None or since < self._last_evidence(name):
+            since = self._person_wait[name] = self._now
+        hold = (getattr(self.cfg, 'unknown_cover', None) or {}).get('person_hold_s', PERSON_HOLD_S)
+        return self._now - since <= float(hold)
 
     def _hand_over(self, ent: Entity) -> bool:
         """A hand in view, still moving (a wave passing over, or a grab already on its way out), covers

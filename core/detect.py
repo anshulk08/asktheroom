@@ -195,7 +195,11 @@ class Detector:
                 if now - self._open_err_t > 10:
                     log.exception("open-world proposals / crops failed; known objects only this frame")
                     self._open_err_t = now
-        return Detections(t=frame.t, frame_idx=frame.idx, items=items, hands=hand_dets)
+        dets = Detections(t=frame.t, frame_idx=frame.idx, items=items, hands=hand_dets)
+        # WS2 proposal: YOLOE's person boxes (a torso, a head, an arm no hand box covers), for the world's
+        # 'someone is in front of it' rule; an extra attribute, so Detections (core/types.py) is unchanged
+        dets.people = [self._to_det("person", 1.0, b) for b in getattr(self.proposer, "people_px", None) or []]
+        return dets
 
     def _proposals(self, img: np.ndarray, items: list[Detection], hands: list[Detection]) -> list[Detection]:
         """Class-agnostic 'thing' detections that duplicate no known object or hand."""

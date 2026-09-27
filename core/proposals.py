@@ -655,6 +655,7 @@ class YOLOEProposer:
         self.ignore = {s.lower() for s in self.cfg.ignore_classes}
         self._roi: Optional[np.ndarray] = None
         self.last_ms = 0.0
+        self.people_px: list[tuple] = []    # the last frame's person boxes (worn items by a person too)
 
     def set_roi(self, polygon: Optional[Polygon]) -> None:
         self._roi = None if polygon is None else np.array(polygon, np.float32).reshape(-1, 1, 2)
@@ -683,6 +684,7 @@ class YOLOEProposer:
         worn = [tuple(float(v) for v in b) for b, s, n in zip(xyxy, conf, label) if s >= c.conf and n in WORN
                 and any(geom.intersection((b[0] - g, b[1] - g, b[2] + g, b[3] + g), p) for p in people)]
         people += worn
+        self.people_px = people
         cands = []
         for j, (b, s, k) in enumerate(zip(xyxy, conf, cls)):
             if s < c.conf or label[j] in self.ignore or tuple(float(v) for v in b) in worn:
