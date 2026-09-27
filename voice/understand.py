@@ -217,6 +217,45 @@ def bare_wake(text: str, cfg: dict) -> bool:
     return False
 
 
+# "Room" opening a fragment with nothing to answer: "Room that person." was answered through Grok in room
+# chatter (rig, 01:09 Sun 27 Sep). Taken as the wake word alone (main.Room._bare_wake): a chime, and the
+# question is listened for. Asking or telling the rig something keeps its answer ("room, describe the couch").
+REQUEST_VERBS = {"describe", "look", "count", "list", "say", "explain", "check", "see", "identify", "spot",
+                 "locate", "read", "help", "guess", "remember", "forget", "repeat", "stop", "give", "call"}
+
+
+def wake_fragment(text: str, cfg: dict, aliases=()) -> bool:
+    """The wake word opens the utterance but what follows is a fragment: no question word, no request or
+    command, no object or taught name, nothing to teach or reset ("Room that person.", "Room, the guy.",
+    "Room over there"). "Room, keys?" and "Room, what changed" are questions."""
+    words = [w for w, _ in _words(text)]
+    for p in _phrases(cfg):
+        i = next((k for k in range(len(words) - len(p) + 1) if words[k:k + len(p)] == p), None)
+        if i is None or not all(w in OPENERS for w in words[:i]):
+            continue
+        rest = words[i + len(p):]
+        while rest and (rest[0] in OPENERS or rest[0] in set(wake_words(cfg))):
+            rest.pop(0)                          # "room, room, ..."
+        if not rest or set(rest) & (ASKS | COMMAND_WORDS | REQUEST_VERBS):
+            return False
+        if rest[0].isdigit() or (len(rest[0]) == 1 and rest[0] not in ("a", "i")):
+            return False                         # "room b", "room 204": a room's name, not the rig's
+        said = " ".join(rest)
+        rules = parse(said, cfg, aliases=aliases)
+        return rules.kind == "OTHER" and rules.obj is None and rules.name is None and not names_object(said, cfg)
+    return False
+
+
+def misheard_greeting(text: str, cfg: dict) -> bool:
+    """A bare wake word only as a misheard greeting ("Hey, bro!", "Hey Drew!", "Goodroom."): chatter is likely,
+    so the question after it gets the strict check (Understander.after_wake_drop). "Heyroom", "okroom" are the
+    real greeting run together."""
+    merged = _listen_list(cfg, "greeting_merged", GREETING_MERGED)
+    listen = dict(cfg.get("listen") or {}, greeting_misheard=[],
+                  greeting_merged=[m for m in merged if m.startswith(("hey", "ok"))])
+    return bare_wake(text, cfg) and not bare_wake(text, dict(cfg, listen=listen))
+
+
 def names_object(text: str, cfg: dict) -> bool:
     return bool(_vocab(cfg)[1].search(normalize(text)))
 
@@ -466,26 +505,50 @@ class Understander:
         with self._lock:
             return self._screen(text)
 
+    def fragment(self, text: str) -> bool:
+        """wake_fragment with the taught names ("room, my charger" names a thing)."""
+        with self._lock:
+            return wake_fragment(text, self.cfg, self._taught())
+
     def after_wake(self, text: str) -> bool:
-        """The question after a bare wake word ("Room!" ... "what do you see?"): it needs no wake word of its
-        own (listen.mode wake), but it must be a question, name a thing ("the laptop charging") or teach one.
-        Chatter after a misheard greeting isn't: a WHERE needs something to look for, and "can you put your
-        phone away", "are you guys ready" are said to people. RESET / RECAL still need the wake word."""
+        """The question after a misheard greeting or a fragment passes the strict check (after_wake_drop)."""
+        return self.after_wake_drop(text) is None
+
+    def after_wake_drop(self, text: str, strict: bool = True) -> Optional[str]:
+        """Why the question after a bare wake word ("Room!" ... "what do you see?") is dropped, or None to
+        answer it. It needs no wake word of its own. After the real wake word (strict False) anything said is
+        answered: the user called the rig and heard the chime (rig, 01:42 Sun 27 Sep: three real questions
+        after "Hey Room" were dropped by the strict check). Always dropped: nothing, Whisper's "you" /
+        "Thank you." on noise, and RESET / RECAL without the wake word in the same sentence.
+        strict (after a misheard greeting, "Hey, bro!", or a fragment, where chatter is likely): it must also
+        be a question, name a thing ("the laptop charging") or teach one; a WHERE needs something to look
+        for, and "can you put your phone away", "are you guys ready" are said to people.
+        The reason is logged (main.Room._asked), never the transcript."""
+        from voice.stt import filler_only
         with self._lock:
             if not text.strip():
-                return False
+                return "nothing heard"
+            if filler_only(text):
+                return "hallucination"
             rules = parse(text, self.cfg, aliases=self._taught())
+            if rules.kind in ACTS and not opens_with_wake_word(text, self.cfg):
+                return "reset or recalibrate without the wake word"
+            if not strict:
+                return None
             if rules.kind == "TEACH":
-                return not names_a_person(rules.name, text)
+                return "strict gate: teaches a person" if names_a_person(rules.name, text) else None
             if rules.kind in ACTS:
-                return opens_with_wake_word(text, self.cfg)
+                return None
             if rules.kind == "WHERE" and rules.obj is None and rules.name is None:
-                return self._followup(text, rules)       # "where are you guys from": nothing to look for
+                # "where are you guys from": nothing to look for
+                return None if self._followup(text, rules) else "strict gate: nothing to look for"
             t = normalize(text)
-            if (YOU_REQUEST.search(t) or re.search(r"\byou (?:guys|all|two)\b|\byall\b", t)):
-                return False
-            return bool(addressed(text, self.cfg) or rules.obj is not None or rules.name is not None
-                        or names_object(text, self.cfg) or _spoken_name(normalize(text)) is not None)
+            if YOU_REQUEST.search(t) or re.search(r"\byou (?:guys|all|two)\b|\byall\b", t):
+                return "strict gate: said to people"
+            if (addressed(text, self.cfg) or rules.obj is not None or rules.name is not None
+                    or names_object(text, self.cfg) or _spoken_name(t) is not None):
+                return None
+            return "strict gate: no question or thing"
 
     def certain(self, text: str) -> bool:
         """Overheard speech that passed screen() and that the model can't turn into IGNORE: the wake word,

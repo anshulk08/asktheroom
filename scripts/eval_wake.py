@@ -5,7 +5,8 @@ with it, with the rules only (understand.enabled false): Whisper's fillers dropp
 wake word opens the mic (voice.understand.bare_wake) and the next line is the question (Understander.after_wake),
 anything else must pass Understander.screen and the overheard reading. stt.min_speech_ms needs the audio, so it
 isn't replayed. Prints how many of the labelled lines went the right way and every unlabelled line (chatter)
-that was answered or woke the rig. Target: no false line answered, every genuine one answered, every wake
+that was answered or woke the rig. Target: no false line answered (a fragment like "Room that person." may
+open the mic, as the wake word alone), every genuine one answered, every wake
 line opens the mic.
 
     python scripts/eval_wake.py                 # listen.mode wake, as on the rig
@@ -23,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core.config import load_config  # noqa: E402
 from voice.stt import filler_only  # noqa: E402
-from voice.understand import IGNORE, Understander, bare_wake, has_wake_word  # noqa: E402
+from voice.understand import IGNORE, Understander, bare_wake, has_wake_word, misheard_greeting  # noqa: E402
 
 EVAL = Path(__file__).resolve().parent.parent / "tests" / "wake_eval.json"
 WANT = {"false": "-", "genuine": "answered", "wake": "woke"}
@@ -41,18 +42,19 @@ def replay(cfg: dict, sessions: list[dict]) -> list[dict]:
     out = []
     for s in sessions:
         u = Understander(cfg)                   # a fresh rig per log file, as it was restarted
-        woke = False
+        woke, strict = False, True
         for e in s["lines"]:
             text = "" if filler_only(e["text"]) else e["text"]
             ack = False
             if woke and text and bare_wake(text, cfg):   # said again: main.Room._asked listens again (twice at most)
-                got = "woke"
-            elif woke:                          # main.Room._asked(after_wake=True)
-                woke, got = False, "answered" if text and u.after_wake(text) else "-"
+                got, strict = "woke", misheard_greeting(text, cfg)
+            elif woke:                          # main.Room._asked(after_wake=True, strict=...)
+                woke, got = False, "answered" if u.after_wake_drop(e["text"], strict=strict) is None else "-"
             elif not text:
                 got = "-"
-            elif bare_wake(text, cfg):
+            elif bare_wake(text, cfg) or u.fragment(text):   # main.Room._bare_wake
                 woke, got = True, "woke"
+                strict = misheard_greeting(text, cfg) or not bare_wake(text, cfg)   # main.Room._wake_strict
             elif u.screen(text) and u(text, overheard=True).kind != IGNORE:
                 got, ack = "answered", has_wake_word(text, cfg)
             else:
@@ -63,7 +65,8 @@ def replay(cfg: dict, sessions: list[dict]) -> list[dict]:
 
 def score(lines: list[dict]) -> dict[str, tuple[int, int]]:
     """label -> (lines that went the right way, lines with that label)."""
-    return {k: (sum(1 for e in lines if e.get("label") == k and e["got"] == want),
+    right = lambda e, k, want: e["got"] != "answered" if k == "false" else e["got"] == want   # noqa: E731
+    return {k: (sum(1 for e in lines if e.get("label") == k and right(e, k, want)),
                 sum(1 for e in lines if e.get("label") == k)) for k, want in WANT.items()}
 
 
@@ -80,7 +83,8 @@ def main(argv=None) -> int:
     before = sum(1 for e in lines if e.get("answered"))
     now = sum(1 for e in lines if e["got"] == "answered")
     print(f"  answered: {now} (the rig then: {before}); woke: {sum(1 for e in lines if e['got'] == 'woke')}")
-    bad = [e for e in lines if (e.get("label") in WANT and e["got"] != WANT[e["label"]])
+    bad = [e for e in lines if (e.get("label") in WANT and e["got"] != WANT[e["label"]]
+                                and not (e["label"] == "false" and e["got"] == "woke"))
            or (e.get("label") is None and e["got"] != "-")]   # always mode answers real questions without "room"
     for e in bad:
         print(f"  MISS {e.get('label') or 'chatter':8} got {e['got']:8} {e['log']} {e['t']}  {e['text']!r}")
