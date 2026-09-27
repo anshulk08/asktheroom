@@ -24,6 +24,7 @@ __all__ = ["Answer", "answer", "ago", "clock", "area"]
 PLURAL = {"keys", "glasses", "pills"}
 NEAR_CM = 25.0          # 'near the X' only when another visible object is this close
 CHANGES_WINDOW_S = 600  # default look-back for 'what changed'
+ALSO_NAMED_MAX = 3      # 'what changed': other changed things named, the rest counted
 PUT_DOWN = ("PUT_BACK", "MOVED", "PUT_INSIDE", "COVERED", "EXITED_VIEW")
 UNNAMED = "thing I haven't been told about"
 
@@ -400,11 +401,23 @@ def _changes(events, cfg: dict, now: float, since: Optional[float]) -> Answer:
         pair = g if len(g) == 1 else [g[0], g[-1]]
         ph = _chain(pair, cfg, now) if len(pair) == 1 else \
             f"{_event_phrase(pair[0], cfg)}, then {_event_phrase(pair[1], cfg)} {ago(pair[1].wall, now)}"
-        sents.append(f"The {_dn(cfg, o)} {_be(_pk(cfg, o), True)} {ph}.")
+        s = f"The {_dn(cfg, o)} {_be(_pk(cfg, o), True)} {ph}."
+        if s not in sents:              # two unnamed things first seen together read the same
+            sents.append(s)
     if len(order) > 3:
-        rest = [_dn(cfg, o) for o in order[2:]]
-        lst = ", ".join(rest[:-1]) + f" and {rest[-1]}"
-        sents.append(f"The {lst} also changed.")
+        # A busy room changes hundreds of unnamed things: name a few, count the rest (a spoken list of
+        # every one ran to 21,000 characters on the rig and took the app down with it)
+        names: list[str] = []
+        for o in order[2:]:
+            n = _dn(cfg, o)
+            if n != UNNAMED and n not in names:
+                names.append(n)
+        names = names[:ALSO_NAMED_MAX]
+        others = len(order) - 2 - len(names)
+        if others:
+            names.append(f"{others} other thing" + ("s" if others > 1 else ""))
+        lst = names[0] if len(names) == 1 else ", ".join(names[:-1]) + f" and {names[-1]}"
+        sents.append(f"{'The ' if names[0][0].isalpha() else ''}{lst} also changed.")
     return Answer(" ".join(sents))
 
 
