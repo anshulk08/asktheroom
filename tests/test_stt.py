@@ -609,3 +609,20 @@ def test_speech_under_min_speech_ms_is_dropped(monkeypatch):
     assert s.hear() and s.last_speech
     s, _ = make(monkeypatch, quiet(10) + loud(5) + quiet(200))        # asked (a click, "Room!"): kept
     assert len(s.record_until_silence()) > 0
+
+
+@pytest.mark.parametrize("text, echo", [
+    ("Hey Room! Okay Room.", True), ("hey room okay room room where are my keys", True),
+    (stt.initial_prompt(CFG), True), ("Okay room.", False), ("Hey Room!", False), ("Room, where are my keys?", False),
+    ("", False)])
+def test_whisper_writing_its_prompt_back_is_an_echo(text, echo):
+    assert stt.echoes_prompt(text, stt.initial_prompt(CFG)) is echo, text
+
+
+def test_last_speech_s_is_the_speech_span_and_last_clip_s_the_recording(monkeypatch):
+    s, _ = make(monkeypatch, quiet(10) + loud(15) + quiet(200))
+    s.record_until_silence()
+    assert abs(s.last_speech_s - 15 * BLOCK / RATE) < 1e-6 and s.last_clip_s > s.last_speech_s
+    s, _ = make(monkeypatch, quiet(500), no_speech_s=1)
+    s.record_until_silence()
+    assert s.last_speech_s == 0.0

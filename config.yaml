@@ -46,7 +46,11 @@ proposals:
     hand_iou: 0.3
     hand_inside: 0.5
     self_iou: 0.5
-    self_inside: 0.8
+    self_inside: 0.8         # nested this much in a bigger proposal: a part of it (a keycap), whatever the scores
+    min_side_px: 12          # narrower boxes are slivers (full-res px; YOLOE boxes are ~19+ px above min_area_frac)
+    nest_small: 0.25         # a nested box under this share of its host's area ...
+    nest_keep_conf: 0.7      # ... scoring this or more is its own object (keys in a tub); other parts only carry on
+                             # a tracked thing (rig frames: laptop keys and cable parts scored under 0.7)
   change:
     work_px: 480             # working long side: Mac 2.3 ms/frame; Orin Nano ~13 ms (320: ~7.5, 640: ~17)
     ref_frames: 10           # empty-table reference = median of this many frames (startup, reset)
@@ -71,6 +75,7 @@ proposals:
     imgsz: 640
     half: false              # .pt on a GPU only; an .engine has its precision baked in
     masks: false
+    worn_near_px: 40         # a shoe / sock / jeans box this close to a person box is the person; alone, an object
   crops:                     # core/crops.py: best-clean + latest crop per object / proposal
     enabled: true
     size_px: 128
@@ -196,6 +201,8 @@ openworld:
   maybe_sim: 0.70            # a new thing is linked 'maybe the same as' an old one above this
   exemplar_max: 8            # appearance views kept per thing
   teach_recent_s: 30
+  forget_unnamed_s: 600      # an unnamed thing lost this long leaves the state; unnamed duplicates lost in place at
+                             # one spot fold into the oldest once no room zone can take them (room handoff_s)
 
 # Stretch (D15, D16)
 floor_zones: {}               # per zone: table edge, ArUco 4-7 positions in table cm, head preset pan/tilt
@@ -224,6 +231,10 @@ tts:
   elevenlabs_model: eleven_flash_v2_5
   piper_voice: en_US-lessac-medium
   output_device: null         # sounddevice index or part of the name (python -m voice.tts --devices); null = default (HDMI in the container)
+  keepalive_s: 480            # after this long with nothing played, a near-inaudible puff of noise between voice turns
+                              # keeps a Bluetooth speaker from switching itself off (~20 min on the Bose); 0 = off
+  keepalive_dbfs: -50         # its level (RMS); raise toward -45 if the speaker still sleeps
+  keepalive_ms: 300
 
 net:
   check_host: https://api.x.ai
@@ -268,6 +279,9 @@ demo_check:
   camera: /dev/v4l/by-id/usb-046d_Logitech_BRIO_3675F8D2-video-index0   # the rig's Brio; an index moves on replug
   home_cm: {}                 # object: [x, y] table cm of the demo layout; empty = check 7 only needs VISIBLE
   home_tol_cm: 5
+  patch_min_ncc: 0.5          # check 17: the table around the tag spot vs table_cal_view.png (normalized correlation,
+                              # light doesn't count); below this the camera or table moved since the calibration
+  view_max_shift: 0.03        # check 17: the whole table view moved more than this fraction of it: the camera moved
 
 understand:
   enabled: true               # false = rule parser only
@@ -365,6 +379,14 @@ visual_memory:
     archive_every_s: 30      # a frame is kept at least this often ...
     check_every_s: 1.0       # ... and on a settled scene change, checked this often
     change_thr: 0.3          # % of 128x72 thumbnail pixels changed by > 20 grey levels
+    # Change gate (rig hour 26 Sep 23:00 replayed, eval/archive_replay.py): people's legs at the table edge
+    # and the world's event churn made 2420 of 2424 saves an hour 'change'. With these: 562 an hour, every one
+    # of the hour's 83 tabletop states still kept (first frame 1.2 s in, median); with a tabletop outline
+    # (python -m core.table --outline, change_on_table) 353 an hour, 83 of 83.
+    change_on_table: true    # with a tabletop outline, only change inside it counts (legs, laps and couch don't)
+    events_need_pixels: true # a world event marks a change only when the view changed too
+    change_min_gap_s: 5      # change frames at least this far apart (the 30 s floor still applies)
+    settle_checks: 0         # wait for this many still checks before a change frame (2 lost 28 of 83 states)
     frame_px: 1280
     jpeg_quality: 80
     max_mb: 500              # disk cap for saved frames (oldest go first)
@@ -441,7 +463,9 @@ table_area:
 auto_name:
   enabled: true
   max_per_minute: 10          # Grok calls per minute; more new things wait their turn
-  min_confidence: 0.5         # a guess below this is not kept (and not asked again)
+  min_confidence: 0.65        # a guess below this is not kept (and not asked again). Grok says 0.6 when it is
+                              # unsure (277 of 706 rig guesses); eval/naming.py on 120 rig crops: 0.65 halves
+                              # wrong names (16.7 -> 9 of 59) for 4 fewer right ones (37 -> 33)
   retry_after_s: 30           # a failed call is tried once more this much later
 
 # Briefly unseen is not lost (core/world.py, rule 4). An object on the table that no rule explains (no hand
@@ -652,6 +676,17 @@ presence:
 # null decodes every frame (the old behaviour).
 capture:
   decode_fps: 20
+
+# The user's seat (core/viewframe.py). Table cm are the camera's frame (x left to right across its table view,
+# y from the view's far top edge to its bottom); what a person hears ("on your left", "carried off the far side") and the
+# phone's map are turned to the side of the table they sit at. front is that side, named in the CAMERA's
+# frame: bottom (the camera's side, as before), right, top or left. With an outline (table_area:) the map
+# is the tabletop squared to it. The phone's "I sit here" (POST /orientation) overrides front and is saved in
+# data/viewer.json (paths.viewer, if set), which wins at the next start. The world, the laser and the events
+# stay camera-frame.
+viewer:
+  front: bottom
+  sides: {}                   # optional labels per CAMERA side for the phone's "I sit here", e.g. {right: couch}
 
 # Object permanence (spec 0011, core/permanence.py): a registry of the objects that matter (the configured props
 # and taught things), each with reference crops and DINOv2 embeddings (the reid: model, used for the registry

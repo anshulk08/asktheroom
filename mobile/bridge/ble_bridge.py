@@ -7,6 +7,11 @@ next to the app's HTTP API on localhost:8000.
     GET /state (4 Hz) -> state notify: on change at most 2 Hz, heartbeat every 5 s, and right after
                         the phone subscribes
     status           -> read (unframed JSON) + notify on change (app up/down, fps, online, calibration)
+    orient write     -> POST /orientation {"front"} in a worker thread, then a fresh state notify
+
+Positions, the table size, edges and sweep actions reach the phone in the user's frame when /state carries
+"view" (core/viewframe.py; bleproto.view_of): the bridge keeps the latest one and turns them with its affine.
+An older app without "view": the camera frame, as before.
 
 Source "phone" is spoken AND aimed like "dashboard" (main.Room.ask_and_act answers every source
 except "sms" out loud and moves the laser; server/app.py's /ask accepts only {"dashboard", "phone"}).
@@ -186,6 +191,8 @@ class BridgeCore:
         self.mtus: dict[str, int] = {}
         self.app_up = False
         self.latest_state: Optional[dict] = None       # raw WorldState from GET /state
+        self.latest_view: Optional[dict] = None        # GET /state's "view" (None: an older app, camera frame)
+        self.latest_sides: Optional[dict] = None       # GET /state's "sides" (labels per camera side)
         self.last_sent_state: Optional[dict] = None    # compact, as sent
         self.state_sent_at = float("-inf")
         self.force_state = False
@@ -265,6 +272,7 @@ class BridgeCore:
                 if not self.app_up:
                     log.info("room app is up")
                 self.app_up, self.latest_state = True, st
+                self.note_view(body)
             self.room_messages(body)
         except Exception as ex:
             with self.lock:
@@ -273,6 +281,16 @@ class BridgeCore:
                     log.warning("room app unreachable: %s", ex)
                 self.app_up = False
         self.push_updates()
+
+    def note_view(self, body: dict) -> None:
+        """Keep GET /state's "view" and "sides" (the user's frame) for the next state and answers."""
+        with self.lock:
+            view = P.view_of(body.get("view"))
+            if (view or {}).get("front") != (P.view_of(self.latest_view) or {}).get("front"):
+                log.info("viewer frame: front %s", view["front"] if view else "none (camera frame)")
+            self.latest_view = body.get("view") if view else None
+            sides = body.get("sides")
+            self.latest_sides = sides if isinstance(sides, dict) else None
 
     def room_messages(self, body: dict) -> None:
         """New answers from the room (not the phone's own) and new notices, on the answer characteristic
@@ -292,12 +310,13 @@ class BridgeCore:
             for r in rs:
                 if r[idk] <= last or not r.get("text"):
                     continue
-                target = P.target_of(self.latest_state, r.get("point_at"))
+                target = P.target_of(self.latest_state, r.get("point_at"), self.latest_view)
+                action = P.view_action(r.get("action"), self.latest_view)
                 if key == "answers" and r.get("src") != self.source:
                     out.append(P.room_msg(str(r.get("src") or "voice"), r["text"], r.get("point_at"),
-                                          r.get("action"), target, q=str(r.get("q") or "")))
+                                          action, target, q=str(r.get("q") or "")))
                 elif key == "notices":
-                    out.append(P.room_msg("notice", r["text"], r.get("point_at"), r.get("action"), target,
+                    out.append(P.room_msg("notice", r["text"], r.get("point_at"), action, target,
                                           nid=r["id"], kind=r.get("kind")))
         with self.lock:
             live = self.notifying["answer"]
@@ -307,7 +326,8 @@ class BridgeCore:
 
     def compact_now(self) -> dict:
         with self.lock:
-            return P.compact_state(self.latest_state, self.current_table_cm(), self.clock())
+            return P.compact_state(self.latest_state, self.current_table_cm(), self.clock(),
+                                   self.latest_view, self.latest_sides)
 
     def current_table_cm(self) -> tuple[float, float]:
         """The table size, re-read when table_cal.json changes: a one-tag recalibration measures a new
@@ -362,6 +382,13 @@ class BridgeCore:
         if voice is not None:                   # the phone's voice settings, not a question: no answer
             threading.Thread(target=self.set_voice, args=(voice,), name="voice", daemon=True).start()
             return
+        orient = P.parse_orient(bytes(value))
+        if orient is not None:                  # the phone's "I sit here": no answer, the map turns
+            if not orient:
+                log.info("orient write with no valid side ignored: %r", bytes(value)[:80])
+                return
+            threading.Thread(target=self.set_orient, args=(orient,), name="orient", daemon=True).start()
+            return
         qid, text, err = P.parse_question(bytes(value))
         self.stats["questions"] += 1
         if err:
@@ -383,6 +410,21 @@ class BridgeCore:
         except Exception as ex:
             log.warning("voice settings not applied: %s", ex)
 
+    def set_orient(self, orient: dict) -> None:
+        """POST /orientation with the user's seat (worker thread), then a fresh state at once, so the phone's
+        map turns without waiting for the next poll. A failure is only logged (the phone can send it again)."""
+        try:
+            r = self.http.post_json("/orientation", orient, timeout=3.0)
+            log.info("orientation from the phone: %s", r)
+        except Exception as ex:
+            log.warning("orientation not applied: %s", ex)
+            return
+        with self.lock:
+            if P.view_of(r):                    # the reply is the new view: no need to wait for a poll
+                self.latest_view = r
+            self.force_state = True
+        self.push_updates()
+
     def answer(self, qid: int, text: str, t0: Optional[float] = None) -> dict:
         """POST /ask and build the answer message (blocking; worker thread)."""
         t0 = self.mono() if t0 is None else t0
@@ -392,12 +434,15 @@ class BridgeCore:
             target = None
             if point_at:
                 try:
-                    st = self.http.get_json("/state", timeout=3.0).get("state")
+                    body = self.http.get_json("/state", timeout=3.0)
+                    st = body.get("state")
                     with self.lock:
                         self.latest_state = st or self.latest_state
+                        self.note_view(body)
                 except Exception:
                     st = self.latest_state
-                target = P.target_of(st, point_at)
+                target = P.target_of(st, point_at, self.latest_view)
+            action = P.view_action(action, self.latest_view)
             msg = P.answer_msg(qid, True, str(r.get("text") or ""), point_at, action, target,
                                round((self.mono() - t0) * 1000))
         except RoomDown:

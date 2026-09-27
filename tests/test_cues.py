@@ -170,3 +170,74 @@ def test_no_chime_when_turned_off(tmp_path, cal_path):
     room.chime = False
     room._asked(time.monotonic())
     assert not any(e[0] == "cue" for e in log.events) and ("light", True) in log.events
+
+
+# -- the speaker keep-alive (a Bluetooth speaker switches itself off after ~20 min of silence)
+
+def test_keepalive_sound_is_quiet_shaped_noise_with_soft_edges():
+    pcm = np.frombuffer(cues.keepalive_pcm(-50, 0.3), np.int16).astype(np.float64) / 32767
+    rms = 20 * np.log10(np.sqrt(np.mean(pcm ** 2)))
+    assert len(pcm) == int(0.3 * cues.RATE) and abs(rms + 50) < 0.5
+    assert np.abs(pcm[:5]).max() < 1e-3 and np.abs(pcm[-5:]).max() < 1e-3 and np.count_nonzero(pcm) > len(pcm) // 2
+    assert 20 * np.log10(np.sqrt(np.mean((np.frombuffer(cues.keepalive_pcm(-45), np.int16) / 32767.0) ** 2))) > -46
+
+
+def keepalive_tts(monkeypatch, **kw):
+    got = []
+
+    class Out:
+        def write(self, b):
+            got.append(len(b))
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(tts, "open_output", lambda rate, device=None: Out())
+    return TTS(dict(CFG, tts=dict(CFG.get("tts") or {}, **kw))), got
+
+
+def test_keepalive_plays_only_after_keepalive_s_of_silence(monkeypatch):
+    t, got = keepalive_tts(monkeypatch, keepalive_s=480)
+    assert t.keepalive() is False and got == []                  # just started
+    t.last_audio_t -= 481
+    assert t.keepalive() is True and got == [2 * int(0.3 * cues.RATE)]
+    assert t.keepalive() is False and len(got) == 1              # the clock restarted
+    t.last_audio_t -= 481
+    t.play_cue(cues.chime_pcm("ack"), cues.RATE)                 # a chime counts as sound
+    assert t.keepalive() is False
+
+
+def test_keepalive_never_waits_for_or_overlaps_an_answer(monkeypatch):
+    t, got = keepalive_tts(monkeypatch, keepalive_s=480)
+    t.last_audio_t -= 481
+    with t._lock:                                                # an answer is playing
+        t0 = time.monotonic()
+        assert t.keepalive() is False and time.monotonic() - t0 < 0.05 and got == []
+    t2, got2 = keepalive_tts(monkeypatch, keepalive_s=0)        # off
+    t2.last_audio_t -= 10_000
+    assert t2.keepalive() is False and got2 == []
+
+
+def test_keepalive_on_a_stalled_speaker_gives_up_within_its_deadline(monkeypatch):
+    t, _ = keepalive_tts(monkeypatch, keepalive_s=480)
+    monkeypatch.setattr(tts, "open_output", lambda rate, device=None: time.sleep(5))
+    t.last_audio_t -= 481
+    t0 = time.monotonic()
+    assert t.keepalive() is False and time.monotonic() - t0 < 2.0 and not t.speaking
+
+
+def test_the_voice_loop_plays_the_keepalive_between_turns_never_while_listening(tmp_path, cal_path):
+    """Run it only when the voice loop is idle: never while the mic records or waits for the question after
+    "Room!", and the mic waits the chime's tail after it, so it can't hear the keep-alive."""
+    events = []
+    stt = FakeSTT("where is my wallet", overheard=["Room!", "hello there"])
+    room, _ = make_room(tmp_path, cal_path, stt=stt, clicker=FakeClicker())
+    room.tts.keepalive = lambda: events.append("keepalive") or True
+    hear, listen = stt.hear, stt.listen
+    stt.hear = lambda idle_s: events.append("hear") or hear(idle_s)
+    stt.listen = lambda: events.append("listen") or listen()
+    t = always_on(room)
+    assert wait_for(lambda: room.tts.said and events.count("hear") >= 3)
+    stop_voice(room, t)
+    assert events[:5] == ["keepalive", "hear", "listen", "keepalive", "hear"]
+    assert all(events[i] == "keepalive" for i in range(len(events)) if events[i - 1:i] == ["listen"])

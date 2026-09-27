@@ -21,11 +21,14 @@
  14 devices     the mic (stt.input_device) and speaker (tts.output_device) named in config are present
  15 memory      MemAvailable >= room_check.min_ram_mb; no NvMapMemAlloc / Traceback in the app log's tail
  16 namer       the room namer's queue is bounded (a burst of 100 crops keeps <= 8)
+ 17 table view  table_cal.json was made at this camera view, the scene around the tag spot still matches
+                table_cal_view.png, the view hasn't shifted, and a tabletop outline is set (else WARN)
 
     python demo_check.py --live           # the morning pass while the room app runs (it keeps the camera
-                                          # and mic): checks 6, 9, 10, 12-16 only
+                                          # and mic): checks 6, 9, 10, 12-17 only
 
-Missing hardware fails that check with the reason, so this also runs on a laptop. Parts (camera,
+[WARN] is not a failure (the run still passes) but says what to fix. Missing hardware fails that check
+with the reason, so this also runs on a laptop. Parts (camera,
 table, detector, laser) are built on first use and shared; one that fails to build fails every
 check that needs it, with the same reason. Every check has a deadline (DEADLINE_S: the detector and
 world checks 180 s for a TensorRT load, prompts 300 s, the rest 30 s): a check that hangs (a speaker
@@ -72,6 +75,7 @@ SPEECH_DBFS = -35.0             # loudest 32 ms block while someone talks, at ar
 SILENT_DBFS = -90.0             # below this the mic is sending digital zeros (muted or wrong device)
 
 Result = tuple[Optional[bool], str]         # ok (None = skipped), message
+WARN = "warning: "                          # (None, WARN + msg) prints [WARN]: not a failure, but act on it
 
 DEADLINE_S = {"detector": 180.0, "world": 180.0}   # may load the TensorRT engine
 MANUAL_DEADLINE_S = 300.0                          # checks that wait for a person to answer
@@ -459,7 +463,7 @@ def _check_tag(table, img) -> Result:
         saved = None
     if c is None or saved is None:
         return True, (f"one-tag calibration loaded ({w:g} x {h:g} cm); tag not in view, drift not checked "
-                      f"(put it down and say 'recalibrate' if the camera moved)")
+                      f"here (check 17 compares the scene; put it down and say 'recalibrate' if the camera moved)")
     err = float(np.linalg.norm(table.px_to_cm(c) - table.px_to_cm(np.array(saved)), axis=1).max())
     msg = f"tag {table.tag_id}, max drift {err:.2f} cm"
     if err >= MAX_MARKER_CM:
@@ -1014,7 +1018,206 @@ def check_namer(rig: Rig) -> Result:
     return n <= 8, f"100 crops queued offline -> {n} kept (cap 8); Grok calls <= {cap}/min"
 
 
-LIVE_CHECKS = {"network", "clock", "room memory", "room app", "grok", "devices", "memory", "namer"}
+# ---------------------------------------------------------------- table calibration vs the view now
+
+def _dcfg(rig: Rig) -> dict:
+    return rig.cfg.get("demo_check") or {}
+
+
+def table_view_now(rig: Rig, get: Optional[Callable] = None) -> tuple[Optional[np.ndarray], str]:
+    """(the table view as the app cuts it now, or None, and where it came from or why not). --live: the
+    app's /full.jpg?raw=1 (capture size, nothing drawn) cut to room_memory.table_view_rect. Otherwise the
+    camera: with room memory on its frame is the full view (any size of the capture's aspect), cut the
+    same way."""
+    import cv2
+
+    from core.room_view import cut
+    from core.table_area import view_rect
+    rect = view_rect(rig.cfg)
+    out = tuple(rig.cfg.get("frame_size_px") or (1280, 720))
+    if rig.live or get is not None:
+        if rect is None:
+            return None, "--live without room memory: the app's /frame.jpg carries the overlay"
+        import requests
+        url = f"{app_url(rig.cfg)}/full.jpg?raw=1"
+        try:
+            r = (get or requests.get)(url, timeout=10)
+        except Exception as e:                                  # noqa: BLE001
+            return None, f"no frame from {url} ({type(e).__name__})"
+        img = (cv2.imdecode(np.frombuffer(r.content, np.uint8), cv2.IMREAD_COLOR)
+               if r.status_code == 200 else None)
+        if img is None:
+            return None, f"no frame from {url} (HTTP {r.status_code})"
+        src = "the app's /full.jpg"
+    else:
+        f = rig.part("frames").latest()
+        if f is None or f.img is None:
+            return None, "no camera frame"
+        img, src = f.img, "the camera"
+        if rig.fake or rect is None:
+            return img, src
+    cw, ch = (rig.cfg.get("room_memory") or {}).get("capture_size") or (1920, 1080)
+    sx, sy = img.shape[1] / cw, img.shape[0] / ch
+    return cut(img, (rect[0] * sx, rect[1] * sy, rect[2] * sx, rect[3] * sy), out), src
+
+
+def patch_ncc(saved: np.ndarray, now: np.ndarray, box, mask_poly=None) -> tuple[Optional[float], int]:
+    """(normalized correlation, pixels compared) of two grey thumbnails inside box, outside mask_poly
+    (thumbnail px). Mean and contrast drop out, so a lighting change keeps it high; a moved camera or
+    table does not. None when there's too little to compare (under 50 px, or a flat patch)."""
+    import cv2
+    h, w = saved.shape[:2]
+    x1, y1, x2, y2 = (int(round(v)) for v in box)
+    x1, y1, x2, y2 = max(0, x1), max(0, y1), min(w, x2), min(h, y2)
+    m = np.zeros((h, w), np.uint8)
+    if x2 > x1 and y2 > y1:
+        m[y1:y2, x1:x2] = 1
+    if mask_poly is not None:
+        cv2.fillPoly(m, [np.round(np.asarray(mask_poly)).astype(np.int32).reshape(-1, 1, 2)], 0)
+    sel = m.astype(bool)
+    n = int(sel.sum())
+    if n < 50:
+        return None, n
+    a = cv2.GaussianBlur(saved.astype(np.float32), (0, 0), 1.0)[sel]
+    b = cv2.GaussianBlur(now.astype(np.float32), (0, 0), 1.0)[sel]
+    a, b = a - a.mean(), b - b.mean()
+    den = float(np.sqrt((a * a).sum() * (b * b).sum()))
+    if den <= 0 or a.std() < 2.0:
+        return None, n
+    return float((a * b).sum() / den), n
+
+
+def view_shift(saved: np.ndarray, now: np.ndarray) -> tuple[float, float, float]:
+    """(dx, dy, response): how far the whole thumbnail moved (phase correlation, Hanning window). Objects
+    moving on the table barely move the peak; response under ~0.05 means no clear answer."""
+    import cv2
+    a = cv2.GaussianBlur(saved.astype(np.float32), (0, 0), 1.0)
+    b = cv2.GaussianBlur(now.astype(np.float32), (0, 0), 1.0)
+    win = cv2.createHanningWindow((a.shape[1], a.shape[0]), cv2.CV_32F)
+    (dx, dy), resp = cv2.phaseCorrelate(a, b, win)
+    return float(dx), float(dy), float(resp)
+
+
+def _outline_state(rig: Rig, table) -> Optional[int]:
+    """Corners of the tabletop outline the app would use (a valid table_area.json, else config
+    table_area.polygon_cm), or None."""
+    from core.table_area import TableArea, area_path, load_saved
+    p = area_path(rig.cfg)
+    pts = load_saved(p, table.H) if p.exists() else None
+    if pts:
+        return len(pts)
+    area = TableArea.from_dict(rig.cfg.get("table_area"))
+    return len(area.polygon_cm) if area.defined else None
+
+
+def check_table_view(rig: Rig, get: Optional[Callable] = None) -> Result:
+    """The table calibration still fits the camera (spec 0010 rig, 27 Sep): table_cal.json's recorded view
+    is the config's (resolution-independent), the scene around the tag spot still matches the calibration
+    thumbnail (normalized correlation >= demo_check.patch_min_ncc, so lighting doesn't matter), the whole
+    view hasn't shifted over demo_check.view_max_shift of the frame, a tag still in view lands where it
+    did, and a tabletop outline is set. No view recorded (a table_cal.json from before) or no outline: WARN."""
+    import hashlib
+    import json
+
+    import cv2
+
+    import core.table
+    table = rig.part("table")
+    tag = bool(getattr(table, "tag_mode", False))
+    redo = ("lay the tag flat on the table and recalibrate" if tag else
+            "put markers 0-3 in view and recalibrate")
+    fails, warns, notes = [], [], []
+    try:
+        d = json.loads(open(table.cal_path).read())
+    except (OSError, ValueError) as e:
+        return False, f"can't read {table.cal_path} ({type(e).__name__}): recalibrate"
+    view = d.get("view")
+    cur = core.table.config_view(rig.cfg)
+    if not view:
+        warns.append("no view recorded: recalibrate (" + ("lay the tag flat on the table, say 'recalibrate')"
+                                                          if tag else "python -m core.table)"))
+    else:
+        same, why = core.table.same_view(view, cur)
+        if not same:
+            fails.append(f"calibrated at another view ({why}): {redo}")
+        else:
+            notes.append("calibrated at this view")
+
+    # the scene now against the calibration thumbnail
+    patch = d.get("tag_patch") or {}
+    png = os.path.join(os.path.dirname(os.path.abspath(table.cal_path)), str(patch.get("file") or ""))
+    saved = None
+    if view and patch.get("file"):
+        try:
+            raw = open(png, "rb").read()
+            if patch.get("sha1") in (None, hashlib.sha1(raw).hexdigest()):
+                saved = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_GRAYSCALE)
+        except OSError:
+            pass
+        if saved is None:
+            warns.append(f"no calibration image ({core.table.SIDECAR} missing or from another calibration): "
+                         "scene not compared; recalibrate")
+    if saved is not None and not fails:
+        img, src = table_view_now(rig, get)
+        if img is None:
+            warns.append(f"scene not compared: {src}")
+        else:
+            fails, notes = _compare_scene(rig, table, d, patch, saved, img, src, fails, notes)
+
+    n = _outline_state(rig, table)
+    if n is None:
+        warns.append("no tabletop outline: the map shows the camera's whole view; draw it "
+                     "(python -m core.table --outline)")
+    else:
+        notes.append(f"tabletop outline {n} corners")
+    if fails:
+        return False, "; ".join(fails + warns + notes)
+    if warns:
+        return None, WARN + "; ".join(warns + notes)
+    return True, "; ".join(notes)
+
+
+def _compare_scene(rig: Rig, table, d: dict, patch: dict, saved: np.ndarray, img: np.ndarray, src: str,
+                   fails: list, notes: list) -> tuple[list, list]:
+    import core.table
+    now = core.table.thumb(img, saved.shape[1])
+    if now.shape != saved.shape:
+        return fails + [f"{src} is {img.shape[1]}x{img.shape[0]}, not the calibration's shape: recalibrate"], notes
+    fw = float((d.get("view") or {}).get("frame_px", [img.shape[1]])[0])
+    k = saved.shape[1] / fw                                   # table-view px -> thumbnail px
+    notes = notes + [f"compared with {src}"]
+    c = core.table.tag_corners(img, table.tag_id, table._det) if getattr(table, "tag_mode", False) else None
+    quad = (d.get("markers_px") or {}).get("tag")
+    if c is not None and quad is not None:                    # the tag still lies there: its corners say it best
+        s = img.shape[1] / fw
+        err = float(np.linalg.norm(table.px_to_cm(c / s) - table.px_to_cm(np.array(quad)), axis=1).max())
+        if err >= MAX_MARKER_CM:
+            fails = fails + [f"the tag is {err:.2f} cm from where it was calibrated: camera or table moved; recalibrate"]
+        else:
+            notes = notes + [f"tag in view, drift {err:.2f} cm"]
+    if patch.get("box") and patch.get("mask") is not None:
+        min_ncc = float(_dcfg(rig).get("patch_min_ncc", 0.5))
+        box = [v * k for v in patch["box"]]
+        ncc, _ = patch_ncc(saved, now, box, np.asarray(patch["mask"], dtype=np.float64) * k)
+        if ncc is None:
+            notes = notes + ["tag spot too small or plain to compare"]
+        elif ncc < min_ncc:
+            fails = fails + [f"the scene at the tag spot changed (match {ncc:.2f} < {min_ncc:g}): camera or "
+                             "table moved; recalibrate"]
+        else:
+            notes = notes + [f"tag spot matches ({ncc:.2f})"]
+    dx, dy, resp = view_shift(saved, now)
+    frac = max(abs(dx) / saved.shape[1], abs(dy) / saved.shape[0])
+    max_frac = float(_dcfg(rig).get("view_max_shift", 0.03))
+    if frac > max_frac and resp >= 0.05:
+        fails = fails + [f"the view shifted {dx / k:+.0f},{dy / k:+.0f} px ({100 * frac:.1f}% of the frame): "
+                         "camera moved; recalibrate"]
+    else:
+        notes = notes + [f"view shift {100 * frac:.1f}%" + (" (unclear)" if resp < 0.05 else "")]
+    return fails, notes
+
+
+LIVE_CHECKS = {"network", "clock", "room memory", "room app", "grok", "devices", "memory", "namer", "table view"}
 
 CHECKS: list[tuple[str, Callable[[Rig], Result]]] = [
     ("camera", check_camera),
@@ -1033,6 +1236,7 @@ CHECKS: list[tuple[str, Callable[[Rig], Result]]] = [
     ("devices", check_devices),
     ("memory", check_memory),
     ("namer", check_namer),
+    ("table view", check_table_view),
 ]
 
 
@@ -1083,6 +1287,8 @@ def run_check_with_deadline(rig: Rig, name: str, fn: Callable[[Rig], Result],
 
 def line(i: int, name: str, ok: Optional[bool], msg: str, color: bool = True) -> str:
     tag, c = ("PASS", GREEN) if ok else ("SKIP", YELLOW) if ok is None else ("FAIL", RED)
+    if ok is None and msg.startswith(WARN):
+        tag, msg = "WARN", msg[len(WARN):]
     s = f"[{tag}] {i} {name:<12s} {msg}"
     return f"{c}{s}{RESET}" if color else s
 

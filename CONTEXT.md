@@ -85,6 +85,7 @@ rules can't read and of open questions (with a compact world state).
 | `core/config.py`, `config.yaml` | Config loaded as a plain dict (`load_config()`); the world also reads a typed `Config` view. All thresholds are here. A gitignored `config.local.yaml` (per device, e.g. the rig's `actuator: pca9685`) is merged over it; tests skip it (`ASKROOM_NO_LOCAL_CONFIG`). |
 | `core/capture.py` | Camera `FrameBuffer`, plus `VideoFileSource` with the same API for replays. |
 | `core/table.py`, `core/table_area.py` | ArUco / one-tag homography mapping pixels to table cm (`table_cal.json`); the operator's tabletop outline, where objects may appear (`table_area.json`, `python -m core.table --outline`). |
+| `core/viewframe.py` | The user's seat: camera-frame table cm turned (and cropped to the tabletop outline) to the side the user sits at, for spoken places, LLM facts and the phone map (`viewer:`, `POST /orientation`, `data/viewer.json`). The world and laser stay camera-frame. |
 | `core/detect.py` | YOLO-World (zero-shot, path A) or fine-tuned YOLO11 (path B, the plan), exported to TensorRT. |
 | `core/hands.py` | Stable `hand:N` ids across frames. |
 | `core/world.py`, `core/relations.py`, `core/geom.py`, `core/surround.py` | Deterministic, rule-based world model (covers, containers, holds, edges, parent chains). `surround.py` remembers the band of table around each object, so a cover no detector knows (a blanket) laid by hand reads as UNDER, not picked up (`unknown_cover:`). About 200 tests. |

@@ -281,6 +281,16 @@ def initial_prompt(cfg: dict, synonyms: bool = False) -> str:
     return f"Hey {wake}! Okay {wake}. {wake}, where are my {', '.join(names)}?"
 
 
+def echoes_prompt(text: str, prompt: str) -> bool:
+    """Whisper writing its own prompt back on noise: the whole prompt, or its first two sentences or more
+    ("Hey Room! Okay Room."). One greeting alone ("Okay room.") is what people say, so it isn't an echo."""
+    def words(s: str) -> list[str]:
+        return re.findall(r"[a-z0-9]+", re.sub(r"['’`]", "", s.lower()))
+    said, p = words(text), words(prompt)
+    two = len(words(" ".join(re.split(r"(?<=[.!?])\s+", prompt)[:2])))
+    return bool(said) and bool(p) and (said == p or (len(said) >= two and p[:len(said)] == said))
+
+
 def audio_ctx_for(n_samples: int, rate: int = RATE) -> int:
     """Encoder context for a clip of n_samples: 50 positions per second, plus slack, at most 1500."""
     return min(1500, int(math.ceil(n_samples / rate * CTX_PER_S)) + CTX_PAD)
@@ -586,6 +596,8 @@ class STT:
         self.prompt = initial_prompt(cfg or {}, synonyms=bool(s.get("prompt_synonyms", False)))
         self._backend, self._vad = backend, vad
         self.last_speech = False            # did the last recording contain speech?
+        self.last_speech_s = 0.0            # how long: first to last speech block (0 without speech)
+        self.last_clip_s = 0.0              # the whole recording, silence included
         self.last_stop = ""                 # why it ended: silence | max_s | click | no speech | no audio | tts
         self.log_text = True                # always-on mic: main.py turns this off, so chatter isn't logged
         self.last_ms: dict[str, float] = {}
@@ -694,6 +706,8 @@ class STT:
             first, note = None, f" (under {min_speech_s * 1000:.0f} ms of speech: discarded)"
         self.last_ms["record"] = 1000 * (time.monotonic() - t0)
         self.last_speech = first is not None
+        self.last_speech_s = (last - first + 1) * block_s if first is not None else 0.0
+        self.last_clip_s = len(blocks) * block_s
         self.last_stop = stop
         log.info("recorded %.2f s, stopped by %s, speech=%s%s", len(blocks) * block_s, stop, self.last_speech, note)
         if first is None:

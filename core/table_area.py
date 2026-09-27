@@ -16,7 +16,9 @@ by the operator. It is used in two places:
 With no outline (polygon_cm empty, the default) the whole calibrated view counts, as before.
 
 Setting it on the rig: python -m core.table --outline prints the steps; --outline-px takes the corners
-clicked in a camera frame (converted with the calibration), --outline takes them in table cm. They are
+clicked in a camera frame (converted with the calibration), --outline-full takes them in the full camera
+frame with room memory on (through room_memory.table_view_rect to table-view px, then the same), --outline
+takes them in table cm. They are
 saved to table_area.json next to table_cal.json with a hash of the calibration matrix: table cm move
 when the table is recalibrated (one-tag mode puts the origin at the view's corner), so a saved outline
 from another calibration is ignored with a warning. main.py applies a valid one at start
@@ -129,9 +131,9 @@ def apply_saved_area(cfg: dict) -> dict:
     return cfg
 
 
-def set_outline(table, cfg: dict, points: Sequence, px: bool = False) -> list[Point]:
+def set_outline(table, cfg: dict, points: Sequence, px: bool = False, extra: Optional[dict] = None) -> list[Point]:
     """Save the outline (corners in table cm, or image px with px=True) for this calibration; returns
-    it in table cm."""
+    it in table cm. extra: more keys for the file (polygon_full_px)."""
     if not getattr(table, 'ok', False):
         raise RuntimeError("table is not calibrated: run python -m core.table first")
     pts = np.asarray(points, dtype=np.float64).reshape(-1, 2)
@@ -142,8 +144,29 @@ def set_outline(table, cfg: dict, points: Sequence, px: bool = False) -> list[Po
     path = area_path(cfg)
     path.write_text(json.dumps({'polygon_cm': [list(p) for p in out],
                                 'polygon_px': pts.tolist() if px else None,
-                                'cal_hash': cal_hash(table.H), 't': time.time()}, indent=1))
+                                'cal_hash': cal_hash(table.H), 't': time.time(), **(extra or {})}, indent=1))
     return out
+
+
+def view_rect(cfg: dict) -> Optional[tuple[int, int, int, int]]:
+    """The table view's rect in full-frame px as main.open_frames cuts it, or None with room memory off."""
+    from core.room_types import RoomConfig
+    from core.room_view import default_rect
+    rc = RoomConfig.from_dict(cfg.get('room_memory'))
+    if not rc.enabled:
+        return None
+    out = tuple(cfg.get('frame_size_px') or (1280, 720))
+    return tuple(int(v) for v in (rc.table_view_rect or default_rect(rc.capture_size, rc.zoom, rc.ref_zoom, out)))
+
+
+def full_to_view(cfg: dict, pts: Sequence) -> list[Point]:
+    """Full camera frame px -> table-view px (the frame the calibration is in): TableView's cut, as a map."""
+    rect = view_rect(cfg)
+    if rect is None:
+        raise ValueError("room memory is off: the camera frame is the table view (use --outline-px)")
+    x1, y1, x2, y2 = rect
+    fw, fh = cfg.get('frame_size_px') or (1280, 720)
+    return [((x - x1) * fw / (x2 - x1), (y - y1) * fh / (y2 - y1)) for x, y in pts]
 
 
 # ----- python -m core.table --outline ------------------------------------------------------------
@@ -152,12 +175,18 @@ HOW = """Tabletop outline: where objects may appear. The calibration covers all 
 table plane (floor and chairs beside the table too); the outline is the tabletop itself.
 
   1. Take a frame from the running rig:   curl -o frame.jpg http://<jetson>:8000/frame.jpg
-  2. Open frame.jpg in a viewer that shows pixel coordinates and note the tabletop's corners in
+     Room memory on: take the whole view:  curl -o full.jpg http://<jetson>:8080/full.jpg
+  2. Open it in a viewer that shows pixel coordinates and note the tabletop's corners in
      order around the table (4, or more for an odd shape; stay a little inside the real edge).
+     Where the tabletop runs out of the table view (the box drawn on full.jpg), put the corner
+     on that box's edge.
   3. python -m core.table --outline-px 84,60 892,48 911,525 67,517 --image frame.jpg
      --image: the corners are that image's px (the dashboard frame is 960 px wide), scaled to the
      camera's, and the outline is drawn into frame_outline.jpg to check. Without it they are camera
      px (frame_size_px). Or --outline x,y ... in table cm.
+     Room memory on: python -m core.table --outline-full 88,552 356,550 246,704 2,704 2,633 --image full.jpg
+     (full.jpg is 1280 px wide, scaled to room_memory.capture_size; without --image the corners are
+     full camera px) -> full_outline.jpg.
   4. Restart the app. Recalibrating the table invalidates the outline: set it again after.
 
 New things are only born at least table_area.edge_cm inside the outline; config.yaml table_area:."""
@@ -175,8 +204,11 @@ def parse_points(tokens: Sequence[str]) -> list[Point]:
 
 
 def outline_main(table, cfg: dict, cm_tokens: Optional[Sequence[str]], px_tokens: Optional[Sequence[str]],
-                 image: Optional[str] = None) -> int:
-    """The --outline / --outline-px CLI: 0 saved (or the steps printed), 1 uncalibrated, 2 bad corners."""
+                 image: Optional[str] = None, full_tokens: Optional[Sequence[str]] = None) -> int:
+    """The --outline / --outline-px / --outline-full CLI: 0 saved (or the steps printed), 1 uncalibrated,
+    2 bad corners."""
+    if full_tokens:
+        return _outline_full(table, cfg, full_tokens, image)
     px = bool(px_tokens)
     tokens = list(px_tokens or cm_tokens or [])
     if not tokens:
@@ -214,4 +246,51 @@ def outline_main(table, cfg: dict, cm_tokens: Optional[Sequence[str]], px_tokens
         out = str(Path(image).with_name(Path(image).stem + '_outline.jpg'))
         cv2.imwrite(out, img)
         print(f"drawn into {out}")
+    return 0
+
+
+def _outline_full(table, cfg: dict, tokens: Sequence[str], image: Optional[str]) -> int:
+    """--outline-full: corners in the full camera frame (or --image's px, scaled to capture_size)."""
+    rect = view_rect(cfg)
+    if rect is None:
+        print("outline not saved: --outline-full needs room memory (room_memory.enabled); without it the "
+              "camera frame is the table view: use --outline-px")
+        return 2
+    try:
+        pts = parse_points(tokens)
+        if len(pts) < 3:
+            raise ValueError("an outline needs at least 3 corners")
+    except ValueError as e:
+        print(f"outline not saved: {e}")
+        return 2
+    img = cv2.imread(image) if image else None
+    if image and img is None:
+        print(f"outline not saved: could not read {image}")
+        return 2
+    cw, ch = (cfg.get('room_memory') or {}).get('capture_size') or (1920, 1080)
+    scale = (cw / img.shape[1], ch / img.shape[0]) if img is not None else (1.0, 1.0)
+    full = [(x * scale[0], y * scale[1]) for x, y in pts]
+    view = full_to_view(cfg, full)
+    try:
+        cm = set_outline(table, cfg, view, px=True, extra={'polygon_full_px': [list(p) for p in full]})
+    except RuntimeError as e:
+        print(f"outline not saved: {e}")
+        return 1
+    x1, y1, x2, y2 = rect
+    print("tabletop outline (table cm):", cm)
+    print("         (full camera px):", [tuple(round(v) for v in p) for p in full])
+    print("          (table view px):", [tuple(round(v) for v in p) for p in view])
+    out = [i + 1 for i, (x, y) in enumerate(full) if not (x1 - 2 <= x <= x2 + 2 and y1 - 2 <= y <= y2 + 2)]
+    if out:
+        print(f"corner(s) {out} lie outside the table view {list(rect)}: fine where the tabletop runs out of "
+              "it, else check them")
+    print(f"saved {area_path(cfg)}; restart the app to use it")
+    if img is not None:
+        s = np.array(scale)
+        cv2.rectangle(img, tuple(int(v) for v in np.round(np.array([x1, y1]) / s)),
+                      tuple(int(v) for v in np.round(np.array([x2, y2]) / s)), (255, 160, 0), 2)
+        cv2.polylines(img, [np.round(np.array(full) / s).astype(np.int32).reshape(-1, 1, 2)], True, (0, 255, 0), 2)
+        path = str(Path(image).with_name(Path(image).stem + '_outline.jpg'))
+        cv2.imwrite(path, img)
+        print(f"drawn into {path}")
     return 0

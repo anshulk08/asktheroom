@@ -18,6 +18,7 @@ from typing import Optional
 
 from core.config import display_name, load_config
 from core.types import Answer, Entity, Event, Intent, Point, Status
+from core.viewframe import View
 from voice.intents import AWAY, normalize, parse
 
 __all__ = ["Answer", "answer", "ago", "clock", "area"]
@@ -123,19 +124,8 @@ def clock(wall: float) -> str:
 
 
 def area(pos: Optional[Point], cfg: dict) -> str:
-    """Coarse table region for a table-cm point: 'near the top left', 'in the middle', ..."""
-    if pos is None:
-        return "somewhere on the table"
-    w, h = (cfg.get("table") or {}).get("size_cm", [90, 60])
-    col = "left" if pos[0] < w / 3 else "right" if pos[0] > 2 * w / 3 else ""
-    row = "top" if pos[1] < h / 3 else "bottom" if pos[1] > 2 * h / 3 else ""
-    if row and col:
-        return f"near the {row} {col}"
-    if row:
-        return f"near the {row} edge"
-    if col:
-        return f"on the {col} side"
-    return "in the middle"
+    """Coarse table region for a table-cm point, from the user's seat: 'at the far left', 'in the middle', ..."""
+    return View.from_cfg(cfg).area(pos)
 
 
 def _kind(world, cfg: dict, name: str) -> Optional[str]:
@@ -174,7 +164,7 @@ def _clause(e: Entity, world, cfg: dict) -> Optional[str]:
     if e.status == Status.HELD:
         return "being held right now"
     if e.status == Status.GONE:
-        return f"off the {e.edge} side of the table" if e.edge else "off the table"
+        return f"off {View.from_cfg(cfg).off_table(e.edge)}"
     return None
 
 
@@ -190,7 +180,7 @@ def _event_phrase(ev: Event, cfg: dict) -> str:
         "UNCOVERED": "uncovered",
         "PUT_INSIDE": f"put inside {_pn(cfg, ev.parent)}" if p else "put inside something",
         "TAKEN_OUT": f"lifted out of {_pn(cfg, ev.parent)}" if p else "lifted out of something",
-        "EXITED_VIEW": f"carried off the {ev.edge} side of the table" if ev.edge else "carried off the table",
+        "EXITED_VIEW": f"carried off {View.from_cfg(cfg).off_table(ev.edge)}",
         "LOST_TRACK": "lost from view",
         "CORRECTED": "given a corrected location",
         "FOUND": "found again",
@@ -306,7 +296,8 @@ def _where_table(obj: str, world, events, cfg: dict, now: float) -> Answer:
         return Answer(f"I haven't seen {Y.lower()} {n} yet. Put {_it(pk)} on the table and I'll keep track.")
 
     if e.status == Status.UNKNOWN or e.confidence < hedge:
-        return Answer(f"I lost track of {Y.lower()} {n}. I last saw {_it(pk)} {area(e.pos_cm, cfg)} "
+        at = area(e.pos_cm, cfg)
+        return Answer(f"I lost track of {Y.lower()} {n}. I last saw {_it(pk)} {at}{',' if ',' in at else ''} "
                       f"{ago(e.last_seen, now)}.", point_at=obj, action="circle")
 
     prob = " probably" if e.confidence < plain or e.candidates else ""
@@ -329,7 +320,7 @@ def _where_table(obj: str, world, events, cfg: dict, now: float) -> Answer:
 
     if e.status == Status.GONE:
         ev = events.last_of_type(obj, ["EXITED_VIEW"]) if events is not None else None
-        side = f"the {e.edge} side of the table" if e.edge else "the table"
+        side = View.from_cfg(cfg).off_table(e.edge)
         when = ago(ev.wall if ev else e.last_seen, now)
         return Answer(f"{Y} {n} {_be(pk, True)}{prob} carried off {side} {when}.",
                       point_at=obj, action=f"sweep:{e.edge}" if e.edge else "circle")
@@ -461,6 +452,8 @@ def _changes(events, cfg: dict, now: float, since: Optional[float]) -> Answer:
     for o in order[:3] if len(order) <= 3 else order[:2]:
         subj, g = said[o]
         pair = g if len(g) == 1 else [g[0], g[-1]]
+        if len(pair) == 2 and _event_phrase(pair[0], cfg) == _event_phrase(pair[1], cfg):
+            pair = pair[1:]             # 'covered up, then covered up': said once, with the latest time
         ph = _chain(pair, cfg, now) if len(pair) == 1 else \
             f"{_event_phrase(pair[0], cfg)}, then {_event_phrase(pair[1], cfg)} {ago(pair[1].wall, now)}"
         s = f"{subj[:1].upper()}{subj[1:]} {_be(_pk(cfg, o), True)} {ph}."
@@ -699,7 +692,7 @@ def _place(e: Entity, world, cfg: dict) -> str:
     if e.status == Status.HELD:
         return "is in someone's hand"
     if e.status == Status.GONE:
-        return f"went off the {e.edge} side of the table" if e.edge else "went off the table"
+        return f"went off {View.from_cfg(cfg).off_table(e.edge)}"
     return f"was last seen {area(e.pos_cm, cfg)}"
 
 

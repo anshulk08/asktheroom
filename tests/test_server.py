@@ -34,6 +34,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("TWILIO_AUTH_TOKEN", TOKEN)
     cfg = load_config()
     cfg["sms"] = {"whitelist": [GOOD]}
+    cfg["paths"] = dict(cfg["paths"], viewer=str(tmp_path / "viewer.json"))   # never the repo's data/viewer.json
     cfg["server"] = dict(cfg["server"], push_hz=50, mjpeg_fps=50)
     snaps = tmp_path / "snaps"
     events = EventLog(str(tmp_path / "e.db"), str(snaps))
@@ -258,8 +259,14 @@ def test_full_frame_view_with_zones_and_room_places(tmp_path):
         assert r.status_code == 200 and r.headers["content-type"] == "image/jpeg"
         img = cv2.imdecode(np.frombuffer(r.content, np.uint8), cv2.IMREAD_COLOR)
         assert img.shape[1] == 1280 and img.sum() > 0          # downscaled, zones drawn on black
+        raw = cv2.imdecode(np.frombuffer(c.get("/full.jpg?raw=1").content, np.uint8), cv2.IMREAD_COLOR)
+        assert raw.shape[:2] == (1080, 1920) and raw.max() < 8   # capture size, nothing drawn
+        view = cv2.imdecode(np.frombuffer(c.get("/frame.jpg?raw=1").content, np.uint8), cv2.IMREAD_COLOR)
+        assert view.shape[:2] == (720, 1280) and view.max() < 8
     with TestClient(create_app(cfg, demo_world(events), events, frames=None)) as c:
         assert c.get("/full.jpg").status_code == 404
+        assert c.get("/full.jpg?raw=1").status_code == 404 and c.get("/frame.jpg?raw=1").status_code == 404
+        assert c.get("/frame.jpg").status_code == 200           # the placeholder, drawn on
 
 
 def test_voice_sets_the_rigs_voice_and_503_without_a_speaker(tmp_path):
@@ -279,3 +286,81 @@ def test_voice_sets_the_rigs_voice_and_503_without_a_speaker(tmp_path):
         assert client.post("/voice", content=b"nope").status_code == 400
     with TestClient(create_app(cfg, demo_world(events), events)) as client:
         assert client.post("/voice", json={"engine": "grok"}).status_code == 503
+
+
+# -- the user's seat (core/viewframe.py): GET /state "view", POST /orientation, the saved choice
+
+def _seat_cfg(tmp_path, front="bottom"):
+    cfg = load_config()
+    cfg["paths"] = dict(cfg["paths"], viewer=str(tmp_path / "viewer.json"))
+    cfg["table"] = dict(cfg["table"], size_cm=[100, 60])
+    cfg["table_area"] = dict(cfg.get("table_area") or {}, polygon_cm=[])
+    cfg["viewer"] = {"front": front, "sides": {}}
+    return cfg
+
+
+def test_state_carries_the_view_and_orientation_turns_and_saves_it(tmp_path):
+    import json
+    cfg = _seat_cfg(tmp_path)
+    events = EventLog(":memory:", str(tmp_path / "s"))
+    with TestClient(create_app(cfg, demo_world(events), events)) as c:
+        body = c.get("/state").json()
+        assert body["view"] == {"front": "bottom", "table": [100.0, 60.0],
+                                "m": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], "outline": False}
+        assert "sides" not in body
+        with c.websocket_connect("/ws") as ws:
+            assert ws.receive_json()["view"]["front"] == "bottom"
+        r = c.post("/orientation", json={"front": "Right"})
+        assert r.status_code == 200
+        v = r.json()
+        assert v["front"] == "right" and v["table"] == [60.0, 100.0] and v["outline"] is False
+        (a, b, cc), (d, e, f) = v["m"]
+        assert (a * 90 + b * 5 + cc, d * 90 + e * 5 + f) == pytest.approx((55, 90))   # the camera's top right
+        assert cfg["viewer"]["front"] == "right" and c.get("/state").json()["view"] == v
+        assert json.loads((tmp_path / "viewer.json").read_text())["front"] == "right"
+
+
+@pytest.mark.parametrize("body", [{"front": "sideways"}, {"front": 3}, {}, [1], "right"])
+def test_orientation_rejects_a_bad_front(tmp_path, body):
+    cfg = _seat_cfg(tmp_path)
+    events = EventLog(":memory:", str(tmp_path / "s"))
+    with TestClient(create_app(cfg, demo_world(events), events)) as c:
+        assert c.post("/orientation", json=body).status_code == 400
+        assert c.post("/orientation", content=b"not json").status_code == 400
+        assert cfg["viewer"]["front"] == "bottom" and not (tmp_path / "viewer.json").exists()
+
+
+def test_orientation_null_goes_back_to_the_configured_seat(tmp_path):
+    """The phone's "use the rig's default": front null restores config viewer.front and forgets the saved seat."""
+    (tmp_path / "viewer.json").write_text('{"front": "top", "t": 1}')
+    cfg = _seat_cfg(tmp_path, front="right")
+    events = EventLog(":memory:", str(tmp_path / "s"))
+    with TestClient(create_app(cfg, demo_world(events), events)) as c:
+        assert c.get("/state").json()["view"]["front"] == "top"
+        r = c.post("/orientation", json={"front": None})
+        assert r.status_code == 200 and r.json()["front"] == "right"
+        assert cfg["viewer"]["front"] == "right" and not (tmp_path / "viewer.json").exists()
+
+
+def test_create_app_applies_a_saved_seat_and_state_carries_sides(tmp_path):
+    (tmp_path / "viewer.json").write_text('{"front": "top", "t": 1}')
+    cfg = _seat_cfg(tmp_path)
+    cfg["viewer"]["sides"] = {"right": "couch"}
+    events = EventLog(":memory:", str(tmp_path / "s"))
+    with TestClient(create_app(cfg, demo_world(events), events)) as c:
+        assert cfg["viewer"]["front"] == "top"
+        body = c.get("/state").json()
+        assert body["view"]["front"] == "top" and body["sides"] == {"right": "couch"}
+
+
+def test_canned_gone_answer_is_worded_from_the_seat_and_sweeps_the_camera_edge(tmp_path):
+    cfg = _seat_cfg(tmp_path)
+    events = EventLog(":memory:", str(tmp_path / "s"))
+    world = demo_world(events)
+    assert world.get("phone").edge == "left"                     # demo_world: the phone left by the camera's left
+    with TestClient(create_app(cfg, world, events)) as c:
+        r = c.post("/ask", json={"text": "where is my phone?"}).json()
+        assert r["text"] == "The phone was carried off the table on your left." and r["action"] == "sweep:left"
+        c.post("/orientation", json={"front": "right"})
+        r = c.post("/ask", json={"text": "where is my phone?"}).json()
+        assert r["text"] == "The phone was carried off the far side of the table." and r["action"] == "sweep:left"

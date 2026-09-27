@@ -18,12 +18,12 @@ from typing import Optional
 
 from core.config import display_name
 from core.types import Event, Status
-from voice.answers import area
+from core.viewframe import View
+from voice.answers import UNNAMED, area
 
 __all__ = ["pill_claim", "pill_guard", "say_time", "say_clock", "say_oclock", "say_day", "spoken", "plural",
            "your", "where_sentence", "event_place", "second_person", "med_phrase", "NEUTRAL_PILLS"]
 
-UNNAMED = "thing I haven't been told about"
 PLURAL = {"keys", "glasses", "pills", "headphones", "scissors", "earbuds"}
 
 # ---------------------------------------------------------------- the pill rule
@@ -172,8 +172,8 @@ def where_sentence(world, cfg: dict, obj: str, named: bool = False) -> tuple[str
     if e.status == Status.HELD:
         return f"Someone is holding {obj_pron} right now.", "point"
     if e.status == Status.GONE:
-        side = f"the {e.edge} side of the table" if e.edge else "the table"
-        return f"{subj} {was} carried off {side}.", (f"sweep:{e.edge}" if e.edge else "circle")
+        return (f"{subj} {was} carried off {View.from_cfg(cfg).off_table(e.edge)}.",
+                f"sweep:{e.edge}" if e.edge else "circle")
     if e.pos_cm is None and e.last_seen is None:
         return f"I haven't seen {obj_pron} yet.", None
     return (f"I lost track of {obj_pron}; I last saw {'them' if pl else 'it'} {area(e.pos_cm, cfg)}.",
@@ -181,7 +181,7 @@ def where_sentence(world, cfg: dict, obj: str, named: bool = False) -> tuple[str
 
 
 def event_place(ev: Event, world, cfg: dict) -> Optional[str]:
-    """Where an event left its object: 'inside the box', 'on the table, near the top left', or None for
+    """Where an event left its object: 'inside the box', 'on the table, at the far left', or None for
     events that leave it nowhere in particular (picked up, lost from view)."""
     p = ev.parent if ev.parent and ev.parent != "unknown" and not ev.parent.startswith("hand") else None
     t = str(ev.type)
@@ -190,7 +190,7 @@ def event_place(ev: Event, world, cfg: dict) -> Optional[str]:
     if t == "COVERED":
         return f"under the {spoken(world, cfg, p)}" if p else "under something"
     if t == "EXITED_VIEW":
-        return f"off the {ev.edge} side of the table" if ev.edge else "off the table"
+        return f"off {View.from_cfg(cfg).off_table(ev.edge)}"
     if t in ("PUT_BACK", "MOVED", "APPEARED", "FOUND", "TAKEN_OUT", "UNCOVERED", "CORRECTED"):
         return f"on the table, {area(ev.to_cm, cfg)}" if ev.to_cm else "on the table"
     return None

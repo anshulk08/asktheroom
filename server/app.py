@@ -4,13 +4,23 @@ create_app(cfg, world, events, frames=None, ask_fn=None, table=None, care=None) 
 
   GET  /                 dashboard (server/web/index.html; everything served locally, works offline)
   GET  /video            MJPEG of the latest frame with the world drawn on it (server/overlay.py)
+  GET  /frame.jpg, /full.jpg   one frame drawn on like /video (the table view; room memory: the whole frame);
+                         ?raw=1 the camera frame as captured, nothing drawn (full.jpg at capture size)
   WS   /ws             WorldState JSON at server.push_hz plus new events since the last push
   GET  /events?since=t   events with wall >= t (oldest first), each with a snapshot_url
   GET  /snapshots/{name} one event snapshot jpg (snapshot dir only)
   POST /ask              {"text", "source"?: "dashboard" | "phone"} -> {"text", "point_at", "action", "latency_ms"}
   POST /voice            {"engine"?: "grok" | "rig" | "builtin", "grok_voice"?, "speed"?} the phone app's
                          voice for the rig's speaker (BLE bridge) -> the stored {"engine", "grok_voice", "speed"}
+  POST /orientation      {"front": "bottom" | "right" | "top" | "left" | null} the user's seat, the camera-frame side of
+                         the table they sit at (the phone's "I sit here", BLE bridge; core/viewframe.py): used by
+                         the next answer, saved in data/viewer.json (null: back to config viewer.front) -> the new
+                         view {"front", "table", "m", "outline"}
   POST /sms              Twilio webhook (signature checked, whitelist only)
+
+/state and /ws also carry "view": the user's frame (core/viewframe.py View.to_json(): {"front", "table": [w, h]
+cm from the seat, "m": 2x3 affine camera table cm -> viewer cm, "outline"}) and, when config viewer.sides is
+set, "sides": {camera side: label}. Positions in "state" stay camera-frame; the BLE bridge turns them.
 
 With care=voice.care.Care (reminders, reports; see voice/care.py), additively:
   /state and /ws         also carry "notices": [{id, t, kind, text, point_at, acknowledged, ...}] and
@@ -49,6 +59,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from core.types import Answer, Event, Status
+from core.viewframe import View, apply_saved, set_front
 from server import overlay, scoreboard
 
 log = logging.getLogger("askroom.server")
@@ -149,9 +160,9 @@ def canned_ask(cfg: dict, world) -> AskFn:
             return Answer(f"The {name} {is_} under the {spoken(e.parent)}.", point_at=obj, action="point")
         if st == "HELD":
             return Answer(f"Someone is holding the {name} right now.")
-        if st == "GONE":
-            side = e.edge or "edge"
-            return Answer(f"The {name} {'were' if is_ == 'are' else 'was'} carried off the {side} side of the table.",
+        if st == "GONE":                      # spoken from the user's seat; the sweep is the laser's (camera frame)
+            side = View.from_cfg(cfg).off_table(e.edge)
+            return Answer(f"The {name} {'were' if is_ == 'are' else 'was'} carried off {side}.",
                           action=f"sweep:{e.edge}" if e.edge else None)
         return Answer(f"I lost track of the {name}. I last saw {'them' if is_ == 'are' else 'it'} here.", point_at=obj, action="circle")
 
@@ -162,6 +173,7 @@ def canned_ask(cfg: dict, world) -> AskFn:
 
 def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = None,
                table=None, care=None, voice_fn: Optional[Callable[..., Any]] = None) -> FastAPI:
+    apply_saved(cfg)                     # the seat the phone chose last time (data/viewer.json), into cfg
     scfg = cfg.get("server") or {}
     push_period = 1.0 / float(scfg.get("push_hz", 5) or 5)
     mjpeg_period = 1.0 / float(scfg.get("mjpeg_fps", 10) or 10)
@@ -210,6 +222,13 @@ def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = 
 
     def meta() -> dict:
         out = {"last_answer": app.state.last_answer, "server_t": time.time(), "answers": list(app.state.answers)}
+        try:                                                   # the user's frame, for the phone (BLE bridge)
+            out["view"] = View.from_cfg(cfg).to_json()
+        except Exception:
+            log.exception("viewer frame failed")
+        sides = (cfg.get("viewer") or {}).get("sides")
+        if isinstance(sides, dict) and sides:
+            out["sides"] = {str(k): str(v) for k, v in sides.items()}
         if care is not None:                                   # care layer: additive key
             try:
                 out["notices"] = care.notices_json()
@@ -278,9 +297,21 @@ def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = 
                      "X-Accel-Buffering": "no"},
         )
 
+    def render_raw(full: bool) -> Optional[bytes]:
+        """The camera frame as captured, nothing drawn (?raw=1): the table view, or the full frame at capture
+        size. For reading tabletop corners (python -m core.table --outline-full) and demo_check's view check."""
+        get = getattr(frames, "latest_full" if full else "latest", None)
+        f = get() if callable(get) else None
+        if f is None or getattr(f, "img", None) is None:
+            return None
+        ok, buf = cv2.imencode(".jpg", f.img, [cv2.IMWRITE_JPEG_QUALITY, 92])
+        return buf.tobytes() if ok else None
+
     @app.get("/frame.jpg")
-    async def frame_jpg():
-        jpg = await asyncio.to_thread(render_jpeg)
+    async def frame_jpg(raw: bool = False):
+        jpg = await asyncio.to_thread(render_raw, False) if raw else await asyncio.to_thread(render_jpeg)
+        if jpg is None:
+            raise HTTPException(404, "no camera frame yet")
         return Response(jpg, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
     # -- room memory (spec 0009): the whole camera frame with the zones, the table view and room places
@@ -325,8 +356,8 @@ def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = 
         return buf.tobytes() if ok else None
 
     @app.get("/full.jpg")
-    async def full_jpg():
-        jpg = await asyncio.to_thread(render_full)
+    async def full_jpg(raw: bool = False):
+        jpg = await asyncio.to_thread(render_raw, True) if raw else await asyncio.to_thread(render_full)
         if jpg is None:
             raise HTTPException(404, "no full camera frame (room memory is off)")
         return Response(jpg, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
@@ -439,6 +470,21 @@ def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = 
             raise HTTPException(400, "expected a JSON object")
         v = voice_fn(body.get("engine"), body.get("grok_voice"), body.get("speed"))
         return JSONResponse(dataclasses.asdict(v) if dataclasses.is_dataclass(v) else v)
+
+    @app.post("/orientation")
+    async def orientation_route(request: Request):
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(400, "expected JSON {\"front\": \"bottom\" | \"right\" | \"top\" | \"left\"}")
+        if not isinstance(body, dict) or "front" not in body:
+            raise HTTPException(400, "expected a JSON object with \"front\"")
+        try:
+            front = await asyncio.to_thread(set_front, cfg, body["front"])
+        except ValueError as ex:
+            raise HTTPException(400, str(ex))
+        log.info("viewer: the user sits at the camera's %s side", front)
+        return JSONResponse(View.from_cfg(cfg).to_json())
 
     @app.post("/sms")
     async def sms(request: Request):

@@ -10,21 +10,25 @@ keeps its entity with merged_into set.
 Identity is causal first; appearance only confirms. Each proposal goes through ordered rules, not a
 weighted score, so every decision can be explained in one sentence:
   per batch, while the thing is in view or in a hand (continuity):
-    merge  one proposal covering two visible things' last boxes: both are kept where they were, at
-           ambiguity_penalty, until they come apart (then nearest, or appearance if decisive)
     (b)    a visible thing: the nearest proposal within gate_cm, of a size like its latest box (or,
            while an arm hides part of it, over the box it rests in: the whole of it again)
     (b)    a HELD thing: a proposal at its holding hand's recent boxes
-  otherwise the proposal is a candidate; after the k-of-n debounce, clear of hands:
+    merge  one proposal covering two visible things' last boxes: those not seen on their own are kept
+           where they were, at ambiguity_penalty, until they come apart (then nearest, or appearance if
+           decisive); the blob itself is never a candidate
+  otherwise the proposal is a candidate; after the k-of-n debounce, clear of hands, and not lying on a
+  thing in view (the same box, or the same spot at a like size: that thing seen twice):
     (a)    causal: it came out of a container / cover that holds hidden things (a hand touched that
            parent since they hid), or appeared where an UNDER thing lay: that child. Several
            children: appearance may pick one, else a new thing linked to all of them
-    (b)    a thing lost in place (no hand involved) seen again at the same spot; with thing_identity:
+    (b)    a thing lost in place (no hand involved) seen again at the same spot (the nearest, if several
+           were lost there); with thing_identity:
            rebirth_s, also one lost recently after a pick-up, a false pick-up or an edge exit
     (c)    appearance resurrects an archived thing only above resurrect_sim AND by resurrect_margin
            over every other thing (a twin on the table blocks it)
     (d)    a new thing, with maybe_same_as links to archived things that look similar; only inside
-           the tabletop outline clear of its edge band (table_area:, core/table_area.py), and never
+           the tabletop outline clear of its edge band (table_area:, core/table_area.py; its centre or,
+           for a tall thing at the far edge, where it stands), and never
            from a proposal flagged occluded (inside a person box). Either can still be an existing
            thing, so one slid off the table leaves as itself and a carried one stays itself
 Exemplars (per-thing appearance banks) are learned only from isolated, confident, unambiguous
@@ -57,6 +61,8 @@ OPEN_INSIDE = 0.8   # this much of a visible object's box within an open contain
 STARTUP_S = 3.0     # configured objects first seen this soon after the first batch were not put down
 ARTICLES = {'my', 'the', 'a', 'an', 'your', 'our', 'this', 'that', 'his', 'her', 'their'}
 NEG = float('-inf')
+SAME_SIZE = 2.0     # 'a like size' for the same-spot birth veto: areas within this factor
+FORGOTTEN_MAX = 1000  # forgotten things still brought back when seen again at their spot (rule (b))
 REST_IOU = 0.5      # a proposal this much over the box a partly hidden thing rests in: the whole of it
 CROSS_UV = 1.0      # a hand in and out of a thing container on opposite sides of its middle, this far
                     # apart (in half-widths): it crossed the thing carrying something past, not into it
@@ -95,6 +101,8 @@ class ThingsConfig:
     exemplar_min_px: int = 16
     exemplar_dup_sim: float = 0.97     # a view this close to a stored one adds nothing
     teach_recent_s: float = 30.0       # no teach zone: things put down within this long
+    forget_unnamed_s: float = 600.0    # an unnamed thing lost (UNKNOWN / GONE) this long leaves the state;
+                                       # unnamed lost ones at one spot fold into the oldest at once. 0 = never
 
     @classmethod
     def from_config(cls, cfg) -> 'ThingsConfig':
@@ -217,6 +225,13 @@ def _grow(box, d: float):
     return (box[0] - d, box[1] - d, box[2] + d, box[3] + d)
 
 
+def _footprint(box):
+    """Where a box stands on the table: the middle of its side nearest the camera (table y grows toward
+    it). A tall thing at the far edge (a speaker, a paper bag, the pill bottle) has its centre past the
+    edge while it stands on the table."""
+    return ((box[0] + box[2]) / 2, box[3])
+
+
 def _box_dist(p, box) -> float:
     """Distance from point p to box (0 inside)."""
     dx = max(box[0] - p[0], 0.0, p[0] - box[2])
@@ -254,6 +269,8 @@ class ThingRules:
         self._merged: dict[str, frozenset] = {}         # thing -> things sharing its merged proposal
         self._unsure_until: dict[str, float] = {}       # thing -> no exemplar learning before this
         self._learn_t: dict[str, float] = {}
+        self._forget_t = NEG                            # last housekeeping pass (_forget_lost)
+        self._forgotten: dict[str, None] = {}           # forgotten lost things, oldest first (FORGOTTEN_MAX)
         self._clean: dict[str, Detection] = {}          # this batch's unambiguous associations
         self._trail: dict[str, deque] = {}              # hand -> recent (t, box_cm)
         self._batch_boxes: list[tuple] = []             # this batch's object / proposal / hand boxes
@@ -432,9 +449,10 @@ class ThingRules:
                              + [h.box_cm for h in dets.hands])
         if not props and not self._cands:
             return []
-        props = self._match_merged(props, seen)
+        props, blobs = self._merged_blobs(props)
         props = self._match_visible(props, seen)
         props = self._match_held(props, seen)
+        self._match_merged(blobs, seen)
         return self._track_candidates(props, seen, dets.hands)
 
     def _proposals(self, items, seen, hands) -> list[Detection]:
@@ -466,28 +484,41 @@ class ThingRules:
                 and self.entities[n].merged_into is None and self.entities[n].zone == 'table'
                 and self.entities[n].box_cm is not None]
 
-    def _match_merged(self, props, seen) -> list[Detection]:
-        """One proposal over 2+ visible things' last boxes: keep every one of them where it was (their
-        identities are not decidable inside the blob), at a confidence penalty, and learn nothing."""
+    def _merged_blobs(self, props) -> tuple[list[Detection], list[tuple[Detection, list[str]]]]:
+        """Splits off the proposals lying over 2+ visible things' last boxes (and plainly none of them):
+        (the rest, [(blob, the things under it)]). A blob is never a candidate: what it shows is known."""
         tc = self._tcfg
         vis = self._visible_things()
-        rest = []
+        rest, blobs = [], []
         for d in props:
             inside = [n for n in vis if geom.overlap_frac(d.box_cm, self.entities[n].box_cm) >= tc.merge_cover]
             if len(inside) < 2 or any(geom.iou(d.box_cm, self.entities[n].box_cm) >= tc.member_iou for n in inside):
                 rest.append(d)
-                continue
+            else:
+                blobs.append((d, inside))
+        return rest, blobs
+
+    def _match_merged(self, blobs, seen) -> None:
+        """After the one-to-one rules: a thing under a blob that no proposal of its own explained stays
+        where it was (its identity is not decidable inside the blob), at a confidence penalty, learning
+        nothing. One still seen on its own is just that: holding it here too left its own proposal
+        unmatched, and it was born again every few seconds (on the rig, 100 things over one cable pile)."""
+        tc = self._tcfg
+        for d, inside in blobs:
             group = frozenset(inside)
             for n in inside:
+                if n in seen:
+                    continue
                 ent = self.entities[n]
                 seen[n] = Detection(THING, d.conf, self._box_px.get(n, d.box_px), ent.pos_cm, ent.box_cm)
                 self._merged[n] = group
                 ent.confidence = min(ent.confidence, self.cfg.ambiguity_penalty)
                 self._unsure_until[n] = self._now + tc.ambiguous_s
-        return rest
 
     def _match_visible(self, props, seen) -> list[Detection]:
-        """Rule (b), in view: each visible thing takes its nearest proposal within gate_cm."""
+        """Rule (b), in view: each visible thing takes its nearest proposal within gate_cm. An occluded one
+        (a part of a bigger proposal, or inside a person) counts same_spot_cm farther: a thing that took a
+        part of itself while its whole box flickered kept it, and the whole box was born again."""
         tc = self._tcfg
         names = [n for n in self._visible_things() if n not in seen]
         pairs = []
@@ -496,7 +527,7 @@ class ThingRules:
                 ent = self.entities[n]
                 dd = geom.dist(d.center_cm, ent.pos_cm)
                 if dd <= tc.gate_cm and self._size_fits(n, d.box_cm):
-                    pairs.append((dd, i, n))
+                    pairs.append((dd + (tc.same_spot_cm if d.occluded else 0.0), i, n))
         taken = self._greedy(pairs, props, seen)
         self._resolve_splits(taken, props, seen)
         return [d for i, d in enumerate(props) if i not in taken]
@@ -610,6 +641,8 @@ class ThingRules:
         candidate's bits, so the world's observation rule reports TAKEN_OUT / UNCOVERED / CORRECTED /
         MOVED as for a configured object) or a new thing."""
         d = c.det
+        if self._on_a_thing(d, seen):
+            return []                          # a thing in view seen twice (two boxes on one object)
         vec = self._embed(d.box_px)
         verdict, links = self._identify(d, vec, seen, self._may_create(d))
         if verdict == 'skip':
@@ -620,6 +653,24 @@ class ThingRules:
             return []
         return self._new_thing(d, c.bits, vec, links, seen)
 
+    def _on_a_thing(self, d: Detection, seen) -> bool:
+        """The proposal lies on a thing in view (visible, or placed this batch): the same box (IoU >=
+        dup_iou), or the same spot at a like size (either box holds the other's centre, areas within
+        SAME_SIZE). Then it is that thing seen twice, never a new one nor a lost one brought back beside
+        it. A phone laid on a notebook is neither (a third of its box, and far smaller)."""
+        tc = self._tcfg
+        boxes = [self.entities[n].box_cm for n in self._visible_things()]
+        boxes += [s.box_cm for n, s in seen.items() if is_thing(n) and s.box_cm is not None]
+        a = geom.area(d.box_cm)
+        for b in boxes:
+            if geom.iou(d.box_cm, b) >= tc.dup_iou:
+                return True
+            ab = geom.area(b)
+            if a > 0 and ab > 0 and max(a, ab) / min(a, ab) <= SAME_SIZE and (
+                    geom.contains_point(b, d.center_cm) or geom.contains_point(d.box_cm, geom.center(b))):
+                return True
+        return False
+
     def _may_create(self, d: Detection) -> bool:
         """A proposal may start a NEW identity only inside the tabletop outline, clear of its edge
         band (table_area:), and only if it is not flagged occluded (mostly inside a person box: a
@@ -627,7 +678,7 @@ class ThingRules:
         if self._vetoes and any(until > (self._wall or 0) and b[0] - r <= d.center_cm[0] <= b[2] + r
                                 and b[1] - r <= d.center_cm[1] <= b[3] + r for b, until, r in self._vetoes):
             return False                    # where retired clutter lay (retire_thing)
-        return not d.occluded and self._area.interior(d.center_cm)
+        return not d.occluded and (self._area.interior(d.center_cm) or self._area.interior(_footprint(d.box_cm)))
 
     def _identify(self, d: Detection, vec, seen, may_create: bool = True):
         """Ordered identity rules (a) causal, (b) continuity, (c) decisive appearance; returns
@@ -669,8 +720,19 @@ class ThingRules:
                 and self.entities[n].pos_cm is not None
                 and geom.dist(d.center_cm, self.entities[n].pos_cm) <= tc.same_spot_cm
                 and self._size_fits(n, d.box_cm)]
-        if len(spot) == 1:
-            return spot[0], []
+        if not spot:       # one forgotten (_forget_lost) is still itself when seen again at its spot
+            spot = [n for n in self._forgotten if self.entities[n].pre_pickup_pos is None
+                    and self.entities[n].pos_cm is not None
+                    and geom.dist(d.center_cm, self.entities[n].pos_cm) <= tc.same_spot_cm
+                    and self._size_fits(n, d.box_cm)]
+        if spot:           # several lost there (duplicates of one object): the nearest, then the latest
+            back = min(spot, key=lambda n: (geom.dist(d.center_cm, self.entities[n].pos_cm),
+                                            -(self.entities[n].last_seen or NEG)))
+            if back in self._forgotten:
+                del self._forgotten[back]
+                self.entities[back].merged_into = None
+                self._things = sorted(self._things + [back], key=self._thing_number)
+            return back, []
         back = self._reborn(d, seen)
         if back:
             return back, []
@@ -798,6 +860,69 @@ class ThingRules:
                 self._unsure_until[n] = self._now + self._tcfg.ambiguous_s
         if self.embed is not None:
             self._learn_looks()
+        self._forget_lost()
+
+    def _forget_lost(self) -> None:
+        """Housekeeping, once a second: an unnamed thing lost (UNKNOWN / GONE) for over forget_unnamed_s
+        leaves the state (seen again at its spot it is itself again, rule (b)), and unnamed things lost in place (no pick-up) at one spot (same_spot_cm, a like
+        size: duplicates of one object) fold into the oldest, quietly (merged_into; history kept, no event).
+        Named things, things holding others, things off the table or that left it within the room handoff
+        window (a room zone may still take them), and configured objects are never touched. On the rig a clutter pile left 90 lost
+        duplicates at one spot in the phone's state until a RESET."""
+        tc = self._tcfg
+        if tc.forget_unnamed_s <= 0 or self._wall is None or self._now - self._forget_t < 1.0:
+            return
+        self._forget_t = self._now
+        rc = getattr(self, 'room_cfg', None)
+        handoff = getattr(rc, 'handoff_s', 0.0) if rc is not None else 0.0
+        keep = {e.parent for e in self.entities.values() if e.parent}
+        keep |= {n for n, (t, _) in getattr(self, '_departures', {}).items() if self._now - t <= handoff}
+        # lost: archived and unseen for the whole presence window (a thing just confirmed is UNKNOWN, never
+        # seen, until its debounce says present: not lost)
+        lost = [n for n in self._things if self.entities[n].merged_into is None and self.entities[n].zone == 'table'
+                and self.entities[n].status in ARCHIVED and self.entities[n].last_seen is not None
+                and not any(self._bits[n]) and not self.entities[n].aliases and n not in keep]
+        gone = set()
+        for n in lost:
+            e = self.entities[n]
+            if self._wall - e.last_seen > tc.forget_unnamed_s:
+                self._drop_thing(n, n)
+                gone.add(n)
+        cells: dict[tuple, list[str]] = {}
+        r = max(tc.same_spot_cm, 1e-6)
+        for n in lost:                              # oldest first: the oldest at a spot keeps it
+            e = self.entities[n]
+            if n in gone or e.pos_cm is None or e.pre_pickup_pos is not None:
+                continue
+            cx, cy = int(e.pos_cm[0] // r), int(e.pos_cm[1] // r)
+            twin = next((m for dx in (-1, 0, 1) for dy in (-1, 0, 1) for m in cells.get((cx + dx, cy + dy), ())
+                         if geom.dist(e.pos_cm, self.entities[m].pos_cm) <= tc.same_spot_cm
+                         and self._size_ok(e.box_cm, self.entities[m].box_cm)), None)
+            if twin is not None:
+                self._drop_thing(n, twin)
+                gone.add(n)
+            else:
+                cells.setdefault((cx, cy), []).append(n)
+        if gone:
+            self._things = [n for n in self._things if n not in gone]
+
+    def _drop_thing(self, name: str, into: str) -> None:
+        """name leaves the state: merged into its twin, or into itself when simply forgotten (as
+        retire_thing). The caller takes it off _things."""
+        e = self.entities[name]
+        if into != name:
+            self._banks[into].extend(self._banks[name])
+            for n in self._things:
+                m = self.entities[n]
+                m.maybe_same_as = [(into if k == name else k, sc) for k, sc in m.maybe_same_as if n != into or k != name]
+        e.merged_into, e.status, e.parent, e.confidence = into, Status.UNKNOWN, None, 0.0
+        self._bits[name] = self._new_bits()
+        self._present[name] = False
+        self._merged.pop(name, None)
+        if into == name:
+            self._forgotten[name] = None
+            while len(self._forgotten) > FORGOTTEN_MAX:
+                del self._forgotten[next(iter(self._forgotten))]
 
     def _learn_looks(self) -> None:
         tc = self._tcfg

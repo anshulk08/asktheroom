@@ -10,7 +10,7 @@ from core.fakeworld import demo_world
 from scripts import eval_wake
 from voice.pipeline import make_ask
 from voice.understand import (IGNORE, Understander, bare_wake, gate, has_wake_word, schema, sounds_like, system_prompt,
-                              to_intent)
+                              to_intent, wake_fragment)
 
 CFG = load_config()
 
@@ -586,3 +586,41 @@ def test_rig_transcripts_replay():
     got = eval_wake.score(lines)
     assert all(ok == n for ok, n in got.values()), got
     assert [e["text"] for e in lines if e.get("label") is None and e["got"] != "-"] == []
+
+
+@pytest.mark.parametrize("text", ["Room that person.", "Room, the guy.", "Room over there", "Okay room, that one.",
+                                  "Room, room, the couch", "Room, you there?"])
+def test_the_wake_word_opening_a_fragment_is_the_wake_word_alone(text):
+    """'Room that person.' in room chatter was answered through Grok (rig, 01:09 Sun 27 Sep)."""
+    assert wake_fragment(text, CFG), text
+    assert Understander(WAKE_CFG).fragment(text), text
+
+
+@pytest.mark.parametrize("text", ["Room, keys?", "Room, what changed", "Room, my wallet?", "Room, describe the couch.",
+                                  "Room, this is my mug", "Room, reset", "Room, what do you see?", "Room!", "",
+                                  "I'm in the room, that person", "Room, where's that person?", "Room, show me the keys",
+                                  "room b", "Room 204 is free"])
+def test_questions_requests_and_bare_wakes_are_not_fragments(text):
+    assert not wake_fragment(text, CFG), text
+
+
+def test_a_taught_name_is_not_a_fragment():
+    u = Understander(WAKE_CFG, aliases=lambda: ["blue mug"])
+    assert not u.fragment("Room, the blue mug") and u.fragment("Room, the red thing")
+
+
+@pytest.mark.parametrize("text, misheard", [("Hey, bro!", True), ("Hey Drew!", True), ("Goodroom.", True),
+                                            ("Room!", False), ("Hey room", False), ("Heyroom.", False),
+                                            ("Okroom", False), ("Ask the room.", False), ("It's decent, bro.", False)])
+def test_misheard_greetings_get_the_strict_check(text, misheard):
+    from voice.understand import misheard_greeting
+    assert misheard_greeting(text, CFG) is misheard, text
+
+
+@pytest.mark.parametrize("text, reason", [("where is my wallet", None), ("can you see my keys", None),
+                                          ("we built this in like twenty hours", None), ("", "nothing heard"),
+                                          ("Thank you.", "hallucination"), ("you", "hallucination"),
+                                          ("reset everything", "reset or recalibrate without the wake word"),
+                                          ("room, reset", None)])
+def test_after_the_real_wake_word_anything_but_noise_or_a_reset_is_answered(text, reason):
+    assert Understander(WAKE_CFG).after_wake_drop(text, strict=False) == reason, text
