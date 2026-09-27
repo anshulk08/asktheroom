@@ -116,7 +116,10 @@ STATE = {"VISIBLE": "on_table", "HELD": "held", "INSIDE": "inside", "UNDER": "un
          "UNKNOWN": "unknown"}
 AFTER = {"place": "on_table", "putdown": "on_table", "uncover": "on_table", "move": "on_table",
          "pickup": "held", "put_inside": "inside", "cover": "under", "exit_edge": "gone",
-         "carry_to": "room", "remove": "gone"}      # carry_to: into truth step 'zone' (room demo, spec 0010)
+         "carry_to": "room", "remove": "gone", "place_room": "room"}
+# carry_to: from the table into truth step 'zone'; place_room: put straight into 'zone', never on the table
+# first (room demo, spec 0010). block / unblock (a person hides a resting prop) change no state.
+FIRST_PUT = ("place", "place_room")         # a prop whose first step is one of these starts off the table
 RESOLVE = ("place", "putdown", "uncover", "move")       # the prop comes to rest in view: find its entity
 MISSABLE = ("place", "putdown")
 NEW_SPOT = ("place", "putdown", "move")     # an unrelated entity found again in place is no arrival for these
@@ -577,7 +580,7 @@ class _Scorer:
             for q in (s.get("obj"), s.get("parent")):
                 if q in self.types and q not in first:
                     first[q] = s
-        self.initial = {p: not (p in first and first[p]["event"] == "place" and first[p].get("obj") == p)
+        self.initial = {p: not (p in first and first[p]["event"] in FIRST_PUT and first[p].get("obj") == p)
                         for p in self.props}
         for p in self.props:
             if self.initial[p]:

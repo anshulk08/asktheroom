@@ -14,7 +14,9 @@ rig's config.local.yaml: room_memory on, 2560x1440; eval/raw_record.py) with the
 left (no camera_setup.sh), and are scored for identity by eval/scorecard.py. They put each prop down with
 a cue first (a place step), so the scorer knows which identity is which prop without annotation. Each
 step's `seg` (still: nobody near the table; people: someone moving, sitting or reaching) splits the clip
-for the phantom-birth rates; carry_to steps name the room zone (room_zones.json key) the prop goes to.
+for the phantom-birth rates; carry_to (from the table) and place_room (straight into the room, never on
+the table) steps name the room zone (room_zones.json key, or 'floor') the prop goes to; block / unblock
+steps: a person hides a resting prop and moves away again.
 
 The recorder needs the camera, so the live app must be stopped first (the rig owner does that:
 scripts/room_app.sh stop). This driver never stops it: it refuses while any container runs main.py
@@ -256,8 +258,45 @@ def _room_remove() -> dict:
             "steps": steps, "checkpoints": [{"at": t + 8, "expect": _on(*props)}]}
 
 
+def _room_straight() -> dict:
+    steps = _place_in(["A", "NB"])
+    t = _end_of(steps)
+    steps += [
+        {"at": t, "say": "Hands away.", "event": "hands_out", "seg": STILL},
+        {"at": t + 8, "say": "Put the phone straight onto the couch, where the camera can see it. Don't touch the "
+                             "table.", "event": "place_room", "obj": "C", "zone": "couch", "seg": PEOPLE},
+        {"at": t + 26, "say": "Put the keys on the floor beside the table. Don't touch the table.",
+         "event": "place_room", "obj": "B", "zone": "floor", "seg": PEOPLE},
+        {"at": t + 44, "say": "Everyone step away from the table and the couch. Keep still.", "event": "hands_out",
+         "seg": STILL}]
+    return {"room": True, "props": {"A": "wallet", "NB": "notebook", "C": "phone", "B": "keys"},
+            "seconds": int(t + 66),
+            "setup": "Empty coffee table, couch clear. Hold the wallet, the notebook, the phone and the keys. The "
+                     "phone and keys never touch the table: carry them round it, not over it.",
+            "steps": steps, "checkpoints": [{"at": t + 6, "expect": _on("A", "NB")},
+                                            {"at": t + 64, "expect": _on("A", "NB")}]}
+
+
+def _room_block() -> dict:
+    steps = _place_in(["A", "C", "PB"])
+    t = _end_of(steps)
+    steps += [
+        {"at": t, "say": "Hands away.", "event": "hands_out", "seg": STILL},
+        {"at": t + 10, "say": "Sit or crouch right in front of the pill bottle, so the camera can't see it, and "
+                              "keep still. Don't touch it.", "event": "block", "obj": "PB", "seg": PEOPLE},
+        {"at": t + 22, "say": "Move away from the table.", "event": "unblock", "obj": "PB", "seg": PEOPLE},
+        {"at": t + 30, "say": "Everyone away. Keep still.", "event": "hands_out", "seg": STILL}]
+    return {"room": True, "props": {"A": "wallet", "C": "phone", "PB": "pill bottle"}, "seconds": int(t + 52),
+            "setup": "Empty coffee table. Hold the wallet, the phone and the pill bottle. Put the pill bottle down "
+                     "near the table edge by the couch, so someone sitting or crouching there hides it from the "
+                     "camera.",
+            "steps": steps, "checkpoints": [{"at": t + 8, "expect": _on("A", "C", "PB")},
+                                            {"at": t + 50, "expect": _on("A", "C", "PB")}]}
+
+
 ROOM_CLIPS = {"room_still": _room_still(), "room_clutter": _room_clutter(), "room_couch": _room_couch(),
-              "room_carry": _room_carry(), "room_move": _room_move(), "room_remove": _room_remove()}
+              "room_carry": _room_carry(), "room_move": _room_move(), "room_remove": _room_remove(),
+              "room_straight": _room_straight(), "room_block": _room_block()}
 CLIPS.update(ROOM_CLIPS)
 
 
