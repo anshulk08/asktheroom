@@ -396,3 +396,47 @@ def test_the_room_table_view_source_cuts_frames_like_the_room_build(monkeypatch)
         assert opened == [("/dev/video0", 1920, 1080)] and f.img.shape == (720, 1280, 3)
     finally:
         src.stop()
+
+
+def test_capture_opens_the_camera_as_the_detector_sees_it():
+    """With room memory on (spec 0009) the capture source is the 1080p frame cut to table_view_rect and resized
+    to 1280x720 (what core.detect gets on the rig); off, the plain FrameBuffer. --full-frame skips the cut."""
+    from core.room_view import TableView
+    from scripts.finetune import capture as cap
+    made = []
+
+    class Buf:
+        def __init__(self, src, **kw):
+            made.append((src, kw))
+            self.src, self.kw = src, kw
+
+    cfg = {"frame_size_px": [1280, 720],
+           "room_memory": {"enabled": True, "capture_size": [1920, 1080], "table_view_rect": [0, 735, 613, 1080],
+                           "ring_s": 1.0}}
+    src = cap.open_source(cfg, "/dev/video9", make_buffer=Buf)
+    assert isinstance(src, TableView) and src.rect == (0, 735, 613, 1080) and src.out_size == (1280, 720)
+    assert made[0][0] == "/dev/video9" and made[0][1]["ring_s"] == 1.0 and callable(made[0][1]["opener"])
+    plain = cap.open_source(cfg, 0, make_buffer=Buf, full_frame=True)
+    assert isinstance(plain, Buf) and plain.kw.get("opener") is not None      # still 1080p, uncut
+    off = cap.open_source({"room_memory": {"enabled": False}}, 0, make_buffer=Buf)
+    assert isinstance(off, Buf) and off.kw == {}
+
+
+def test_max_rot_bounds_a_cutout_rotation_for_the_corner_camera():
+    """Overhead, any rotation of a cutout is a real pose; from the corner camera an object never lies upside
+    down, so --max-rot keeps pastes within +-max_rot degrees (0: the cutout's own orientation, only scaled/mirrored)."""
+    for seed in range(5):
+        p = synthesize.place_object(np.random.default_rng(seed), cut("wallet", (0, 255, 0), size=(60, 20)), 2,
+                                    (0, 0, W, H), max_rot=0)
+        ys, xs = np.nonzero(p.label)
+        w, h = xs.max() - xs.min() + 1, ys.max() - ys.min() + 1
+        assert 2.6 <= w / h <= 3.4, (seed, w, h)                      # 60x20 stays 3:1, never rotated
+    p = synthesize.place_object(np.random.default_rng(1), cut("wallet", (0, 255, 0), size=(60, 20)), 2,
+                                (0, 0, W, H))
+    ys, xs = np.nonzero(p.label)                                       # default: the old 0-360 draw
+    assert (xs.max() - xs.min() + 1) / (ys.max() - ys.min() + 1) < 2.6
+
+
+def test_train_parser_takes_flipud_for_the_corner_camera():
+    a = train.build_parser().parse_args(["--flipud", "0"])
+    assert a.flipud == 0.0 and train.build_parser().parse_args([]).flipud == 0.5

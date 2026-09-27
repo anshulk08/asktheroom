@@ -11,7 +11,9 @@ Run on the Jetson host venv (cv2 + numpy only) with the app stopped, since it ho
     python scripts/finetune/capture.py --room couch --data data/ft-corner-couch   # one room zone's crop
 
 Each object lies alone on the empty table, so bglabel.py's difference against the empty table is its
-box. Writes into --data (default data/finetune), the layout the other scripts use:
+box. The camera is opened as the detector sees it: with room memory on in config (spec 0009, the corner Brio at
+1080p, zoom 100) frames are the table view, the 1080p frame cut to room_memory.table_view_rect and resized
+to 1280x720, exactly what core.detect gets on the rig; --full-frame keeps the uncut 1080p frame instead. Writes into --data (default data/finetune), the layout the other scripts use:
 
     images/cap<g>_<object>-<k>.jpg, labels/...txt   g = k % 4 is the "trial" train.py splits on;
                                                     cap3 is held out (train.py --val-trials cap3)
@@ -278,6 +280,31 @@ def room_source(cfg: dict, device, view: str):
     return TableView(fb, rect, out)
 
 
+def open_source(cfg: dict, device, *, full_frame: bool = False, make_buffer=None):
+    """The camera as the detector sees it (mirrors main.open_frames). Room memory off: FrameBuffer(device).
+    On: the camera at room_memory.capture_size in a short ring, cut to table_view_rect and resized to
+    frame_size_px by TableView, unless full_frame. make_buffer replaces FrameBuffer in tests."""
+    from core.capture import FrameBuffer, open_camera
+    from core.room_types import RoomConfig
+    from core.room_view import TableView, default_rect
+    make = make_buffer or FrameBuffer
+    rc = RoomConfig.from_dict(cfg.get("room_memory"))
+    if not rc.enabled:
+        return make(device)
+    w, h = (int(v) for v in rc.capture_size)
+    fb = make(device, ring_s=rc.ring_s, opener=lambda src: open_camera(src, w, h))
+    if full_frame:
+        return fb
+    out = tuple(int(v) for v in cfg.get("frame_size_px", (1280, 720)))
+    rect = rc.table_view_rect or default_rect(rc.capture_size, rc.zoom, rc.ref_zoom, out)
+    return TableView(fb, tuple(rect), out)
+
+
+def describe_source(src) -> str:
+    rect = getattr(src, "rect", None)
+    return f"table view {list(rect)} -> {list(src.out_size)}" if rect else "the camera frame"
+
+
 def write_qa(data: Path, names: list[str], prefix: str = "cap", out: str = "qa_capture.jpg",
              limit: Optional[int] = None) -> Path:
     """Contact sheet of the labelled images whose names start with prefix, boxes drawn."""
@@ -319,6 +346,8 @@ def main(argv=None) -> int:
                     help="capture what the room build's detector sees (room_memory: in config.local.yaml): "
                          "'table' = the table view cut from the full frame, or a zone name (its crop). "
                          "One --data dir per view; merge them with merge_sets.py")
+    ap.add_argument("--full-frame", action="store_true",
+                    help="room memory on: capture the uncut camera frame instead of the table view")
     a = ap.parse_args(argv)
     cfg = load_config()
     names = class_names(cfg)
@@ -334,11 +363,11 @@ def main(argv=None) -> int:
         print(f"unknown names {sorted(bad)}; choose from {names} or --distractors", file=sys.stderr)
         return 2
     device = int(a.device) if a.device.isdigit() else a.device
-    if a.room:
+    if a.room:                                            # an explicit view: the table view or a zone's crop
         fb = room_source(cfg, device, a.room)
-    else:
-        from core.capture import FrameBuffer
-        fb = FrameBuffer(device)
+    else:                                                 # as the detector sees it (the table view with room memory on)
+        fb = open_source(cfg, device, full_frame=a.full_frame)
+        print(f"capturing {'full frames' if a.full_frame else 'the table view'}: {describe_source(fb)}")
     try:
         cap = Capture(fb, Path(a.data), names, poses=a.poses, params=Params(hand_len_px=a.hand_len,
                                   roi_px=tuple(int(v) for v in a.roi.split(",")) if a.roi else None),

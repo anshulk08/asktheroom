@@ -35,6 +35,11 @@ fi
 # ${a[@]+"${a[@]}"}: an empty array is "unbound" under set -u in bash < 4.4 (macOS).
 # ASKROOM_DOCKER_ARGS: extra `docker run` options, e.g. "-d --name askroom_room_app" (scripts/room_app.sh).
 read -r -a extra <<< "${ASKROOM_DOCKER_ARGS:-}"
-exec docker run --rm ${tty[@]+"${tty[@]}"} ${extra[@]+"${extra[@]}"} --runtime=nvidia --ipc=host --network=host ${devs[@]+"${devs[@]}"} ${cams[@]+"${cams[@]}"} ${blinka[@]+"${blinka[@]}"} \
+# Host PulseAudio (a Bluetooth speaker lives there, not in ALSA): pass the socket through. Only the
+# askroom:audio image (ALSA pulse plugin, /etc/asound.conf default -> pulse) can use it; askroom:latest ignores it.
+pulse=(); PS="/run/user/$(id -u)/pulse/native"
+[ -S "$PS" ] && pulse=(-v "$(dirname "$PS")":"$(dirname "$PS")" -e "PULSE_SERVER=unix:$PS" -e "PULSE_COOKIE=/askroom/.pulse-cookie")
+[ -S "$PS" ] && [ -f "$HOME/.config/pulse/cookie" ] && cp -f "$HOME/.config/pulse/cookie" "$PWD/.pulse-cookie" 2>/dev/null
+exec docker run --rm ${tty[@]+"${tty[@]}"} ${extra[@]+"${extra[@]}"} --runtime=nvidia --ipc=host --network=host ${devs[@]+"${devs[@]}"} ${cams[@]+"${cams[@]}"} ${pulse[@]+"${pulse[@]}"} ${blinka[@]+"${blinka[@]}"} \
   -v /etc/localtime:/etc/localtime:ro -v /etc/timezone:/etc/timezone:ro \
   ${envf[@]+"${envf[@]}"} -v "$PWD":/askroom -w /askroom -e PYTHONPATH=/askroom "$IMAGE" "$@"

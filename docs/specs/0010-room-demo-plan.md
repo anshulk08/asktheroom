@@ -210,6 +210,14 @@ the next step" and show the phone map instead. Do not bring an unlabelled laser 
   `sudo hcitool` LE-mask command after every Jetson boot before phones can connect.
 - **Not done yet:** speaker/mic (no USB audio on the Jetson yet), decoy runs on the rig, retrain (P1-1),
   merge back to `main`.
+- **21:40 P1-1 retrain, tooling ready, capture pending** (`506844e`): `capture.py` now opens the Brio as the
+  detector sees it (1080p, zoom 100, cut to `table_view_rect` [0, 735, 613, 1080], resized to 1280x720), so the
+  captures are the table-view frames the engine runs on; corner switches `synthesize.py --max-rot 25` and
+  `train.py --flipud 0` (nothing on a table seen in perspective is upside down); commands in
+  `scripts/finetune/README.md` ("Corner camera"). Scripts synced to `~/askroom_room`. Needs ~20 min of rig time
+  with the app stopped and a person placing the 8 props + 5 distractors on the coffee table (dark wood: lamp on);
+  training on the Mac is ~110 s/epoch (the overhead Brio run: 25 epochs, mAP50 0.93). Not captured yet: the rig
+  was busy with the mic/speaker work (P0-1) at 21:30-21:40.
 
 ## 6. Tonight's schedule (EDT)
 
