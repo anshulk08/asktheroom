@@ -20,7 +20,9 @@ export time: changing prompts means re-exporting.
 """
 from __future__ import annotations
 
+import datetime
 import logging
+import os
 import time
 from collections import Counter
 from typing import Optional, Protocol
@@ -56,6 +58,28 @@ def class_list(cfg: dict) -> tuple[list[str], dict[str, str]]:
     return classes, to_obj
 
 
+def _label_names(names) -> list[str]:
+    return [str(v) for v in (names.values() if isinstance(names, dict) else names)]
+
+
+def missing_objects(cfg: dict, names) -> list[str]:
+    """Configured objects (and 'hand') no model class maps to (by class_list): the detector can never
+    report them, and before this they vanished without a word."""
+    _, to_obj = class_list(cfg)
+    have = {to_obj.get(n) for n in _label_names(names)}
+    return [o for o in list(cfg.get("objects") or {}) + ["hand"] if o not in have]
+
+
+def weights_info(path: str, names) -> dict:
+    """Which weights are loaded, for the startup log and /state (state.perception.model)."""
+    try:
+        st = os.stat(path)
+        size, mtime = st.st_size, datetime.datetime.fromtimestamp(st.st_mtime).isoformat(timespec="seconds")
+    except OSError:                              # a hub name ultralytics downloads, or already gone
+        size = mtime = None
+    return {"path": str(path), "size": size, "mtime": mtime, "names": _label_names(names)}
+
+
 class UltralyticsBackend:
     """A .pt / .engine through ultralytics. A YOLO-World .pt gets the prompts via set_classes."""
 
@@ -67,9 +91,20 @@ class UltralyticsBackend:
         self.half = bool(d.get("half", True))
         self.floor = float(d.get("min_conf", 0.05))
         self.model = YOLO(self.path)
-        if "world" in self.path and self.path.endswith(".pt"):
-            self.model.set_classes(class_list(cfg)[0])
+        classes = class_list(cfg)[0]
+        if "world" in self.path and self.path.endswith(".pt") and missing_objects(cfg, self.model.names):
+            try:                                # a baked .pt (prompts in, CLIP removed) can't set_classes
+                self.model.set_classes(classes)
+            except Exception as ex:
+                log.warning("%s: set_classes failed (%s); using the classes baked into it", self.path, ex)
         self.names = self.model.names
+        self.info = weights_info(self.path, self.names)
+        log.info("detector weights %s (%s bytes, modified %s), %d classes: %s", self.info["path"],
+                 self.info["size"], self.info["mtime"], len(self.info["names"]), ", ".join(self.info["names"]))
+        self.info["missing"] = missing_objects(cfg, self.names)
+        if self.info["missing"]:
+            log.warning("detector %s has no class for %s: never detected by name (conf_threshold / prompts "
+                        "name them, the model does not)", self.path, ", ".join(self.info["missing"]))
 
     def infer(self, img: np.ndarray) -> list[Raw]:
         # An engine's precision is fixed at export; passing half= to it only prints a deprecation warning.

@@ -64,10 +64,13 @@ class Config:
     table_size_cm: tuple[float, float] = (90.0, 60.0)
     frame_size_px: tuple[int, int] = (1280, 720)
 
-    conf_threshold: float = 0.35
+    conf_threshold: float = 0.35                                          # the default cut-off
+    conf_thresholds: dict[str, float] = field(default_factory=dict)       # per object, over the default
     present_k: int = 6
     present_n: int = 10
     absent_max: int = 1
+    # presence.hz: k of n count updates of a loop at this rate, by time (None: updates, whatever the fps)
+    presence_hz: float | None = None
 
     contact_overlap: float = 0.30
     contact_window_s: float = 1.0
@@ -129,11 +132,18 @@ class Config:
         kw["objects"] = [ObjectSpec(n, k, list(prompts.get(n, []))) for n, k in (raw.get("objects") or {}).items()]
         ct = raw.get("conf_threshold")
         if ct is not None:
-            kw["conf_threshold"] = ct.get("default", 0.35) if isinstance(ct, dict) else ct
+            if isinstance(ct, dict):
+                kw["conf_threshold"] = float(ct.get("default", 0.35))
+                kw["conf_thresholds"] = {k: float(v) for k, v in ct.items() if k != "default"}
+            else:
+                kw["conf_threshold"] = float(ct)
         if "present_k_of_n" in raw:
             kw["present_k"], kw["present_n"] = raw["present_k_of_n"]
         if "absent_k_of_n" in raw:
             kw["absent_max"] = raw["absent_k_of_n"][0]
+        if "hz" in (raw.get("presence") or {}):
+            hz = raw["presence"]["hz"]
+            kw["presence_hz"] = float(hz) if hz else None
         size = (raw.get("table") or {}).get("size_cm")
         if size:
             kw["table_size_cm"] = tuple(size)
@@ -146,6 +156,11 @@ class Config:
     @classmethod
     def load(cls, path: str | os.PathLike | None = None) -> "Config":
         return cls.from_dict(load_config(path))
+
+    def threshold(self, name: str) -> float:
+        """The detector's cut-off for this object (conf_threshold.<name>, else .default): the World
+        applies the same per-object cut as core/detect.py, so a lower per-object value takes effect."""
+        return self.conf_thresholds.get(name, self.conf_threshold)
 
     def kind_of(self, name: str) -> str:
         for o in self.objects:

@@ -162,6 +162,9 @@ class Room:
         self.detector, self.hands = detector, hands
         self.room_memory = None                    # core.room.RoomMemory when room_memory.enabled (build)
         self._room_err_t = float("-inf")
+        info = getattr(getattr(detector, "backend", None), "info", None)
+        if info is not None and isinstance(getattr(world, "perception", None), dict):
+            world.perception["model"] = info       # which weights loaded, on /state
         if interpret is None:
             from voice.understand import Understander
             interpret = Understander(dict(cfg, understand={"enabled": False}))     # rules only
@@ -198,7 +201,12 @@ class Room:
         self.stop_ev = threading.Event()
         self._acted = threading.local()            # .kind: RESET / RECAL if the router answered one
         self._turn = threading.local()             # .stale: set when the voice loop gave up on this ask thread
-        self._clear_ev = threading.Event()         # RESET: the perception thread resets proposals, crops, room memory
+        self._clear_ev = threading.Event()         # RESET: the perception thread resets proposals, crops, room memory, hand ids
+        pg = cfg.get("perception_guard") or {}
+        self.stale_s = float(pg.get("stale_s", 2.0))
+        self.voice_recal = bool(pg.get("voice_recalibrate", True))
+        self._perceived_t: Optional[float] = None  # monotonic t of the live loop's last perception step
+        self._frame_err_t = float("-inf")          # last logged frame-read failure (rate limit)
         self._cal_warned = False
         self._aim_lock = threading.Lock()
         self._aim_gen = 0
@@ -235,18 +243,26 @@ class Room:
             kind = None
         if kind == "RESET":
             self.world.reset()
-            if self.hands is not None:
-                self.hands.reset()
             self._clear_ev.set()
+        elif kind == "RECAL" and not self.voice_recal:
+            ans = Answer("Recalibrating by voice is turned off. Use the table tool on the rig.")
         elif kind == "RECAL":
             threading.Thread(target=self._recalibrate_and_tell, args=(source != "sms",), name="recal",
                              daemon=True).start()
+        elif (kind == "WHERE" or ans.point_at is not None) and self.perception_stale():
+            ans = Answer("My camera view is not updating right now. " + ans.text, ans.point_at, ans.action, ans.target_cm)
         return ans
 
     def _stale(self) -> bool:
         """This thread is answering a voice question _ask_with_cue already answered from the rules."""
         ev = getattr(self._turn, "stale", None)
         return ev is not None and ev.is_set()
+
+    def perception_stale(self) -> bool:
+        """The live perception loop has not finished a step for stale_s (camera or detector stuck):
+        answers about where things are say the view is old. Replays (no live loop) are never stale."""
+        t = self._perceived_t
+        return t is not None and time.monotonic() - t > self.stale_s
 
     def ask_and_act(self, text: str, source: str) -> Answer:
         """ask_fn for the server: dashboard questions are spoken and aimed, texts only answered. An
@@ -459,7 +475,7 @@ class Room:
                 log.warning("table calibrated: tracked area %.0f x %.0f cm; restart the app so every part "
                             "uses that size", *self.table.size_cm)
             return None
-        if self._clear_ev.is_set():        # here, not in ask: the proposer isn't thread-safe
+        if self._clear_ev.is_set():        # here, not in ask: the proposer and hand tracker aren't thread-safe
             self._clear_ev.clear()
             self.detector.reset_proposals()
             if self.room_memory is not None:   # same thread as its step: never concurrent with a visit
@@ -467,6 +483,8 @@ class Room:
                     self.room_memory.reset()
                 except Exception:              # the room must never cost the table
                     log.exception("room memory reset failed; table perception goes on")
+            if self.hands is not None:
+                self.hands.reset()
         dets = self.detector.detect(frame)
         dets.hands = self.hands.update(dets.hands, dets.t)
         if self.room_enabled:
@@ -495,9 +513,18 @@ class Room:
     def perception_loop(self) -> None:
         last_idx, n, t_win = 0, 0, time.monotonic()
         period = 1.0 / self.max_fps if self.max_fps > 0 else 0.0
+        self._perceived_t = time.monotonic()
         while not self.stop_ev.is_set():
             t0 = time.monotonic()
-            frame = self.frames.wait_new(last_idx, timeout=1.0)
+            try:                           # a bad table view cut (TableView: ValueError) must not end the loop
+                self._mark_stale()
+                frame = self.frames.wait_new(last_idx, timeout=1.0)
+            except Exception:
+                if t0 - self._frame_err_t > 10:
+                    log.exception("reading a frame failed; skipping it")
+                    self._frame_err_t = t0
+                self.stop_ev.wait(0.1)
+                continue
             if frame is None:
                 continue
             last_idx = frame.idx
@@ -509,13 +536,21 @@ class Room:
                 self.stop_ev.wait(0.1)
                 continue
             n += 1
-            now = time.monotonic()
+            now = self._perceived_t = time.monotonic()
             if now - t_win >= 2.0:
                 self.world.fps = round(n / (now - t_win), 1)
                 n, t_win = 0, now
             rest = period - (now - t0)
             if rest > 0:
                 self.stop_ev.wait(rest)
+
+    def _mark_stale(self) -> None:
+        """Put perception staleness on /state (state.perception.stale), logging when it flips."""
+        stale, info = self.perception_stale(), getattr(self.world, "perception", None)
+        if isinstance(info, dict) and info.get("stale", False) != stale:
+            info["stale"] = stale
+            (log.warning if stale else log.info)("perception %s", f"stale: no step for over {self.stale_s:g} s"
+                                                 if stale else "running again")
 
     def voice_loop(self) -> None:
         """Listen and answer until stop. An error in one question is logged and met with a short

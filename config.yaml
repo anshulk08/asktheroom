@@ -604,3 +604,18 @@ room_check:
   min_ram_mb: 1024            # MemAvailable with the app running (Jetson: 8 GB shared with the GPU)
   max_frame_age_s: 5          # /state's last perception update must be this fresh
   grok_timeout_s: 10          # GET /models on api.x.ai (no tokens) must answer within this
+
+# Perception health (main.py Room). The live loop finishing no step for stale_s (camera or detector stuck):
+# answers about where things are start "My camera view is not updating right now." and /state has perception.stale.
+# voice_recalibrate false: a spoken "recalibrate" is refused (set it so in config.local.yaml for the demo,
+# once the table calibration is frozen: a refit mid-demo moves the frame under the world and the laser).
+perception_guard:
+  stale_s: 2.0
+  voice_recalibrate: true
+
+# Presence debounce by time (core/presence.py, core/world.py rule 1): present_k_of_n and absent_k_of_n count
+# updates of a loop at hz (main.perception_max_fps, the rate eval.score_clip replays at), measured in
+# seconds: a live rig slowed to 7 fps flips after the same time as at 15 fps (6 of 10 = 0.4 s of
+# sightings), where before it took twice as long. null = count updates, whatever the rate.
+presence:
+  hz: 15

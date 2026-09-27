@@ -224,3 +224,28 @@ def test_tag_calibration_and_the_area_size_are_saved_and_applied_at_startup(tmp_
     four = dict(fresh, table_tag=dict(fresh["table_tag"], enabled=False), table=dict(fresh["table"], size_cm=[90, 60]))
     apply_saved_size(four)
     assert four["table"]["size_cm"] == [90, 60]              # four-marker mode keeps the configured size
+
+
+def test_a_refit_swaps_h_and_hinv_together():
+    """A spoken 'recalibrate' refits on its own thread: a reader never sees a new H with the old Hinv."""
+    import threading
+    t = Table({"table": {"size_cm": (90, 60)}}, cal_path="/nonexistent/table_cal.json")
+    a, b = np.eye(3), np.array([[2.0, 0, 5], [0, 2, 3], [0, 0, 1]])
+    t._set(a)
+    stop, bad = threading.Event(), []
+
+    def refit():
+        while not stop.is_set():
+            t._set(b)
+            t._set(a)
+    th = threading.Thread(target=refit, daemon=True)
+    th.start()
+    for _ in range(20000):
+        H, Hinv = t._cal
+        if not np.allclose(H @ Hinv, np.eye(3)):
+            bad.append(1)
+    stop.set()
+    th.join(2)
+    assert not bad and t.Hinv is t._cal[1]
+    t.H = b                                          # assigning H refits Hinv too
+    assert np.allclose(t.H @ t.Hinv, np.eye(3))

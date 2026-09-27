@@ -141,3 +141,48 @@ def test_a_box_too_big_for_any_prop_is_dropped():
 def test_an_object_off_the_table_is_dropped():
     d = run_bounded([("phone", 0.9, (1000, 650, 1060, 700)), ("keys", 0.6, (100, 100, 150, 140))])
     assert [i.cls for i in d.items] == ["keys"]           # phone centre (103, 67.5) cm is off a 90 x 60 table
+
+
+class _FakeYOLO:
+    """ultralytics.YOLO stand-in: fixed class names; set_classes fails like a baked (CLIP-less) .pt."""
+    names = {0: "keys", 1: "phone", 2: "hand"}
+    calls = []
+
+    def __init__(self, path):
+        self.path = path
+
+    def set_classes(self, classes):
+        _FakeYOLO.calls.append(classes)
+        raise RuntimeError("no CLIP text encoder")
+
+
+def _backend(monkeypatch, path, cfg=CFG):
+    import sys
+    import types
+    from core.detect import UltralyticsBackend
+    monkeypatch.setitem(sys.modules, "ultralytics", types.SimpleNamespace(YOLO=_FakeYOLO))
+    return UltralyticsBackend(cfg, path)
+
+
+def test_the_backend_logs_its_weights_and_warns_about_objects_it_cannot_see(monkeypatch, tmp_path, caplog):
+    w = tmp_path / "brio.engine"
+    w.write_bytes(b"x" * 123)
+    with caplog.at_level("INFO", logger="core.detect"):
+        b = _backend(monkeypatch, str(w))
+    assert b.info["path"] == str(w) and b.info["size"] == 123 and b.info["mtime"]
+    assert b.info["names"] == ["keys", "phone", "hand"]
+    assert "wallet" in b.info["missing"] and "keys" not in b.info["missing"] and "hand" not in b.info["missing"]
+    assert "brio.engine" in caplog.text and "no class for" in caplog.text and "wallet" in caplog.text
+
+
+def test_a_baked_world_pt_whose_set_classes_fails_keeps_its_baked_classes(monkeypatch, tmp_path):
+    _FakeYOLO.calls.clear()
+    b = _backend(monkeypatch, str(tmp_path / "yolov8s-worldv2-askroom.pt"))
+    assert _FakeYOLO.calls and b.names == _FakeYOLO.names and b.info["size"] is None
+
+
+def test_missing_objects_maps_prompt_labels_back_to_objects():
+    from core.detect import missing_objects
+    cfg = {"objects": {"keys": "target", "box": "container"}, "prompts": {"box": ["cardboard box"]}}
+    assert missing_objects(cfg, {0: "cardboard box", 1: "hand"}) == ["keys"]
+    assert missing_objects(cfg, ["keys", "box", "hand"]) == []

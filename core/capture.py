@@ -121,9 +121,24 @@ class FrameBuffer:
                     self._device, self.reconnects, n, len(self._snapshot))
 
     def _run(self) -> None:
+        """The capture thread. Nothing may end it: perception would wait on it forever while the
+        dashboard looks alive. A read that raises (a cv2.error mid-stream) counts as a failed read."""
+        while not self._stop.is_set():
+            try:
+                self._read_loop()
+            except Exception:
+                log.exception("capture thread error; carrying on")
+                self._stop.wait(0.1)
+
+    def _read_loop(self) -> None:
         dead_since = None
         while not self._stop.is_set():
-            ok, img = self.cap.read()
+            try:
+                ok, img = self.cap.read()
+            except Exception as ex:
+                ok, img = False, None
+                if self.failures % 30 == 0:
+                    log.warning("camera read raised %s: %s", type(ex).__name__, ex)
             now, wall = time.monotonic(), time.time()
             if not ok or img is None:
                 self.failures += 1
@@ -148,6 +163,11 @@ class FrameBuffer:
     def latest(self) -> Optional[Frame]:
         with self._lock:
             return self._ring[-1] if self._ring else None
+
+    def age(self) -> Optional[float]:
+        """Seconds since the newest frame arrived, or None before the first."""
+        with self._lock:
+            return time.monotonic() - self._ring[-1].t if self._ring else None
 
     def wait_new(self, after_idx: int, timeout: float = 1.0) -> Optional[Frame]:
         """Block until a frame newer than after_idx arrives (None on timeout)."""

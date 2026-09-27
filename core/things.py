@@ -350,7 +350,7 @@ class ThingRules:
                 self._aliases.pop(a, None)
                 self._alias_by.pop(a, None)
             e.merged_into, e.status, e.parent, e.confidence, e.aliases = name, Status.UNKNOWN, None, 0.0, []
-            self._bits[name] = deque(maxlen=self.cfg.present_n)
+            self._bits[name] = self._new_bits()
             self._present[name] = False
             self._merged.pop(name, None)
             return True
@@ -615,7 +615,7 @@ class ThingRules:
         if verdict == 'skip':
             return []
         if verdict is not None:
-            self._bits[verdict] = deque(list(c.bits)[:-1], maxlen=self.cfg.present_n)
+            self._bits[verdict] = self._new_bits(list(c.bits)[:-1])
             seen[verdict] = d
             return []
         return self._new_thing(d, c.bits, vec, links, seen)
@@ -760,7 +760,7 @@ class ThingRules:
         self._things.append(name)
         self._born[name] = self._wall if self._wall is not None else time.time()
         self._path[name] = deque(maxlen=60)
-        self._bits[name] = deque(list(bits)[:-1], maxlen=self.cfg.present_n)
+        self._bits[name] = self._new_bits(list(bits)[:-1])
         self._present[name] = False
         self._contacts[name] = {}
         self._banks[name] = ExemplarBank(self._tcfg.exemplar_max, self._tcfg.exemplar_dup_sim)
@@ -924,7 +924,7 @@ class ThingRules:
                 e = self.entities[n]
                 e.maybe_same_as = [(keep if m == drop else m, sc) for m, sc in e.maybe_same_as]
         ed.merged_into, ed.status, ed.parent, ed.confidence, ed.aliases = keep, Status.UNKNOWN, None, 0.0, []
-        self._bits[drop] = deque(maxlen=self.cfg.present_n)
+        self._bits[drop] = self._new_bits()
         self._present[drop] = False
         self._path[drop] = deque(maxlen=60)
         self._contacts[drop] = {}

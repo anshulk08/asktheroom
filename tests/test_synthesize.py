@@ -367,3 +367,32 @@ def test_unknown_cutouts_still_fail_unless_marked_distractor(tmp_path):
     write_cut(tmp_path / "clash", "phone", distractor=True)             # a distractor can't be a class
     with pytest.raises(ValueError):
         synthesize.synthesize(tmp_path / "clash", NAMES, n=2)
+
+
+def test_scene_frames_are_saved_unlabelled_for_the_go_no_go(tmp_path):
+    cam, said = Table(), []
+    cap = capture.Capture(cam, tmp_path, NAMES, ask=lambda p: "", say=said.append)
+    n = cap.capture_scene(seconds=1.0, every_s=0.1)
+    frames = sorted((tmp_path / "scene").glob("scene-*.jpg"))
+    assert n == len(frames) >= 9 and not (tmp_path / "labels").exists()
+
+
+def test_the_room_table_view_source_cuts_frames_like_the_room_build(monkeypatch):
+    """capture.py --room table: the camera at 1920x1080 seen through TableView(table_view_rect -> 1280x720)."""
+    import core.capture
+    cfg = {"frame_size_px": [1280, 720], "room_memory": {"capture_size": [1920, 1080], "table_view_rect": [320, 180, 1600, 900]}}
+
+    class Cam:
+        def read(self):
+            return True, np.zeros((1080, 1920, 3), np.uint8)
+
+        def release(self):
+            pass
+    opened = []
+    monkeypatch.setattr(core.capture, "open_camera", lambda src, w, h: opened.append((src, w, h)) or Cam())
+    src = capture.room_source(cfg, "/dev/video0", "table")
+    try:
+        f = src.wait_new(0, 2.0)
+        assert opened == [("/dev/video0", 1920, 1080)] and f.img.shape == (720, 1280, 3)
+    finally:
+        src.stop()

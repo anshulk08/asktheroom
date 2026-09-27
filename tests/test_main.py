@@ -385,6 +385,20 @@ def test_perceive_is_one_perception_step_after_the_table_is_calibrated(tmp_path)
     assert str(world.get("wallet").status) == "VISIBLE"
 
 
+def test_the_detector_weights_are_on_state(tmp_path):
+    class Backend:
+        info = {"path": "models/brio.engine", "size": 1, "mtime": "2026-09-26T17:53:00", "names": ["keys"],
+                "missing": ["wallet"]}
+
+    class Det:
+        backend = Backend()
+
+    events = EventLog(":memory:", str(tmp_path))
+    world = World(CFG, events)
+    main.Room(CFG, world, events, None, None, None, None, detector=Det())
+    assert world.state_json()["perception"]["model"]["path"] == "models/brio.engine"
+
+
 def test_build_fake_runs_without_hardware(monkeypatch, tmp_path):
     import net
     import voice.understand
@@ -455,7 +469,7 @@ def test_reset_clears_the_detectors_proposals_and_crops_on_the_perception_thread
             return hands
 
         def reset(self):
-            pass
+            calls.append((threading.current_thread().name, "hands"))
 
     class Table:
         ok = True
@@ -463,7 +477,12 @@ def test_reset_clears_the_detectors_proposals_and_crops_on_the_perception_thread
     events = EventLog(":memory:", str(tmp_path))
     world = World(CFG, events)
     ask = make_ask(CFG, world, events, net=None, other=no_model)
+    class RoomMem:
+        def reset(self):
+            calls.append((threading.current_thread().name, "room"))
+
     room = main.Room(CFG, world, events, Table(), Frames(), None, ask, detector=Det(), hands=Hands())
+    room.room_memory = RoomMem()            # Frames has no full_at: no room step, only its reset
     t = threading.Thread(target=room.perception_loop, name="perception", daemon=True)
     t.start()
     assert wait_for(lambda: calls)
@@ -475,7 +494,82 @@ def test_reset_clears_the_detectors_proposals_and_crops_on_the_perception_thread
     room.stop_ev.set()
     t.join(2)
     i = calls.index(("perception", "reset"))
-    assert calls[i + 1:i + 2] in ([], [("perception", "detect")]) and calls.count(("perception", "reset")) == 1
+    assert calls[i + 1:i + 3] == [("perception", "room"), ("perception", "hands")]   # room memory, hand ids: same thread
+    assert calls[i + 3:i + 4] in ([], [("perception", "detect")]) and calls.count(("perception", "reset")) == 1
+
+
+def test_a_frame_read_that_raises_never_ends_the_perception_loop(tmp_path):
+    """TableView.wait_new cuts the frame; a bad table_view_rect raises ValueError there, outside perceive's try."""
+    from core.types import Detections, Frame
+    seen = []
+
+    class Frames:
+        def __init__(self):
+            self.i = 0
+
+        def wait_new(self, after, timeout=1.0):
+            time.sleep(0.005)
+            self.i += 1
+            if self.i <= 3:
+                raise ValueError("rect (0, 0, 0, 0) is empty inside a 1920x1080 image")
+            return Frame(t=time.monotonic(), wall=time.time(), img=None, idx=self.i)
+
+    class Det:
+        def detect(self, f):
+            seen.append(f.idx)
+            return Detections(t=f.t, frame_idx=f.idx, items=[], hands=[])
+
+    class Hands:
+        def update(self, hands, t):
+            return hands
+
+    class Table:
+        ok = True
+
+    events = EventLog(":memory:", str(tmp_path))
+    room = main.Room(CFG, World(CFG, events), events, Table(), Frames(), None, None, detector=Det(), hands=Hands())
+    t = threading.Thread(target=room.perception_loop, daemon=True)
+    t.start()
+    assert wait_for(lambda: len(seen) >= 3) and t.is_alive()
+    room.stop_ev.set()
+    t.join(2)
+
+
+def test_where_answers_hedge_while_perception_is_stale(tmp_path):
+    room, _ = make_room(tmp_path)
+    assert not room.ask("where is my wallet?", "dashboard").text.startswith("My camera view")   # no live loop
+    room._perceived_t = time.monotonic() - 5                          # the live loop stuck for 5 s
+    ans = room.ask("where is my wallet?", "dashboard")
+    assert ans.text.startswith("My camera view is not updating right now.") and ans.point_at == "wallet"
+    room._perceived_t = time.monotonic()
+    assert not room.ask("where is my wallet?", "dashboard").text.startswith("My camera view")
+
+
+def test_the_perception_loop_puts_staleness_on_state(tmp_path):
+    class Frames:
+        def wait_new(self, after, timeout=1.0):
+            time.sleep(0.01)
+            return None                                               # the camera gave up
+
+    events = EventLog(":memory:", str(tmp_path))
+    world = World(CFG, events)
+    room = main.Room(CFG, world, events, None, Frames(), None, None)
+    room.stale_s = 0.05
+    t = threading.Thread(target=room.perception_loop, daemon=True)
+    t.start()
+    assert wait_for(lambda: world.state_json()["perception"].get("stale") is True)
+    room.stop_ev.set()
+    t.join(2)
+
+
+def test_a_spoken_recalibrate_can_be_turned_off_for_the_demo(tmp_path, cal_path):
+    room, _ = make_room(tmp_path, cal_path)
+    room.voice_recal = False
+    recal = []
+    room.recalibrate = lambda timeout_s=None: recal.append(1)
+    assert "turned off" in room.ask("recalibrate", "voice").text
+    time.sleep(0.1)
+    assert recal == []
 
 
 def test_voice_answers_are_logged_for_the_phone(tmp_path):
