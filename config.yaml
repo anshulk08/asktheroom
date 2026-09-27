@@ -540,7 +540,19 @@ room_memory:
   things: true                # also unnamed objects (YOLOE) in zones, handed off by departure + Grok name match
   thing_name_wait_s: 45.0     # a confirmed room object waits this long for its Grok answer (queued behind the cap)
   name_match_min: 2.0         # how well two Grok names must match (core.auto_name.match_score; 2 = same head noun)
-  names_per_minute: 20        # Grok calls for room crops, at most (only while a handoff is possible)
+  names_per_minute: 60        # Grok calls for room crops, at most (only while a handoff is possible; xAI allows
+                              # 3 requests/s on grok-4.3, so latency is the limit, not this)
+  room_every_n_hot: 2         # while a handoff is open (something just left the table) process one zone every
+                              # N frames instead of room_every_n, so a far zone is seen within a frame or two
+                              # (spec 0010 P0-3; the cost is one more prop + YOLOE pass per frame: measure fps)
+  confirm_visits_arrival: 1   # visits to confirm a track whose spot changed when it appeared (an arrival);
+                              # static clutter keeps confirm_visits
+  hot_max_s: 30.0             # the fast cadence lasts this long after a departure (the handoff stays open for
+                              # handoff_s at the normal cadence); a foot at the table edge must not halve the fps for 2 min
+  handoff_min_dwell_s: 4.0    # a thing counts as carried off only if it sat on the table this long first (feet, sleeves)
+  ignore_names: [sock, sneaker, shoe, foot, feet, hand, arm, sleeve, leg, knee, shirt, jeans, pants, shorts, fabric, cloth, person]
+                              # a departed thing Grok named like one of these is a body part or clothing at the table
+                              # edge (the couch-sitter's feet were handed off as "sock" on the rig): never a handoff
 
 # Covers no detector knows (core/world.py rule 4, core/surround.py). A blanket, jacket or napkin laid over
 # objects by hand: the hands touch what it covers, so the hand rule alone read each touched object as

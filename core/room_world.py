@@ -84,6 +84,15 @@ class RoomRules:
         self._pending_things: dict[str, RoomTrack] = {}          # confirmed 'thing' tracks not decided yet
         self.room_cfg = RoomConfig.from_dict(getattr(self, '_room_raw', None))
 
+    def room_reset(self) -> None:
+        """The room side alone, as RoomMemory.reset does it on the perception thread after World.reset
+        already ran on the asking thread: whatever one visit of the old tracks left in the fresh world (a
+        conflict, a pending thing) goes; the config stays (World.reset re-reads it)."""
+        with self.lock:
+            cfg = self.room_cfg
+            self._reset_room()
+            self.room_cfg = cfg
+
     def thing_guess(self, name: str) -> Optional[dict]:
         """Grok's {name, also, confidence} for a thing on the table. core/auto_name.py's attach replaces
         this on the instance; without a namer no thing has a name, so none is ever handed over."""
@@ -145,21 +154,56 @@ class RoomRules:
             return Place(kind='table', zone=vent.zone, say=say, status=vent.status, chain=chain, via=via,
                          pos_cm=pos, observed_directly=via == name, conflicts=conflicts)
 
+    def _open_departures(self, t: float, max_age_s: float, min_dwell_s: float = 0.0) -> list[tuple[str, float]]:
+        """(thing, departure t) of things carried off the table at most max_age_s ago that could still be
+        handed off: unconsumed, still off the table, not merged away and, with min_dwell_s, on the table
+        that long before leaving (from _placed_t, core/things.py; unknown: not gated)."""
+        out = []
+        for name, (dep_t, _) in list(self._departures.items()):
+            ent = self.entities.get(name)
+            if (ent is None or not is_thing(name) or ent.merged_into is not None or ent.zone != TABLE
+                    or not _off_table(ent) or t - dep_t > max_age_s):
+                continue
+            placed = getattr(self, '_placed_t', {}).get(name)
+            if min_dwell_s > 0 and placed is not None and dep_t - placed < min_dwell_s:
+                continue
+            if self._junk_name(self.thing_guess(name)):
+                continue
+            out.append((name, dep_t))
+        return out
+
+    def _junk_name(self, guess: Optional[dict]) -> bool:
+        """Grok named it like a body part or clothing (room_cfg.ignore_names): a foot or a sleeve at the
+        table edge, born and "gone" every few seconds, never carried anywhere. On the rig these were handed
+        off as "sock" and "white fabric" to the couch-sitter's own feet (Sat 26 Sep)."""
+        if not guess:
+            return False
+        names = self.room_cfg.ignore_names or ()
+        return any(match_score(n, guess) >= 1.5 for n in names)
+
     def room_handoff_hints(self, t: float) -> list[dict]:
         """Grok guesses of things that left the table (an unconsumed table departure within handoff_s of
-        t) and could be handed off now. The room pass only asks Grok about new room things while this is
-        non-empty, and asks "is it one of these?" instead of an open name."""
+        t, after sitting there handoff_min_dwell_s) and could be handed off now. The room pass only asks
+        Grok about new room things while this is non-empty, and asks "is it one of these?" instead of an
+        open name."""
         with self.lock:
             out = []
-            for name, (dep_t, _) in list(self._departures.items()):
-                ent = self.entities.get(name)
-                if (ent is None or not is_thing(name) or ent.merged_into is not None or ent.zone != TABLE
-                        or not _off_table(ent) or t - dep_t > self.room_cfg.handoff_s):
-                    continue
+            for name, _ in self._open_departures(t, self.room_cfg.handoff_s):
                 g = self.thing_guess(name)
                 if g:
                     out.append(g)
             return out
+
+    def room_hot(self, t: float) -> bool:
+        """Whether the room pass should run at its fast cadence: a named thing that sat on the table for
+        handoff_min_dwell_s left it within hot_max_s. Both gates are here and not on the handoff itself,
+        because the fast cadence costs the table half its fps: on the rig a foot at the table edge (born,
+        named "sneaker", gone 3 s later) kept the room hot for 2 minutes (Sat 26 Sep). Such a thing can
+        still be handed off at the normal cadence if it really was carried somewhere."""
+        rc = self.room_cfg
+        with self.lock:
+            return any(self.thing_guess(name)
+                       for name, _ in self._open_departures(t, rc.hot_max_s, rc.handoff_min_dwell_s))
 
     def room_json(self) -> dict:
         """For state_json: name -> its room state, plus 'conflicts' (every recorded conflict sighting)."""
@@ -323,16 +367,8 @@ class RoomRules:
         departure within handoff_s, before the track was first seen), still off it, not merged away and
         not already some other track's."""
         taken = set(self._thing_tracks.values())
-        out = []
-        for name, (dep_t, _) in self._departures.items():
-            ent = self.entities.get(name)
-            if (ent is None or not is_thing(name) or ent.merged_into is not None or name in taken
-                    or name in self._room):
-                continue
-            if (ent.zone == TABLE and _off_table(ent) and visit.t - dep_t <= self.room_cfg.handoff_s
-                    and dep_t < trk.first_seen):
-                out.append((name, dep_t))
-        return out
+        return [(name, dep_t) for name, dep_t in self._open_departures(visit.t, self.room_cfg.handoff_s)
+                if name not in taken and name not in self._room and dep_t < trk.first_seen]
 
     def _thing_reacquire(self, trk: RoomTrack, visit: ZoneVisit) -> Optional[str]:
         """The one thing in this zone whose own track is missing or absent and was last matched before trk

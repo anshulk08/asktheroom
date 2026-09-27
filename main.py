@@ -159,7 +159,7 @@ class Room:
         self._cues = 0
         self.stop_ev = threading.Event()
         self._acted = threading.local()            # .kind: RESET / RECAL if the router answered one
-        self._clear_ev = threading.Event()         # RESET: the perception thread resets proposals, crops, hand ids
+        self._clear_ev = threading.Event()         # RESET: the perception thread resets proposals, crops, room memory, hand ids
         pg = cfg.get("perception_guard") or {}
         self.stale_s = float(pg.get("stale_s", 2.0))
         self.voice_recal = bool(pg.get("voice_recalibrate", True))
@@ -423,6 +423,11 @@ class Room:
         if self._clear_ev.is_set():        # here, not in ask: the proposer and hand tracker aren't thread-safe
             self._clear_ev.clear()
             self.detector.reset_proposals()
+            if self.room_memory is not None:   # same thread as its step: never concurrent with a visit
+                try:
+                    self.room_memory.reset()
+                except Exception:              # the room must never cost the table
+                    log.exception("room memory reset failed; table perception goes on")
             if self.hands is not None:
                 self.hands.reset()
         dets = self.detector.detect(frame)

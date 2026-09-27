@@ -169,7 +169,8 @@ unit-tested, not yet on the rig. A prop carried from the table to a drawn room z
 answered as "on the bookshelf", from the one camera at 1920x1080 with no laser. Off by default
 (`room_memory.enabled: false`); on the rig it needs `table_view_rect` measured, zones drawn, and D17 passing
 on the table view (`demo_check.py` check 10 checks the files). One instance per prop class is a demo
-assumption, not identity evidence.
+assumption, not identity evidence. A spoken "reset" clears the room memory too (tracks, pending Grok
+names, zone backgrounds), on the perception thread, without a restart.
 
 ## Decisions worth knowing
 

@@ -1,17 +1,25 @@
 """Room memory M0 (spec 0009): per-zone tracks of known props, the per-frame room driver, and the zone CLI.
 
 RoomTracker keeps short tracks `r:N` per drawn zone across visits of that zone: confirmation after
-`confirm_visits` matched visits, and valid/invalid misses (a hand box, a large frame-difference blob or a
-too dark/bright box over the spot makes a visit count for nothing). RoomMemory runs once per perception
-frame: every `room_every_n`-th call it crops the next zone (round-robin) from the full 1080p frame, runs the
-already-loaded prop model backend on the crop, and hands the tracker's ZoneVisit to `world.room_update`,
-which applies the association rules (core/room_world.py). Positions here are full-frame px, never table cm.
+`confirm_visits` matched visits (`confirm_visits_arrival`, 1, for a track whose spot changed when it
+appeared: an arrival), and valid/invalid misses (a hand box, a large frame-difference blob or a too
+dark/bright box over the spot makes a visit count for nothing). RoomMemory runs once per perception frame:
+every `room_every_n`-th call (`room_every_n_hot`-th while the world has a handoff open) it crops the next
+zone (round-robin) from the full 1080p frame, runs the already-loaded prop model backend on the crop, and
+hands the tracker's ZoneVisit to `world.room_update`, which applies the association rules
+(core/room_world.py). Positions here are full-frame px, never table cm.
 
 Unnamed things (`room_memory.things`): the props model does not know most objects from a high corner, so
 the same zone crop also goes through a class-agnostic YOLOE proposer (sharing the table's loaded model);
 its boxes that are not a prop, a hand or someone carrying something become cls 'thing' observations and
 are tracked like any class. Each confirmed thing track has one close-up named by Grok in the background
 (RoomNamer), so the World can hand a table thing that left off to a zone thing with a matching name.
+
+Speed (spec 0010 P0-3; a judge asks within ~5 s of putting the object down, far zones took 20-24 s): while
+`world.room_handoff_hints` is non-empty the zones are visited every frame, an arrival confirms on its first
+visit, its "is it one of these?" call goes to Grok before any open naming (static clutter is not sent at
+all then), and the World decides the track the moment the name lands (RoomNamer.on_named), not on the
+zone's next visit.
 
     python -m core.room --zone bookshelf --say "the bookshelf" --poly 100,80 600,80 600,400 100,400
     python -m core.room --list
@@ -73,6 +81,11 @@ class RoomTracker:
             return list(self._tracks.get(zone, []))
         return [tr for ts in self._tracks.values() for tr in ts]
 
+    def reset(self) -> None:
+        """Forget every track (a spoken reset). The id counter goes on: a naming job or an event log entry
+        that still names an old 'r:N' must never point at a new track."""
+        self._tracks = {}
+
     def visit(self, zone: str, say: str, obs: list[RoomObservation], blockers: list[BoxPx],
               changes: list[BoxPx], t: float, wall: float, frame_idx: int,
               lum: Optional[Callable[[BoxPx], float]] = None, crop=None) -> ZoneVisit:
@@ -92,7 +105,7 @@ class RoomTracker:
                 tr.last_seen, tr.last_wall = t, wall
                 tr.hits += 1
                 tr.misses = 0
-                tr.confirmed = tr.confirmed or tr.hits >= self.cfg.confirm_visits
+                tr.confirmed = tr.confirmed or tr.hits >= self._need(tr)
                 if tr.confirmed:
                     v.confirmed.append(tr)
                 keep.append(tr)
@@ -120,12 +133,20 @@ class RoomTracker:
             tr = RoomTrack(tid=f"r:{self._n}", zone=zone, cls=o.cls, box_px=tuple(int(c) for c in o.box_px),
                            first_seen=t, first_wall=wall, last_seen=t, last_wall=wall, hits=1)
             tr.changed = _changed(tr.box_px, changes)
-            tr.confirmed = tr.hits >= self.cfg.confirm_visits
+            tr.confirmed = tr.hits >= self._need(tr)
             if tr.confirmed:
                 v.confirmed.append(tr)
             keep.append(tr)
         self._tracks[zone] = keep
         return v
+
+    def _need(self, tr: RoomTrack) -> int:
+        """Matched visits a track needs to confirm. An arrival (its spot changed when it was first seen, or
+        on a later visit once the placing hand was gone) confirms on confirm_visits_arrival (1): the second
+        visit of a far zone cost a second or more of the handoff (spec 0010 P0-3), and the change evidence
+        is what tells the carried object from detector flicker on static clutter, which keeps
+        confirm_visits."""
+        return self.cfg.confirm_visits_arrival if tr.changed else self.cfg.confirm_visits
 
     @staticmethod
     def _match(tracks: list[RoomTrack], obs: list[RoomObservation]) -> dict[str, RoomObservation]:
@@ -170,10 +191,11 @@ class RoomTracker:
 # Grok names for thing tracks
 
 class _Job:
-    __slots__ = ("track", "img", "attempts", "due", "hints")
+    __slots__ = ("track", "img", "attempts", "due", "hints", "gen")
 
-    def __init__(self, track: RoomTrack, img: np.ndarray, due: float, hints=None):
+    def __init__(self, track: RoomTrack, img: np.ndarray, due: float, hints=None, gen: int = 0):
         self.track, self.img, self.attempts, self.due, self.hints = track, img, 0, due, hints
+        self.gen = gen                     # the reset generation it was queued in (RoomNamer.reset)
 
 
 class RoomNamer:
@@ -181,14 +203,19 @@ class RoomNamer:
     core.auto_name.AutoNamer._ask), the result set as `track.guess`. The perception thread only queues a
     copied crop. Calls only while `online()` (offline, jobs wait), at most `per_minute`; a failure (an
     exception or None) is retried once `retry_s` later, then given up. The queue keeps the newest
-    `max_pending` jobs: a burst of junk boxes must not hold memory or starve later tracks."""
+    `max_pending` jobs: a burst of junk boxes must not hold memory or starve later tracks. Verification
+    jobs (with hints: "is it one of these?") go before open naming, newest first either way: the carried
+    object is the one that matters. `on_named(track)`, when set, is called on the worker thread right after
+    a guess lands (RoomMemory decides the track at once; spec 0010 P0-3)."""
 
     def __init__(self, name_fn: Callable[[np.ndarray], Optional[dict]], per_minute: int = 6,
                  online: Optional[Callable[[], bool]] = None, clock: Callable[[], float] = time.monotonic,
                  retry_s: float = 5.0, max_pending: int = 8, start: bool = True,
-                 verify_fn: Optional[Callable[[np.ndarray, list], Optional[dict]]] = None):
+                 verify_fn: Optional[Callable[[np.ndarray, list], Optional[dict]]] = None,
+                 on_named: Optional[Callable[[RoomTrack], None]] = None):
         self.name_fn = name_fn
         self.verify_fn = verify_fn         # (img, hints) -> guess: "is this one of these?" beats open naming
+        self.on_named = on_named           # called with the track once its guess is set (the worker thread)
         self.per_minute = int(per_minute)
         self.online = online or (lambda: True)
         self.clock = clock
@@ -196,6 +223,7 @@ class RoomNamer:
         self._lock = threading.Lock()
         self._jobs: deque = deque(maxlen=max(1, int(max_pending)))   # full: appending drops the oldest
         self._calls: deque = deque()       # clock() of recent calls (the per-minute cap)
+        self._gen = 0                      # bumped by reset(): a job from an older generation never lands
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -207,18 +235,27 @@ class RoomNamer:
         """hints: Grok names of things that just left the table (the handoff candidates), asked about
         directly when a verify_fn is set."""
         with self._lock:
-            self._jobs.append(_Job(track, img, self.clock(), list(hints) if hints else None))
+            self._jobs.append(_Job(track, img, self.clock(), list(hints) if hints else None, self._gen))
         self._wake.set()
 
     def pending(self) -> int:
         with self._lock:
             return len(self._jobs)
 
+    def reset(self) -> None:
+        """Drop every queued job and disown the one in flight: after a spoken reset its tracks are gone,
+        and a Grok answer for a pre-reset crop must not become a new track's name (the worker checks the
+        generation after the call, so even an answer already on its way is thrown away)."""
+        with self._lock:
+            self._jobs.clear()
+            self._gen += 1
+
     def step(self, now: Optional[float] = None) -> bool:
         """Try the next due job. True when a call was made."""
         now = self.clock() if now is None else now
         with self._lock:
-            job = next((j for j in reversed(self._jobs) if j.due <= now), None)   # newest first: the fresh arrival
+            due = [j for j in reversed(self._jobs) if j.due <= now]              # newest first: the fresh arrival
+            job = next((j for j in due if j.hints), due[0] if due else None)     # a verification first
             if job is None or not self.online():
                 return False
             while self._calls and self._calls[0] <= now - 60.0:
@@ -235,9 +272,19 @@ class RoomNamer:
             log.info("naming room track %s failed (attempt %d): %s", job.track.tid, job.attempts, e)
             g = None
         self._save(job, g)
+        with self._lock:
+            stale = job.gen != self._gen
+        if stale:                          # reset while it was asked: neither applied nor retried
+            log.info("room track %s in %s: named after a reset, dropped", job.track.tid, job.track.zone)
+            return True
         if g:
             job.track.guess = g
             log.info("room track %s in %s looks like a %s", job.track.tid, job.track.zone, g.get("name"))
+            if self.on_named is not None:
+                try:
+                    self.on_named(job.track)
+                except Exception:              # a deciding bug must not cost the naming worker
+                    log.warning("deciding room track %s on its name failed", job.track.tid, exc_info=True)
         else:
             log.info("room track %s in %s: no usable name (attempt %d)", job.track.tid, job.track.zone, job.attempts)
         if not g and job.attempts < 2:
@@ -302,7 +349,8 @@ def _near_ok(tr: RoomTrack, o: RoomObservation) -> bool:
 # Driver
 
 class RoomMemory:
-    """Called once per perception frame with the full camera frame; processes one zone every room_every_n calls."""
+    """Called once per perception frame with the full camera frame; processes one zone every room_every_n
+    calls (room_every_n_hot while a handoff is open)."""
 
     def __init__(self, cfg: RoomConfig, zones: Zones, backend, to_obj: dict[str, str], world,
                  table_rect: BoxPx, hand_conf: float = 0.35, proposer=None, namer: Optional[RoomNamer] = None):
@@ -318,8 +366,14 @@ class RoomMemory:
         self.tracker = RoomTracker(cfg)
         self._prop_err_t = float("-inf")
         self._calls = 0
+        self._since = 0                        # calls since the last processed zone (the cadence)
         self._next = 0
+        self._last_idx = -1                    # frame_idx of the last processed zone (synthetic visits)
         self._prev: dict[str, np.ndarray] = {}  # zone -> grey crop of its previous visit (change evidence)
+        self._extra: list[Event] = []          # events of visits decided off the perception thread (_on_named)
+        self._extra_lock = threading.Lock()
+        if namer is not None and getattr(namer, "on_named", None) is None:
+            namer.on_named = self._on_named
 
     @classmethod
     def from_config(cls, cfg: dict, world, backend, table_rect: Optional[BoxPx], proposer=None,
@@ -372,23 +426,76 @@ class RoomMemory:
         if self.namer is not None:
             self.namer.stop()
 
+    def reset(self) -> None:
+        """A spoken reset, without a restart: forget every track, every queued or in-flight Grok name, and
+        every zone's previous crop (the first visit after this takes fresh backgrounds, so nothing counts
+        as 'changed' until something really arrives), then the World's room side too. Runs on the
+        perception thread, like step(), so the next run starts exactly like a fresh start: World.reset()
+        on the asking thread may already have cleared the room state, but one visit with the old tracks
+        could have slipped in between (a pre-reset conflict or pending thing in a fresh world)."""
+        self.tracker.reset()
+        if self.namer is not None:
+            self.namer.reset()
+        self._prev.clear()
+        fn = getattr(self.world, "room_reset", None)
+        if callable(fn):
+            fn()
+
     def step(self, full: Optional[Frame]) -> list[Event]:
-        """One perception frame. Every room_every_n-th call processes the next zone and returns
-        world.room_update's events; otherwise, or with no image or an empty crop, []."""
+        """One perception frame. Every room_every_n-th call with a frame (every room_every_n_hot-th while the
+        world has a handoff open: `room_handoff_hints` non-empty, so the zone the object went to is seen
+        within a frame or two instead of up to zones x room_every_n frames later; spec 0010 P0-3) processes
+        the next zone, round-robin, and returns world.room_update's events; otherwise, or with no image or
+        an empty crop, []. Events of visits decided off this thread since the last call (_on_named) come
+        first. Hot mode costs one more prop + YOLOE pass per perception frame on the Jetson (10-13 fps with
+        the cold cadence): not measured yet; measure fps on the rig with a handoff open."""
         self._calls += 1
+        self._since += 1
+        out = self._drain()
         names = list(self.zones.zones)
-        if not names or self._calls % max(1, int(self.cfg.room_every_n)) != 0:
-            return []
-        if full is None or full.img is None:
-            return []
+        if not names or full is None or full.img is None:
+            return out
+        hints = self._hints(full.t)
+        every = (min(self.cfg.room_every_n_hot, self.cfg.room_every_n) if self._hot(full.t, hints)
+                 else self.cfg.room_every_n)          # hot is never slower than cold
+        if self._since < max(1, int(every)):
+            return out
+        self._since = 0
+        self._last_idx = full.idx
         zone = self.zones.zones[names[self._next % len(names)]]
         self._next += 1
-        visit = self._visit(zone, full)
+        visit = self._visit(zone, full, hints)
         if visit is None:
-            return []
-        return list(self.world.room_update(visit) or [])
+            return out
+        return out + list(self.world.room_update(visit) or [])
 
-    def _visit(self, zone: Zone, full: Frame) -> Optional[ZoneVisit]:
+    def _drain(self) -> list[Event]:
+        with self._extra_lock:
+            out, self._extra = self._extra, []
+        return out
+
+    def _on_named(self, track: RoomTrack) -> None:
+        """RoomNamer's callback, on its worker thread: Grok named `track`. The World decides it now, with a
+        synthetic visit of its zone holding just this track (the track's last sighting, no crop), instead
+        of on the zone's next visit, which cold could be ~1.7 s away (spec 0010 P0-3). room_update takes the
+        world lock; the tracker is only read (a track it dropped meanwhile is not decided: it would never be
+        refreshed or missed again). The visit's events come out of the next step(). A failure is logged,
+        never raised."""
+        try:
+            zone = self.zones.zones.get(track.zone)
+            if zone is None or not track.confirmed or not any(t is track for t in self.tracker.tracks(track.zone)):
+                return
+            visit = ZoneVisit(zone=track.zone, say=zone.say, t=track.last_seen, wall=track.last_wall,
+                              frame_idx=self._last_idx, confirmed=[track], crop=None)
+            events = list(self.world.room_update(visit) or [])
+            if events:
+                with self._extra_lock:
+                    self._extra.extend(events)
+        except Exception:
+            log.warning("deciding room track %s on its name failed", track.tid, exc_info=True)
+
+    def _visit(self, zone: Zone, full: Frame, hints: Optional[list] = None) -> Optional[ZoneVisit]:
+        """One processed visit of `zone`. `hints`: what `_hints(full.t)` said (None: the world can't say)."""
         img = full.img
         h, w = img.shape[:2]
         bx1, by1, bx2, by2 = zone.bbox()
@@ -466,15 +573,29 @@ class RoomMemory:
         visit = self.tracker.visit(zone.name, zone.say, obs, hands, changes, full.t, full.wall, full.idx,
                                    lum=lum, crop=crop.copy())
         if self.namer is not None:
-            hints = self._hints(full.t)
             for tr in visit.confirmed:
-                if tr.cls == THING and tr.guess is None and not tr.name_asked and hints != []:
+                # While a handoff is open only arrivals (their spot changed) are sent: static clutter never
+                # arrived, so it can't be the carried object, and each junk call cost ~1 s of Grok's time
+                # ahead of the one that matters (counter clutter, rig run Sat 26 Sep).
+                if (tr.cls == THING and tr.guess is None and not tr.name_asked and hints != []
+                        and (hints is None or tr.changed)):
                     img = (_marked_close_up(visit.crop, tr.box_px, x1, y1) if hints and self.namer.verify_fn
                            else _close_up(visit.crop, tr.box_px, x1, y1))
                     if img is not None:
                         tr.name_asked = True
                         self.namer.submit(tr, img, hints)
         return visit
+
+    def _hot(self, t: float, hints: Optional[list]) -> bool:
+        """The fast cadence: the world's room_hot (a named departure within hot_max_s), else hints non-empty
+        for a world without it."""
+        fn = getattr(self.world, "room_hot", None)
+        if callable(fn):
+            try:
+                return bool(fn(t))
+            except Exception:
+                log.debug("room_hot failed", exc_info=True)
+        return bool(hints)
 
     def _hints(self, t: float) -> Optional[list]:
         """Grok names of things that left the table and could still be handed off, or None when the world
@@ -734,7 +855,10 @@ def make_verify_fn(namer) -> Callable[[np.ndarray, list], Optional[dict]]:
     """(img, hints) -> guess, through the auto-namer's Grok provider. Asking "is it one of these?" (the
     names of things that just left the table) is far more reliable than open naming for a small, far
     object: open naming called the remote on the couch a phone and an eyeglasses case (rig run). A match
-    returns that hint's guess, so the World's name check passes; 'none' returns what Grok says it is."""
+    returns that hint's guess, so the World's name check passes; 'none' returns what Grok says it is.
+    Speed: the call goes through the auto-namer's provider, built from visual_memory (grok-4.3 at
+    reasoning_effort 'none', its lowest, timeout_s 8), which is what makes it ~0.6-1.5 s; narrate() takes
+    no per-call effort, so nothing is set here. The crop goes at namer.c.crop_px (384) on its long side."""
     from core.auto_name import _jpeg, clean_name, match_score
     from core.narration import _parse_json
 
