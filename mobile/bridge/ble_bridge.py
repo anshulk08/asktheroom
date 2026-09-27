@@ -257,7 +257,7 @@ class BridgeCore:
     def poll_once(self) -> None:
         """One GET /state, then whatever notifications are due."""
         try:
-            body = self.http.get_json("/state", timeout=1.0)
+            body = self.http.get_json("/state", timeout=3.0)
             st = body.get("state") if isinstance(body, dict) else None
             if not isinstance(st, dict):
                 raise ValueError("no state in /state")
@@ -379,7 +379,7 @@ class BridgeCore:
             target = None
             if point_at:
                 try:
-                    st = self.http.get_json("/state", timeout=1.0).get("state")
+                    st = self.http.get_json("/state", timeout=3.0).get("state")
                     with self.lock:
                         self.latest_state = st or self.latest_state
                 except Exception:
