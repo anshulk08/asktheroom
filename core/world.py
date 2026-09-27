@@ -282,7 +282,7 @@ class World(ThingRules, RoomRules):
         count = bits.hits()
         if count >= self.cfg.present_k - 1e-9:
             self._present[name] = True
-        elif count <= self.cfg.absent_max:
+        elif count <= self.cfg.absent_max + 1e-9:
             self._present[name] = False
 
     # ----- rule 2: observation wins -------------------------------------------------------------
@@ -696,7 +696,7 @@ class World(ThingRules, RoomRules):
         """Present, or seen often enough lately that the debounce may still flip to present. A put-down
         is judged by observation, so the hand rules wait rather than race it (a hand that drops an
         object and leaves at once would otherwise read as lost before the object is confirmed)."""
-        return self._present[name] or self._bits[name].hits() > self.cfg.absent_max
+        return self._present[name] or self._bits[name].hits() > self.cfg.absent_max + 1e-9
 
     def _update_held(self, name: str, ent: Entity) -> list[Event]:
         laid = self._laid_over(name, ent)       # it was a cover laid over it, not a pick-up
