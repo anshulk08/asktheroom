@@ -154,8 +154,30 @@ def camera_controls() -> dict:
     return ctl
 
 
-def say(text: str) -> subprocess.Popen:
-    return subprocess.Popen(["say", "-r", "185", text])
+def speaker() -> list:
+    """The cue voice on this laptop: macOS say, Linux espeak-ng / espeak / spd-say, Windows PowerShell's SAPI;
+    [] if none (cues are then only printed)."""
+    import shutil
+    for cmd, args in (("say", ["-r", "185"]), ("espeak-ng", ["-s", "165"]), ("espeak", ["-s", "165"]),
+                      ("spd-say", ["-w"])):
+        if shutil.which(cmd):
+            return [cmd, *args]
+    if shutil.which("powershell"):
+        return ["powershell", "-NoProfile", "-Command",
+                "Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak($args[0])"]
+    return []
+
+
+class _Printed:
+    def wait(self, timeout=None):
+        return 0
+
+
+def say(text: str):
+    """Speak a cue (and print it, so a laptop with no voice still works: read the cue and act on it)."""
+    print(f"  >>> {text}", flush=True)
+    cmd = speaker()
+    return subprocess.Popen([*cmd, text]) if cmd else _Printed()
 
 
 def run_clip(name: str, clip_id: str, exposure: int = 166, gain: int = 80, setup: bool = True) -> Path:

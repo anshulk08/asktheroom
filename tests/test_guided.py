@@ -62,3 +62,15 @@ def test_recording_uses_the_remote_copy_and_stops_only_the_app_on_the_camera(mon
     assert "--filter volume=/dev/v4l" in stop and "camera_setup.sh 166" in stop and " 80 10 160 3200" in stop
     assert "~/askroom_rig/data/clips/brio_still_1" in mkdir and "~/askroom/" not in mkdir
     assert rec.startswith("cd ~/askroom_rig && ")
+
+
+def test_cues_use_whatever_voice_the_laptop_has(monkeypatch, capsys):
+    import shutil
+
+    from eval import guided
+    monkeypatch.setattr(shutil, "which", lambda c: "/usr/bin/espeak-ng" if c == "espeak-ng" else None)
+    assert guided.speaker()[0] == "espeak-ng"
+    monkeypatch.setattr(shutil, "which", lambda c: None)
+    assert guided.speaker() == []
+    assert guided.say("Hands away.").wait() == 0          # no voice: printed only, never an error
+    assert ">>> Hands away." in capsys.readouterr().out
