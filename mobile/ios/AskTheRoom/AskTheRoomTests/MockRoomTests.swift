@@ -69,7 +69,9 @@ final class MockRoomTests: XCTestCase {
 
     func testStartingSnapshotIsTheSampleAtNow() {
         XCTAssertEqual(snapshot.t, now.timeIntervalSince1970)
-        XCTAssertEqual(snapshot.entities.count, 12)
+        XCTAssertEqual(snapshot.entities.count, 16, "the sample and the room's four")
+        XCTAssertEqual(snapshot.lay, MockData.sampleLayout)
+        XCTAssertNotNil(snapshot.lh)
         XCTAssertEqual(snapshot.entity(named: "keys")?.ls, now.timeIntervalSince1970 - 120)
     }
 }

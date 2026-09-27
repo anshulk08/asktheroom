@@ -13,6 +13,7 @@ import Foundation
 ///   -mockSelect name   open this entity's detail sheet (with -mockTab table: pick it on the map)
 ///   -mockFocus name    open the answer sheet on this entity
 ///   -mockTab table     open on the Table (or `recent`) tab rather than Home
+///   -mockMap table     on that tab, show the table map rather than the room map
 ///   -mockScroll YES    scroll Home to the bottom
 ///   -mockSettings YES  open helper settings
 ///   -mockConnection YES  with -mockSettings: open the Connection section (link diagnostics)
@@ -87,7 +88,8 @@ final class MockRoom: RoomTransport {
 
     /// The spec sample, moved so its times are "now" and the detail sheet reads sensibly.
     static func startingSnapshot(now: Date = Date()) -> Snapshot {
-        var s = MockData.sampleSnapshot
+        // The sample table with the room around it, so the Room map has something to show.
+        var s = MockData.roomSnapshot
         let offset = now.timeIntervalSince1970 - (s.t ?? now.timeIntervalSince1970)
         s.t = now.timeIntervalSince1970
         for i in s.e.indices {
@@ -131,6 +133,26 @@ final class MockRoom: RoomTransport {
     }
 
     private static let story: [Step] = [
+        // Round the room first, for the Room map: the wallet to the couch and on to the counter,
+        // the headphones carried off and put down by the door.
+        Step(change: "Your wallet went to the couch.") { s, now in
+            s.update("wallet") { $0.s = .visible; $0.xy = nil; $0.r = nil; $0.z = "couch"; $0.rg = .visible; $0.ls = now }
+        },
+        Step(change: "You picked up your headphones.") { s, now in
+            s.update("headphones") { $0.s = .held; $0.rg = .carried; $0.ls = now }
+        },
+        Step(change: "Your headphones are by the doorway.") { s, now in
+            s.update("headphones") { $0.s = .visible; $0.z = "doorway"; $0.rg = .visible; $0.ls = now }
+        },
+        Step(change: "Your wallet is on the counter.") { s, now in
+            s.update("wallet") { $0.z = "counter"; $0.ls = now }
+        },
+        Step(change: "Your wallet came back to the table.") { s, now in
+            s.update("wallet") { $0.z = nil; $0.rg = nil; $0.xy = TablePoint(x: 60, y: 15); $0.r = $0.xy; $0.ls = now }
+        },
+        Step(change: "Your headphones are on the couch.") { s, now in
+            s.update("headphones") { $0.z = "couch"; $0.ls = now }
+        },
         Step(change: "Your phone came back to the table.") { s, now in
             s.update("phone") { $0.s = .visible; $0.xy = TablePoint(x: 12, y: 30); $0.r = $0.xy; $0.edge = nil; $0.ls = now }
         },
