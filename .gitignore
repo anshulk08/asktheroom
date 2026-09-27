@@ -79,3 +79,4 @@ data/finetune_pub/
 # per-device config overlay (core/config.py)
 config.local.yaml
 data/room/
+data/finetune-*/

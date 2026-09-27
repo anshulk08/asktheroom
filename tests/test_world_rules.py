@@ -706,3 +706,18 @@ def test_a_label_jumping_away_from_keys_still_in_place_is_another_object(rscene,
     assert events == []
     keys = world.get('keys')
     assert keys.status == Status.VISIBLE and abs(keys.pos_cm[0] - 40) < 2
+
+
+def test_keys_the_detector_stops_naming_while_a_proposal_still_outlines_them_stay(scene, world, cfg):
+    """blanket_1t: the phone's screen lit up and the fine-tuned detector stopped calling it 'phone' (it
+    called the tape roll 'phone' instead); YOLOE still proposed the phone's box. Its pixels changed, so
+    the patch check failed and the phone was lost after the grace, then reborn as a new thing:N. A
+    class-agnostic proposal on the object's own box, with no hand there, is the object still there."""
+    scene.place('keys', 40, 30)
+    scene.thing('keys seen as a thing', 40, 30, 6, 4)
+    scene.run(world, 1.5)
+    scene.miss('keys')
+    events = scene.run(world, cfg.lost_grace_s + 1.5)
+    assert events == []
+    assert world.get('keys').status == Status.VISIBLE
+    assert not [n for n in world.entities if n.startswith('thing:')]

@@ -23,7 +23,8 @@ import cv2
 from core import geom, relations
 from core.config import Config
 from core.room_world import RoomRules
-from core.things import ThingRules
+from core.surround import SurroundMemory, UnknownCoverConfig
+from core.things import ThingRules, is_thing
 from core.types import Detection, Detections, Entity, Event, EventType, Frame, Point, Status
 
 HISTORY_MAX = 1000
@@ -32,6 +33,8 @@ LABEL_LEFT_IOU = 0.3         # a target's label this clear of its box while its 
 LABEL_ON_THING_IOU = 0.5    # a configured label on a thing's box overlapping this much ...
 ESTABLISHED_S = 2.0         # ... in place this long before the object was last seen elsewhere: the thing
 PARTLY_HIDDEN_INSIDE = 0.8  # a smaller box this much inside the box an object rests in: part of it is hidden
+THING_COVER_AREA = 1.5      # a thing at least this many times an object's footprint can lie over it
+OUTLINE_IOU = 0.5           # a class-agnostic proposal this much like a configured object's box outlines it
 
 # A rule verdict is (Status, parent, confidence, EventType[, candidates]), or NO_CHANGE: the rule
 # claims the object this update (later rules are skipped) but leaves the belief as it is and emits
@@ -108,6 +111,11 @@ class World(ThingRules, RoomRules):
             self._waiting: dict[str, float] = {}        # obj -> when an absence no rule explained began
             self._bg_t: float | None = None             # last background / appearance refresh
             self._gray_img = None                       # this update's grey frame, made on demand
+            self._ucfg = UnknownCoverConfig.from_config(self.cfg)
+            self._bands = SurroundMemory(self._ucfg)    # the band of table around each object (unknown covers)
+            self._laid_wait: dict[str, float] = {}      # obj -> since when its absence waits on the band
+            self._bare_at: dict[str, float] = {}        # obj UNDER 'unknown' -> since when its band looks bare
+            self._unknown_uncovered: set[str] = set()   # last seen again from under 'unknown'
             self._reset_things()
             self._reset_room()
 
@@ -120,6 +128,7 @@ class World(ThingRules, RoomRules):
             self._decay(dets.t)
             self._now, self._wall, self._frame = dets.t, frame.wall if frame else dets.t, frame
             self._gray_img = None
+            self._batch_things = [d for d in dets.items if d.cls == 'thing']
             out: list[Event] = []
             seen = self._best_detections(dets.items, dets.hands)
             self._track_covers(seen)
@@ -144,8 +153,10 @@ class World(ThingRules, RoomRules):
             for name, ent in self.entities.items():
                 if ent.status == Status.HELD and not self._reappearing(name):
                     out += self._update_held(name, ent)
+            out += self._things_laid_over()
             out += self._lifted_covers()
             self._refresh_images(seen, dets.hands)
+            self._remember_bands(seen, dets.hands)
             self._after_things(out)
             return out
 
@@ -246,9 +257,12 @@ class World(ThingRules, RoomRules):
                 or geom.dist(ent.pos_cm, d.center_cm) < self.cfg.moved_min_cm
                 or any(geom.overlap_frac(h.box_cm, d.box_cm) > 0 for h in hands)):
             return False
+        in_place = self._visible_things() + [    # or hidden where it lay (a blanket just lifted off it)
+            n for n in self._things if self.entities[n].status == Status.UNDER
+            and self.entities[n].merged_into is None and self.entities[n].box_cm is not None]
         return any(geom.iou(self.entities[n].box_cm, d.box_cm) >= LABEL_ON_THING_IOU
                    and self._placed_t.get(n, seen) + ESTABLISHED_S <= seen
-                   for n in self._visible_things())
+                   for n in in_place)
 
     def _debounce(self, name: str, ent: Entity, det: Detection | None) -> None:
         """Push this batch's presence bit; refresh position while detected (even before a flip)."""
@@ -269,12 +283,16 @@ class World(ThingRules, RoomRules):
     def _observe(self, name: str, ent: Entity) -> list[Event]:
         prev, origin, known = ent.status, ent.pre_pickup_pos, name in self._confirmed
         from_room = ent.zone != 'table' and name in self._room
+        # seen again where something unknown lay over it: found in place, not put down (teach, _refound)
+        (self._unknown_uncovered.add if prev == Status.UNDER and ent.parent == 'unknown'
+         else self._unknown_uncovered.discard)(name)
         ent.status, ent.parent, ent.candidates, ent.confidence, ent.edge = Status.VISIBLE, None, [], 1.0, None
         ent.zone, ent.pre_pickup_pos, ent.held_since = 'table', None, None
         self._confirmed.add(name)
         self._rest[name], self._rest_box[name] = ent.pos_cm, ent.box_cm
         self._carry.pop(name, None)
         self._waiting.pop(name, None)
+        self._settled_band(name)
         if from_room:                       # back from a room zone: Return (core/room_world.py)
             return self._room_return(name, ent)
         if prev == Status.HELD:
@@ -363,6 +381,7 @@ class World(ThingRules, RoomRules):
                              if t >= self._now - self.cfg.contact_window_s), reverse=True)
             if not recent:                  # shifted with no hand (e.g. re-detected): new rest spot
                 self._rest[name], self._rest_box[name] = pos, ent.box_cm
+                self._settled_band(name)
                 return []
             self._carry[name] = (recent[0][1], rest)
             return [self._emit(name, EventType.PICKED_UP, from_cm=rest, parent=recent[0][1])]
@@ -374,6 +393,7 @@ class World(ThingRules, RoomRules):
             return []
         origin = self._carry.pop(name)[1]
         self._rest[name], self._rest_box[name] = pos, ent.box_cm
+        self._settled_band(name)
         etype = EventType.MOVED if geom.dist(pos, origin) >= self.cfg.moved_min_cm else EventType.PUT_BACK
         return [self._emit(name, etype, from_cm=origin, to_cm=pos)]
 
@@ -397,6 +417,10 @@ class World(ThingRules, RoomRules):
             slid_over = self._slid_over_by_hand(name, ent)
             if slid_over is not None:
                 return self._apply_verdict(name, ent, slid_over)
+            if self._touched(name):         # a hand holding an unknown cover touches what it covers
+                laid = self._laid_over(name, ent)
+                if laid is not None:
+                    return self._defer_or_apply(name, ent, laid)
             held = self._picked_up(name, ent)
             if held or ent.status == Status.HELD:
                 return held
@@ -410,6 +434,9 @@ class World(ThingRules, RoomRules):
             return []
         self._waiting.pop(name, None)
         self._depart_anchor = self._last_evidence(name)   # room memory: last seen, not the grace's end
+        laid = self._laid_over(name, ent, settled=True)     # untouched, still unseen: an unknown cover?
+        if laid is not None and laid is not NO_CHANGE:
+            return self._apply_verdict(name, ent, laid)       # (COVERED by 'unknown' is a departure too)
         return self._lose(name, ent)
 
     def _still_there(self, name: str) -> bool:
@@ -418,8 +445,20 @@ class World(ThingRules, RoomRules):
         a shifted crop decorrelates. Checked before the hand rule too: a touch within the contact
         window followed by a detector miss must not read as a pick-up."""
         gray, box = self._gray(), self._look_px.get(name)
-        return (gray is not None and box is not None
-                and self._looks.still_there(name, gray, box, self.cfg.appearance_match))
+        return self._outlined(name) or (gray is not None and box is not None
+                                        and self._looks.still_there(name, gray, box, self.cfg.appearance_match))
+
+    def _outlined(self, name: str) -> bool:
+        """A visible configured object the detector no longer names while a class-agnostic proposal still
+        outlines its box (OUTLINE_IOU), with no hand on it: it is still there. On blanket_1t the phone's
+        screen lit up, the fine-tuned detector called the tape roll 'phone' instead, the patch no longer
+        matched, and the phone was lost and reborn as a thing, though YOLOE still proposed its box."""
+        ent = self.entities[name]
+        if is_thing(name) or ent.status != Status.VISIBLE or ent.box_cm is None:
+            return False
+        if any(geom.overlap_frac(self._hands[h][2], ent.box_cm) > 0 for h in self._hands_now):
+            return False
+        return any(geom.iou(d.box_cm, ent.box_cm) >= OUTLINE_IOU for d in getattr(self, '_batch_things', ()))
 
     def _last_evidence(self, name: str) -> float:
         """When the object was last detected or its patch last matched. An absence no rule explains is
@@ -447,6 +486,10 @@ class World(ThingRules, RoomRules):
         trail = getattr(self, '_trail', {}).get(hid) or ()
         now_c = geom.center(self._hands[hid][2])
         return any(self._now - t <= TRANSIT_S and geom.dist(geom.center(b), now_c) >= TRANSIT_CM for t, b in trail)
+
+    def _touched(self, name: str) -> bool:
+        since = self._seen_t[name] - self.cfg.contact_window_s
+        return any(t >= since for t in self._contacts[name].values())
 
     def _picked_up(self, name: str, ent: Entity) -> list[Event]:
         # Debounce declares absence ~0.6-0.9 s late, so the window is anchored at last_seen, not now.
@@ -520,6 +563,126 @@ class World(ThingRules, RoomRules):
             confidence *= self.cfg.ambiguity_penalty
         return (Status.UNDER, parents[0], confidence, EventType.COVERED, parents[1:])
 
+    # ----- rule 4b: a cover no detector knows (a blanket, a jacket, a napkin) ----------------------
+    # The hands laying it touch what it covers, so the hand rule alone reads each touched object as
+    # picked up. Once no hand hides the spot, a real pick-up leaves the band of table around it as it
+    # was; a cover leaves it changed all round (core/surround.py). That, settled for settle_s, is UNDER
+    # the cover: a named cover that qualifies, a thing laid over it, else 'unknown'.
+
+    def _laid_over(self, name: str, ent: Entity, settled: bool = False):
+        """A verdict once the band around the object's spot looks covered and has been at rest for
+        settle_s (a cover lying there; an arm keeps moving); NO_CHANGE while it settles or hands hide
+        too much of it to tell (at most wait_max_s); None when the band shows table (or there is no
+        memory of it): the other rules decide. settled: the lost grace has run out, decide now."""
+        uc, img = self._ucfg, (self._frame.img if self._frame is not None else None)
+        band = self._bands.memory(name) if uc.enabled and img is not None else None
+        if band is None:
+            return None
+        now, hands = self._now, [self._hands[h][1] for h in self._hands_now]
+        self._bands.sample(name, img, now)
+        if not settled and now - self._laid_wait.setdefault(name, now) > uc.wait_max_s:
+            return None
+        look = self._bands.look(name, img, hands)
+        if look is False:
+            self._laid_wait.pop(name, None)
+            return None
+        if look is None or not self._bands.still(name, img, now, uc.settle_s, hands):
+            return None if settled else NO_CHANGE
+        self._laid_wait.pop(name, None)
+        ent.box_cm, ent.pos_cm = band.box_cm, geom.center(band.box_cm)    # it lies where it rested
+        self._box_px[name] = band.box_px
+        return self._under_verdict(name, band.box_cm)
+
+    def _defer_or_apply(self, name: str, ent: Entity, laid) -> list[Event]:
+        if laid is NO_CHANGE:
+            self._present[name] = True      # re-checked each update until the band settles
+            return []
+        self._waiting.pop(name, None)
+        return self._apply_verdict(name, ent, laid)
+
+    def _under_verdict(self, name: str, box_cm):
+        named = self._covered(name, box_cm, self._now)
+        if named is not None:
+            return named
+        thing = self._thing_over(name, box_cm)
+        if thing is not None:
+            return (Status.UNDER, thing, self.cfg.conf_under, EventType.COVERED)
+        return (Status.UNDER, 'unknown', self.cfg.conf_under_unknown, EventType.COVERED)
+
+    def _thing_over(self, name: str, box_cm) -> str | None:
+        """A visible thing lying over box_cm (cover_overlap of it, at least THING_COVER_AREA times its
+        footprint), put down there no earlier than just before the object was last seen (a mat the object
+        already lay on was there before), and established: untouched for ESTABLISHED_S since. A napkin the
+        proposer sees whole qualifies; a piece of a blanket still in a hand does not (on the rig, one
+        taken as the cover made its child 'come out' at the next piece of blanket the proposer saw)."""
+        if box_cm is None:
+            return None
+        since = self._seen_t.get(name, -1e18) - self.cfg.contact_window_s
+        best = []
+        for n in self._visible_things():
+            b, placed = self.entities[n].box_cm, self._placed_t.get(n, -1e18)
+            if n == name or geom.area(b) < THING_COVER_AREA * geom.area(box_cm) or placed < since \
+                    or self._now - placed < ESTABLISHED_S or max(self._contacts[n].values(), default=-1e18) > placed:
+                continue
+            ov = geom.overlap_frac(b, box_cm)
+            if ov >= self.cfg.cover_overlap:
+                best.append((ov, n))
+        return max(best)[1] if best else None
+
+    def _things_laid_over(self) -> list[Event]:
+        """An object UNDER 'unknown' with a thing now seen lying over it: that thing is its cover."""
+        out = []
+        for name, ent in self.entities.items():
+            if ent.status == Status.UNDER and ent.parent == 'unknown':
+                thing = self._thing_over(name, ent.box_cm)
+                if thing is not None:
+                    ent.parent, ent.confidence, ent.candidates = thing, self.cfg.conf_under, []
+                    self._bare_at.pop(name, None)
+                    out.append(self._emit(name, EventType.COVERED, parent=thing))
+        return out
+
+    def _unknown_cover_lifted(self, name: str, ent: Entity) -> list[Event]:
+        """The band around an object UNDER 'unknown' looks as remembered again (the cover lifted off). If
+        the object's own remembered pixels are back at its spot, it is there (UNCOVERED, as a detector
+        miss). If it has not been seen within reappear_wait_s, it went with the cover, so it is lost,
+        with lifted_cover_penalty, like one under a named cover that was lifted."""
+        img = self._frame.img if self._frame is not None else None
+        hands = [self._hands[h][1] for h in self._hands_now]
+        if img is None or not self._bands.bare(name, img, hands):
+            self._bare_at.pop(name, None)
+            return []
+        if self._still_there(name):         # uncovered and its own pixels are back: it is there
+            self._present[name], self._matched_t[name] = True, self._now
+            return self._observe(name, ent)
+        since = self._bare_at.setdefault(name, self._now)
+        if self._now - since < self.cfg.reappear_wait_s or self._reappearing(name):
+            return []
+        del self._bare_at[name]
+        ent.confidence *= self.cfg.lifted_cover_penalty
+        return self._lose(name, ent)
+
+    def _settled_band(self, name: str) -> None:
+        """Seen again, or set down: no cover is settling over it; a band remembered elsewhere is stale."""
+        self._laid_wait.pop(name, None)
+        self._bare_at.pop(name, None)
+        self._bands.drop_samples(name)
+        band, pos = self._bands.memory(name), self.entities[name].pos_cm
+        if band is not None and pos is not None and geom.dist(geom.center(band.box_cm), pos) >= self.cfg.moved_min_cm:
+            self._bands.forget(name)
+
+    def _remember_bands(self, seen: dict[str, Detection], hands: list[Detection]) -> None:
+        img = self._frame.img if self._frame is not None else None
+        if not self._ucfg.enabled or img is None:
+            return
+        hands_px = [h.box_px for h in hands]
+        for name, det in seen.items():
+            ent = self.entities[name]
+            if ent.status == Status.VISIBLE and self._present[name] and ent.zone == 'table':
+                self._bands.observe(name, img, det.box_px, det.box_cm, self._now, hands_px)
+        for name, ent in self.entities.items():     # not seen now: keep views, to tell a cover at rest
+            if name not in seen and ent.status in (Status.VISIBLE, Status.HELD) and ent.zone == 'table':
+                self._bands.sample(name, img, self._now)
+
     # ----- rule 5: HELD objects ------------------------------------------------------------------
 
     def _reappearing(self, name: str) -> bool:
@@ -529,6 +692,11 @@ class World(ThingRules, RoomRules):
         return self._present[name] or sum(self._bits[name]) > self.cfg.absent_max
 
     def _update_held(self, name: str, ent: Entity) -> list[Event]:
+        laid = self._laid_over(name, ent)       # it was a cover laid over it, not a pick-up
+        if laid is NO_CHANGE:
+            return []
+        if laid is not None:
+            return self._apply_verdict(name, ent, laid)
         inside = self._check_inside(name, ent, self._now)
         if inside is not None:
             return self._apply_verdict(name, ent, inside)
@@ -586,6 +754,9 @@ class World(ThingRules, RoomRules):
         out: list[Event] = []
         for name, ent in self.entities.items():
             cover = ent.parent if ent.status == Status.UNDER else None
+            if cover == 'unknown':
+                out += self._unknown_cover_lifted(name, ent)
+                continue
             if cover not in self.entities or not self._cover_lifted(cover, ent):
                 self._lifted_at.pop(name, None)
                 continue
@@ -597,6 +768,10 @@ class World(ThingRules, RoomRules):
         return out
 
     def _cover_lifted(self, cover: str, child: Entity) -> bool:
+        if is_thing(cover):                 # a thing laid over it: its box is the cover's
+            c = self.entities[cover]
+            return (not self._present[cover] or c.status != Status.VISIBLE or c.box_cm is None
+                    or child.box_cm is None or geom.overlap_frac(c.box_cm, child.box_cm) < self.cfg.lifted_overlap_max)
         st = self._covers.state(cover)
         if st is None or not self._present[cover] or child.box_cm is None:
             return True
