@@ -37,25 +37,43 @@ git archive HEAD | ssh guru@10.90.84.178 'tar -x -C ~/askroom_room && echo "$(da
 
 ## 2. Start, stop, restart the room app
 
-```bash
-# stop
-docker ps --format '{{.Names}} {{.Image}} {{.Status}}'               # the room app is the askroom container
-docker stop <that container>
+`scripts/room_app.sh` runs the app in one container (`askroom_room_app`): starting it twice never launches a
+second app, the log is appended (`data/room/app-<time>.log`, with `data/room/app.log` pointing at the
+latest), and `start` refuses while another container runs `main.py` or `demo_check.py`, or something holds
+the camera. It prints how to stop that one and never stops it itself.
 
-# start (voice on; for dashboard/phone only add --no-voice)
-cd ~/askroom_room && nohup scripts/dock.sh python3 -u main.py --camera $CAM --port 8080 \
-    > data/room/app.log 2>&1 < /dev/null &
-tail -f data/room/app.log                                            # wait for the dashboard line
+```bash
+cd ~/askroom_room
+scripts/room_app.sh status                                   # FIRST, once: its flock / bash paths are unverified on the Jetson
+scripts/room_app.sh start --camera $CAM --port 8080          # voice on; add --no-voice for dashboard/phone only
+scripts/room_app.sh restart                                  # no args: the ones the last start used (data/room/app.args)
+scripts/room_app.sh stop
+tail -f data/room/app.log
 ```
 
-*Restart script and reset-without-restart: from the room/check and room/voice branches, pasted here when merged.*
+"started" is printed only once the dashboard answers (60 s), else the log's last lines. The **first switch**
+from the hand-launched app (e.g. `upbeat_curie`) to the script is Anshul's call: `docker stop <that container>`,
+then `start`.
+
+**Before 7 AM, run the old launch command once too** (this build's `scripts/dock.sh` binds `/dev` with a V4L2
+cgroup rule so a replugged Brio reappears; if the container or its terminal misbehaves, fall back with
+`ASKROOM_DEV_BIND=0`):
+
+```bash
+docker stop askroom_room_app 2>/dev/null
+cd ~/askroom_room && nohup scripts/dock.sh python3 -u main.py --camera $CAM --port 8080 > data/room/app-manual.log 2>&1 < /dev/null &
+# misbehaves? stop it and: ASKROOM_DEV_BIND=0 nohup scripts/dock.sh python3 -u main.py --camera $CAM --port 8080 ...
+```
+
+**Reset without a restart:** a spoken "ask the room, reset" (or the `curl` in §3 row 3) clears the table and
+room memory (spec 0010 P0-4); restart only if reset doesn't bring the next run back.
 
 ## 3. Morning checklist (spec 0010 §8), 7:00 AM
 
 | # | Check | Command | Pass |
 |---|---|---|---|
-| 1 | Pre-demo check | app stopped, then `scripts/dock.sh python3 demo_check.py --camera $CAM` | every line green (camera, zones drawn at this view, room memory, network, audio, clock) |
-| 2 | Start the app | §2 start | `/healthz` answers: `curl -s $RIG/healthz` |
+| 1 | Pre-demo check, app running | `scripts/dock.sh python3 demo_check.py --live` | green: 6 network, 9 clock, 10 zones at this camera view, 12 room app (fps, `/full.jpg`), 13 Grok round trip, 14 mic and speaker by name, 15 RAM >= 1 GB and no NvMapMemAlloc / tracebacks in the app log, 16 namer queue <= 8. It never opens the camera or mic |
+| 2 | App up | `scripts/room_app.sh status` and `curl -s $RIG/healthz` | running, dashboard answers |
 | 3 | Reset | `curl -s -X POST $RIG/ask -H 'content-type: application/json' -d '{"text":"ask the room, reset"}'` | answered in < 5 s, then one full run passes |
 | 4 | One full 60-s run with voice | the §1 script of spec 0010, spoken from the judge's spot | spoken answer names the right zone |
 | 5 | One full run with the phone | the iPhone app over BLE | the answer is read aloud on the phone |
@@ -92,9 +110,14 @@ demo: {hold_notices: true}                      # nothing speaks unasked while j
 
 Then run the app **with voice** (§2 start, without `--no-voice`) and follow the voice runbook's checks.
 
-## 5. Hotspot switch and restart script
+## 5. Hotspot switch
 
-*From the room/check branch. Pasted here when merged.*
+The procedure is **`docs/HOTSPOT.md`**: save the phone hotspot once with `nmcli` (autoconnect off), switch with
+`sudo nmcli connection up askroom-hotspot`, verify with `scripts/dock.sh python3 demo_check.py --live --only 6 9 13`
+and `scripts/room_app.sh status`, switch back with `sudo nmcli connection up "<venue connection NAME>"`.
+Do it at the rig's keyboard or over USB-C: Wi-Fi SSH drops and the Jetson's address changes on the hotspot.
+The app keeps running; it notices within 5 s and re-warms Grok. Offline, table answers still work, but no
+new room object gets a name.
 
 ## 6. Retrain slot (P1-1, Anshul's 10:15 PM rig slot)
 
@@ -110,6 +133,22 @@ merged). In short:
 - **Midnight go/no-go:** notebook, box and keys at confidence >= 0.6 in >= 80% of the demo layout's frames
   (`conf_sweep --images ... --require`). If not: no hiding in the demo script (spec 0010 P1-1 fallback).
 - Put the room app back afterwards (§2 start) and check `$RIG/full.jpg`.
+
+## Troubleshooting
+
+- **demo_check 12 can't reach the app:** it looks at `room_check.app_url`, else the `--port` that
+  `room_app.sh start` saved, else `server.port` (8000). A hand-launched app on 8080: set
+  `room_check: {app_url: http://127.0.0.1:8080}` in `config.local.yaml`.
+- **demo_check 14 fails:** `stt.input_device` / `tts.output_device` must be part of the device's **name**
+  (`cat /proc/asound/cards` lists them), not an index (indexes shift on replug). A device the app holds open
+  (RUNNING) passes. `null` fails on purpose: the corner Brio's mic and silent HDMI.
+- **demo_check 15 says "no app log":** it reads `data/room/app.log`, which `room_app.sh` maintains; for a
+  hand-launched app point `room_check.app_log` at its log.
+- **Presence acts odd** (with room/detector merged: objects flip present/absent too fast or too slow after the time-based debounce):
+  `presence: {hz: null}` in `config.local.yaml` restores the old frame-count debounce; restart the app.
+- **The camera is gone after a replug:** `ls /dev/v4l/by-id/` on the host; if it's there but not in the
+  container, restart the app (`room_app.sh restart`), or with `ASKROOM_DEV_BIND=0` if the `/dev` bind is the
+  suspect.
 
 ## 7. Restore notes
 
