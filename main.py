@@ -1167,6 +1167,14 @@ def build(cfg: dict, fake: bool = False, camera: int = 0, with_voice: bool = Tru
     checker = core.grok_check.from_config(cfg, events, world, table, online=lambda: netmon.online)
     if visual is not None:
         visual.grok_check = checker
+    # Grounding (Moondream 3.1, off unless grounding.enabled): WHERE for a thing the tracker can't place
+    # searches the whole room by text; one grounder, so the WS8 re-find adapter shares its rate limits.
+    import core.grounding
+    grounder = core.grounding.from_config(cfg)
+    if grounder is not None:
+        core.grounding.configure(cfg, grounder)
+        if visual is not None:
+            visual.grounder = grounder
     cleanup += [x.stop for x in (narrator, visual, namer, checker) if x is not None]
     ask = voice.pipeline.make_ask(cfg, world, events, net=netmon, interpret=interpret, visual=visual)
     tts = voice.tts.TTS(cfg, net=netmon).attach(world)     # /state: speaker connected, the phone's voice

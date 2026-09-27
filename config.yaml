@@ -687,3 +687,44 @@ capture:
 viewer:
   front: bottom
   sides: {}                   # optional labels per CAMERA side for the phone's "I sit here", e.g. {right: couch}
+
+# Open-vocabulary grounding (core/grounding.py): Moondream 3.1's cloud /detect (api.moondream.ai/v1, model
+# moondream3.1-9B-A2B) finds a NAMED thing anywhere in the room by text. Off by default. With it on and room
+# memory on, "where is my X?" for a thing with no fresh visible place (never seen, lost, carried off, stale or
+# absent in its zone) or a name the rig doesn't know searches the live full frame, then close-ups of the zones
+# (smallest first), within where_deadline_s; a hit is said hedged ("Your keys look like they're on the couch")
+# and never aimed at, a miss falls through to Grok's room look and the templates. Key: MOONDREAM_API_KEY in
+# .env (never committed or printed; scripts/dock.sh passes .env into the container). Optional fallback:
+# CF_ACCOUNT_ID + CF_API_TOKEN for Cloudflare Workers AI (@cf/moondream/moondream3.1-9B-A2B). WS8's registry
+# can use it as its re-find backend with permanence.refind: moondream (core.grounding.refind). Bench:
+# python -m eval.grounding_bench. Pricing (3.1): $0.30 / 1M input tokens, $1.00 / 1M output, $5 free a month.
+grounding:
+  enabled: false
+  provider: moondream         # moondream | cloudflare
+  model: moondream3.1-9B-A2B  # always sent: the API has no default
+  base_url: https://api.moondream.ai/v1
+  api_key_env: MOONDREAM_API_KEY
+  cf_fallback: true           # a failed Moondream call is tried once on Workers AI if CF_ACCOUNT_ID and CF_API_TOKEN are set
+  timeout_s: 3.0              # per HTTP request
+  retries: 1                  # after a timeout, connection error or 5xx, with backoff_s * 2**i before it
+  backoff_s: 0.3
+  backoff_429_s: 10.0         # a 429 stops every call this long (or Retry-After)
+  auth_backoff_s: 60.0        # a 401/403 (bad key) stops every call this long
+  min_interval_s: 0.5         # between calls: 2 requests a second, Moondream's default limit on 3.1 (10/s with >= $10 balance)
+  max_per_minute: 30
+  max_per_hour: 300
+  max_px: 1792                # long side sent (~1.8 MP: what the model's tiles see of a 2560x1440 frame anyway)
+  jpeg_quality: 90
+  max_objects: 5
+  verify: true                # a box is said only after a closed /query on its close-up says yes: /detect boxes
+                              # something even for absent things ('umbrella' -> an orange case on the rig frame)
+  verify_boxes: 2             # boxes per search checked that way, best first
+  hit_conf: 0.8               # /detect returns no score: every box gets this confidence
+  min_conf: 0.5               # boxes under this are dropped
+  max_area_frac: 0.05         # a box over this share of the image is furniture, not the thing
+  where_deadline_s: 2.5       # longest a WHERE question waits for the search
+  zone_crops: 3               # zone close-ups searched after a miss on the full frame
+  zone_pad: 0.15              # each zone's box grown by this share on every side ...
+  zone_rise: 0.5              # ... and upwards by this share of its height
+  min_crop_px: 384            # a close-up is at least this wide and tall (about one model tile)
+  near_px: 250                # outside every zone: "near <zone>" within this many px (of a 2560-wide frame)

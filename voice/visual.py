@@ -12,6 +12,12 @@ Routing (VisualQA.route, called by voice/pipeline.py before the offline template
     HISTORY / HANDLED for such a name goes to recall() when no narration mentions it.
   - WHERE for a tracked object the world has never placed (or, offline, for a name it doesn't know) uses
     the Grok settle check's newest sighting of it (core/grok_check.py, when on and it has one).
+  - With grounding on (core/grounding.py, Moondream 3.1; off by default) and the whole room in view, WHERE
+    for a thing with no fresh visible place (never seen, lost, carried off, stale or absent in its zone) or a
+    name the world doesn't know first searches the live full frame, then zone close-ups, by text, within
+    grounding.where_deadline_s. A hit is said hedged ("Your keys look like they're on the couch": detection
+    finds A thing like it, not identity) and never aimed at; a miss, a timeout or no key falls through to the
+    paths above. A name the world doesn't know found on the table goes on to pick(), which can point.
 Offline, a question only the VLM could answer gets a spoken 'I need the connection' (the world model
 still answers everything else). Over the hourly cap, route() returns None and the old path answers.
 
@@ -528,6 +534,8 @@ class VisualQA:
         self.last: Optional[dict] = None
         self.grok_check = None          # core.grok_check.GrokCheck when on (main.build sets it)
         self.room_zones: Optional[list] = None   # [(name, spoken)] when room memory is on (main.build): room look
+        self.grounder = None            # core.grounding.MoondreamGrounder when grounding.enabled (main.build sets it)
+        self.last_ground: Optional[dict] = None
         self._polys: Optional[dict] = None       # the zones' polygons (room_memory.zones_path), read on first use
 
     # -- the VLM call
@@ -1089,6 +1097,10 @@ class VisualQA:
             except Exception:
                 target, known = None, True
             said = [w for w in (intent.name or intent.obj, query_phrase(text)) if w]
+            if k == "WHERE" and (target or not known) and self._ground_first(t, target, online):
+                found = self._ground(target, said[0] if said else None)
+                if found is not None:
+                    return found
             if known:
                 if k != "WHERE" or not target:
                     return None
@@ -1145,6 +1157,93 @@ class VisualQA:
                        f"your {said} {area((hit['x_cm'], hit['y_cm']), self.cfg)}.")
         return Answer(text)                 # an old, ungrounded VLM sighting: spoken only, never aimed at
 
+    # -- grounding: find a named thing anywhere in the room by text (core/grounding.py)
+
+    def _ground_first(self, t: str, ent: Optional[str], online: Optional[bool]) -> bool:
+        """Grounding answers this WHERE first: it is on, online, the whole room is in view, the question
+        doesn't keep to the table (t normalized), and ent (None: a name the world doesn't know) has no fresh
+        visible place."""
+        if self.grounder is None or not (self.online() if online is None else online):
+            return False
+        return self._room_default(t) and (ent is None or self._needs_finding(ent))
+
+    def _needs_finding(self, ent: str) -> bool:
+        """ent has no fresh visible place: never seen, lost (UNKNOWN or below answer_hedge), carried off
+        (GONE), or in a room zone but stale or absent. VISIBLE on the table, fresh in a zone, or hidden in
+        a known container (the world model's strength: the camera can't see it there) is not."""
+        try:
+            e = self.world.get(ent)
+            p = self.world.place(ent) if hasattr(self.world, "place") else None
+        except Exception:
+            return False
+        if p is not None and p.kind == "room":
+            return bool(p.absent or not p.fresh)
+        if e.status == Status.UNKNOWN or e.status == Status.GONE:
+            return True
+        return float(e.confidence or 0.0) < float(self.cfg.get("answer_hedge", 0.5))
+
+    def _ground_phrase(self, ent: Optional[str], said: Optional[str]) -> Optional[str]:
+        """What to ask the grounder for: a prop's first detector prompt ('remote control'), a taught thing's
+        name, else the words said ('red mug')."""
+        if ent is not None:
+            prompts = (self.cfg.get("prompts") or {}).get(ent) or []
+            if prompts:
+                return str(prompts[0])
+            name = self._names().get(ent)
+            if name:
+                return name
+            if not ent.startswith("thing:"):
+                return display_name(self.cfg, ent)
+        return said
+
+    def _ground(self, ent: Optional[str], said: Optional[str]) -> Optional[Answer]:
+        """The hedged spoken place where the grounder finds ent / said in the whole room now, or None (a
+        miss, no frame, no key, a timeout: the other paths answer). A name the world doesn't know found on
+        the table is None too: pick() can point at it there."""
+        from core.grounding import find_anywhere
+        phrase = self._ground_phrase(ent, said)
+        f = self._room_frame()
+        if not phrase or f is None or getattr(f, "img", None) is None:
+            return None
+        h, w = f.img.shape[:2]
+        say = dict(self.room_zones or [])
+        zones = [(n, say.get(n, f"the {n.replace('_', ' ')}"), poly) for n, poly in self._zone_polys((w, h)).items()]
+        rect = getattr(self.frames, "rect", None) or (self.cfg.get("room_memory") or {}).get("table_view_rect")
+        c = self.grounder.c
+        limit = float(c.where_deadline_s)
+        t0 = time.perf_counter()
+        try:
+            found = call_with_deadline(find_anywhere, limit, self.grounder, f.img, phrase, zones, rect,
+                                       max(0.1, limit - 0.1), c, name="grounding")
+        except TimeoutError:
+            found = None
+            log.info("grounding: no answer for %r within %.1f s", phrase, limit)
+        except Exception:
+            log.exception("grounding failed")
+            return None
+        ms = int((time.perf_counter() - t0) * 1000)
+        self.last_ground = {"phrase": phrase, "ms": ms, "found": found}
+        if found is None:
+            log.info("grounding: %r not found (%d ms)", phrase, ms)
+            return None
+        log.info("grounding: %r %s (%s, box %s, %d ms)", phrase, found.where, found.source,
+                 tuple(round(v) for v in found.box), ms)
+        if ent is None and found.place == "table":
+            return None
+        return Answer(self._found_text(ent, said or phrase, found.where))
+
+    def _found_text(self, ent: Optional[str], said: str, where: str) -> str:
+        """'Your keys look like they're on the couch.': hedged, since a detector finds something that looks
+        like it, not the thing itself."""
+        from voice.answers import _dn, _pk, _plural, _your
+        if ent is not None:
+            n, pk, your = _dn(self.cfg, ent), _pk(self.cfg, ent), _your(self.cfg, ent)
+        else:
+            n = re.sub(r"^(?:a|an|the|my|your|our)\s+", "", said.strip().lower())
+            pk, your = (n.split() or [n])[-1], "Your"
+        verb = "look like they're" if _plural(pk) else "looks like it's"
+        return _spoken(f"{your} {n} {verb} {where}.")
+
     def _never_placed(self, ent: str) -> bool:
         """A tracked object the world has never had a position for (UNKNOWN, never seen)."""
         try:
@@ -1176,7 +1275,10 @@ class VisualQA:
                                f" and, for questions about earlier, up to {self.c.recall_frames} saved frames"
                                f"{' (of the table or the whole room)' if self._room_frame() is not None else ''} are sent to "
                                f"{self.provider.name} ({self.provider.model}). Saved frames stay on this "
-                               f"device for {self.c.keep_h:g} h.")}
+                               f"device for {self.c.keep_h:g} h."
+                               + (" For a 'where is' question the tracker can't answer, the whole room view (and "
+                                  "close-ups of its areas) is sent to Moondream to find the thing by name."
+                                  if self.grounder is not None else ""))}
 
     def attach(self, world) -> "VisualQA":
         """Adds the visual status to world.state_json and, after every world.update, binds the crop
