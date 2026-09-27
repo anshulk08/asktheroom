@@ -156,7 +156,7 @@ def test_replay_config_takes_the_yoloe_model_override(tmp_path):
 
 
 @pytest.mark.parametrize("name", ["room_still", "room_clutter", "room_couch", "room_carry", "room_move", "room_remove",
-                                  "room_straight", "room_block"])
+                                  "room_straight", "room_block", "room_keys_off", "room_return"])
 def test_room_scenarios_become_truth_with_segments_and_zones(name):
     from eval.guided import CLIPS, truth_from
     c = CLIPS[name]
@@ -173,6 +173,12 @@ def test_room_scenarios_become_truth_with_segments_and_zones(name):
             assert s["obj"] not in placed                      # straight into the room, never on the table
     if name == "room_clutter":
         assert t["scene_objects"] == ["laptop", "cable pile"]
+    if name in ("room_keys_off", "room_return", "room_carry"):
+        back = [s for s in t["steps"] if s.get("expect_same")]
+        assert back and all(s["event"] == "putdown" for s in back)
+    if name == "room_block":
+        b0, b1 = [s["t"] for s in t["steps"] if s["event"] in ("block", "unblock")]
+        assert 10 <= b1 - b0 <= 20
 
 
 def test_set_overrides_any_config_key_and_mode_is_permanence_mode(tmp_path):
@@ -211,3 +217,47 @@ def test_replay_from_args_records_the_overrides_on_the_trace(tmp_path, monkeypat
     monkeypatch.setattr(score_clip, "replay_clip", fake_replay)
     trace = score_clip.replay_from_args(clip, a)
     assert seen["cfg"]["permanence"]["mode"] == "registry" and trace.overrides == ["permanence.mode=registry"]
+
+
+class FakeNamer:
+    """An injected naming provider (core.narration's narrate API), as WS3's cached provider would be."""
+
+    def __init__(self, name="coffee mug"):
+        self.name, self.calls = name, 0
+
+    def narrate(self, system, parts, schema):
+        from types import SimpleNamespace
+        self.calls += 1
+        return SimpleNamespace(text=json.dumps({"name": self.name, "also": [], "confidence": 0.9}))
+
+
+def test_names_hook_attaches_auto_name_with_an_injected_provider_on_clip_time(tmp_path):
+    from eval import scorecard
+    from tests.test_score_clip import Take
+    take = Take(tmp_path)
+    take.run(1)
+    take.put("A", (60, 30))
+    take.run(4)
+    truth = {"props": {"A": "mug"}, "steps": [{"t": 1.0, "event": "place", "obj": "A"}]}
+    clip = load_clip(take.write(truth))
+    fake = FakeNamer()
+    trace = score_clip.replay_clip(clip, detector=take.stub(), names=fake)
+    assert fake.calls >= 1 and "names: FakeNamer" in trace.detector
+    named = {n: v for s in trace.samples for n, v in (s.names or {}).items()}
+    assert named["thing:1"]["guess"]["name"] == "coffee mug"
+    r = scorecard.scorecard(trace, clip)
+    assert r["naming"]["props"]["A"] == {"entity": "thing:1", "guess": "coffee mug", "fits": True}
+    assert score_clip.replay_clip(clip, detector=take.stub()).samples[-1].names == {}     # off by default
+
+
+def test_load_provider_passes_what_the_factory_takes(tmp_path):
+    import sys
+    import types
+    mod = types.ModuleType("fake_naming_mod")
+    mod.make = lambda cfg=None, clip_dir=None: ("made", cfg["x"], clip_dir)
+    mod.bare = lambda: "bare"
+    sys.modules["fake_naming_mod"] = mod
+    clip = load_clip(write_room_clip(tmp_path / "room_6"))
+    assert score_clip.load_provider("fake_naming_mod:make", {"x": 1}, clip) == ("made", 1, str(clip.dir))
+    assert score_clip.load_provider("fake_naming_mod:bare", {}, clip) == "bare"
+    assert score_clip.load_provider("grok", {}, clip) is None

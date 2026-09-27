@@ -104,7 +104,10 @@ def test_scorecard_counts_duplicates_phantoms_body_parts_and_handoffs():
     assert crit(r, "position error while still")["result"] == "PASS"
     h = r["handoffs"]["rows"][0]
     assert h["ok"] and h["entity"] == "thing:1" and h["got"] == "couch" and h["delay_s"] == pytest.approx(5.0)
-    assert r["naming"]["ok"] == 2 and r["naming"]["named"] == 2
+    n = r["naming"]
+    assert (n["right"], n["wrong"], n["none"]) == (2, 0, 0) and n["junk_named"] == 1       # the sock
+    assert n["props"]["A"] == {"entity": "thing:1", "guess": "brown wallet", "fits": True}
+    assert r["bindings"]["A"] == [{"t": 2.0, "entity": "thing:1"}] and r["identity"]["worst_entities_per_object"] == 2
     assert r["things"]["identities_created"] == 4 and r["things"]["expected_end"] == 1
     assert r["pass"] is False
 
@@ -166,22 +169,114 @@ def test_body_part_names_and_name_scores():
     assert sc.name_score("wallet", {"guess": {"name": "phone"}}) == 0.0
 
 
-def test_traces_round_trip_through_json_and_the_cli_scores_them(tmp_path, capsys):
+def test_our_replay_scores_the_same_through_the_track_contract():
+    from eval.track import FORMAT, trace_to_track, track_to_trace
     trace, clip = room_clip()
-    back = sc.trace_from_json(json.loads(json.dumps(sc.trace_to_json(trace))))
+    lines = trace_to_track(trace, "synthetic", zones={"zones": {"couch": {"say": "the couch"}}})
+    assert lines[0]["format"] == FORMAT and {ln["type"] for ln in lines} == {"header", "entity", "frame", "event"}
+    frame = next(ln for ln in lines if ln["type"] == "frame" and ln["t"] == 26.0)
+    row = next(e for e in frame["entities"] if e["id"] == "thing:1")
+    assert row["state"] == "visible" and row["zone"] == "couch" and row["place"] == "the couch" and row["table_cm"] is None
+    direct, via = sc.scorecard(trace, clip), sc.score_track(lines, clip)
+    for k in ("entities_per_object", "phantom_births", "handoffs", "naming", "body_things", "position_still"):
+        assert via[k] == direct[k], k
+    assert [c["result"] for c in via["criteria"]] == [c["result"] for c in direct["criteria"]]
+    back = track_to_trace(lines)
     assert back.samples[30].ents == trace.samples[30].ents and back.samples[-1].zones == {"thing:1": "couch"}
-    assert sc.scorecard(back, clip)["entities_per_object"] == sc.scorecard(trace, clip)["entities_per_object"]
+
+
+def external_track():
+    """A tracker that is not ours: its own ids, spoken places instead of zone keys, no events."""
+    lines = [{"type": "header", "format": "askroom-track/1", "clip": "synthetic", "tracker": "registry"},
+             {"type": "entity", "id": "w", "kind": "object", "names": ["brown wallet"]}]
+    for i in range(0, 451):
+        t = round(i * DT, 3)
+        ents = []
+        if t >= 2.0:
+            if t < 20.0:
+                ents.append({"id": "w", "state": "visible", "place": "on the table", "table_cm": list(A_AT)})
+            elif t < 25.0:
+                ents.append({"id": "w", "state": "carried", "place": None})
+            else:
+                ents.append({"id": "w", "state": "visible", "place": "the couch"})
+        if t >= 4.0:
+            ents.append({"id": "k", "state": "visible", "zone": "table", "table_cm": list(B_AT)})
+        lines.append({"type": "frame", "t": t, "entities": ents})
+    return lines
+
+
+def test_an_external_tracker_is_scored_by_the_same_code():
+    _, clip = room_clip()
+    clip.meta["room_zones"] = {"zones": {"couch": {"say": "the couch"}, "side_table": {"say": "the side table"}}}
+    r = sc.score_track(external_track(), clip)
+    assert r["mapping"]["A"][0]["entity"] == "thing:w" and r["mapping"]["B"][0]["entity"] == "thing:k"
+    assert r["entities_per_object"]["worst"] == 1
+    assert r["phantom_births"]["still"]["n"] == 0 and r["phantom_births"]["people"]["n"] == 0
+    assert r["handoffs"]["rows"][0]["ok"] and r["handoffs"]["rows"][0]["got"] == "couch"
+    assert r["naming"]["props"]["A"]["fits"] is True and r["naming"]["props"]["B"]["fits"] is None
+    assert r["detector"].startswith("registry")
+    assert r["pass"] is True
+
+
+def test_a_malformed_track_is_refused():
+    from eval.track import track_to_trace
+    with pytest.raises(ValueError):
+        track_to_trace([{"type": "frame", "t": 0, "entities": []}])
+    with pytest.raises(ValueError):
+        track_to_trace([{"type": "header", "format": "other/9"}])
+    with pytest.raises(ValueError):
+        track_to_trace([{"type": "header", "format": "askroom-track/1"},
+                        {"type": "frame", "t": 0, "entities": [{"id": "x", "state": "floating"}]}])
+
+
+def test_the_cli_scores_a_track_file_in_each_clip(tmp_path, capsys):
+    from eval.track import write_track
+    _, clip = room_clip()
     d = tmp_path / "room_x"
     d.mkdir()
     (d / "truth.json").write_text(json.dumps(clip.truth))
     (d / "frames.json").write_text(json.dumps({"t": clip.t, "wall": clip.wall}))
-    (d / "trace.json").write_text(json.dumps(sc.trace_to_json(trace)))
+    write_track(d / "track-registry.jsonl", external_track())
     out = tmp_path / "card.json"
-    assert sc.main([str(d), "--from-trace", "--json", str(out)]) == 1
+    assert sc.main([str(d), "--track", "track-registry.jsonl", "--json", str(out)]) == 0
     printed = capsys.readouterr().out
-    assert "entities per real object" in printed and "FAIL" in printed
+    assert "entities per real object" in printed and "PASS" in printed
     cards = json.loads(out.read_text())
-    assert cards[0]["clip"] == "room_x" and cards[0]["entities_per_object"]["worst"] == 2
+    assert cards[0]["clip"] == "room_x" and cards[0]["entities_per_object"]["worst"] == 1
+
+
+def test_returns_undrawn_handoffs_and_gone_while_blocked():
+    steps = [{"t": 0.0, "event": "hands_out"}, {"t": 1.0, "event": "place", "obj": "B"},
+             {"t": 3.0, "event": "place", "obj": "PB"},
+             {"t": 10.0, "event": "carry_to", "obj": "B", "zone": "floor"},
+             {"t": 20.0, "event": "putdown", "obj": "B", "expect_same": True},
+             {"t": 30.0, "event": "block", "obj": "PB"}, {"t": 40.0, "event": "unblock", "obj": "PB"}]
+    truth = _truth(steps, {"B": "keys", "PB": "pill bottle"})
+    PB_AT = (60.0, 30.0)
+
+    def world(t):
+        ents = {}
+        if 2.0 <= t < 11.0:
+            ents["thing:1"] = ("VISIBLE", None, B_AT)
+        elif 11.0 <= t < 21.0:
+            ents["thing:1"] = ("UNKNOWN", None, B_AT)         # never put in a zone: right for the floor
+        if t >= 21.0:
+            ents["thing:5"] = ("VISIBLE", None, (40.0, 40.0))  # back as a new identity
+        if t >= 4.0 and not (35.0 <= t < 38.0):
+            ents["thing:2"] = ("VISIBLE", None, PB_AT)         # forgotten for 3 s while blocked
+        return ents, {}, {}
+    trace = _trace(50.0, world, [_appeared("thing:1", 2.0, B_AT), _appeared("thing:2", 4.0, PB_AT),
+                                 _appeared("thing:5", 21.0, (40.0, 40.0))])
+    clip = _clip(truth, 50.0)
+    clip.meta["room_zones"] = {"zones": {"couch": {}}}
+    r = sc.scorecard(trace, clip)
+    h = r["handoffs"]["rows"][0]
+    assert h["drawn"] is False and h["got"] is None and h["ok"]
+    back = r["returns"]["rows"][0]
+    assert back["before"] == "thing:1" and back["after"] == "thing:5" and not back["ok"]
+    assert crit(r, "identity after return")["result"] == "FAIL"
+    o = r["occlusions"]["rows"][0]
+    assert o["gone_frames"] == 30 and not o["ok"] and crit(r, "identity through occlusion")["result"] == "FAIL"
 
 
 def test_room_placement_false_handoff_and_occlusion():

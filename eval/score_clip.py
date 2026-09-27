@@ -26,7 +26,10 @@ frames (e.g. 2560x1440), and the replay puts them behind core.room_view.TableVie
 main.open_frames does (eval/clip.clip_view: the recorded table_view_rect, resized to frame_size_px), so the
 table pipeline sees the live cut. When the replay config has room memory on and the clip recorded its
 zones (meta.json room_zones, or --zones), main.make_room_memory runs it on the full frames, as the app does;
-room things are named by Grok only with --grok (live calls, background thread, so not deterministic).
+nothing is named unless --names is given: --names grok (live Grok calls) or --names module:factory (an
+injected provider, e.g. a cached one), attached as core.auto_name.AutoNamer to the replayed world and to
+room memory's namer, stepped on clip time after each perception step, so names land at once (live they
+take ~1-3 s).
 truth.commands and truth.questions go at their t
 through Room.ask: the care layer and voice.pipeline.make_ask (both clocked by the clip's wall time, so
 'put there 20 seconds ago' is measured on the clip) with voice.understand.Understander offline (the
@@ -238,14 +241,64 @@ def make_hands_off_detector(cfg: dict, table):
     return core.detect.Detector(cfg, table, backend=NoBoxes())
 
 
+class _Names:
+    """--names: core.auto_name.AutoNamer on the replayed world (and room memory's namer) with a given provider
+    (None: the configured Grok provider), stepped synchronously on clip time after each perception step."""
+
+    def __init__(self, cfg: dict, world, provider, clock):
+        from core.auto_name import AutoNameConfig, AutoNamer
+        c = AutoNameConfig.from_dict(dict((cfg.get("auto_name") or {}), enabled=True))
+        world.online = True                    # main.build: world.online follows the NetMonitor
+        self.namer = AutoNamer(cfg, world, provider=provider, online=lambda: True, clock=clock, c=c,
+                               start=False).attach(world)
+        self.clock = clock
+        self.room = None
+
+    def attach_room(self, room_memory) -> None:
+        """Room memory's thing namer asks through this provider, on clip time, without its thread."""
+        rn = getattr(room_memory, "namer", None)
+        if rn is None:
+            return
+        from core.room import make_verify_fn
+        rn.stop()
+        rn.name_fn, rn.verify_fn = self.namer._ask, make_verify_fn(self.namer)
+        rn.clock, rn.online = self.clock, (lambda: True)
+        self.room = rn
+
+    def step(self, most: int = 50) -> None:
+        for x in (self.namer, self.room):
+            for _ in range(most if x is not None else 0):
+                if not x.step():
+                    break
+
+
+def load_provider(spec: str, cfg: dict, clip: Clip):
+    """--names value -> provider: 'grok' is None (AutoNamer's configured Grok provider); 'module:factory'
+    calls factory (with cfg= and clip_dir= when it takes them) for an object with narrate(system, parts,
+    schema), as core.narration's providers have."""
+    if spec in ("grok", ""):
+        return None
+    import importlib
+    import inspect
+    mod, _, attr = spec.partition(":")
+    factory = getattr(importlib.import_module(mod), attr or "provider")
+    try:
+        params = inspect.signature(factory).parameters
+    except (TypeError, ValueError):
+        params = {}
+    kw = {k: v for k, v in (("cfg", cfg), ("clip_dir", str(clip.dir))) if k in params}
+    return factory(**kw)
+
+
 def replay_clip(clip: Clip, cfg: Optional[dict] = None, detector=None, max_fps: Optional[float] = None,
                 live_timing: bool = False, overheard: bool = False, no_model: bool = False,
-                hands_off: bool = False, grok: bool = False) -> Trace:
+                hands_off: bool = False, grok: bool = False, names=None) -> Trace:
     """Every frame the live perception loop would have taken, through Room.perceive; truth.commands and
     truth.questions through Room.ask at their t. Returns what the world believed after each frame.
     A clip recorded with room memory on is cut to the table view as live (clip.view()), and room memory
-    runs on the full frames when the config has it on and the zones were recorded. grok: Grok names new
-    things (table and room, auto_name) with live calls, as the app does online."""
+    runs on the full frames when the config has it on and the zones were recorded. names: a naming
+    provider (core.narration provider API) attached through core.auto_name on clip time; grok: the
+    configured Grok provider instead (live calls)."""
     import core.table
     from core.embed import make_embedder
     from core.events import EventLog
@@ -267,11 +320,8 @@ def replay_clip(clip: Clip, cfg: Optional[dict] = None, detector=None, max_fps: 
             if detector is None:
                 detector = (make_model_free_detector(cfg, table) if no_model else
                             make_hands_off_detector(cfg, table) if hands_off else make_detector(cfg, table))
-            namer = None
-            if grok:                                    # main.build: auto names, and world.online from NetMonitor
-                import core.auto_name
-                world.online = True
-                namer = core.auto_name.from_config(cfg, world, online=lambda: True)
+            now = {"t": 0.0}
+            namer = _Names(cfg, world, names, lambda: now["t"]) if (grok or names is not None) else None
             view = clip.view()
             slot = FrameSlot()
             frames = TableView(slot, view[0], view[1]) if view is not None else None
@@ -285,6 +335,8 @@ def replay_clip(clip: Clip, cfg: Optional[dict] = None, detector=None, max_fps: 
             if view is not None and (cfg.get("room_memory") or {}).get("enabled") \
                     and getattr(detector, "backend", None) is not None:
                 room.room_memory = make_room_memory(cfg, world, detector, view[0])
+                if namer is not None and room.room_memory is not None:
+                    namer.attach_room(room.room_memory)
             if (cfg.get("care") or {}).get("enabled", True):          # main.build's attach_care, on clip time
                 from voice.care import Care
                 care = Care(cfg, world, events, room.base_ask, clock=lambda: clock["wall"], online=lambda: False)
@@ -297,23 +349,24 @@ def replay_clip(clip: Clip, cfg: Optional[dict] = None, detector=None, max_fps: 
             trace = Trace(objects=dict(cfg.get("objects") or {}), max_fps=fps, live_timing=live_timing,
                           detector="model-free (no YOLO, change proposer)" if no_model else
                           f"{type(detector).__name__}: {model}, proposals {kind}"
-                          + (f" ({pmodel})" if pmodel else "") + (", Grok names" if grok else ""),
+                          + (f" ({pmodel})" if pmodel else "")
+                          + ((", names: Grok" if names is None else f", names: {type(names).__name__}")
+                             if namer is not None else ""),
                           view=[list(view[0]), list(view[1])] if view is not None else None,
                           room=room.room_memory is not None)
             try:
                 _run(clip, room, world, interpret, trace, 1.0 / fps if fps > 0 else 0.0, clock, overheard,
-                     slot if frames is not None else None, frames)
+                     slot if frames is not None else None, frames, namer, now)
             finally:
-                for x in (room.room_memory, namer):
-                    if x is not None:
-                        x.stop()
+                if room.room_memory is not None:
+                    room.room_memory.stop()
             return trace
         finally:
             events.close()
 
 
 def _run(clip: Clip, room, world, interpret, trace: Trace, period: float, clock: dict, overheard: bool,
-         slot=None, view=None) -> None:
+         slot=None, view=None, namer=None, now: Optional[dict] = None) -> None:
     """The perception loop on video time. It is ready again max(period, the step's time with
     --live-timing) after it started a step, and then takes the NEWEST frame (the camera thread keeps
     only the latest), or waits for the next one. Speech goes in at its t, between steps. slot / view: the
@@ -336,7 +389,11 @@ def _run(clip: Clip, room, world, interpret, trace: Trace, period: float, clock:
             if view is not None:
                 slot.cur = f
                 f = view.at(f.t)
+            if now is not None:
+                now["t"] = f.t
             out = room.perceive(f)
+            if namer is not None:
+                namer.step()
         except Exception:
             log.exception("perception step failed at t=%.2f", f.t)
             trace.errors += 1
@@ -1063,9 +1120,11 @@ def add_replay_args(ap: argparse.ArgumentParser) -> None:
                     help="override a config key for the replay: dotted key, YAML value (repeatable), e.g. "
                          "--set permanence.mode=registry --set proposals.yoloe.conf=0.25")
     ap.add_argument("--mode", help="shorthand for --set permanence.mode=MODE (the permanence tracker to replay)")
-    ap.add_argument("--grok", action="store_true",
-                    help="name new things with Grok as the app does online (needs XAI_API_KEY; live calls on a "
-                         "background thread, so two replays can differ)")
+    ap.add_argument("--names", metavar="grok|MODULE:FACTORY",
+                    help="name new things through core.auto_name on clip time: 'grok' (live calls, XAI_API_KEY) or "
+                         "an injected provider factory, e.g. eval.naming:CachedProvider (called with cfg= and "
+                         "clip_dir= when it takes them)")
+    ap.add_argument("--grok", action="store_true", help="the same as --names grok")
 
 
 def replay_config(clip: Clip, a: argparse.Namespace) -> dict:
@@ -1118,8 +1177,11 @@ def set_key(cfg: dict, item: str) -> dict:
 def replay_from_args(clip: Clip, a: argparse.Namespace) -> Trace:
     if a.zones:
         clip.meta["room_zones"] = json.loads(Path(a.zones).read_text())
-    trace = replay_clip(clip, replay_config(clip, a), max_fps=a.fps, live_timing=a.live_timing,
-                        overheard=a.overheard, no_model=a.no_model, hands_off=a.hands_off, grok=a.grok)
+    cfg = replay_config(clip, a)
+    spec = "grok" if a.grok else a.names
+    provider = load_provider(spec, cfg, clip) if spec else None
+    trace = replay_clip(clip, cfg, max_fps=a.fps, live_timing=a.live_timing, overheard=a.overheard,
+                        no_model=a.no_model, hands_off=a.hands_off, grok=spec == "grok", names=provider)
     trace.overrides = overrides(a)
     return trace
 

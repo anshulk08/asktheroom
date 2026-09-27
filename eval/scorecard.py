@@ -2,12 +2,15 @@
 
     python -m eval.scorecard data/clips/room_still_1 data/clips/room_couch_1       # the recorded models
     python -m eval.scorecard data/clips/room_* --hands-off --yoloe-model models/yoloe-26s-seg-pf.pt
-    python -m eval.scorecard data/clips/room_* --json card.json --save-trace         # keep each replay
-    python -m eval.scorecard data/clips/room_* --from-trace                          # rescore, no replay
+    python -m eval.scorecard data/clips/room_* --json card.json --save-track         # keep each replay
+    python -m eval.scorecard data/clips/room_* --track track-askroom.jsonl           # rescore, no replay
+    python -m eval.scorecard data/clips/room_* --track track-registry.jsonl          # an external tracker
 
 Each clip is replayed as eval.score_clip does (same pipeline, same options: the table-view cut of a
-1440p clip, room memory, --hands-off for a Mac with only the YOLOE .pt, --grok for live names), then
-scored per truth prop. The props' identities come from score_clip's mapping (each prop is put down with
+1440p clip, room memory, --hands-off for a Mac with only the YOLOE .pt, --names for names), then
+scored per truth prop. Scoring always goes through the tracker output contract (askroom-track/1,
+eval/track.py, docs/track-format.md): the replay is written as a track and read back, so an external
+tracker's track (--track) is scored by exactly the same code. The props' identities come from score_clip's mapping (each prop is put down with
 a cue in the room_* clips, so its entity is the one that arrived for that cue). A table per clip, then one
 row per clip; --json writes every number.
 
@@ -24,21 +27,29 @@ Metrics (targets in CardBars):
                              hands_out, people otherwise); a still segment starts settle_s after its cue
   body-part / clothing       entities whose label, taught aliases or Grok guess (name or alternatives) is a
                              body part or clothing word (BODY_WORDS). n/a when no entity carries a name
-                             (offline replay: use --grok, or WS3's naming)
+                             (offline replay: use --names)
   position error while still the prop's entity's farthest position from its median (or truth.positions[prop],
                              cm) over each still segment, visible samples only
   room handoffs              each carry_to step: the prop's entity (before it was carried) is in the step's
-                             zone within handoff_s (or before the prop's next step)
-  naming                     a hook for WS3: the best core.auto_name.match_score of the prop's description
-                             against its entity's guess, aliases or label; ok at name_min. n/a without names
+                             zone within handoff_s (or before the prop's next step); into no drawn zone (the
+                             floor by the doorway): it is put in no zone at all
+  naming (hook)              the naming block: per prop its entity, the name it goes by and whether it fits
+                             (core.auto_name.match_score >= name_min), right / wrong / none, junk_named.
+                             n/a without names (replay with --names grok or --names module:factory)
+
+The JSON per clip also has "bindings" (truth prop -> world entity over time: [{t, entity}], from the
+scorer's mapping; "mapping" adds why) and "identity" (the headline identity numbers).
   room placements            each place_room step (a prop put straight into a zone, never on the table):
                              an entity turns up in that zone within handoff_s. n/a for a zone not drawn
                              (the floor)
   false handoffs             an entity in a room zone that no cue explains: a prop resting on the table per
                              truth, a phantom (a foot handed off as 'sock'), anything but the carried prop or
                              the first new entity in a place_room zone. Target 0
-  identity through occlusion each block step (a person hides a resting prop, then unblock): the prop has the
-                             same entity, visible, after unblock as before the block
+  identity through occlusion each block step (a person hides a resting prop, then unblock): hidden, not gone
+                             (its entity is never GONE or missing from settle_s after the block to unblock),
+                             and the same entity, visible, after unblock as before the block
+  identity after return      each putdown with expect_same (brought back after carry_to / remove): the
+                             entity that arrives is the one the prop had before it was taken
   removed, not ghosted       each remove step: from ghost_s after it, no visible entity at the prop's spot
 
 Config overrides (--set dotted.key=value, --mode M for permanence.mode=M) apply to the replay config, so
@@ -155,6 +166,15 @@ def body_part(names: dict) -> Optional[str]:
     return None
 
 
+def primary_name(names: dict) -> Optional[str]:
+    """The name an entity goes by: Grok's guess, else its label or first alias."""
+    g = (names or {}).get("guess")
+    if isinstance(g, dict) and g.get("name"):
+        return str(g["name"])
+    phrases = name_phrases(names or {})
+    return phrases[0] if phrases else None
+
+
 def name_score(truth: str, names: dict) -> float:
     """How well the entity's names fit the prop's description (core.auto_name.match_score, 0-3): its
     guess as Grok gave it, and each alias or label as a guess of its own."""
@@ -230,8 +250,7 @@ class _Card:
                                     and any(self._resting(p, s.t) for s in self.samples))}
 
     def things(self) -> dict:
-        created = sorted({n for n in self.tr.kinds if n.startswith(THING)} |
-                         {ev["obj"] for ev in self.tr.events if ev["type"] == "APPEARED"
+        created = sorted({ev["obj"] for ev in self.tr.events if ev["type"] == "APPEARED"
                           and ev["obj"].startswith(THING)})
         if not self.samples:
             return {"identities_created": len(created), "live_end": 0, "visible_end": 0, "expected_end": 0}
@@ -272,21 +291,28 @@ class _Card:
                 "named": len(self.names)}
 
     def naming(self) -> dict:
-        rows = []
+        """The naming block (WS3): per prop the entity (the latest one bound to it that carries a name, else
+        the latest bound), its name (Grok's guess, else a taught alias or label) and whether that fits the
+        prop's description (core.auto_name.match_score >= name_min; null without a name). right / wrong /
+        none count the props; junk_named the named entities that never stood for a prop (clutter, feet)."""
+        merged = self.tr.merged
+        props, bound = {}, set()
         for p, what in self.sc.types.items():
             ents = [m["entity"] for m in self.sc.mapping.get(p, [])]
-            best = None
+            bound |= set(ents) | {_survivor(e, merged) for e in ents}
+            pick, nm = (ents[-1] if ents else None), None
             for e in reversed(ents):
-                nm = self.names.get(e) or self.names.get(_survivor(e, self.tr.merged) or "")
-                if nm:
-                    sc = name_score(str(what), nm)
-                    if best is None or sc > best["score"]:
-                        best = {"entity": e, "names": name_phrases(nm), "score": sc}
-            rows.append({"prop": p, "truth": what, "entity": best["entity"] if best else (ents[-1] if ents else None),
-                         "names": best["names"] if best else [], "score": best["score"] if best else None,
-                         "ok": bool(best and best["score"] >= self.b.name_min)})
-        named = [r for r in rows if r["score"] is not None]
-        return {"rows": rows, "named": len(named), "ok": sum(r["ok"] for r in named)}
+                got = self.names.get(e) or self.names.get(_survivor(e, merged) or "")
+                if got:
+                    pick, nm = e, got
+                    break
+            props[p] = {"entity": pick, "guess": primary_name(nm) if nm else None,
+                        "fits": (name_score(str(what), nm) >= self.b.name_min) if nm else None}
+        junk = [{"entity": n, "guess": primary_name(v)} for n, v in sorted(self.names.items())
+                if n not in bound and primary_name(v)]
+        fits = [v["fits"] for v in props.values()]
+        return {"props": props, "right": fits.count(True), "wrong": fits.count(False), "none": fits.count(None),
+                "junk_named": len(junk), "junk": junk}
 
     # -- positions, handoffs, removals
 
@@ -319,16 +345,23 @@ class _Card:
         return min((float(x["t"]) for x in self.sc.steps if float(x["t"]) > t + 1e-9
                     and p in (x.get("obj"), x.get("parent"))), default=math.inf)
 
+    def _drawn(self, zone: Optional[str]) -> bool:
+        drawn = self._zones_drawn()
+        return (zone in drawn) if drawn is not None else (zone not in (None, "floor"))
+
     def handoffs(self) -> dict:
+        """carry_to steps. Into a drawn zone: the prop's entity must show up there. Into no drawn zone (the
+        floor by the doorway): it must not be put in any zone (nothing to see it there)."""
         rows = []
         for s in self.sc.steps:
             if s["event"] != "carry_to" or not s.get("obj"):
                 continue
             p, t, want = s["obj"], float(s["t"]), s.get("zone")
+            drawn = self._drawn(want)
             ent = self.sc.mapped(p, t - 1e-6)
             end = min(t + self.b.handoff_s, self._next_step(p, t))
-            row = {"t": round(t, 2), "prop": p, "zone": want, "entity": ent, "got": None, "delay_s": None,
-                   "ok": False}
+            row = {"t": round(t, 2), "prop": p, "zone": want, "drawn": drawn, "entity": ent, "got": None,
+                   "delay_s": None, "ok": False}
             if ent is not None:
                 names = {ent, _survivor(ent, self.tr.merged)}
                 for smp in self.sc.between(t, end):
@@ -337,10 +370,28 @@ class _Card:
                         continue
                     if row["got"] is None or z == want:
                         row.update(got=z, delay_s=round(smp.t - t, 2))
-                    if z == want:
-                        row["ok"] = True
+                    if z == want or not drawn:
                         break
+                row["ok"] = (row["got"] == want) if drawn else row["got"] is None
             rows.append(row)
+        return {"rows": rows, "n": len(rows), "ok": sum(r["ok"] for r in rows)}
+
+    def returns(self) -> dict:
+        """putdown steps with expect_same: a prop carried off (or out of view) and brought back has the
+        identity it had before it was taken."""
+        rows = []
+        for s in self.sc.steps:
+            if s["event"] != "putdown" or not s.get("expect_same") or not s.get("obj"):
+                continue
+            p, t = s["obj"], float(s["t"])
+            took = [x for x in self.sc.steps if x.get("obj") == p and float(x["t"]) < t
+                    and x["event"] in ("carry_to", "remove", "pickup", "exit_edge")]
+            t_took = float(took[-1]["t"]) if took else t
+            before = _survivor(self.sc.mapped(p, t_took - 1e-6), self.tr.merged)
+            row_p = next((r for r in self.sc.placements if r["prop"] == p and abs(r["t"] - t) < 1e-6), None)
+            after = _survivor(row_p["entity"], self.tr.merged) if row_p and row_p["entity"] else None
+            rows.append({"t": round(t, 2), "prop": p, "taken_t": round(t_took, 2), "before": before, "after": after,
+                         "ok": before is not None and after == before})
         return {"rows": rows, "n": len(rows), "ok": sum(r["ok"] for r in rows)}
 
     def _zones_drawn(self) -> Optional[set]:
@@ -398,11 +449,14 @@ class _Card:
             after = _survivor(self.sc.mapped(p, t_after), self.tr.merged)
             smp = self.sc.at(t_after)
             v = smp.ents.get(after) if (smp is not None and after) else None
-            hidden = [x.ents.get(before, ("-",))[0] for x in self.sc.between(t, un)] if before else []
+            during = self.sc.between(t + self.b.settle_s, un)
+            hidden = [x.ents.get(before, ("missing",))[0] for x in during] if before else []
+            gone = sum(h in ("GONE", "missing") for h in hidden)
             rows.append({"t": round(t, 2), "prop": p, "unblock_t": round(un, 2), "before": before, "after": after,
                          "visible_after": bool(v and v[0] == "VISIBLE"),
                          "while_hidden": max(set(hidden), key=hidden.count) if hidden else None,
-                         "ok": before is not None and before == after and bool(v and v[0] == "VISIBLE")})
+                         "gone_frames": gone, "frames": len(hidden),
+                         "ok": before is not None and before == after and bool(v and v[0] == "VISIBLE") and gone == 0})
         return {"rows": rows, "n": len(rows), "ok": sum(r["ok"] for r in rows)}
 
     def removals(self) -> dict:
@@ -436,7 +490,7 @@ class _Card:
         body, naming, pos = self.body_things(), self.naming(), self.positions()
         hand, rem = self.handoffs(), self.removals()
         placed = self.room_placements()
-        false_h, occl = self.false_handoffs(placed), self.occlusions()
+        false_h, occl, back = self.false_handoffs(placed), self.occlusions(), self.returns()
         room_ran = bool(self.tr.room) or any(smp.zones for smp in self.samples)
         crit = [
             _row("entities per real object", _epo(epo), f"{b.entities_per_object}",
@@ -448,7 +502,7 @@ class _Card:
             _row("phantom births/min people", _rate(births[PEOPLE]), f"<= {b.people_births_per_min:g}",
                  None if births[PEOPLE]["per_min"] is None else births[PEOPLE]["per_min"] <= b.people_births_per_min),
             _row("body-part / clothing things", (f"{body['n']}" + _few([f"{x['entity']} '{x['name']}'" for x in body["things"]]))
-                 if body["names_seen"] else "n/a (no names: --grok)", f"{b.body_things}",
+                 if body["names_seen"] else "n/a (no names: --names)", f"{b.body_things}",
                  body["n"] <= b.body_things if body["names_seen"] else None),
             _row("position error while still", f"max {pos['max_cm']:.1f} cm" if pos["max_cm"] is not None else "n/a",
                  f"<= {b.pos_cm:g} cm", None if pos["max_cm"] is None else pos["max_cm"] <= b.pos_cm),
@@ -466,20 +520,32 @@ class _Card:
             _row("identity through occlusion", f"{occl['ok']}/{occl['n']}" + _few(
                 [f"{r['prop']}: {r['before']} -> {r['after'] or 'none'}" for r in occl["rows"] if not r["ok"]]),
                  "all", occl["ok"] == occl["n"] if occl["n"] else None),
+            _row("identity after return", f"{back['ok']}/{back['n']}" + _few(
+                [f"{r['prop']}: {r['before']} -> {r['after'] or 'none'}" for r in back["rows"] if not r["ok"]]),
+                 "all", back["ok"] == back["n"] if back["n"] else None),
             _row("removed, not ghosted", f"{rem['n'] - rem['ghosts']}/{rem['n']}", "all",
                  rem["ghosts"] == 0 if rem["n"] else None),
-            _row("naming (hook)", f"{naming['ok']}/{naming['named']} named props fit" if naming["named"]
-                 else "n/a (no names: --grok)", f"match >= {b.name_min:g}",
-                 naming["ok"] == naming["named"] if naming["named"] else None),
+            _row("naming (hook)", (f"{naming['right']}/{naming['right'] + naming['wrong']} named props fit, "
+                                   f"{naming['none']} unnamed, {naming['junk_named']} junk named")
+                 if naming["right"] + naming["wrong"] else "n/a (no names: --names)", f"match >= {b.name_min:g}",
+                 naming["wrong"] == 0 if naming["right"] + naming["wrong"] else None),
         ]
         rp = self.tr
         return {"clip": self.clip.name, "video_s": round(self.clip.duration_s or (self.t1 - self.t0), 2),
                 "frames_processed": len(self.samples), "replay_wall_s": round(rp.wall_s, 1), "detector": rp.detector, "view": rp.view, "room_memory": rp.room,
                 "props": dict(self.sc.types), "mapping": self.sc.mapping,
+                "bindings": {p: [{"t": m["t"], "entity": m["entity"]} for m in ms] for p, ms in self.sc.mapping.items()},
+                "identity": {"worst_entities_per_object": epo["worst"],
+                             "identities_created": things["identities_created"],
+                             "phantom_still_per_min": births[STILL]["per_min"],
+                             "phantom_people_per_min": births[PEOPLE]["per_min"],
+                             "body_things": body["n"] if body["names_seen"] else None,
+                             "false_handoffs": false_h["n"], "handoffs_ok": [hand["ok"], hand["n"]],
+                             "occlusions_ok": [occl["ok"], occl["n"]], "returns_ok": [back["ok"], back["n"]]},
                 "segments": [{"from": round(a, 2), "to": round(b_, 2), "kind": k} for a, b_, k in self.segs],
                 "entities_per_object": epo, "things": things, "phantom_births": births, "body_things": body,
                 "position_still": pos, "handoffs": hand, "removals": rem, "naming": naming,
-                "room_placements": placed, "false_handoffs": false_h, "occlusions": occl,
+                "room_placements": placed, "false_handoffs": false_h, "occlusions": occl, "returns": back,
                 "overrides": list(getattr(rp, "overrides", None) or []),
                 "bars": asdict(b), "criteria": crit,
                 "pass": all(c["result"] != "FAIL" for c in crit)}
@@ -513,21 +579,12 @@ def scorecard(trace: Trace, clip: Clip, bars: Optional[CardBars] = None, score_b
     return _Card(trace, clip, bars or CardBars(), score_bars or Bars()).report()
 
 
-# ----- traces on disk -----------------------------------------------------------------------------------
-
-def trace_to_json(trace: Trace) -> dict:
-    return asdict(trace)
-
-
-def trace_from_json(d: dict) -> Trace:
-    def pt(v):
-        return tuple(v) if v is not None else None
-    samples = [Sample(t=s["t"], ents={n: (v[0], v[1], pt(v[2])) for n, v in s["ents"].items()},
-                      hands=[tuple(h) for h in s["hands"]], seen={k: [tuple(c) for c in v] for k, v in s["seen"].items()},
-                      zones=dict(s.get("zones") or {}), names=dict(s.get("names") or {}))
-               for s in d.get("samples") or []]
-    kw = {k: v for k, v in d.items() if k != "samples" and k in Trace.__dataclass_fields__}
-    return Trace(samples=samples, **kw)
+def score_track(lines: list, clip: Clip, bars: Optional[CardBars] = None,
+                score_bars: Optional[Bars] = None) -> dict:
+    """The scorecard of a tracker's output in the askroom-track/1 contract (eval/track.py,
+    docs/track-format.md): our replay and an external tracker are scored by this same path."""
+    from eval.track import track_to_trace
+    return scorecard(track_to_trace(lines, clip.meta.get("room_zones")), clip, bars, score_bars)
 
 
 # ----- command line -------------------------------------------------------------------------------------
@@ -567,12 +624,15 @@ def main(argv=None) -> int:
     import logging
 
     from eval.score_clip import add_replay_args, replay_from_args
+    from eval.track import read_lines, trace_to_track, write_track
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("clips", nargs="+", help="clip directories (video.mp4, frames.json, meta.json, truth.json)")
     ap.add_argument("--json", help="write every clip's scorecard here (a list)")
-    ap.add_argument("--save-trace", action="store_true", help="write each replay to <clip>/<--trace-name>")
-    ap.add_argument("--from-trace", action="store_true", help="score <clip>/<--trace-name> instead of replaying")
-    ap.add_argument("--trace-name", default="trace.json")
+    ap.add_argument("--track", help="score this tracker output (askroom-track/1 JSONL) instead of replaying: a "
+                                    "file name inside each clip directory, or a path when scoring one clip")
+    ap.add_argument("--save-track", nargs="?", const="track-askroom.jsonl", metavar="NAME",
+                    help="write each replay's track into the clip directory (default name track-askroom.jsonl)")
+    ap.add_argument("--tracker", default="askroom", help="the tracker name written in a saved track's header")
     add_replay_args(ap)
     ap.add_argument("--dup-cm", type=float, default=CardBars.dup_cm)
     ap.add_argument("--settle-s", type=float, default=CardBars.settle_s)
@@ -585,20 +645,20 @@ def main(argv=None) -> int:
     cards = []
     for d in a.clips:
         clip = load_clip(d)
-        tp = Path(d) / a.trace_name
-        if a.from_trace:
-            if not tp.exists():
-                print(f"{d}: no {a.trace_name} (replay it once with --save-trace)")
+        if a.track:
+            tp = Path(a.track) if (len(a.clips) == 1 and Path(a.track).is_file()) else Path(d) / a.track
+            if not tp.is_file():
+                print(f"{d}: no track {tp}")
                 continue
-            trace = trace_from_json(json.loads(tp.read_text()))
+            lines = read_lines(tp)
         else:
             if not clip.video.exists():
                 print(f"{d}: no video.mp4")
                 continue
-            trace = replay_from_args(clip, a)
-            if a.save_trace:
-                tp.write_text(json.dumps(trace_to_json(trace), default=str))
-        r = scorecard(trace, clip, CardBars(dup_cm=a.dup_cm, settle_s=a.settle_s), Bars(initial_s=a.initial_s))
+            lines = trace_to_track(replay_from_args(clip, a), clip.name, a.tracker, clip.meta.get("room_zones"))
+            if a.save_track:
+                write_track(Path(d) / a.save_track, lines)
+        r = score_track(lines, clip, CardBars(dup_cm=a.dup_cm, settle_s=a.settle_s), Bars(initial_s=a.initial_s))
         print_card(r)
         cards.append(r)
     print_summary(cards)
