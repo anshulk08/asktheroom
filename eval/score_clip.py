@@ -8,6 +8,7 @@ clip's truth.json, so anyone can replay a recording and read PASS / FAIL without
     python -m eval.score_clip data/clips/<id> --detect-model my.pt --proposals change   # Mac, a local .pt
     python -m eval.score_clip data/clips/<id> --hands-off --yoloe-model models/yoloe-26s-seg-pf.pt
                                           # Mac with only the YOLOE .pt: no fixed-class detector, so no hands
+    python -m eval.score_clip data/clips/<id> --set permanence.mode=registry   # any config key (dotted, YAML)
 
 On the Jetson, run it inside the app's container (the TensorRT engines only load there):
 
@@ -181,6 +182,7 @@ class Trace:
     detector: str = ""
     view: Optional[list] = None                     # [table_view_rect, out_size] the frames were cut to
     room: bool = False                              # room memory ran
+    overrides: list = field(default_factory=list)   # --set / --mode items the replay config took
 
 
 def make_detector(cfg: dict, table):
@@ -809,7 +811,7 @@ class _Scorer:
                        "wall_s": round(tr.wall_s, 2),
                        "fps": round(len(self.samples) / tr.wall_s, 1) if tr.wall_s > 0 else None,
                        "max_fps": tr.max_fps, "live_timing": tr.live_timing, "detector": tr.detector,
-                       "view": tr.view, "room_memory": tr.room,
+                       "view": tr.view, "room_memory": tr.room, "overrides": tr.overrides,
                        "detect_ms_median": round(median(tr.detect_ms), 1) if tr.detect_ms else None,
                        "git": clip.meta.get("git"), "models": clip.meta.get("models"),
                        "clock_offset_s": clip.meta.get("clock_offset_s")},
@@ -1008,7 +1010,8 @@ def print_report(r: dict) -> None:
           f"processed (cap {rp['max_fps']:g} fps{', live timing' if rp['live_timing'] else ''}), "
           f"{rp['errors']} errors, {rp['wall_s']} s to replay"
           + (f", detector median {rp['detect_ms_median']} ms" if rp["detect_ms_median"] is not None else ""))
-    print(f"  detector: {rp['detector']}")
+    print(f"  detector: {rp['detector']}" + (f"; config overrides: {', '.join(rp['overrides'])}"
+                                              if rp.get("overrides") else ""))
     if rp.get("view"):
         print(f"  table view: {rp['view'][0]} of the full frame, resized to {rp['view'][1][0]}x{rp['view'][1][1]}"
               f"; room memory {'on' if rp.get('room_memory') else 'off'}")
@@ -1056,6 +1059,10 @@ def add_replay_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--yoloe-model", help="YOLOE weights instead of proposals.yoloe.model (the rig's reduced "
                                           ".engine only loads on the Jetson; models/yoloe-26s-seg-pf.pt on a Mac)")
     ap.add_argument("--zones", help="room_zones.json for a room clip recorded without its zones in meta.json")
+    ap.add_argument("--set", dest="overrides", action="append", default=[], metavar="KEY=VALUE",
+                    help="override a config key for the replay: dotted key, YAML value (repeatable), e.g. "
+                         "--set permanence.mode=registry --set proposals.yoloe.conf=0.25")
+    ap.add_argument("--mode", help="shorthand for --set permanence.mode=MODE (the permanence tracker to replay)")
     ap.add_argument("--grok", action="store_true",
                     help="name new things with Grok as the app does online (needs XAI_API_KEY; live calls on a "
                          "background thread, so two replays can differ)")
@@ -1073,14 +1080,48 @@ def replay_config(clip: Clip, a: argparse.Namespace) -> dict:
     if a.yoloe_model:
         pc = cfg.get("proposals") or {}
         cfg["proposals"] = dict(pc, yoloe=dict(pc.get("yoloe") or {}, model=a.yoloe_model))
+    for item in overrides(a):
+        set_key(cfg, item)
+    return cfg
+
+
+def overrides(a: argparse.Namespace) -> list:
+    """--set items, with --mode as permanence.mode, in the order they apply."""
+    out = list(getattr(a, "overrides", None) or [])
+    if getattr(a, "mode", None):
+        out.append(f"permanence.mode={a.mode}")
+    return out
+
+
+def set_key(cfg: dict, item: str) -> dict:
+    """Apply one 'dotted.key=value' (value parsed as YAML: 0.25, true, [1, 2], registry) to cfg in place,
+    creating missing sections. Raises ValueError on a malformed item or a key under a non-section."""
+    import yaml
+    key, sep, raw = item.partition("=")
+    parts = [k for k in key.strip().split(".") if k]
+    if not sep or not parts:
+        raise ValueError(f"--set wants dotted.key=value, got {item!r}")
+    d = cfg
+    for k in parts[:-1]:
+        nxt = d.get(k)
+        if nxt is None:
+            nxt = d[k] = {}
+        elif not isinstance(nxt, dict):
+            raise ValueError(f"--set {item!r}: {k} is not a section")
+        else:
+            nxt = d[k] = dict(nxt)
+        d = nxt
+    d[parts[-1]] = yaml.safe_load(raw) if raw.strip() else None
     return cfg
 
 
 def replay_from_args(clip: Clip, a: argparse.Namespace) -> Trace:
     if a.zones:
         clip.meta["room_zones"] = json.loads(Path(a.zones).read_text())
-    return replay_clip(clip, replay_config(clip, a), max_fps=a.fps, live_timing=a.live_timing,
-                       overheard=a.overheard, no_model=a.no_model, hands_off=a.hands_off, grok=a.grok)
+    trace = replay_clip(clip, replay_config(clip, a), max_fps=a.fps, live_timing=a.live_timing,
+                        overheard=a.overheard, no_model=a.no_model, hands_off=a.hands_off, grok=a.grok)
+    trace.overrides = overrides(a)
+    return trace
 
 
 def main(argv=None) -> int:

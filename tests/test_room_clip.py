@@ -155,7 +155,8 @@ def test_replay_config_takes_the_yoloe_model_override(tmp_path):
     assert cfg["room_memory"]["table_view_rect"] == [0, 180, 320, 360]
 
 
-@pytest.mark.parametrize("name", ["room_still", "room_clutter", "room_couch", "room_carry", "room_move", "room_remove"])
+@pytest.mark.parametrize("name", ["room_still", "room_clutter", "room_couch", "room_carry", "room_move", "room_remove",
+                                  "room_straight", "room_block"])
 def test_room_scenarios_become_truth_with_segments_and_zones(name):
     from eval.guided import CLIPS, truth_from
     c = CLIPS[name]
@@ -166,7 +167,47 @@ def test_room_scenarios_become_truth_with_segments_and_zones(name):
     placed = {s["obj"] for s in t["steps"] if s["event"] == "place"}
     assert placed, name                                        # every room clip binds props with place cues
     for s in t["steps"]:
-        if s["event"] == "carry_to":
-            assert s["zone"] in ("couch", "side_table", "counter")
+        if s["event"] in ("carry_to", "place_room"):
+            assert s["zone"] in ("couch", "side_table", "counter", "floor")
+        if s["event"] == "place_room":
+            assert s["obj"] not in placed                      # straight into the room, never on the table
     if name == "room_clutter":
         assert t["scene_objects"] == ["laptop", "cable pile"]
+
+
+def test_set_overrides_any_config_key_and_mode_is_permanence_mode(tmp_path):
+    import argparse
+    ap = argparse.ArgumentParser()
+    score_clip.add_replay_args(ap)
+    a = ap.parse_args(["--set", "permanence.mode=registry", "--set", "proposals.yoloe.conf=0.25",
+                       "--set", "room_memory.zones_path=elsewhere.json", "--mode", "registry2"])
+    clip = load_clip(write_room_clip(tmp_path / "room_4"))
+    recorded = json.loads((tmp_path / "room_4" / "meta.json").read_text())["config"]
+    cfg = score_clip.replay_config(clip, a)
+    assert cfg["permanence"] == {"mode": "registry2"}               # --mode applies after --set
+    assert cfg["proposals"]["yoloe"]["conf"] == 0.25
+    assert cfg["proposals"]["yoloe"]["model"] == recorded["proposals"]["yoloe"]["model"]   # siblings kept
+    assert clip.meta["config"]["proposals"]["yoloe"].get("conf") == recorded["proposals"]["yoloe"].get("conf")
+    assert score_clip.overrides(a)[-1] == "permanence.mode=registry2"
+    assert score_clip.set_key({"a": {"b": 1}}, "a.c=[1, 2]") == {"a": {"b": 1, "c": [1, 2]}}
+    assert score_clip.set_key({}, "x.y=true") == {"x": {"y": True}}
+    with pytest.raises(ValueError):
+        score_clip.set_key({"a": 1}, "a.b=2")
+    with pytest.raises(ValueError):
+        score_clip.set_key({}, "novalue")
+
+
+def test_replay_from_args_records_the_overrides_on_the_trace(tmp_path, monkeypatch):
+    import argparse
+    ap = argparse.ArgumentParser()
+    score_clip.add_replay_args(ap)
+    a = ap.parse_args(["--mode", "registry"])
+    clip = load_clip(write_room_clip(tmp_path / "room_5"))
+    seen = {}
+
+    def fake_replay(clip, cfg, **kw):
+        seen["cfg"] = cfg
+        return score_clip.Trace()
+    monkeypatch.setattr(score_clip, "replay_clip", fake_replay)
+    trace = score_clip.replay_from_args(clip, a)
+    assert seen["cfg"]["permanence"]["mode"] == "registry" and trace.overrides == ["permanence.mode=registry"]
