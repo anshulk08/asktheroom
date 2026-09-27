@@ -429,9 +429,14 @@ def test_demo_evidence_is_the_newest_event_with_a_snapshot(tmp_path):
     (snaps / "111_wallet_MOVED.jpg").write_bytes(b"\xff\xd8jpeg")
     events.add(Event(t=1.0, wall=111.0, obj="wallet", type="MOVED", snapshot=str(snaps / "111_wallet_MOVED.jpg")))
     events.add(Event(t=2.0, wall=222.0, obj="wallet", type="LOST_TRACK"))              # no picture: skipped
+    for wall, typ in ((333.0, "COVERED"), (444.0, "LOST_TRACK")):                     # pictures, but not of its place
+        (snaps / f"{int(wall)}_wallet_{typ}.jpg").write_bytes(b"\xff\xd8jpeg")
+        events.add(Event(t=wall, wall=wall, obj="wallet", type=typ, snapshot=str(snaps / f"{int(wall)}_wallet_{typ}.jpg")))
     with TestClient(app) as c:
-        got = c.get("/demo/evidence?obj=wallet").json()
+        got = c.get("/demo/evidence?obj=wallet").json()               # the move that put it there, not the newest
         assert got == {"obj": "wallet", "type": "MOVED", "t": 111.0, "snapshot_url": "/snapshots/111_wallet_MOVED.jpg"}
+        events.add(Event(t=5.0, wall=555.0, obj="phone", type="COVERED", snapshot=str(snaps / "333_wallet_COVERED.jpg")))
+        assert c.get("/demo/evidence?obj=phone").json()["type"] == "COVERED"    # no placing event: the newest other
         assert c.get("/demo/evidence?obj=nothing").json() == {} and c.get("/demo/evidence").json() == {}
 
 

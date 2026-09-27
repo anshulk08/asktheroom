@@ -665,7 +665,8 @@
       for (const k of ["object", "name", "match", "answer", "seen", "mark", "same", "confidence", "also"]) if (k in d) keep[k] = d[k];
       return JSON.stringify(Object.keys(keep).length ? keep : d).replace(/,"/g, ', "').replace(/":/g, '": ');
     } catch (e) {
-      return raw || (c.error ? "error: " + c.error : "");
+      if (raw) return raw;
+      return c.ok === false ? "no reply (" + (/HTTP/.test(c.error || "") ? c.error : "offline") + ")" : "";
     }
   }
 
