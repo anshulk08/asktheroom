@@ -47,6 +47,11 @@ ls -d ~/askroom_*                                               # stale scratch 
 
 ## 2. Light, exposure, table frame, outline, then freeze
 
+**Who types what.** At the rig you do only the physical parts: the light (2.1) and the tag (2.3: lay it down,
+measure it, tell us the size). asktheroom-60 runs 2.2 to 2.5 over SSH, grabs a frame, the orchestrator reads
+the tabletop corners off it, and asktheroom-60 sets the outline and checks it. The commands are here in case
+you run them yourself.
+
 1. **Even light.** Light the table evenly: no sun patch or hard shadow across it, no glare on the box. Keep
    the same light for every later step; if it changes, redo steps 2 and 3.
 2. **Lock the camera** (auto exposure and autofocus off; values measured over this table on Sat 26 Sep):
@@ -58,8 +63,9 @@ ls -d ~/askroom_*                                               # stale scratch 
    Too dark or too bright in venue light: change only the gain (3rd value) in steps of 20 and rerun. Run it
    again after any replug (the app also restores the controls itself when the camera drops off USB).
 3. **Table frame (one AprilTag).** Lay the printed tag (36h11, id 0) flat near the middle of the table.
-   `table_tag.size_cm` in `config.local.yaml` must be the printed black square's side: 16.0 for the printed
-   tag, 14.5 for the iPad stand-in. Then:
+   **Measure it:** the outer black border, edge to edge, in cm, with a ruler (not the white margin around it).
+   Put that number in `~/askroom_rig/config.local.yaml` as `table_tag: {size_cm: <cm>}` (it says 14.5 now, the
+   iPad stand-in's). Then:
 
    ```bash
    $D python3 -m core.table --device $CAM
@@ -73,7 +79,7 @@ ls -d ~/askroom_*                                               # stale scratch 
    $D python3 -m core.table --outline                  # prints these steps
    # grab a 1280x720 frame (app stopped):
    $D python3 -c "import cv2; c = cv2.VideoCapture('$CAM', cv2.CAP_V4L2); c.set(3, 1280); c.set(4, 720); [c.read() for _ in range(30)]; cv2.imwrite('frame.jpg', c.read()[1])"
-   # Mac: scp guru@10.90.84.178:askroom_rig/frame.jpg . and open it in Preview (Tools > Show Inspector shows px)
+   # Mac: scp guru@10.90.84.178:askroom_rig/frame.jpg ~/asktheroom/rig_frame.jpg; open it in Preview (Tools > Show Inspector shows px)
    # read the tabletop's corners in px (a little inside the real edge), in order around the table, then:
    $D python3 -m core.table --outline-px X1,Y1 X2,Y2 X3,Y3 X4,Y4 --image frame.jpg
    ```
@@ -94,21 +100,29 @@ The replay clips the fixes are measured on were recorded on the old camera; thes
 right after step 2 (same light, camera settings, table frame and outline: each clip stores its calibration and
 outline), **before** step 3 (a laser dot in the frame would be a new object), with the app stopped.
 
-`eval.guided` runs on a **Mac next to the table**: the Mac speaks each cue out loud (`say`), you do what it
-says, and the Jetson records. Nobody annotates afterwards: the cues are the ground truth. It needs the
-integration branch on that Mac (`~/asktheroom/wt-integration` on the orchestrating Mac) and SSH to the Jetson.
+`eval.guided` runs on **your laptop, next to the table**: it speaks each cue out loud, you do what it says,
+and the Jetson records. Nobody annotates afterwards: the cues are the ground truth.
+
+**Laptop setup (once, ~5 min).** macOS or Linux (on Windows use WSL: it needs `ssh` and `rsync`). Only
+Python 3.9+ and git: `eval.guided` uses the standard library, so no venv or `pip install` is needed.
 
 ```bash
-# Mac, in the integration worktree
+git clone https://github.com/anshulk08/asktheroom.git && cd asktheroom    # or, in an existing clone: git fetch
+git checkout demo-integration
+ssh-copy-id guru@10.90.84.178        # key login: guided opens dozens of SSH sessions, a password prompt each would stall it
+ssh guru@10.90.84.178 true           # must return with no prompt
 export ASKROOM_JETSON=guru@10.90.84.178 ASKROOM_REMOTE_DIR=askroom_rig
-PY=~/asktheroom/askroom/.venv/bin/python
-$PY -m eval.guided --list                          # each clip's setup and length
-$PY -m eval.guided shell --id brio_shell_1 --no-setup
+PY=python3
+$PY -m eval.guided --list            # each clip's setup and length
 ```
+
+Cue voice: macOS `say`; on Linux `espeak-ng`, `espeak` or `spd-say` (`sudo apt install espeak-ng`); Windows
+PowerShell's voice. With none, each cue is printed as `>>> ...`: read it and act. Turn the
+laptop volume up.
 
 `--no-setup` keeps the camera exactly as step 2.2 locked it. Each run prints the setup: lay the props out as it
 says, then press nothing: it says "Get ready", then the cues. It ends with "Done." and copies the clip to
-`data/clips/<id>` on the Mac (and leaves it in `~/askroom_rig/data/clips/<id>` on the Jetson).
+`data/clips/<id>` on the laptop (and leaves it in `~/askroom_rig/data/clips/<id>` on the Jetson).
 
 Props (the same every clip): A wallet, B a small solid object (the keys), C the phone, NB the notebook, BOX the
 open box (open side up).
@@ -136,9 +150,15 @@ reach and nobody's eyes at table height. The laser turns itself off after 10 s i
 
 1. Put servokit's wheels into `docker/wheels`: the `pip3 download adafruit-circuitpython-servokit==1.3.24
    Jetson.GPIO==2.1.11 ...` command is in the header of `docker/Dockerfile`.
-2. Rebuild: `docker build -t askroom:latest docker/` (adds espeak-ng too if the build has network, e.g. a hotspot).
-3. On the host, `sudo i2cdetect -y -r 7` must show `40` (the board on I2C bus 7).
-4. `$D python3 -c "import board, adafruit_servokit; print(board.board_id)"` must print the board.
+2. The image with servokit and espeak-ng is `askroom:demo` (built Sat 26 Sep; `askroom:latest` is left as it
+   was). To rebuild: `docker build -t askroom:demo docker/` (network needed for espeak-ng, e.g. a hotspot).
+   From here on run the laser steps with `export ASKROOM_IMAGE=askroom:demo` so `$D` uses it.
+3. On the host, `i2cdetect -y -r 7` (no sudo: guru is in the i2c group) must show `40`: the PCA9685 on I2C
+   bus 7. (Sat 26 Sep 20:15 bus 7 was empty: the board isn't wired or powered yet. Bus 1's `40`, shown `UU`,
+   is an on-board chip, not ours.)
+4. `ASKROOM_IMAGE=askroom:demo scripts/dock.sh python3 -c "import board, adafruit_servokit; print(board.board_id, board.I2C().scan())"`
+   must print `JETSON_ORIN_NANO [64]` (0x40 = 64). Use this copy's `scripts/dock.sh` (it sets the Blinka board
+   variables Docker hides), not `~/askroom`'s.
 5. In `config.local.yaml` set `actuator: pca9685`.
 
 If servokit is missing or the board isn't found, main.py logs `LASER DISABLED ...` and answers by voice only
