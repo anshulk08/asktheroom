@@ -47,6 +47,7 @@ import cv2
 import numpy as np
 
 from core import geom
+from core.crops import shrink
 from core.room_types import RoomConfig, RoomObservation, RoomTrack, ZoneVisit
 from core.room_zones import Zone, Zones, view_version
 from core.types import BoxPx, Event, Frame
@@ -59,6 +60,7 @@ DEDUPE_IOU = 0.5            # two boxes of one class this overlapped in one crop
 THING = "thing"             # cls of an unnamed object (a YOLOE proposal); never matches a prop's track
 PROP_IOU = 0.5              # a proposal this overlapped with a prop observation is that prop
 MARK_MIN_SIDE = 240         # px: the context patch around a boxed object for "is it one of these?"
+CTX_PX = 384                # a queued open-naming context view is kept at most this long (its send size)
 NAME_MARGIN = 0.5           # a thing's close-up for Grok: its box grown by this per side (small, far objects
                             # need the surroundings to be recognisable: rig run Sat 26 Sep)
 ERR_LOG_S = 10.0            # a failing proposer is logged at most this often
@@ -191,11 +193,12 @@ class RoomTracker:
 # Grok names for thing tracks
 
 class _Job:
-    __slots__ = ("track", "img", "attempts", "due", "hints", "gen")
+    __slots__ = ("track", "img", "attempts", "due", "hints", "gen", "ctx")
 
-    def __init__(self, track: RoomTrack, img: np.ndarray, due: float, hints=None, gen: int = 0):
+    def __init__(self, track: RoomTrack, img: np.ndarray, due: float, hints=None, gen: int = 0, ctx=None):
         self.track, self.img, self.attempts, self.due, self.hints = track, img, 0, due, hints
         self.gen = gen                     # the reset generation it was queued in (RoomNamer.reset)
+        self.ctx = ctx                     # the marked wider view for open naming, or None
 
 
 class RoomNamer:
@@ -231,11 +234,13 @@ class RoomNamer:
             self._thread = threading.Thread(target=self._run, name="room-name", daemon=True)
             self._thread.start()
 
-    def submit(self, track: RoomTrack, img: np.ndarray, hints: Optional[list] = None) -> None:
+    def submit(self, track: RoomTrack, img: np.ndarray, hints: Optional[list] = None,
+               ctx: Optional[np.ndarray] = None) -> None:
         """hints: Grok names of things that just left the table (the handoff candidates), asked about
-        directly when a verify_fn is set."""
+        directly when a verify_fn is set. ctx: a wider view with the track in a red box, sent with the
+        close-up for open naming (name_fn(img, ctx))."""
         with self._lock:
-            self._jobs.append(_Job(track, img, self.clock(), list(hints) if hints else None, self._gen))
+            self._jobs.append(_Job(track, img, self.clock(), list(hints) if hints else None, self._gen, ctx))
         self._wake.set()
 
     def pending(self) -> int:
@@ -266,8 +271,10 @@ class RoomNamer:
             self._calls.append(now)
         job.attempts += 1
         try:
-            g = (self.verify_fn(job.img, job.hints) if job.hints and self.verify_fn is not None
-                 else self.name_fn(job.img))
+            if job.hints and self.verify_fn is not None:
+                g = self.verify_fn(job.img, job.hints)
+            else:
+                g = self.name_fn(job.img) if job.ctx is None else self.name_fn(job.img, job.ctx)
         except Exception as e:
             log.info("naming room track %s failed (attempt %d): %s", job.track.tid, job.attempts, e)
             g = None
@@ -579,11 +586,13 @@ class RoomMemory:
                 # ahead of the one that matters (counter clutter, rig run Sat 26 Sep).
                 if (tr.cls == THING and tr.guess is None and not tr.name_asked and hints != []
                         and (hints is None or tr.changed)):
-                    img = (_marked_close_up(visit.crop, tr.box_px, x1, y1) if hints and self.namer.verify_fn
+                    verify = bool(hints and self.namer.verify_fn)
+                    img = (_marked_close_up(visit.crop, tr.box_px, x1, y1) if verify
                            else _close_up(visit.crop, tr.box_px, x1, y1))
                     if img is not None:
                         tr.name_asked = True
-                        self.namer.submit(tr, img, hints)
+                        ctx = None if verify else shrink(_marked_close_up(visit.crop, tr.box_px, x1, y1), CTX_PX)
+                        self.namer.submit(tr, img, hints, ctx=ctx)
         return visit
 
     def _hot(self, t: float, hints: Optional[list]) -> bool:
@@ -659,20 +668,8 @@ def _marked_close_up(crop: np.ndarray, box: BoxPx, ox: int, oy: int, min_side: i
     min_side px, native resolution), so Grok sees its surroundings. A far, dark object cut out alone was
     "no usable name" on the counter and side table (trial runs, Sat 26 Sep); set-of-marks with context is
     what made visual questions work."""
-    h, w = crop.shape[:2]
-    x1, y1, x2, y2 = box[0] - ox, box[1] - oy, box[2] - ox, box[3] - oy
-    if x2 - x1 < 2 or y2 - y1 < 2:
-        return None
-    cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-    side = max(min_side, 3 * (x2 - x1), 3 * (y2 - y1))
-    a1, b1 = max(0, int(cx - side / 2)), max(0, int(cy - side / 2))
-    a2, b2 = min(w, int(cx + side / 2)), min(h, int(cy + side / 2))
-    if a2 - a1 < 8 or b2 - b1 < 8:
-        return None
-    out = crop[b1:b2, a1:a2].copy()
-    t = max(2, round(max(out.shape[:2]) / 120))
-    cv2.rectangle(out, (int(x1) - a1 - t, int(y1) - b1 - t), (int(x2) - a1 + t, int(y2) - b1 + t), (0, 0, 255), t)
-    return out
+    from core.crops import marked_view
+    return marked_view(crop, (box[0] - ox, box[1] - oy, box[2] - ox, box[3] - oy), min_side)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -869,7 +866,7 @@ def make_verify_fn(namer) -> Callable[[np.ndarray, list], Optional[dict]]:
         listed = "; ".join(h["name"] + (f" (also: {', '.join(h.get('also') or [])})" if h.get("also") else "")
                            for h in named)
         reply = namer.provider.narrate(VERIFY_SYSTEM, [("text", f"Looking for: {listed}"),
-                                                       ("image", _jpeg(img, namer.c.crop_px)),
+                                                       ("image", _jpeg(img, namer.c.crop_px, namer.c.jpeg_quality)),
                                                        ("text", "Which one is the object in the red box, or none?")],
                                         VERIFY_SCHEMA)
         d = _parse_json(reply.text) or {}

@@ -81,6 +81,43 @@ def _clip(img: np.ndarray, box, margin: float = 0.0) -> Optional[tuple[int, int,
     return (x1, y1, x2, y2) if x2 - x1 >= 4 and y2 - y1 >= 4 else None
 
 
+def close_up(img: np.ndarray, box, margin: float = 0.15) -> Optional[np.ndarray]:
+    """A copy of img at box grown by margin per side, clipped to the image; None when under 4 px."""
+    c = _clip(img, box, margin)
+    return None if c is None else img[c[1]:c[3], c[0]:c[2]].copy()
+
+
+def shrink(img: Optional[np.ndarray], long_side: int) -> Optional[np.ndarray]:
+    """img with its long side at most long_side (INTER_AREA), never enlarged; a queued close-up is kept at the
+    size it is sent at, not at native resolution (a 3x context patch of a laptop at 1440p is ~4 MB)."""
+    if img is None:
+        return None
+    s = long_side / max(img.shape[:2])
+    return img if s >= 1 else cv2.resize(img, (max(1, round(img.shape[1] * s)), max(1, round(img.shape[0] * s))),
+                                         interpolation=cv2.INTER_AREA)
+
+
+def marked_view(img: np.ndarray, box, min_side: int = 240, grow: float = 3.0) -> Optional[np.ndarray]:
+    """The object at box (img px) in a red box inside a square patch around it, grow x its long side and at
+    least min_side px, clipped to the image, at img's resolution: the context Grok needs to tell a small or
+    far object from its surroundings (set-of-marks: a far, dark object cut out alone was "no usable name",
+    trial runs Sat 26 Sep). None when the box or the patch is too small."""
+    h, w = img.shape[:2]
+    x1, y1, x2, y2 = (float(v) for v in box)
+    if x2 - x1 < 2 or y2 - y1 < 2:
+        return None
+    cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+    side = max(min_side, grow * (x2 - x1), grow * (y2 - y1))
+    a1, b1 = max(0, int(cx - side / 2)), max(0, int(cy - side / 2))
+    a2, b2 = min(w, int(cx + side / 2)), min(h, int(cy + side / 2))
+    if a2 - a1 < 8 or b2 - b1 < 8:
+        return None
+    out = img[b1:b2, a1:a2].copy()
+    t = max(2, round(max(out.shape[:2]) / 120))
+    cv2.rectangle(out, (int(x1) - a1 - t, int(y1) - b1 - t), (int(x2) - a1 + t, int(y2) - b1 + t), (0, 0, 255), t)
+    return out
+
+
 def _look(img: np.ndarray, box: BoxPx) -> Optional[np.ndarray]:
     """Mean Lab colour of the box (8 x 8 px), or None for a box too small to tell."""
     c = _clip(img, box)

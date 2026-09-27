@@ -359,8 +359,9 @@ def test_a_thing_that_barely_sat_on_the_table_does_not_make_the_room_hot(scene, 
 
 def test_a_departed_thing_named_like_clothing_is_never_handed_off(scene, world):
     """Rig: the couch-sitter's feet were born on the table edge as 'sock', 'gone', and handed off to
-    their own arrival on the couch. Body and clothing names never open a handoff."""
-    sock = {"name": "white sock", "also": ["sock"], "confidence": 0.8}
+    their own arrival on the couch. Body and clothing names never open a handoff. (A 'sock' is no longer
+    kept as a name at all, core.auto_name.NOT_OBJECTS; a shoe can be a real object, so it is named.)"""
+    sock = {"name": "white sneaker", "also": ["sneaker"], "confidence": 0.8}
     named_thing_leaves(scene, world, namer_for(world, sock), guess=sock)
     assert world.room_handoff_hints(scene.t) == [] and world.room_hot(scene.t) is False
     trk = room_thing(scene, world, 'r:1', guess=dict(sock))

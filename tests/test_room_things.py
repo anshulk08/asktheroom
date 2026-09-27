@@ -55,10 +55,11 @@ class Namer:
     """A fake name_fn: records the crops it was sent."""
 
     def __init__(self, result=GUESS, fail=False):
-        self.result, self.fail, self.imgs = result, fail, []
+        self.result, self.fail, self.imgs, self.ctxs = result, fail, [], []
 
-    def __call__(self, img):
+    def __call__(self, img, ctx=None):
         self.imgs.append(img)
+        self.ctxs.append(ctx)
         if self.fail:
             raise RuntimeError("grok timed out")
         return dict(self.result) if self.result is not None else None
@@ -207,6 +208,19 @@ def test_a_confirmed_thing_is_named_once_in_the_background():
         namer.stop()
 
 
+def test_open_naming_also_sends_the_marked_spot():
+    fn = Namer()
+    namer = RoomNamer(fn, start=False, clock=lambda: 0.0)
+    big = rect_zone("wall", 0, 0, 1000, 500)
+    rm, _, _ = make(zones=(big,), props=[Proposal((100, 100, 150, 150), 0.5)], namer=namer, max_crop_px=500)
+    rm.step(frame(1))
+    rm.step(frame(2))
+    assert namer.step(0.0)
+    ctx = fn.ctxs[0]
+    red = (ctx[..., 2] > 200) & (ctx[..., 1] < 50) & (ctx[..., 0] < 50)
+    assert ctx.shape[0] >= 240 and red.any()
+
+
 def test_a_named_crop_is_a_copy_of_the_native_zone_crop():
     fn = Namer()
     namer = RoomNamer(fn, start=False, clock=lambda: 0.0)
@@ -233,7 +247,7 @@ def test_props_are_never_sent_to_grok():
 def test_perception_never_waits_on_grok():
     gate = threading.Event()
 
-    def slow(img):
+    def slow(img, ctx=None):
         gate.wait(5)
         return dict(GUESS)
 
@@ -565,7 +579,7 @@ def test_verify_fn_maps_a_match_to_the_hint_and_none_to_its_own_name():
         pass
 
     n = N()
-    n.c = type("C", (), {"crop_px": 384, "min_confidence": 0.5})()
+    n.c = type("C", (), {"crop_px": 384, "jpeg_quality": 90, "min_confidence": 0.5})()
     img = np.full((60, 60, 3), 128, np.uint8)
     n.provider = Provider({"match": "remote control", "name": "tv remote", "confidence": 0.8})
     assert make_verify_fn(n)(img, [REMOTE]) == REMOTE
@@ -596,7 +610,7 @@ def test_verify_needs_grok_s_own_description_to_fit():
         pass
 
     n = N()
-    n.c = type("C", (), {"crop_px": 384, "min_confidence": 0.5})()
+    n.c = type("C", (), {"crop_px": 384, "jpeg_quality": 90, "min_confidence": 0.5})()
     img = np.full((60, 60, 3), 128, np.uint8)
     n.provider = Provider({"match": "remote control", "name": "computer keyboard", "confidence": 0.9})
     assert make_verify_fn(n)(img, [REMOTE])["name"] == "computer keyboard"      # a yes that describes a keyboard
