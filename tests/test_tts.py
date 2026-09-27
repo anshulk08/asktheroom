@@ -409,3 +409,42 @@ def test_the_playback_deadline_leaves_room_for_a_bluetooth_speaker(chars):
     after the last write: with a second for both, the deadline still never cuts off a real answer."""
     speech_s = chars / 15.0                                     # slower than any measured answer
     assert tts.playback_budget_s("x" * chars) >= speech_s + 0.3 + 1.0
+
+
+# -- long answers: Piper's memory grows with the square of a sentence's length (a 21,000-character
+#    'what changed' list took the rig out of memory)
+
+LONG_LIST = "The " + ", ".join(["thing I haven't been told about"] * 600) + " also changed."
+
+
+def test_piper_gets_a_long_sentence_in_bounded_pieces(piper):
+    pcm = list(tts.piper_chunks(piper, LONG_LIST))
+    assert len(piper.texts) > 1 and max(map(len, piper.texts)) <= tts.PIPER_MAX_CHARS
+    assert len(pcm) == 2 * len(piper.texts)
+    assert " ".join(piper.texts).replace(" ,", ",") == LONG_LIST
+
+
+def test_short_sentences_reach_piper_as_they_are(piper):
+    list(tts.piper_chunks(piper, "Where are my keys? They are on the couch."))
+    assert piper.texts == ["Where are my keys?", "They are on the couch."]
+
+
+def test_a_piece_without_commas_is_cut_at_a_space_or_at_the_limit():
+    words = tts.text_pieces("word " * 200, limit=50)
+    assert all(len(p) <= 50 for p in words) and all(not p.startswith(" ") for p in words)
+    assert all(len(p) <= 50 for p in tts.text_pieces("x" * 180, limit=50))
+
+
+def test_speakable_keeps_whole_sentences_that_fit():
+    assert tts.speakable("Short one. " * 80) == ("Short one. " * 54).strip()
+    assert tts.speakable("Fine as is.") == "Fine as is."
+    cut = tts.speakable(LONG_LIST)
+    assert len(cut) <= tts.MAX_SPOKEN_CHARS and cut.endswith(".") and not cut.endswith(",.")
+
+
+def test_speak_caps_a_long_answer(audio, piper, caplog, monkeypatch):
+    monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
+    t = TTS(CFG, online(False))
+    t.speak(LONG_LIST)
+    assert sum(map(len, piper.texts)) <= tts.MAX_SPOKEN_CHARS
+    assert "speaking only the first" in caplog.text

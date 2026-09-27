@@ -32,6 +32,7 @@ from __future__ import annotations
 import logging
 import os
 import queue
+import re
 import threading
 import time
 from pathlib import Path
@@ -51,6 +52,9 @@ ELEVEN_RATE = 22050
 FIRST_BYTE_S = 1.5          # slower than this -> Piper for this utterance
 CHUNK_BYTES = 2048          # ~46 ms at 22.05 kHz int16
 PIPER_DIR = ROOT / "models" / "piper"
+MAX_SPOKEN_CHARS = 600      # longer text is cut at a sentence end: ~40 s of speech is already too long
+PIPER_MAX_CHARS = 250       # Piper runs a sentence in one pass and its memory grows with the square of its
+                            # length (6,600 chars: 8 GB); longer sentences go in pieces, cut at commas/spaces
 
 
 # ---------------------------------------------------------------- audio seam
@@ -194,9 +198,42 @@ def load_piper(name: str, model_dir: Path = PIPER_DIR):
 
 
 def piper_chunks(voice, text: str) -> Iterator[tuple[bytes, int]]:
-    """(int16 bytes, sample rate) per sentence, as soon as each is synthesized."""
-    for chunk in voice.synthesize(text):
-        yield chunk.audio_int16_bytes, chunk.sample_rate
+    """(int16 bytes, sample rate) per sentence, as soon as each is synthesized; a sentence longer than
+    PIPER_MAX_CHARS goes to Piper in pieces (one 21,000-character sentence took the rig out of memory)."""
+    for piece in text_pieces(text):
+        for chunk in voice.synthesize(piece):
+            yield chunk.audio_int16_bytes, chunk.sample_rate
+
+
+def text_pieces(text: str, limit: int = PIPER_MAX_CHARS) -> list[str]:
+    """Sentences of at most limit characters: a longer one is cut after its last comma or semicolon that
+    fits, else at its last space, else at limit."""
+    out: list[str] = []
+    for sent in re.split(r"(?<=[.!?])\s+", text.strip()):
+        while len(sent) > limit:
+            cut = max(sent.rfind(", ", 0, limit), sent.rfind("; ", 0, limit)) + 1
+            if cut <= 0:
+                cut = sent.rfind(" ", 0, limit)
+            if cut <= 0:
+                cut = limit
+            out.append(sent[:cut].strip())
+            sent = sent[cut:].strip()
+        if sent:
+            out.append(sent)
+    return out
+
+
+def speakable(text: str, limit: int = MAX_SPOKEN_CHARS) -> str:
+    """text, or its whole sentences that fit in limit characters (else cut at a word, with a full stop)."""
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    head = text[:limit + 1]
+    end = max(head.rfind(". "), head.rfind("! "), head.rfind("? "))
+    if end > 0:
+        return head[:end + 1]
+    cut = head.rfind(" ", 0, limit)
+    return (head[:cut] if cut > 0 else head[:limit]).rstrip(",;:") + "."
 
 
 # ---------------------------------------------------------------- espeak (last resort)
@@ -312,6 +349,9 @@ class TTS:
         text = (text or "").strip()
         if not text:
             return
+        if len(text) > MAX_SPOKEN_CHARS:
+            log.warning("answer is %d characters; speaking only the first %d", len(text), MAX_SPOKEN_CHARS)
+            text = speakable(text)
         with self._lock:
             u = self._utt = _Utterance()
             self.last_engine = None
