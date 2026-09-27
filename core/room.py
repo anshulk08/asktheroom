@@ -92,7 +92,7 @@ class RoomTracker:
                 tr.last_seen, tr.last_wall = t, wall
                 tr.hits += 1
                 tr.misses = 0
-                tr.confirmed = tr.confirmed or tr.hits >= self.cfg.confirm_visits
+                tr.confirmed = tr.confirmed or tr.hits >= self._need(tr)
                 if tr.confirmed:
                     v.confirmed.append(tr)
                 keep.append(tr)
@@ -120,12 +120,20 @@ class RoomTracker:
             tr = RoomTrack(tid=f"r:{self._n}", zone=zone, cls=o.cls, box_px=tuple(int(c) for c in o.box_px),
                            first_seen=t, first_wall=wall, last_seen=t, last_wall=wall, hits=1)
             tr.changed = _changed(tr.box_px, changes)
-            tr.confirmed = tr.hits >= self.cfg.confirm_visits
+            tr.confirmed = tr.hits >= self._need(tr)
             if tr.confirmed:
                 v.confirmed.append(tr)
             keep.append(tr)
         self._tracks[zone] = keep
         return v
+
+    def _need(self, tr: RoomTrack) -> int:
+        """Matched visits a track needs to confirm. An arrival (its spot changed when it was first seen, or
+        on a later visit once the placing hand was gone) confirms on confirm_visits_arrival (1): the second
+        visit of a far zone cost a second or more of the handoff (spec 0010 P0-3), and the change evidence
+        is what tells the carried object from detector flicker on static clutter, which keeps
+        confirm_visits."""
+        return self.cfg.confirm_visits_arrival if tr.changed else self.cfg.confirm_visits
 
     @staticmethod
     def _match(tracks: list[RoomTrack], obs: list[RoomObservation]) -> dict[str, RoomObservation]:
