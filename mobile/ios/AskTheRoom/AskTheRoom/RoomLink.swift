@@ -16,9 +16,14 @@ enum RigGATT {
 /// The Bluetooth link to the rig (spec section 5, "Connect"): scan for the service,
 /// connect to the strongest rig, remember it, and reconnect forever: at once after a drop,
 /// then with backoff up to 5 s.
+///
+/// It keeps going in the background (`bluetooth-central` background mode), and with state
+/// restoration iOS relaunches the app when the rig comes back, so the map is current whenever
+/// the rig is on. The pending connect to the remembered rig never times out.
 @MainActor
 final class RoomLink: NSObject, RoomTransport {
     static let rememberedKey = "rigPeripheralID"
+    static let restoreID = "AskTheRoomCentral"
     /// How long to keep listening after the first rig is heard, to pick the strongest.
     static let chooseWindow: Duration = .milliseconds(800)
     static let maxBackoff = 5.0
@@ -41,12 +46,15 @@ final class RoomLink: NSObject, RoomTransport {
     private var stopped = false
     /// A question asked while the link was down; sent as soon as it's back.
     private var waiting: Question?
+    /// The rig iOS was still connected or connecting to when it relaunched the app.
+    private var restored: CBPeripheral?
 
     init(store: RoomStore) {
         self.store = store
         super.init()
         central = CBCentralManager(delegate: self, queue: nil,
-                                   options: [CBCentralManagerOptionShowPowerAlertKey: false])
+                                   options: [CBCentralManagerOptionShowPowerAlertKey: false,
+                                             CBCentralManagerOptionRestoreIdentifierKey: Self.restoreID])
     }
 
     // MARK: RoomTransport
@@ -58,6 +66,24 @@ final class RoomLink: NSObject, RoomTransport {
             return
         }
         waiting = nil
+        peripheral.writeValue(data, for: characteristic, type: .withResponse)
+    }
+
+    /// Written to the question characteristic (PROTOCOL.md section 5a); no answer comes back.
+    /// Sent on every connect too, so a rig that restarted gets it again.
+    func send(voice: VoiceSettings) {
+        guard let data = voice.encoded(), let peripheral, peripheral.state == .connected,
+              let characteristic = questionCharacteristic else { return }
+        peripheral.writeValue(data, for: characteristic, type: .withResponse)
+    }
+
+    /// Where the person sits, written like the voice settings: raw JSON on the question
+    /// characteristic, no answer. The rig pushes a state with the new `view` instead.
+    /// Sent on every connect too, so a rig that restarted turns the map again; a reset to the
+    /// rig's default goes out on one connect only.
+    func send(orient: OrientSettings) {
+        guard let data = orient.encoded(), let peripheral, peripheral.state == .connected,
+              let characteristic = questionCharacteristic else { return }
         peripheral.writeValue(data, for: characteristic, type: .withResponse)
     }
 
@@ -92,6 +118,25 @@ final class RoomLink: NSObject, RoomTransport {
         // Scan as well, in case the rig's identity changed or none is remembered.
         heard = [:]
         central.scanForPeripherals(withServices: [RigGATT.service])
+    }
+
+    /// Picks up where iOS left off after relaunching the app: a live link is set up again,
+    /// a pending connect is left to complete, and anything else starts over.
+    private func adopt(_ p: CBPeripheral) {
+        guard !stopped else { return }
+        switch p.state {
+        case .connected:
+            peripheral = p
+            p.delegate = self
+            store?.linkChanged(.connecting)
+            connected(p)
+        case .connecting:
+            peripheral = p
+            p.delegate = self
+            store?.linkChanged(.connecting)
+        default:
+            findRig()
+        }
     }
 
     private func discovered(_ p: CBPeripheral, rssi: Int) {
@@ -186,6 +231,8 @@ final class RoomLink: NSObject, RoomTransport {
             if let c = found[uuid] { p.setNotifyValue(true, for: c) }
         }
         store?.linkChanged(.connected)
+        send(voice: Speaker.voiceSettings)
+        if let orient = Seat.orientForConnect() { send(orient: orient) }
         if let waiting { send(waiting) }
         watch(p)
     }
@@ -250,7 +297,13 @@ extension RoomLink: CBCentralManagerDelegate {
         let state = central.state
         MainActor.assumeIsolated {
             switch state {
-            case .poweredOn: findRig()
+            case .poweredOn:
+                if let p = restored {
+                    restored = nil
+                    adopt(p)
+                } else {
+                    findRig()
+                }
             case .poweredOff: store?.linkChanged(.bluetoothOff)
             case .unauthorized: store?.linkChanged(.unauthorized)
             case .unsupported: store?.linkChanged(.unsupported)
@@ -260,6 +313,15 @@ extension RoomLink: CBCentralManagerDelegate {
                 peripheral = nil
                 questionCharacteristic = nil
             }
+        }
+    }
+
+    /// Called before `centralManagerDidUpdateState` when iOS relaunches the app for the rig.
+    nonisolated func centralManager(_ central: CBCentralManager, willRestoreState dict: [String: Any]) {
+        let rig = (dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral])?.first
+        MainActor.assumeIsolated {
+            log.info("restored by iOS: \(rig == nil ? "no rig" : "rig", privacy: .public)")
+            restored = rig
         }
     }
 

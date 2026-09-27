@@ -10,6 +10,8 @@ struct HelperSettings: View {
     @AppStorage(Speaker.grokVoiceKey) private var grokVoice = Grok.defaultVoice
     @AppStorage(Speaker.speedKey) private var speed = 1.0
     @AppStorage(Speaker.voiceIDKey) private var voiceID = ""
+    /// The camera side the person sits at, or empty for the rig's default.
+    @AppStorage(Seat.savedKey) private var seat = ""
     @State private var grokKeyDraft = ""
     @State private var hasGrokKey = Speaker.grokKey != nil
     @State private var keyDraft = ""
@@ -35,8 +37,10 @@ struct HelperSettings: View {
                 } header: {
                     Text("Answers")
                 } footer: {
-                    Text("The rig already says its answers out loud. Read aloud is for using the phone away from the table.")
+                    Text("The rig already says its answers out loud. Read aloud is for using the phone away from the table, and stays quiet while the rig's speaker is on.")
                 }
+
+                seatSection
 
                 voiceSection
 
@@ -72,6 +76,10 @@ struct HelperSettings: View {
             }
             .onDisappear(perform: saveKeys)
             .task(id: hasGrokKey) { voices = await Grok.fetchVoices(key: Speaker.grokKey) }
+            // The rig's speaker uses the same voice (PROTOCOL.md section 5a).
+            .onChange(of: engine) { store.sendVoiceSettings() }
+            .onChange(of: grokVoice) { store.sendVoiceSettings() }
+            .onChange(of: speed) { store.sendVoiceSettings() }
             .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.routeChangeNotification)
                 .receive(on: RunLoop.main)) { _ in route = VoiceRoute.current }
             .navigationTitle("Helper settings")
@@ -156,6 +164,38 @@ struct HelperSettings: View {
         }
     }
 
+    @ViewBuilder
+    private var seatSection: some View {
+        let view = store.snapshot?.view
+        Section {
+            SeatDiagram(view: view) { edge in
+                guard let view else { return }
+                Seat.choose(view.cameraSide(at: edge))
+                store.sendSeat()
+            }
+            Button {
+                Seat.choose(nil)
+                store.sendSeat()
+            } label: {
+                HStack {
+                    Text("Use the rig's default")
+                    Spacer()
+                    if seat.isEmpty {
+                        Image(systemName: "checkmark").foregroundStyle(Theme.accent)
+                    }
+                }
+            }
+            .foregroundStyle(.primary)
+            .accessibilityAddTraits(seat.isEmpty ? .isSelected : [])
+        } header: {
+            Text("I sit here")
+        } footer: {
+            Text(view == nil
+                 ? "Left, right and the map follow where you sit. Connect to the rig to choose."
+                 : "Left, right and the map follow where you sit. Tap the side of the table you sit at.")
+        }
+    }
+
     private var voiceChoices: [Grok.Voice] {
         voices.contains { $0.id.caseInsensitiveCompare(grokVoice) == .orderedSame }
             ? voices : voices + [Grok.Voice(id: grokVoice, name: grokVoice.capitalized)]
@@ -191,6 +231,67 @@ struct HelperSettings: View {
         case .unauthorized: return "Bluetooth not allowed"
         case .unsupported: return "No Bluetooth on this device"
         }
+    }
+}
+
+/// The table as the map shows it, with the person always at the bottom. Each side is a button
+/// that means "I sit here"; the rig then turns the map so that side comes to the bottom.
+private struct SeatDiagram: View {
+    let view: ViewInfo?
+    let choose: (Edge) -> Void
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        VStack(spacing: 6) {
+            side(.top)
+            HStack(spacing: 6) {
+                side(.left)
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(Theme.surface(scheme))
+                    .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.primary.opacity(0.2)))
+                    .frame(width: 120, height: 80)
+                    .accessibilityHidden(true)
+                side(.right)
+            }
+            side(.bottom)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 6)
+        .disabled(view == nil)
+    }
+
+    private func side(_ edge: Edge) -> some View {
+        let name = view?.name(at: edge).map(\.localizedCapitalized)
+        let isYou = edge == .bottom
+        return Button { choose(edge) } label: {
+            HStack(spacing: 4) {
+                if isYou { Image(systemName: "person.fill") }
+                Text(isYou ? ["You", name].compactMap { $0 }.joined(separator: " · ") : name ?? Self.word(for: edge))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+            }
+            .font(.footnote.weight(.semibold))
+            .frame(minWidth: edge == .left || edge == .right ? 56 : 88, minHeight: 28)
+        }
+        .buttonStyle(.bordered)
+        .tint(isYou ? Theme.accent : .secondary)
+        .accessibilityLabel(Self.accessibilityLabel(for: edge, name: name))
+        .accessibilityAddTraits(isYou ? .isSelected : [])
+    }
+
+    static func word(for edge: Edge) -> String {
+        switch edge {
+        case .top: return "Far"
+        case .left: return "Left"
+        case .right: return "Right"
+        case .bottom: return "Near"
+        }
+    }
+
+    /// "Sit at the far side, couch"; the bottom is where the person already sits.
+    static func accessibilityLabel(for edge: Edge, name: String?) -> String {
+        let place = "the \(word(for: edge).lowercased()) side" + (name.map { ", \($0.lowercased())" } ?? "")
+        return edge == .bottom ? "You sit at \(place)" : "Sit at \(place)"
     }
 }
 
