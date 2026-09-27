@@ -54,6 +54,10 @@ class RoomConfig:
                                                    # itself stays open for handoff_s at the normal cadence
     handoff_min_dwell_s: float = 4.0               # a thing must have sat on the table this long before leaving to count
                                                    # as carried off (a foot at the table edge appears and vanishes in seconds)
+    ignore_names: tuple = ("sock", "sneaker", "shoe", "foot", "feet", "hand", "arm", "sleeve", "leg", "knee",
+                           "shirt", "jeans", "pants", "shorts", "fabric", "cloth", "person")
+                                                   # a departed thing Grok named like this is a body part or clothing at
+                                                   # the table edge, never carried off: no handoff, no hot mode
     confirm_visits_arrival: int = 1                # visits to confirm a track whose spot changed (an arrival)
 
     @classmethod

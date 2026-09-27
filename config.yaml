@@ -550,6 +550,9 @@ room_memory:
   hot_max_s: 30.0             # the fast cadence lasts this long after a departure (the handoff stays open for
                               # handoff_s at the normal cadence); a foot at the table edge must not halve the fps for 2 min
   handoff_min_dwell_s: 4.0    # a thing counts as carried off only if it sat on the table this long first (feet, sleeves)
+  ignore_names: [sock, sneaker, shoe, foot, feet, hand, arm, sleeve, leg, knee, shirt, jeans, pants, shorts, fabric, cloth, person]
+                              # a departed thing Grok named like one of these is a body part or clothing at the table
+                              # edge (the couch-sitter's feet were handed off as "sock" on the rig): never a handoff
 
 # Covers no detector knows (core/world.py rule 4, core/surround.py). A blanket, jacket or napkin laid over
 # objects by hand: the hands touch what it covers, so the hand rule alone read each touched object as

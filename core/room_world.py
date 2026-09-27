@@ -167,8 +167,19 @@ class RoomRules:
             placed = getattr(self, '_placed_t', {}).get(name)
             if min_dwell_s > 0 and placed is not None and dep_t - placed < min_dwell_s:
                 continue
+            if self._junk_name(self.thing_guess(name)):
+                continue
             out.append((name, dep_t))
         return out
+
+    def _junk_name(self, guess: Optional[dict]) -> bool:
+        """Grok named it like a body part or clothing (room_cfg.ignore_names): a foot or a sleeve at the
+        table edge, born and "gone" every few seconds, never carried anywhere. On the rig these were handed
+        off as "sock" and "white fabric" to the couch-sitter's own feet (Sat 26 Sep)."""
+        if not guess:
+            return False
+        names = self.room_cfg.ignore_names or ()
+        return any(match_score(n, guess) >= 1.5 for n in names)
 
     def room_handoff_hints(self, t: float) -> list[dict]:
         """Grok guesses of things that left the table (an unconsumed table departure within handoff_s of
