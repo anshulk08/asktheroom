@@ -36,10 +36,13 @@ scripts/room_app.sh stop          # or, for a hand-launched app: docker stop <it
 ```
 
 The recorder needs the camera. `eval.guided` refuses to start while any container runs `main.py` and never
-stops the app itself. The rig's `~/askroom_room` needs this branch's `eval/raw_record.py`, `eval/clip.py`
-and `eval/guided.py` (it records at `room_memory.capture_size`, 2560x1440, and writes the view and zones
-into `meta.json`); copy just those three files if the rig checkout is older. Camera settings are left as
-the app set them (room clips never run `camera_setup.sh`).
+stops the app itself. Only `eval/raw_record.py` runs on the rig: its copy in `~/askroom_room` must be this
+branch's (it records at `room_memory.capture_size`, 2560x1440, and writes the view and zones into
+`meta.json`; the rig's core already has everything it imports). Copy that one file if the rig checkout
+is older: `scp eval/raw_record.py guru@10.90.84.178:askroom_room/eval/` (keep a `.bak` of the old one).
+Camera settings are left as the app set them (room clips never run `camera_setup.sh`). On Sun 27 Sep
+~00:40 the app ran hand-launched (container `serene_visvesvaraya`, image `askroom:audio`, `main.py --camera
+... --port 8080`), not under `room_app.sh`: note its command before stopping it, to start it the same way.
 
 ## Recording (Mac, in this checkout)
 
@@ -99,8 +102,8 @@ real times), hundreds means the Jetson could not encode 1440p fast enough; say s
 ## After (rig owner, WS7)
 
 ```bash
-cd ~/askroom_room && scripts/room_app.sh restart     # the args of the last start
-scripts/room_app.sh status
+cd ~/askroom_room && scripts/room_app.sh restart     # the args of the last start (or relaunch the
+scripts/room_app.sh status                           # hand-launched app with the command noted before)
 ```
 
 ## Scoring (Mac, any time, no rig)
