@@ -599,6 +599,7 @@ class Room:
 
     def _voice_turn(self) -> None:
         """One pass of the voice loop: a clicker press, or one stretch of listening."""
+        self._keepalive()
         if self.listen_mode == "click":
             if self.clicker.wait_press(timeout=0.5):
                 self._asked(time.monotonic())
@@ -639,6 +640,19 @@ class Room:
             self._ignored = 0
         else:
             self._ignored += 1
+
+    def _keepalive(self) -> None:
+        """Between turns (the mic isn't recording, no question is being listened for): the speaker keep-alive
+        (TTS.keepalive), then the chime's wait, so the next recording can't hear it."""
+        keepalive = getattr(self.tts, "keepalive", None)
+        if keepalive is None:
+            return
+        try:
+            if keepalive():
+                from voice.cues import TAIL_S
+                self.stop_ev.wait(TAIL_S)
+        except Exception:
+            log.exception("speaker keep-alive failed")
 
     def _certain(self, text: str) -> bool:
         """Overheard speech the model can't reject (Understander.certain); True without one."""

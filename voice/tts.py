@@ -409,6 +409,11 @@ class TTS:
         self.last_engine: Optional[str] = None  # 'grok' | 'elevenlabs' | 'piper' | 'espeak' | None
         self.last_first_audio_s: Optional[float] = None
         self.last_timed_out = False             # the last utterance hit its playback deadline
+        # keep-alive (voice/cues.py keepalive_pcm): a Bluetooth speaker switches off after ~20 min of silence
+        self.keepalive_s = float(t.get("keepalive_s", 480))            # 0: off
+        self.keepalive_dbfs = float(t.get("keepalive_dbfs", -50))
+        self.keepalive_ms = float(t.get("keepalive_ms", 300))
+        self.last_audio_t = time.monotonic()    # when something last played (an answer, a chime, a keep-alive)
 
     # -- routing
 
@@ -490,6 +495,7 @@ class TTS:
             log.warning("answer is %d characters; speaking only the first %d", len(text), MAX_SPOKEN_CHARS)
             text = speakable(text)
         with self._lock:
+            self.last_audio_t = time.monotonic()
             u = self._utt = _Utterance()
             self.last_engine = None
             self.last_first_audio_s = None
@@ -564,13 +570,15 @@ class TTS:
         """True while an answer plays (the always-on mic waits, or it would answer itself)."""
         return self._lock.locked()
 
-    def play_cue(self, pcm: bytes, rate: int, deadline_s: float = 3.0) -> bool:
+    def play_cue(self, pcm: bytes, rate: int, deadline_s: float = 3.0, wait_s: float = 0.5) -> bool:
         """A short cue (voice/cues.py chimes) on the speech output, blocking until it has played. Never
-        overlaps an answer (skipped if one is still playing after 0.5 s) and never hangs the caller past
+        overlaps an answer (skipped if one is still playing after wait_s) and never hangs the caller past
         deadline_s on a stalled speaker. False when it didn't play."""
-        if not self._lock.acquire(timeout=0.5):
+        got = self._lock.acquire(timeout=wait_s) if wait_s > 0 else self._lock.acquire(blocking=False)
+        if not got:
             return False
         try:
+            self.last_audio_t = time.monotonic()
             def play() -> None:
                 out = open_output(rate, self._device())
                 try:
@@ -584,6 +592,20 @@ class TTS:
             return False
         finally:
             self._lock.release()
+
+    def keepalive(self) -> bool:
+        """Play the keep-alive sound (voice/cues.py keepalive_pcm) if nothing has played for keepalive_s, so a
+        Bluetooth speaker doesn't switch itself off. Only if the speaker is free this instant (never waits
+        for, or overlaps, an answer or a chime), bounded by a 1 s deadline. The voice loop calls it between
+        turns, never while the mic records (main.Room._keepalive). True when it played."""
+        if self.keepalive_s <= 0 or time.monotonic() - self.last_audio_t < self.keepalive_s:
+            return False
+        from voice.cues import RATE, keepalive_pcm
+        pcm = keepalive_pcm(self.keepalive_dbfs, self.keepalive_ms / 1000)
+        played = self.play_cue(pcm, RATE, deadline_s=1.0 + self.keepalive_ms / 1000, wait_s=0)
+        if played:
+            log.debug("speaker keep-alive played")
+        return played
 
     def stop(self) -> None:
         """Cut off current speech (safe from any thread; returns within about ABORT_S)."""

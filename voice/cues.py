@@ -10,6 +10,11 @@ come out of the same speaker as the answers. A Bluetooth speaker that has been i
 ~0.2 s of sound it gets, so each chime starts with LEAD_S of silence; A2DP also plays ~0.2 s late, so
 the mic waits TAIL_S after a chime before it records, or it would hear the chime.
 
+A Bluetooth speaker switches itself off after ~20 min without sound (the Bose SoundLink Micro did twice on
+the rig, Sat 26 Sep; the rig then spoke into the analog sink). keepalive_pcm is a near-inaudible puff of
+low-passed noise (tts.keepalive_dbfs, about -50 dBFS RMS, 0.3 s) that TTS.keepalive plays when nothing has
+played for tts.keepalive_s; digital silence may not count as sound to the speaker.
+
 The indicator is software with a hardware slot. listen.indicator.backend:
   none  (default) log only: the rig has no LEDs yet
   gpio  an LED on a GPIO line (libgpiod's python bindings, `gpiod`): gpio_chip (e.g. gpiochip0) and
@@ -55,6 +60,26 @@ def chime_pcm(kind: str = "listen", rate: int = RATE, lead_s: float = LEAD_S) ->
         parts.append(tone.astype(np.float32))
     pcm = np.concatenate(parts) * LEVEL[kind]
     return (np.clip(pcm, -1, 1) * 32767).astype(np.int16).tobytes()
+
+
+def keepalive_pcm(dbfs: float = -50.0, dur_s: float = 0.3, rate: int = RATE, seed: int = 0) -> bytes:
+    """int16 mono PCM: dur_s of low-passed noise at dbfs RMS with faded edges (no click). Noise, not a tone:
+    a small speaker plays a sub-audible tone as nothing, and may treat it as silence."""
+    n = max(1, int(dur_s * rate))
+    x = np.random.default_rng(seed).standard_normal(n)
+    a = np.exp(-2 * np.pi * 400 / rate)                  # one-pole low-pass at ~400 Hz: a soft rumble, not hiss
+    y = np.empty(n)
+    acc = 0.0
+    for i in range(n):
+        acc = a * acc + (1 - a) * x[i]
+        y[i] = acc
+    f = min(int(0.05 * rate), n // 2)
+    if f:
+        ramp = 0.5 - 0.5 * np.cos(np.linspace(0, np.pi, f))
+        y[:f] *= ramp
+        y[-f:] *= ramp[::-1]
+    y *= 10 ** (dbfs / 20) / max(float(np.sqrt(np.mean(y ** 2))), 1e-12)
+    return (np.clip(y, -1, 1) * 32767).astype(np.int16).tobytes()
 
 
 class ListenIndicator:
