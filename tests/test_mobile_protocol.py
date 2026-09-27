@@ -1299,3 +1299,77 @@ def test_an_old_app_without_hello_gets_plain_paced_capped_states():
     assert len(P.dumps({k: v for k, v in last.items()})) <= P.STATE_MAX_BYTES + 64
     assert {"keys", "pill_bottle", "wallet"} <= {e["n"] for e in last["e"]} and last["tx"] == 0
     assert phone.chunk_counts["state"][-1] <= P.STATE_MAX_BYTES // 179 + 2
+
+
+# ---------------------------------------------------------------- live sightings (27 Sep: "I see glasses on the couch")
+
+RIG_ZONES = {"couch": {"say": "the couch"}, "side_table": {"say": "the side table"},
+             "counter": {"say": "the kitchen counter"}, "doorway": {"say": "the floor by the doorway"}}
+
+
+def look_row(seq, text, obj="glasses", kind="look", t=1790500620.4):
+    return {"seq": seq, "t": t, "src": "voice", "q": "where are my glasses", "text": text, "obj": obj,
+            "point_at": None, "action": None, "evidence": [{"kind": kind, "t": t}]}
+
+
+@pytest.mark.parametrize("text,zone", [
+    ("I see glasses on the couch.", "couch"),
+    ("Your glasses look like they're on the kitchen counter, next to the kettle.", "counter"),
+    ("There are glasses by the doorway, on the floor.", "doorway"),
+    ("On the couch there's a mug, and your glasses are on the side table.", "side_table"),   # after the name
+])
+def test_a_room_look_that_names_a_zone_is_a_sighting(text, zone):
+    s = P.sighting_of(look_row(1, text), P.zone_phrases(RIG_ZONES))
+    assert s == ("glasses", zone, 1790500620.4, "look")
+
+
+@pytest.mark.parametrize("row", [
+    look_row(1, "I don't see any glasses on the couch."),
+    look_row(1, "Your glasses are not on the couch."),
+    look_row(1, "I see glasses somewhere on the left."),                      # no zone named
+    look_row(1, "Your glasses are on the couch.", kind="event"),              # the tracker's answer, not a look
+    look_row(1, "I see glasses on the couch.", obj=None),
+])
+def test_what_is_not_a_sighting(row):
+    assert P.sighting_of(row, P.zone_phrases(RIG_ZONES)) is None
+
+
+def test_layout_zones_work_like_the_zones_file():
+    lay = [{"id": "couch", "say": "the couch"}, {"id": "counter", "say": "the kitchen counter"}]
+    assert P.sighting_of(look_row(1, "Glasses on the counter.", kind="recall"), P.zone_phrases(lay)) == \
+        ("glasses", "counter", 1790500620.4, "recall")
+
+
+def test_sightings_msg_newest_first_fresh_and_capped():
+    sg = {f"x{i}": ("couch", 1000.0 + i, "look") for i in range(12)}
+    sg["old"] = ("counter", 1000.0 - 5000, "look")
+    out = P.sightings_msg(sg, now=1020.0)
+    assert len(out) == P.SIGHTING_MAX and out[0][0] == "x11" and all(r[0] != "old" for r in out)
+
+
+def test_the_bridge_sends_a_sighting_right_after_the_answer(tmp_path):
+    core, http, phone, mono = make()
+    zf = tmp_path / "room_zones.json"
+    zf.write_text(json.dumps({"zones": RIG_ZONES}))
+    core.zones_file = str(zf)
+    http.meta = {"answers": []}
+    core.poll_once()
+    core.set_notifying("state", True)
+    core.set_notifying("answer", True)
+    n = len(phone.msgs["state"])
+    http.meta = {"answers": [look_row(14, "I see glasses on the couch.", t=1790001000.5)]}
+    mono.t += 0.1                                     # well inside the 0.5 s state interval: sent anyway
+    core.poll_once()
+    assert len(phone.msgs["state"]) == n + 1
+    assert phone.msgs["state"][-1]["sg"] == [["glasses", "couch", 1790001000.5, "look"]]
+    assert phone.msgs["answer"][-1]["text"] == "I see glasses on the couch."
+    mono.t += 2000                                    # 30 min later the sighting is gone
+    core.poll_once()
+    assert "sg" not in phone.msgs["state"][-1]
+
+
+def test_an_old_state_without_sightings_is_unchanged():
+    core, http, phone, mono = make()
+    core.poll_once()
+    core.set_notifying("state", True)
+    assert "sg" not in phone.msgs["state"][-1]
