@@ -307,3 +307,42 @@ def test_a_hung_part_fails_its_check_and_later_ones_fast(fake_rig):
         assert ok is False and "hung while starting" in msg
     finally:
         gate.set()
+
+
+def test_a_timed_out_prompt_does_not_swallow_the_next_answer():
+    import os
+    r, w = os.pipe()
+    rig = dc.Rig(CFG, fake=True, manual=True)
+    rig.prompts = dc.PromptReader(os.fdopen(r))
+    rig._ask = rig.prompts.ask
+    try:
+        ok, msg = dc.run_check_with_deadline(rig, "a", lambda rg: (True, rg.ask("first? ")), timeout=0.3)
+        assert ok is False and "timed out" in msg
+        os.write(w, b"yes\n")
+        ok, msg = dc.run_check_with_deadline(rig, "b", lambda rg: (True, rg.ask("second? ")), timeout=3)
+        assert (ok, msg) == (True, "yes")
+    finally:
+        os.close(w)
+        rig.close()
+
+
+def test_laser_off_now_does_not_wait_for_a_held_lock(fake_rig):
+    import threading
+    import time
+    laser = fake_rig.part("laser")
+    laser.act.laser(True)
+    held, release = threading.Event(), threading.Event()
+
+    def hog():
+        with laser.act.lock:
+            held.set()
+            release.wait(10)
+    threading.Thread(target=hog, daemon=True).start()
+    held.wait(2)
+    t0 = time.monotonic()
+    try:
+        fake_rig.laser_off_now()
+        assert time.monotonic() - t0 < 1.0
+        assert laser.act.laser_log[-1][1] is False                  # the hardware was told off
+    finally:
+        release.set()

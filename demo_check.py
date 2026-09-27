@@ -43,6 +43,8 @@ import tempfile
 import threading
 import time
 import traceback
+import weakref
+from collections import deque
 from typing import Callable, Optional, Union
 from urllib.parse import urlparse
 
@@ -139,6 +141,56 @@ class LayoutBackend:
         return list(self.raw)
 
 
+# ---------------------------------------------------------------- prompts
+
+class PromptReader:
+    """input() for checks that can be abandoned: one thread reads stdin lines into a queue, and a check
+    that timed out while waiting for an answer is marked so it can never take a later answer (a plain
+    input() left blocked would swallow the next Enter)."""
+
+    def __init__(self, stream=None):
+        self.stream = stream if stream is not None else sys.stdin
+        self.lines: deque = deque()
+        self.cv = threading.Condition()
+        self.eof = False
+        self.dead: "weakref.WeakSet[threading.Thread]" = weakref.WeakSet()   # checks that timed out (idents get reused)
+        self._thread: Optional[threading.Thread] = None
+
+    def _run(self) -> None:
+        while True:
+            try:
+                line = self.stream.readline()
+            except (OSError, ValueError):
+                line = ""
+            with self.cv:
+                if not line:
+                    self.eof = True
+                    self.cv.notify_all()
+                    return
+                self.lines.append(line.rstrip("\r\n"))
+                self.cv.notify_all()
+
+    def ask(self, prompt: str) -> str:
+        print(prompt, end="", flush=True)
+        with self.cv:
+            if self._thread is None:
+                self._thread = threading.Thread(target=self._run, name="stdin", daemon=True)
+                self._thread.start()
+            while True:
+                if threading.current_thread() in self.dead:
+                    raise TimeoutError("prompt abandoned: its check timed out")
+                if self.lines:
+                    return self.lines.popleft()
+                if self.eof:
+                    raise EOFError
+                self.cv.wait(0.5)
+
+    def abandon(self, thread: threading.Thread) -> None:
+        with self.cv:
+            self.dead.add(thread)
+            self.cv.notify_all()
+
+
 # ---------------------------------------------------------------- the parts, built on first use
 
 class Rig:
@@ -146,10 +198,12 @@ class Rig:
     so every check that needs a missing camera reports the camera, not a knock-on error."""
 
     def __init__(self, cfg: dict, fake: bool = False, camera: Union[int, str] = 0, manual: bool = True,
-                 ask: Callable[[str], str] = input):
+                 ask: Optional[Callable[[str], str]] = None):
         self.fake = fake
         self.cfg = fake_cfg(cfg) if fake else cfg
-        self.camera, self.manual, self._ask = camera, manual, ask
+        self.prompts = PromptReader() if ask is None else None
+        self.camera, self.manual = camera, manual
+        self._ask = ask if ask is not None else self.prompts.ask
         self._parts: dict[str, object] = {}
         self.building: set[str] = set()             # parts being made right now (a hung check marks them)
         self._cleanup: list[Callable[[], None]] = []
@@ -244,6 +298,20 @@ class Rig:
         laser = self.part("laser")
         laser.room_map = RoomMap.load(path)
         return laser, self.part("frames")
+
+    def laser_off_now(self, timeout: float = 2.0) -> None:
+        """Best effort before exiting: write laser-off straight to the hardware, without the actuator's
+        lock (a timed-out check may still hold it) and with a deadline."""
+        for name in ("laser", "room"):
+            got = self._parts.get(name)
+            laser = got[0] if isinstance(got, tuple) else got
+            act = getattr(laser, "act", None)
+            hw = getattr(act, "_hw_laser", None)
+            if hw is None:
+                continue
+            t = threading.Thread(target=hw, args=(False, time.monotonic()), name="laser-off", daemon=True)
+            t.start()
+            t.join(timeout)
 
     def close(self) -> None:
         for fn in reversed(self._cleanup):
@@ -641,6 +709,8 @@ def run_check_with_deadline(rig: Rig, name: str, fn: Callable[[Rig], Result],
         print(f"--- check {name!r} stuck after {timeout:.0f} s:", file=sys.stderr)
         print("".join(traceback.format_list(stack)), file=sys.stderr, flush=True)
         where = f" in {stack[-1].name} ({os.path.basename(stack[-1].filename)}:{stack[-1].lineno})"
+    if rig.prompts is not None:
+        rig.prompts.abandon(t)                        # it can't take a later check's answer
     for part in list(rig.building):
         rig._parts[part] = TimeoutError(f"{part} hung while starting (check {name!r} timed out)")
     return False, f"timed out after {timeout:.0f} s{where}"
@@ -677,6 +747,7 @@ def main(argv=None) -> int:
             print(line(i, name, ok, msg, color), flush=True)
             failed += ok is False
     finally:
+        rig.laser_off_now()                                 # even if a hung check holds the actuator
         closer = threading.Thread(target=rig.close, name="close", daemon=True)
         closer.start()
         closer.join(10.0)
