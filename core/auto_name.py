@@ -1,17 +1,28 @@
 """Automatic names for new things: a soft guess of what an unnamed thing:N is, so "where's my deodorant?"
 can be answered after it was hidden, even though nobody taught its name.
 
-When the world confirms a new thing (an APPEARED event for thing:N), one close-up of it is queued: the
-crop store's view of that thing (core.crops.active().for_entity: only views confirmed as it), else the
-current frame cut at the thing's box with a margin. A worker thread sends each close-up to Grok once
-(the visual_memory: section's provider, model, base_url and timeout, through core/xai.py) and asks for
-strict JSON {name: 1-3 word common noun, also: up to 3 alternatives, confidence}. Perception never waits:
-the update hook only copies a crop and queues it.
+When the world confirms a new thing (an APPEARED event for thing:N), one close-up of it is queued. With
+room memory on, the camera runs at 2560x1440 and the table pipeline sees a 1280x720 resize of a ~817x460
+region (core/room_view.TableView); the close-up is then cut from the full frame of the same moment
+(frames.full_at(t)) at native resolution, with a wider marked view of the spot (the thing in a red box)
+as context. Without a full frame: the crop store's view of that thing (core.crops.active().for_entity:
+only views confirmed as it), else the current frame cut at the thing's box with a margin, and the frame's
+marked spot as context. A worker thread sends each close-up to Grok once (the visual_memory: section's
+provider, model, base_url and timeout, through core/xai.py) and asks for strict JSON {object: is it a
+separate object, name: 1-3 word common noun, also: up to 3 alternatives, confidence}. Perception never
+waits: the update hook only copies crops and queues them.
+
+Naming accuracy (eval/naming.py, 120 hand-labelled rig crops, Sun 27 Sep, mean of 3 runs): the Sat 26 Sep
+namer (a 128 px table-view crop, an overhead-camera prompt) got 44/120 right: it named 48 of 61 hands,
+feet, worn watches and jeans as objects. The corner-camera prompt, the context view, the object flag,
+NOT_OBJECTS and min_confidence 0.65 get 83/120: 50 of 61 rejected, wrong names for real things 26 -> 9 of 59.
 
 Rules: calls only while online (offline, the job waits); at most max_per_minute calls; one successful
 name per thing; a failed call is retried once, retry_after_s later, then given up; a thing that has a
-taught alias (or was merged or reset away) is never sent. A reply under min_confidence, or a name that
-says nothing ('object'), is kept as no guess and not asked again.
+taught alias (or was merged or reset away) is never sent. A reply under min_confidence, one that says
+it is no object (a person, something worn, furniture), a name that says nothing ('object', a colour
+alone, 'white object') or one naming a body part, a person or worn clothing (NOT_OBJECTS) is kept as no
+guess and not asked again.
 
 The guess is not an alias. It lives here (thing -> {name, also, confidence}), is merged into
 state_json's thing entries as "guess" (dashboard, phone, Grok's world state) and is reached through
@@ -42,25 +53,42 @@ from core.types import EventType, Status
 log = logging.getLogger(__name__)
 
 GENERIC = {"object", "objects", "thing", "things", "item", "items", "unknown", "something", "stuff",
-           "unclear", "none", "nothing", "table", "tabletop", "unidentified object"}
+           "unclear", "none", "nothing", "table", "tabletop", "unidentified object", "unidentifiable",
+           "unidentified", "shape", "blob", "piece"}
+# A name whose last word is one of these is not an object someone would ask about: a body part, a person,
+# worn clothing, the furniture or the room, a trick of the light. Rig logs, Sat 26 Sep: room tracks named
+# hand x97, arm, finger, ear, person, persons leg, shirt, shorts, fabric, wooden table. Shoes, watches and
+# glasses are not here: lying on a table they are objects (the prompt's object flag says when they are worn).
+NOT_OBJECTS = {"hand", "hands", "finger", "fingers", "thumb", "palm", "fist", "arm", "arms", "forearm",
+               "elbow", "wrist", "shoulder", "leg", "legs", "knee", "thigh", "foot", "feet", "toe", "ankle",
+               "face", "head", "hair", "nose", "ear", "eye", "mouth", "lip", "neck", "chin", "skin", "body",
+               "person", "people", "man", "woman", "boy", "girl", "child", "human", "lap",
+               "sleeve", "shirt", "tshirt", "t shirt", "sweater", "hoodie", "sweatshirt", "jeans", "pants",
+               "trousers", "shorts", "sock", "socks", "fabric", "clothing",
+               "button", "zipper", "pocket", "collar", "logo", "clothing tag",
+               "floor", "wall", "carpet", "rug", "couch", "sofa", "tabletop", "surface", "wooden table",
+               "shadow", "reflection", "glare"}
 MAX_WORDS = 3
+TRAILING = {"of", "with", "and", "for", "on", "in", "or", "a", "the"}      # never the last word of a name
 MAX_ALSO = 3
 
-NAME_SYSTEM = """You name one object from an overhead close-up of a tabletop (the camera looks straight down).
-Reply with the everyday name a person would use when asking where it is.
+NAME_SYSTEM = """You name one object for a person who will later ask where it is. The camera is high in a corner of a room and looks down at an angle, so objects are seen from above and from the side, often small, and the light is warm and dim, so colours can look off.
+
+You get a close-up of the object and, when there is one, a wider view of the same spot with the object in a red box. Name only the object inside the red box (the middle of the close-up), never one next to it.
 
 Rules:
-- name: a common noun of 1 to 3 words, lowercase, no brand, no colour, e.g. "deodorant stick", "coffee mug", "phone charger".
-- also: up to 3 other short names people might say for it, e.g. "deodorant"; an empty list if there are none.
-- confidence: 0 to 1. If you can't tell what it is, set it below 0.5.
+- object: false if what is in the box is a person or part of one (hand, arm, finger, wrist, leg, knee, foot, face, head, hair), something a person is wearing or a detail of it (a watch or band on a wrist, a sock or shoe on a foot, a shirt, jeans, a button, zipper or logo on clothes, glasses on a face, a necklace), part of the furniture or the room (table, table leg, couch, floor, wall), a shadow or reflection, or nothing you can make out. Otherwise true.
+- name: the everyday name a person would use when asking where it is: a common noun of 1 to 3 words, lowercase, no brand, e.g. "coffee mug", "deodorant stick", "house keys". Put a colour first only if you are sure of it ("white mug"); never a colour alone and never "white object". If you can't tell what the object is, describe it plainly ("plastic part", "small box") with a low confidence. Empty if object is false.
+- also: up to 3 other short names people might say for it; an empty list if there are none.
+- confidence: 0 to 1, how sure you are of the name. A guess from a blurry or partly hidden shape is below 0.5.
 - If it is a medicine or pill bottle, just name it plainly ("pill bottle"). Never say anything about medication being taken, its contents or its use.
-- Name the main object in the middle of the image only; ignore hands and the table.
+- A hand holding or touching the object is fine: name the object, not the hand.
 Reply with the JSON object only."""
 
 NAME_SCHEMA = {
-    "type": "object", "additionalProperties": False, "required": ["name", "also", "confidence"],
-    "properties": {"name": {"type": "string"}, "also": {"type": "array", "items": {"type": "string"}},
-                   "confidence": {"type": "number"}},
+    "type": "object", "additionalProperties": False, "required": ["object", "name", "also", "confidence"],
+    "properties": {"object": {"type": "boolean"}, "name": {"type": "string"},
+                   "also": {"type": "array", "items": {"type": "string"}}, "confidence": {"type": "number"}},
 }
 
 
@@ -73,7 +101,11 @@ class AutoNameConfig:
     min_confidence: float = 0.5    # a name below this is not kept
     retry_after_s: float = 30.0    # a failed call is tried once more this much later
     crop_px: int = 384             # the close-up's long side as sent (small crops are upscaled)
-    margin: float = 0.15           # frame crop fallback: the box grown by this fraction per side
+    jpeg_quality: int = 90         # of the close-up and the context view as sent
+    margin: float = 0.15           # a frame close-up: the box grown by this fraction per side
+    context: bool = True           # also send a wider view of the spot with the thing in a red box
+    context_px: int = 384          # the context view's long side as sent
+    context_min_px: int = 240      # the context patch is at least this many source px (and 3x the box)
     max_pending: int = 32          # queued close-ups at most (the oldest go first)
     rename_after_s: float = 20.0   # a thing whose reply was no usable name gets a fresh close-up this much later ...
     rename_max: int = 1            # ... at most this many times (0: never), while it is visible on the table
@@ -88,6 +120,7 @@ class AutoNameConfig:
 class Job:
     name: str                      # thing:N
     img: np.ndarray                # BGR close-up
+    ctx: Optional[np.ndarray] = None   # BGR wider view with the thing in a red box, or None
     attempts: int = 0
     due: float = 0.0               # clock() before which it is not tried
 
@@ -102,21 +135,36 @@ def _singular(w: str) -> str:
     return w[:-1] if len(w) > 3 and w.endswith("s") and not w.endswith("ss") else w
 
 
+MODIFIERS = {"red", "blue", "green", "black", "white", "yellow", "orange", "purple", "pink", "brown", "grey",
+             "gray", "silver", "gold", "clear", "big", "small", "little", "large", "tiny", "old", "new"}
+
+
 def clean_name(text) -> Optional[str]:
     """A spoken-style name from the model's text: lowercase, no articles or punctuation, at most
-    MAX_WORDS words; None for nothing or a word that names no object ('object', 'unknown')."""
+    MAX_WORDS words; None for nothing or a name that names no object: only words like 'object' or
+    'unknown', or only colour and size words around them ('white', 'white object', 'small black thing').
+    'orange' alone stays: it is a fruit too."""
     if not isinstance(text, str):
         return None
     key = norm_name(text)
-    words = [w for w in key.split() if not w.isdigit()][:MAX_WORDS]
+    words = [w for w in key.split() if not w.isdigit()]
+    if len(words) > MAX_WORDS and words[MAX_WORDS - 1] in TRAILING:     # 'white bar of soap': not 'white bar of'
+        words = [w for w in words if w not in MODIFIERS] or words
+    words = words[:MAX_WORDS]
+    while len(words) > 1 and words[-1] in TRAILING:
+        words.pop()
     name = " ".join(words)
-    if not name or name in GENERIC or all(w in GENERIC for w in words):
+    if not name or name in GENERIC or (all(w in GENERIC or w in MODIFIERS for w in words) and name != "orange"):
         return None
     return name
 
 
-MODIFIERS = {"red", "blue", "green", "black", "white", "yellow", "orange", "purple", "pink", "brown", "grey",
-             "gray", "silver", "gold", "clear", "big", "small", "little", "large", "tiny", "old", "new"}
+def not_object(name: str) -> bool:
+    """True when a cleaned name is a body part, a person, worn clothing or part of the room (NOT_OBJECTS,
+    by its last word or the whole name, plurals folded): 'hand', 'persons leg', 'table leg', 'grey shirt'."""
+    words = norm_name(name).split()
+    return bool(words) and (" ".join(words) in NOT_OBJECTS or words[-1] in NOT_OBJECTS
+                            or _singular(words[-1]) in NOT_OBJECTS)
 
 
 def _tokens(phrase: str) -> list[str]:
@@ -150,6 +198,27 @@ def match_score(said: str, guess: dict) -> float:
     return best
 
 
+def judge(d: dict, min_confidence: float) -> Optional[dict]:
+    """The guess kept from Grok's parsed reply, or None: it says no object, the name names nothing or no
+    object (clean_name, not_object), makes a medical claim, or is under min_confidence. Alternatives
+    that fail the same checks are dropped."""
+    from core.narration_store import med_claim
+    try:
+        conf = float(d.get("confidence", 0.0))
+    except (TypeError, ValueError):
+        conf = 0.0
+    conf = min(1.0, max(0.0, conf)) if conf == conf else 0.0
+    name = clean_name(d.get("name"))
+    if d.get("object") is False or name is None or not_object(name) or med_claim(name) or conf < min_confidence:
+        return None
+    also = []
+    for a in d.get("also") or []:
+        a = clean_name(a)
+        if a and a != name and a not in also and not med_claim(a) and not not_object(a):
+            also.append(a)
+    return {"name": name, "also": also[:MAX_ALSO], "confidence": round(conf, 3)}
+
+
 # ---------------------------------------------------------------- the namer
 
 def _number(name: str) -> int:
@@ -159,7 +228,7 @@ def _number(name: str) -> int:
         return 0
 
 
-def _jpeg(img: np.ndarray, long_side: int) -> bytes:
+def _jpeg(img: np.ndarray, long_side: int, quality: int = 85) -> bytes:
     """JPEG bytes of img scaled so its long side is long_side (small crops are enlarged: tiny images
     hurt the VLM)."""
     import cv2
@@ -168,10 +237,17 @@ def _jpeg(img: np.ndarray, long_side: int) -> bytes:
     if s != 1:
         img = cv2.resize(img, (max(1, round(w * s)), max(1, round(h * s))),
                          interpolation=cv2.INTER_AREA if s < 1 else cv2.INTER_CUBIC)
-    ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, int(quality)])
     if not ok:
         raise RuntimeError("jpeg encode failed")
     return buf.tobytes()
+
+
+def _to_full(box, rect, out_size) -> tuple[float, float, float, float]:
+    """A table-view box (px of the out_size image) in full-frame px, for the view cut at rect."""
+    sx = (rect[2] - rect[0]) / float(out_size[0])
+    sy = (rect[3] - rect[1]) / float(out_size[1])
+    return (rect[0] + box[0] * sx, rect[1] + box[1] * sy, rect[0] + box[2] * sx, rect[1] + box[3] * sy)
 
 
 def _crop_store():
@@ -185,8 +261,11 @@ def _crop_store():
 class AutoNamer:
     def __init__(self, cfg: dict, world, provider=None, online: Optional[Callable[[], bool]] = None,
                  clock: Callable[[], float] = time.monotonic, c: Optional[AutoNameConfig] = None,
-                 start: bool = True):
+                 start: bool = True, frames=None):
         self.cfg, self.world, self.clock = cfg, world, clock
+        # core.room_view.TableView (full_at, rect, out_size) when room memory runs the camera at full size:
+        # close-ups are then cut from the full frame at native resolution
+        self.frames = frames
         self.c = c or AutoNameConfig.from_dict((cfg or {}).get("auto_name"))
         if provider is None:
             from core.narration import NarrationConfig, make_provider
@@ -272,12 +351,12 @@ class AutoNamer:
                 continue
             if ent.aliases:
                 continue
-            img = self._close_up(ent, dets, frame)
-            if img is None:
+            views = self._close_up(ent, dets, frame)
+            if views is None:
                 log.debug("no close-up for %s; not named", ev.obj)
                 continue
             with self._lock:
-                self._jobs.append(Job(ev.obj, img, due=self.clock()))
+                self._jobs.append(Job(ev.obj, views[0], views[1], due=self.clock()))
                 while len(self._jobs) > self.c.max_pending:
                     self._jobs.popleft()
             self._wake.set()
@@ -301,40 +380,74 @@ class AutoNamer:
                 continue
             if ent.aliases or ent.status != Status.VISIBLE or getattr(ent, "zone", "table") != "table":
                 continue
-            img = self._close_up(ent, dets, frame)
+            views = self._close_up(ent, dets, frame)
             with self._lock:
                 t, k = self._unnamed.get(name, [now, 0])
-                self._unnamed[name] = [now, k if img is None else k + 1]
-                if img is None:
+                self._unnamed[name] = [now, k if views is None else k + 1]
+                if views is None:
                     continue
                 self._done.discard(name)
-                self._jobs.append(Job(name, img, due=now))
+                self._jobs.append(Job(name, views[0], views[1], due=now))
             self._wake.set()
 
-    def _close_up(self, ent, dets, frame) -> Optional[np.ndarray]:
-        """The crop store's confirmed view of ent, else the frame cut at ent's box (+ margin)."""
+    def _close_up(self, ent, dets, frame) -> Optional[tuple[np.ndarray, Optional[np.ndarray]]]:
+        """(close-up, context view or None) of ent. Its box in this frame's detections, cut from the full
+        frame of the same moment when there is one (native resolution: the table view is a ~1.6x
+        enlargement of an 817 px wide region at 1440p); else the crop store's confirmed view of ent, else
+        this frame cut at its box. The context view is the same frame's patch around the box with ent in a
+        red box (off with context: false, and never for a crop-store view, whose frame is gone)."""
+        from core.crops import close_up, marked_view
+        img = getattr(frame, "img", None)
+        box = self._box(ent, dets) if img is not None else None
+        full = self._full(frame) if box is not None else None
+        if full is not None:
+            fbox = _to_full(box, self.frames.rect, self.frames.out_size)
+            crop = close_up(full, fbox, self.c.margin)
+            if crop is not None:
+                return crop, (marked_view(full, fbox, self.c.context_min_px) if self.c.context else None)
         store = _crop_store()
         if store is not None:
             try:
                 tr = store.for_entity(ent)
                 crop = (tr.best or tr.recent) if tr is not None else None
                 if crop is not None and crop.img is not None:
-                    return crop.img
+                    return crop.img, None
             except Exception:
                 log.debug("crop store failed", exc_info=True)
-        img = getattr(frame, "img", None)
-        if img is None or dets is None:
+        if box is None:
+            return None
+        crop = close_up(img, box, self.c.margin)
+        if crop is None:
+            return None
+        return crop, (marked_view(img, box, self.c.context_min_px) if self.c.context else None)
+
+    @staticmethod
+    def _box(ent, dets):
+        """ent's box (px) among this frame's detections: the one the world took as its latest observation,
+        else a proposal within 2 cm of its position; None when it was not seen in this frame."""
+        if dets is None:
             return None
         box = next((d.box_px for d in dets.items if d.box_cm is ent.box_cm), None)
         if box is None and ent.pos_cm is not None:
             near = [d for d in dets.items if d.cls == "thing"
                     and abs(d.center_cm[0] - ent.pos_cm[0]) + abs(d.center_cm[1] - ent.pos_cm[1]) < 2.0]
             box = near[0].box_px if near else None
-        if box is None:
+        return box
+
+    def _full(self, frame) -> Optional[np.ndarray]:
+        """The full camera frame `frame` (a table-view Frame) was cut from, or None: no full-frame source,
+        or the ring no longer holds that exact frame (a box from another moment would miss the thing)."""
+        full_at = getattr(self.frames, "full_at", None)
+        if full_at is None or getattr(frame, "t", None) is None:
             return None
-        from core.crops import _clip
-        c = _clip(img, box, self.c.margin)
-        return None if c is None else img[c[1]:c[3], c[0]:c[2]].copy()
+        try:
+            f = full_at(frame.t)
+        except Exception:
+            log.debug("full frame lookup failed", exc_info=True)
+            return None
+        if f is None or f.img is None or f.idx != frame.idx:
+            return None
+        return f.img
 
     # -- the worker
 
@@ -367,7 +480,7 @@ class AutoNamer:
             self._calls.append(now)
         job.attempts += 1
         try:
-            g = self._ask(job.img)
+            g = self._ask(job.img, job.ctx)
         except Exception as ex:
             log.info("naming %s failed (attempt %d): %s", job.name, job.attempts, ex)
             with self._lock:
@@ -392,27 +505,18 @@ class AutoNamer:
                          "; a fresh close-up later" if n < self.c.rename_max else "")
         return True
 
-    def _ask(self, img: np.ndarray) -> Optional[dict]:
+    def _ask(self, img: np.ndarray, ctx: Optional[np.ndarray] = None) -> Optional[dict]:
+        """Grok's guess for a close-up (and the context view, when there is one), or None: no object, a
+        name that names nothing or no object (clean_name, NOT_OBJECTS), a medical claim, or under
+        min_confidence."""
         from core.narration import _parse_json
-        from core.narration_store import med_claim
-        jpg = _jpeg(img, self.c.crop_px)
-        reply = self.provider.narrate(NAME_SYSTEM, [("text", "Close-up of one object on the table:"),
-                                                    ("image", jpg), ("text", "What is it called?")], NAME_SCHEMA)
-        d = _parse_json(reply.text)
-        try:
-            conf = float(d.get("confidence", 0.0))
-        except (TypeError, ValueError):
-            conf = 0.0
-        conf = min(1.0, max(0.0, conf)) if conf == conf else 0.0
-        name = clean_name(d.get("name"))
-        if name is None or med_claim(name) or conf < self.c.min_confidence:
-            return None
-        also = []
-        for a in d.get("also") or []:
-            a = clean_name(a)
-            if a and a != name and a not in also and not med_claim(a):
-                also.append(a)
-        return {"name": name, "also": also[:MAX_ALSO], "confidence": round(conf, 3)}
+        q = self.c.jpeg_quality
+        parts = [("text", "Close-up of the object:"), ("image", _jpeg(img, self.c.crop_px, q))]
+        if ctx is not None:
+            parts += [("text", "The same spot, wider; the object is in the red box:"),
+                      ("image", _jpeg(ctx, self.c.context_px, q))]
+        reply = self.provider.narrate(NAME_SYSTEM, parts + [("text", "What is it called?")], NAME_SCHEMA)
+        return judge(_parse_json(reply.text), self.c.min_confidence)
 
     def _run(self) -> None:
         while not self._stop.is_set():
@@ -468,11 +572,12 @@ class AutoNamer:
             self._thread.join(timeout=2.0)
 
 
-def from_config(cfg: dict, world, online=None, start: bool = True) -> Optional[AutoNamer]:
-    """The app's namer, attached to the world, or None when auto_name.enabled is false (the default)."""
+def from_config(cfg: dict, world, online=None, start: bool = True, frames=None) -> Optional[AutoNamer]:
+    """The app's namer, attached to the world, or None when auto_name.enabled is false (the default).
+    frames: the app's frame source; a TableView (room memory on) gives native-resolution close-ups."""
     c = AutoNameConfig.from_dict((cfg or {}).get("auto_name"))
     if not c.enabled:
         return None
-    namer = AutoNamer(cfg, world, online=online, c=c, start=start).attach(world)
+    namer = AutoNamer(cfg, world, online=online, c=c, start=start, frames=frames).attach(world)
     log.info("auto-naming on: %s", namer.status()["disclosure"])
     return namer

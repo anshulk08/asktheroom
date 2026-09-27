@@ -8,12 +8,12 @@ import numpy as np
 import pytest
 
 import core.crops
-from core.auto_name import AutoNameConfig, AutoNamer, clean_name, from_config, match_score
+from core.auto_name import AutoNameConfig, AutoNamer, clean_name, from_config, match_score, not_object
 from core.config import Config, load_config
 from core.events import EventLog
 from core.labels import thing_labels
 from core.narration import ProviderError, Reply
-from core.types import Status
+from core.types import Frame, Status
 from core.world import World
 from mobile.bridge import bleproto as P
 from tests.synth import Scene
@@ -113,8 +113,8 @@ def test_a_new_thing_is_named_in_the_background_and_the_guess_is_in_state(scene,
     assert namer.step() is True
     assert len(grok.calls) == 1
     system, parts, schema = grok.calls[0]
-    assert [k for k, _ in parts].count("image") == 1          # one close-up, nothing else
-    assert set(schema["required"]) == {"name", "also", "confidence"}
+    assert [k for k, _ in parts].count("image") == 2          # the close-up and the marked spot, nothing else
+    assert set(schema["required"]) == {"object", "name", "also", "confidence"}
     assert namer.guess("thing:1") == {"name": "deodorant stick", "also": ["deodorant"], "confidence": 0.9}
     st = world.state_json()
     ent = next(e for e in st["entities"] if e["name"] == "thing:1")
@@ -253,6 +253,90 @@ def test_a_low_confidence_name_is_not_kept_or_retried(scene, world):
     assert namer.guess("thing:1") is None and namer.guess("thing:2") is None
 
 
+def test_a_body_part_worn_thing_or_colour_is_no_name(scene, world):
+    """Rig logs, Sat 26 Sep: hands, arms, watches on wrists and 'white object' were kept as names."""
+    namer, grok, _ = make(world, {"object": False, "name": "watch", "also": [], "confidence": 0.9},
+                          {"object": True, "name": "Person's Hand", "also": [], "confidence": 0.9},
+                          {"object": True, "name": "white object", "also": [], "confidence": 0.9},
+                          {"object": True, "name": "tv remote", "also": ["remote", "hand", "arm"], "confidence": 0.9})
+    for i, x in enumerate((20, 50, 80, 110)):
+        put(scene, world, f"k{i}", (x, 30))
+    for _ in range(4):
+        namer.step()
+    assert len(grok.calls) == 4
+    assert [namer.guess(f"thing:{i}") for i in (1, 2, 3)] == [None, None, None]
+    assert namer.guess("thing:4") == {"name": "tv remote", "also": ["remote"], "confidence": 0.9}
+
+
+def test_the_prompt_is_for_a_corner_camera_not_an_overhead_one(scene, world):
+    namer, grok, _ = make(world)
+    put(scene, world, "deo", (40, 30))
+    namer.step()
+    system, parts, _ = grok.calls[0]
+    assert "corner" in system and "straight down" not in system and "overhead" not in system
+    assert "red box" in system and "object: false" in system
+    assert [p for k, p in parts if k == "text"][1].endswith("red box:")
+
+
+class FullFrames:
+    """A TableView stand-in: the full frame is the table-view frame at 2x, the view cut from all of it."""
+    rect, out_size = (0, 0, 2560, 1440), (1280, 720)
+
+    def __init__(self, same_idx=True):
+        self.last, self.same_idx = None, same_idx
+
+    def full_at(self, t):
+        import cv2
+        f = self.last
+        big = cv2.resize(f.img, (2560, 1440), interpolation=cv2.INTER_NEAREST)
+        return Frame(t=f.t, wall=f.wall, img=big, idx=f.idx if self.same_idx else f.idx + 1)
+
+
+def with_full(world, frames):
+    """make() with a full-frame source; world.update records each frame for it."""
+    grok = FakeGrok()
+    namer = AutoNamer(CFG, world, provider=grok, online=lambda: True, clock=Clock(),
+                      c=AutoNameConfig(enabled=True), start=False, frames=frames).attach(world)
+    inner = world.update
+
+    def update(dets, frame):
+        frames.last = frame
+        return inner(dets, frame)
+
+    world.update = update
+    return namer, grok
+
+
+def test_the_close_up_is_cut_from_the_full_frame_at_native_resolution(scene, world, cfg, tmp_path):
+    namer, _, _ = make(world)
+    put(scene, world, "deo", (40, 30))
+    small = namer._jobs[0].img
+    scene2 = Scene(cfg, fps=10, t0=1000.0, render=True)
+    world2 = World(cfg, EventLog(":memory:", str(tmp_path / "s2")), embed=scene2.embed)
+    namer2, grok = with_full(world2, FullFrames())
+    put(scene2, world2, "deo", (40, 30))
+    job = namer2._jobs[0]
+    assert abs(job.img.shape[0] - 2 * small.shape[0]) <= 3 and abs(job.img.shape[1] - 2 * small.shape[1]) <= 3
+    red = (job.ctx[..., 2] > 200) & (job.ctx[..., 1] < 50) & (job.ctx[..., 0] < 50)
+    assert job.ctx.shape[0] >= 240 and red.any()          # the spot, with the thing in a red box
+    namer2.step()
+    assert [k for k, _ in grok.calls[0][1]].count("image") == 2
+
+
+def test_a_full_frame_from_another_moment_is_not_used(scene, world):
+    namer, _ = with_full(world, FullFrames(same_idx=False))
+    put(scene, world, "deo", (40, 30))
+    job = namer._jobs[0]
+    assert job.img.shape[0] < 100                          # the table-view cut, not the 2x full frame
+
+
+def test_no_context_view_when_off(scene, world):
+    namer, grok, _ = make(world, context=False)
+    put(scene, world, "deo", (40, 30))
+    namer.step()
+    assert [k for k, _ in grok.calls[0][1]].count("image") == 1
+
+
 def test_a_pill_bottle_is_named_plainly_and_the_prompt_forbids_claims(scene, world):
     namer, grok, _ = make(world, {"name": "Pill Bottle", "also": ["medicine", "pills taken today"],
                                   "confidence": 0.8})
@@ -307,6 +391,18 @@ def test_clean_name():
     assert clean_name("  the   blue coffee mug with handle ") == "blue coffee mug"
     assert clean_name("object") is None and clean_name("") is None and clean_name(None) is None
     assert clean_name("unknown") is None
+    assert clean_name("white") is None and clean_name("white object") is None
+    assert clean_name("small black thing") is None
+    assert clean_name("white mug") == "white mug" and clean_name("orange") == "orange"
+    assert clean_name("white bar of soap") == "bar of soap" and clean_name("small box of pens for") == "box of pens"
+
+
+def test_not_object():
+    for n in ("hand", "hands", "persons leg", "table leg", "grey shirt", "socks", "person", "wooden table",
+              "jeans button", "clothing tag"):
+        assert not_object(n), n
+    for n in ("tv remote", "watch", "white sneaker", "glasses", "hand sanitizer", "laptop", "arm band"):
+        assert not not_object(n), n
 
 
 def test_match_score():

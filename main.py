@@ -1113,7 +1113,7 @@ def build(cfg: dict, fake: bool = False, camera: int = 0, with_voice: bool = Tru
     # Automatic names for new things (off unless auto_name.enabled): attached after the visual layer, so
     # the crop store already knows which views are each thing's when a new one is queued for Grok.
     import core.auto_name
-    namer = core.auto_name.from_config(cfg, world, online=lambda: netmon.online)
+    namer = core.auto_name.from_config(cfg, world, online=lambda: netmon.online, frames=frames)
     checker = core.grok_check.from_config(cfg, events, world, table, online=lambda: netmon.online)
     if visual is not None:
         visual.grok_check = checker
