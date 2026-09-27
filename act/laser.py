@@ -76,12 +76,12 @@ def dot_px_diff(off: np.ndarray, on: np.ndarray, thr: int = 40, min_area: int = 
     return _largest_blob(mask, score, min_area, max_area)
 
 
-def _dot_blob(mask: np.ndarray, weight: np.ndarray, min_area: int, max_area: int,
-              max_aspect: float = 4.0, min_fill: float = 0.3) -> Optional[tuple[float, float]]:
-    """Brightest dot-shaped blob: area in range, not a streak (aspect), not a ring or edge (fill).
-    Centre of gravity of the score over the blob's bounding box."""
+def _dot_blobs(mask: np.ndarray, weight: np.ndarray, min_area: int, max_area: int,
+               max_aspect: float = 4.0, min_fill: float = 0.3) -> list[tuple[float, float, float]]:
+    """Every dot-shaped blob (area in range, not a streak by aspect, not a ring or edge by fill) as
+    (x, y, peak): the centre of gravity of the score over the blob's bounding box, and its peak score."""
     n, lab, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
-    best, best_peak = None, -np.inf
+    out = []
     for i in range(1, n):
         x, y, w, h, area = (int(stats[i, k]) for k in (cv2.CC_STAT_LEFT, cv2.CC_STAT_TOP,
                                                        cv2.CC_STAT_WIDTH, cv2.CC_STAT_HEIGHT,
@@ -90,16 +90,21 @@ def _dot_blob(mask: np.ndarray, weight: np.ndarray, min_area: int, max_area: int
                 or area < min_fill * w * h:
             continue
         m = lab[y:y + h, x:x + w] == i
-        peak = float(weight[y:y + h, x:x + w][m].max())
-        if peak > best_peak:
-            best, best_peak = (x, y, w, h, m), peak
-    if best is None:
+        wt = np.where(m, np.maximum(weight[y:y + h, x:x + w].astype(np.float64), 1.0), 0.0)
+        ys, xs = np.mgrid[y:y + h, x:x + w]
+        s = wt.sum()
+        out.append((float((xs * wt).sum() / s), float((ys * wt).sum() / s), float(weight[y:y + h, x:x + w][m].max())))
+    return out
+
+
+def _dot_blob(mask: np.ndarray, weight: np.ndarray, min_area: int, max_area: int,
+              max_aspect: float = 4.0, min_fill: float = 0.3) -> Optional[tuple[float, float]]:
+    """Brightest dot-shaped blob (see _dot_blobs), or None."""
+    blobs = _dot_blobs(mask, weight, min_area, max_area, max_aspect, min_fill)
+    if not blobs:
         return None
-    x, y, w, h, m = best
-    wt = np.where(m, np.maximum(weight[y:y + h, x:x + w].astype(np.float64), 1.0), 0.0)
-    ys, xs = np.mgrid[y:y + h, x:x + w]
-    s = wt.sum()
-    return float((xs * wt).sum() / s), float((ys * wt).sum() / s)
+    x, y, _ = max(blobs, key=lambda b: b[2])
+    return x, y
 
 
 def dot_px_hsv(on: np.ndarray, min_area: int = 2, max_area: int = 1500) -> Optional[tuple[float, float]]:
@@ -359,11 +364,14 @@ class Laser:
 
     # -- spec API
     def find_dot_px(self, n_pairs: int = 1, gate: bool = True,
-                    roi: Optional[tuple[int, int, int, int]] = None) -> Optional[tuple[float, float]]:
+                    roi: Optional[tuple[int, int, int, int]] = None,
+                    unique: bool = False) -> Optional[tuple[float, float]]:
         """Blink the laser n_pairs times and return the dot in image px (None if not seen). Laser ends on.
         The pairs' scores are averaged, which lifts a dim far dot out of sensor noise (SNR ~ sqrt(n));
         the threshold drops by sqrt(n) to keep the false-alarm rate. gate: pick the brightest
-        dot-shaped blob instead of the largest one. roi: (x0, y0, x1, y1) px; only look inside it."""
+        dot-shaped blob instead of the largest one. roi: (x0, y0, x1, y1) px; only look inside it.
+        unique (with gate): None unless exactly one dot-shaped blob shows (faint specks under half the
+        brightest one's peak don't count)."""
         with self._locked():
             acc, n, off, on = None, 0, None, None
             for _ in range(max(1, n_pairs)):
@@ -395,6 +403,11 @@ class Laser:
                 keep = np.zeros_like(mask)
                 keep[y0:y1, x0:x1] = 1
                 mask &= keep
+            if gate and unique:        # a second blob half as bright or more (a glint) makes it ambiguous
+                blobs = sorted(_dot_blobs(mask, score, 2, self.max_dot_px), key=lambda b: -b[2])
+                if not blobs or (len(blobs) > 1 and blobs[1][2] >= 0.5 * blobs[0][2]):
+                    return None
+                return blobs[0][0], blobs[0][1]
             if gate:
                 return _dot_blob(mask, score, 2, self.max_dot_px)
             return _largest_blob(mask, score, 2, self.max_dot_px)
@@ -418,17 +431,29 @@ class Laser:
             return None
         return float(cm[0]), float(cm[1])
 
+    def find_dot_wide(self, n_pairs: int = 3) -> Optional[Point]:
+        """The whole picture, averaged over n_pairs blinks, when the dot isn't near the target (the head or
+        camera was knocked, or the fit is off). Only an unambiguous answer counts: one dot-shaped blob
+        and no other half as bright, else None. Laser ends on."""
+        px = self.find_dot_px(n_pairs, gate=True, unique=True)
+        if px is None:
+            return None
+        cm = self.table.px_to_cm(np.array([px], dtype=np.float64)).reshape(-1)
+        return float(cm[0]), float(cm[1])
+
     def aim(self, target_cm: tuple, mode: str = "point") -> float:
         """Point at target_cm. mode 'point' closes the loop on the seen dot (<= 8 tries, stop < tol_cm);
         'open' just moves to the prediction and measures once. Only a dot within first_dot_cm of the
-        target counts. After MAX_MISSES looks in a row without it, stop and hold the pose (the
-        open-loop prediction if it was never seen). Returns the last measured error in cm (inf if the
-        dot was never seen). Leaves the laser on; the actuator's auto-off timer restarts."""
+        target counts; if the first look misses, one whole-picture search (find_dot_wide) may find a
+        dot that is further off (knocked head), and the loop corrects from there. After MAX_MISSES
+        looks in a row without it, stop and hold the pose. Returns the last measured error in cm (inf if
+        the dot was never seen). Leaves the laser on, except when the dot was never seen: an unconfirmed
+        dot could be anywhere, so the laser goes off. The actuator's auto-off timer restarts."""
         fit = self._need_fit()
         target = np.asarray(target_cm, dtype=np.float64)
         target_fit = self.to_fit_cm(target)
         tries = 1 if mode == "open" else self.max_tries
-        err, first, n, misses, reason = math.inf, None, 0, 0, "max_tries"
+        err, first, n, misses, reason, wide = math.inf, None, 0, 0, "max_tries", False
         with self._locked():
             cmd = np.array(self._clamp(*fit.predict(target_fit)))
             self.move_to(*cmd)
@@ -436,6 +461,12 @@ class Laser:
                 self.clock.sleep(self.settle_s)
                 dot = self.find_dot(near_cm=target)
                 n += 1
+                if dot is None and first is None and not wide and mode != "open":
+                    wide = True
+                    dot = self.find_dot_wide()
+                    if dot is not None:
+                        log.warning("laser dot %.0f cm from the target: head or camera moved? (found by a "
+                                    "whole-picture search)", math.dist(dot, target))
                 if dot is None:         # occluded or missed: look again (counts as a try)
                     misses += 1
                     if misses >= MAX_MISSES:
@@ -455,9 +486,9 @@ class Laser:
                 self.move_to(*cmd, duration_s=0.1)
             if first is None:
                 reason = "not_seen"
-            self.act.laser(True)
-        self.last_aim = {"tries": n, "first_err_cm": first, "err_cm": err, "reason": reason}
-        self.state = {"on": True, "target": None,
+            self.act.laser(reason != "not_seen")
+        self.last_aim = {"tries": n, "first_err_cm": first, "err_cm": err, "reason": reason, "wide": wide}
+        self.state = {"on": reason != "not_seen", "target": None,
                       "err_cm": None if math.isinf(err) else round(err, 2)}
         return err
 
