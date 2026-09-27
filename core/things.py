@@ -62,6 +62,7 @@ STARTUP_S = 3.0     # configured objects first seen this soon after the first ba
 ARTICLES = {'my', 'the', 'a', 'an', 'your', 'our', 'this', 'that', 'his', 'her', 'their'}
 NEG = float('-inf')
 SAME_SIZE = 2.0     # 'a like size' for the same-spot birth veto: areas within this factor
+LAID_OVER_GROW = 2.5  # a proposal over a thing's box, this many times its area, is laid over it, not it
 FORGOTTEN_MAX = 1000  # forgotten things still brought back when seen again at their spot (rule (b))
 REST_IOU = 0.5      # a proposal this much over the box a partly hidden thing rests in: the whole of it
 CROSS_UV = 1.0      # a hand in and out of a thing container on opposite sides of its middle, this far
@@ -526,11 +527,35 @@ class ThingRules:
             for n in names:
                 ent = self.entities[n]
                 dd = geom.dist(d.center_cm, ent.pos_cm)
-                if dd <= tc.gate_cm and self._size_fits(n, d.box_cm):
+                if dd <= tc.gate_cm and self._size_fits(n, d.box_cm) and not self._laid_over_it(n, d.box_cm) \
+                        and not self._child_shows(n, d.box_cm):
                     pairs.append((dd + (tc.same_spot_cm if d.occluded else 0.0), i, n))
         taken = self._greedy(pairs, props, seen)
         self._resolve_splits(taken, props, seen)
         return [d for i, d in enumerate(props) if i not in taken]
+
+    def _laid_over_it(self, name: str, box) -> bool:
+        """box covers the thing's last box (cover_overlap) and is LAID_OVER_GROW times the larger of that
+        and the box it rests in: a cup put down over the keys, not the keys grown. Within the size gate a
+        visible thing took its cover's box as its own, so it was never under anything (the shell game)."""
+        last = self.entities[name].box_cm
+        big = max(geom.area(last), geom.area(self._rest_box.get(name) or last))
+        return geom.area(box) >= LAID_OVER_GROW * big and geom.overlap_frac(box, last) >= self.cfg.cover_overlap
+
+    def _child_shows(self, name: str, box) -> bool:
+        """box is what name hides coming back: at the spot of a thing UNDER / INSIDE it, nearer that thing's
+        size than name's. A cup lifted off the keys stays 'visible' for the lost grace and took the keys'
+        box as its own, so the keys never came back."""
+        a, own = geom.area(box), geom.area(self.entities[name].box_cm)
+        for n in self._things:
+            e = self.entities[n]
+            if e.parent != name or e.status not in HIDDEN or e.pos_cm is None or e.box_cm is None:
+                continue
+            ca = geom.area(e.box_cm)
+            if a > 0 and ca > 0 and own > 0 and geom.dist(geom.center(box), e.pos_cm) <= self._tcfg.same_spot_cm \
+                    and abs(np.log(a / ca)) < abs(np.log(a / own)):
+                return True
+        return False
 
     def _match_held(self, props, seen) -> list[Detection]:
         """Rule (b), in a hand: a HELD thing takes a proposal at its holding hand's recent boxes,
@@ -545,7 +570,8 @@ class ThingRules:
                     if self._now - t > tc.hand_trail_s:
                         break
                     gap = _box_dist(d.center_cm, box)
-                    if gap <= tc.hand_gate_cm:
+                    if gap <= tc.hand_gate_cm and not self._laid_over_it(n, d.box_cm) \
+                            and not self._child_shows(n, d.box_cm):
                         pairs.append(((age, gap), i, n))
                         break
         taken = self._greedy(pairs, props, seen)
