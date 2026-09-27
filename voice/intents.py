@@ -306,7 +306,7 @@ def _spoken_name(t: str) -> Optional[str]:
             if w in NAME_STOP or w in ARTICLES:
                 break
             words.append(w)
-        if words and not is_place(" ".join(words)):
+        if words:
             return " ".join(words)
     return None
 
@@ -410,8 +410,11 @@ def parse(text: str, cfg: dict, aliases=()) -> Intent:
         kind = "WHERE"                  # 'is it on the counter?': voice.conversation fills in the thing
     else:
         kind = "OTHER"
-    if kind == "WHERE" and obj is None and spoken is None and _names_a_place(t):
-        kind = "OTHER"                  # 'where's the couch': a place, not a thing to find
+    if kind == "WHERE" and obj is None and is_place(spoken) and PRONOUN_WHERE.search(t):
+        spoken = None                   # 'is it on the counter?': 'it' is the thing, the counter only where
+    if kind == "WHERE" and obj is None and (spoken is None or is_place(spoken)) and _names_a_place(t):
+        kind, spoken = "OTHER", None    # 'where's the couch': a place, not a thing to find ('did I use the
+                                        # stove' keeps its name: the narration memory answers that)
 
     name = spoken if kind in ("WHERE", "HISTORY", "HANDLED") and obj is None else None
     if kind in ("HISTORY", "HANDLED") and obj is None and name is None and GENERAL.search(t):
