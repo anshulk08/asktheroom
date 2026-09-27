@@ -23,7 +23,8 @@
     const m = new Map(), taken = new Map();
     for (const e of state.entities || []) {
       if (String(e.name).indexOf("thing:") !== 0) continue;
-      const label = e.label || (e.guess && e.guess.name ? e.guess.name + "?" : "something new");
+      const g = e.guess && e.guess.name && !(e.guess.confidence < 0.5) ? e.guess.name : null;  // GUESS_MIN
+      const label = e.label || (g ? g + "?" : "something new");
       const k = (taken.get(label.toLowerCase()) || 0) + 1;
       taken.set(label.toLowerCase(), k);
       m.set(e.name, k === 1 ? label : label + " (" + k + ")");

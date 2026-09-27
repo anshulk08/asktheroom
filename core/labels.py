@@ -12,6 +12,7 @@ from typing import Optional
 
 PREFIX = 'thing:'
 NEW = 'something new'       # a thing with no taught name and no guess
+GUESS_MIN = 0.5             # a guess below this confidence isn't shown (voice/answers.py, the phone agree)
 
 
 def thing_label(name: str, label: Optional[str] = None, guess: Optional[str] = None) -> str:
@@ -26,7 +27,8 @@ def thing_label(name: str, label: Optional[str] = None, guess: Optional[str] = N
 
 def _guess(e: dict) -> Optional[str]:
     g = e.get('guess')
-    return str(g['name']) if isinstance(g, dict) and g.get('name') else None
+    return str(g['name']) if isinstance(g, dict) and g.get('name') \
+        and float(g.get('confidence', 1.0)) >= GUESS_MIN else None
 
 
 def thing_labels(state: Optional[dict]) -> dict[str, str]:
