@@ -271,7 +271,12 @@ def initial_prompt(cfg: dict, synonyms: bool = False) -> str:
         objs = cfg.get("objects") or {}
         names += [re.sub(r"^the ", "", str(k)) for k, v in (cfg.get("synonyms") or {}).items() if v in objs]
         names = list(dict.fromkeys(names))
-    return f"Where are my {', '.join(names)}?" if names else ""
+    if not names:
+        return ""
+    # The wake word leads, as it is spoken ("Room, where ..."): on its own, a one-word "Room!" came back
+    # as "Hit the Arduino table." from the ceiling mic (rig, Sat 26 Sep); primed, Whisper expects it.
+    wake = ((cfg.get("listen") or {}).get("wake_words") or ["room"])[0]
+    return f"{str(wake).strip().capitalize()}, where are my {', '.join(names)}?"
 
 
 def audio_ctx_for(n_samples: int, rate: int = RATE) -> int:

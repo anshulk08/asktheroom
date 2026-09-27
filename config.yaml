@@ -285,6 +285,7 @@ listen:
                               # config.local.yaml.example
   idle_s: 8                   # reopen the mic after this long with nobody talking
   echo_tail_s: 0.4            # keep the mic shut this long after the rig stops speaking
+  log_overheard: false        # debug only: log every transcript, including dropped chatter (privacy: keep false)
 
 # Re-ID crop embedder (core/embed.py) for open-world identity: World(cfg, events, embed=make_embedder(cfg)).
 # Off: the world has no appearance evidence (as before). DINOv2-S/14 ONNX from

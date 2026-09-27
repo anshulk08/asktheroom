@@ -208,8 +208,17 @@ the next step" and show the phone map instead. Do not bring an unlabelled laser 
 - **fps:** 9-10 idle, 7-8 during a carry (was 5.8 with the every-frame cadence).
 - **Phone:** the BLE bridge runs from `~/askroom_room` against port 8080; it needs the one-time
   `sudo hcitool` LE-mask command after every Jetson boot before phones can connect.
-- **Not done yet:** speaker/mic (no USB audio on the Jetson yet), decoy runs on the rig, retrain (P1-1),
-  merge back to `main`.
+- **21:45 voice (P0-1):** the app runs with voice from `~/askroom_room`; the Brio's own ceiling mic transcribes
+  a judge-distance "Where is my wallet?" in ~200 ms (whisper-server base.en on the Jetson). Wake mode for the
+  expo (`listen.mode: wake`): a bare "Room" now acts as listen-now (people pause after it), Whisper's prompt
+  leads with the wake word, and the rig's `wake_words` list the mishearings (rome, rum, roon, ruin, broom).
+  Verified live: "room, where is the wallet?" accepted. No speaker yet (TTS goes to HDMI): a Bluetooth
+  speaker is coming; `askroom:audio` (ALSA pulse plugin) + `scripts/dock.sh` Pulse pass-through are ready.
+  `listen.log_overheard: true` is on in the rig's local config for tuning: **remove before the expo**.
+- **Merged to `main`** (`4a3b08c`, fast-forward). Trials stopped at Anshul's request after the wallet re-run
+  (2/2 handoffs incl. the side table on the new build).
+- **Not done yet:** speaker, decoy runs on the rig, retrain (P1-1: tooling committed by a parallel session,
+  capture pending), phone connection unconfirmed, morning checklist.
 - **21:40 P1-1 retrain, tooling ready, capture pending** (`506844e`): `capture.py` now opens the Brio as the
   detector sees it (1080p, zoom 100, cut to `table_view_rect` [0, 735, 613, 1080], resized to 1280x720), so the
   captures are the table-view frames the engine runs on; corner switches `synthesize.py --max-rot 25` and

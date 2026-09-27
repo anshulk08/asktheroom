@@ -569,3 +569,9 @@ def test_tts_passed_to_the_constructor(monkeypatch):
     tts = Speaking([False, True])
     s = STT(CFG, backend=FakeBackend(), vad=AmpVAD(), tts=tts)
     assert s.tts is tts and s.listen() == "" and s.last_stop == "tts"
+
+
+def test_prompt_leads_with_the_wake_word():
+    p = stt.initial_prompt(CFG)
+    assert p.startswith("Room, where are my ") and "keys" in p
+    assert stt.initial_prompt(dict(CFG, listen={"wake_words": ["jarvis"]})).startswith("Jarvis, where")
