@@ -98,8 +98,18 @@ Then run the app **with voice** (§2 start, without `--no-voice`) and follow the
 
 ## 6. Retrain slot (P1-1, Anshul's 10:15 PM rig slot)
 
-*From the room/detector branch: capture, label, train, export, and the midnight go/no-go (notebook/box/keys
-≥ 0.6 from the corner). Pasted here when merged.*
+The full checklist is **`docs/corner_retrain.md`** (room/detector branch; in this build once that branch is
+merged). In short:
+
+- **A** (no camera): a scratch copy `~/askroom_ft` of room/detector on the Jetson with `~/askroom_room`'s
+  `config.local.yaml` and `room_zones.json` copied in; props and 4 distractors ready; demo lighting.
+- **B-C** (the only camera time, Anshul's call): stop the room app, capture the table view as the room build
+  sees it (`scripts/finetune/capture.py --room table ...`), zoom stays 100.
+- **D-F** (Mac): label, merge with the public hand frames, train YOLO26s.
+- **G** (Jetson, with the lock and >= 1.5 GB free): export the engine in the container.
+- **Midnight go/no-go:** notebook, box and keys at confidence >= 0.6 in >= 80% of the demo layout's frames
+  (`conf_sweep --images ... --require`). If not: no hiding in the demo script (spec 0010 P1-1 fallback).
+- Put the room app back afterwards (§2 start) and check `$RIG/full.jpg`.
 
 ## 7. Restore notes
 
