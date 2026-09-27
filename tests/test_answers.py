@@ -320,42 +320,130 @@ def test_where_for_an_object_never_seen_says_so_and_does_not_point():
 
 # ---------- open world ----------
 
-def test_appeared_event_phrase_and_unnamed_things_in_changes():
-    from core.types import Event
-    fw = FakeWorld([Entity("keys", "target", Status.VISIBLE, pos_cm=(10.0, 10.0))])
-    now = time.time()
-    fw.events.add(Event(t=1.0, wall=now - 5, obj="thing:4", type="APPEARED", to_cm=(40.0, 30.0)))
+def _things(fw, labels: dict, guesses: dict):
+    """FakeWorld plus the open world's view of its things: taught labels (None for none) and Grok's
+    guesses ({thing: (name, confidence)}) in state_json, as core/auto_name.py adds them."""
+    fw.thing_labels = lambda: dict(labels)
+    state = fw.state_json
+
+    def state_json():
+        st = state()
+        st["entities"] = list(st.get("entities") or []) + [
+            {"name": n, "label": labels.get(n), "status": "VISIBLE"} for n in labels]
+        for e in st["entities"]:
+            if e["name"] in guesses:
+                g, c = guesses[e["name"]]
+                e["guess"] = {"name": g, "also": [], "confidence": c}
+        return st
+
+    fw.state_json = state_json
+    return fw
+
+
+def changed(fw, now):
     a = answer(Intent("CHANGES", None, "what changed"), fw, fw.events, CFG, now=now)
     spoken_ok(a)
-    assert a.text == "The thing I haven't been told about was first seen just now."
+    assert not re.search(r"thing:|unnamed|haven't been told|\d+ other|\(\d+\)", a.text), a.text
+    return a.text
 
 
-def test_changes_in_a_busy_room_name_a_few_and_count_the_rest():
-    # the rig's room had hundreds of unnamed things: the spoken answer ran to 21,000 characters
-    fw = FakeWorld([Entity("keys", "target", Status.VISIBLE, pos_cm=(10.0, 10.0))])
+def test_changes_leave_out_a_thing_with_no_name_and_no_guess():
+    fw = _things(FakeWorld([Entity("keys", "target", Status.VISIBLE, pos_cm=(10.0, 10.0))]), {"thing:4": None}, {})
     now = time.time()
-    for i in range(400):
+    fw.events.add(Event(t=1.0, wall=now - 120, obj="thing:4", type="APPEARED", to_cm=(40.0, 30.0)))
+    fw.events.add(Event(t=2.0, wall=now - 60, obj="thing:4", type="MOVED", to_cm=(45.0, 30.0)))
+    assert changed(fw, now) == "Nothing I can name has changed in the last 10 minutes."
+
+
+def test_changes_say_what_a_thing_looks_like_and_skip_a_weak_guess():
+    fw = _things(FakeWorld([]), {"thing:4": None, "thing:5": None},
+                 {"thing:4": ("pill bottle", 0.8), "thing:5": ("cable", 0.3)})
+    now = time.time()
+    for i, n in enumerate(("thing:4", "thing:5")):
+        fw.events.add(Event(t=float(i), wall=now - 120 + i, obj=n, type="APPEARED", to_cm=(40.0, 30.0)))
+    assert changed(fw, now) == "Something that looks like a pill bottle was first seen 2 minutes ago."
+
+
+def test_changes_leave_out_a_young_thing_no_hand_touched():
+    # identity flicker births a thing every few seconds: seen under YOUNG_S and untouched is noise;
+    # picked up, it isn't
+    fw = _things(FakeWorld([]), {"thing:4": None, "thing:5": None},
+                 {"thing:4": ("mug", 0.9), "thing:5": ("apple", 0.9)})
+    now = time.time()
+    fw.events.add(Event(t=1.0, wall=now - 10, obj="thing:4", type="APPEARED", to_cm=(40.0, 30.0)))
+    fw.events.add(Event(t=2.0, wall=now - 8, obj="thing:5", type="APPEARED", to_cm=(20.0, 30.0)))
+    fw.events.add(Event(t=3.0, wall=now - 4, obj="thing:5", type="PICKED_UP"))
+    assert changed(fw, now) == "Something that looks like an apple was picked up just now."
+
+
+def test_changes_named_things_come_before_guesses():
+    fw = _things(FakeWorld([Entity("keys", "target", Status.VISIBLE, pos_cm=(10.0, 10.0))]),
+                 {"thing:1": "charger", "thing:4": None}, {"thing:4": ("glasses", 0.7)})
+    now = time.time()
+    fw.events.add(Event(t=1.0, wall=now - 200, obj="keys", type="MOVED"))
+    fw.events.add(Event(t=2.0, wall=now - 100, obj="thing:1", type="PICKED_UP"))
+    fw.events.add(Event(t=3.0, wall=now - 50, obj="thing:4", type="PICKED_UP"))
+    assert changed(fw, now) == ("The charger was picked up 2 minutes ago. The keys were moved 3 minutes ago. "
+                                "Something that looks like glasses was picked up 50 seconds ago.")
+
+
+def test_changes_in_a_busy_room_are_short_and_useful():
+    # the rig's room had hundreds of nameless things: the spoken answer ran to 21,000 characters, then
+    # (capped) "The thing I haven't been told about was first seen, then found again... 295 other things"
+    fw = _things(FakeWorld([Entity("keys", "target", Status.VISIBLE, pos_cm=(10.0, 10.0))]),
+                 {f"thing:{i}": None for i in range(300)}, {})
+    now = time.time()
+    for i in range(300):
+        fw.events.add(Event(t=float(i), wall=now - 300 + i * 0.5, obj=f"thing:{i}", type="APPEARED",
+                            to_cm=(40.0, 30.0)))
+        fw.events.add(Event(t=float(i) + 0.1, wall=now - 200 + i * 0.5, obj=f"thing:{i}", type="FOUND"))
+    fw.events.add(Event(t=500.0, wall=now - 1, obj="keys", type="PICKED_UP"))
+    assert changed(fw, now) == "The keys were picked up just now."
+
+
+def test_changes_in_a_busy_room_with_guesses_name_a_few_and_never_count():
+    fw = _things(FakeWorld([Entity("keys", "target", Status.VISIBLE, pos_cm=(10.0, 10.0))]),
+                 {f"thing:{i}": None for i in range(300)}, {"thing:7": ("pill bottle", 0.9), "thing:9": ("mug", 0.8)})
+    now = time.time()
+    for i in range(300):
         fw.events.add(Event(t=float(i), wall=now - 300 + i * 0.5, obj=f"thing:{i}", type="APPEARED",
                             to_cm=(40.0, 30.0)))
     fw.events.add(Event(t=500.0, wall=now - 1, obj="keys", type="PICKED_UP"))
-    a = answer(Intent("CHANGES", None, "what changed"), fw, fw.events, CFG, now=now)
-    spoken_ok(a)
-    assert len(a.text) < 300 and a.text.count("haven't been told about") == 1
-    assert a.text.startswith("The keys were picked up just now.")
-    assert a.text.endswith("399 other things also changed.")
+    text = changed(fw, now)
+    assert text == ("The keys were picked up just now. Something that looks like a mug was first seen "
+                    "5 minutes ago. Something that looks like a pill bottle was first seen 5 minutes ago.")
+    assert len(sentences(text)) <= 3
 
 
-def test_changes_name_other_known_things_before_counting():
-    fw = FakeWorld([Entity(n, "target", Status.VISIBLE, pos_cm=(10.0, 10.0))
-                    for n in ("keys", "wallet", "remote", "phone", "box")])
+def test_changes_name_other_known_things_then_a_few_other_things():
+    fw = _things(FakeWorld([Entity(n, "target", Status.VISIBLE, pos_cm=(10.0, 10.0))
+                            for n in ("keys", "wallet", "remote", "phone", "box")]),
+                 {f"thing:{i}": None for i in range(5)}, {"thing:0": ("mug", 0.9), "thing:1": ("cup", 0.9)})
     now = time.time()
     for i, n in enumerate(("box", "phone", "remote", "wallet", "keys")):
         fw.events.add(Event(t=float(i), wall=now - 60 + i, obj=n, type="MOVED"))
     for i in range(5):
         fw.events.add(Event(t=10.0 + i, wall=now - 100 + i, obj=f"thing:{i}", type="APPEARED",
                             to_cm=(40.0, 30.0)))
-    a = answer(Intent("CHANGES", None, "what changed"), fw, fw.events, CFG, now=now)
-    assert a.text.endswith("The remote, phone, box and 5 other things also changed.")
+    text = changed(fw, now)
+    assert text.endswith("The remote, the phone, the box and a few other things also changed.")
+    assert changed(_things(fw, {}, {}), now).endswith("The remote, the phone and the box also changed.")
+
+
+def test_what_was_i_doing_leaves_out_nameless_things():
+    fw = _things(FakeWorld([Entity("keys", "target", Status.VISIBLE, pos_cm=(10.0, 10.0))]), {"thing:4": None}, {})
+    now = time.time()
+    fw.events.add(Event(t=1.0, wall=now - 60, obj="thing:4", type="MOVED"))
+    a = answer(Intent("WHAT_DOING", None, "what was I doing"), fw, fw.events, CFG, now=now)
+    assert a.text == "I haven't seen anything happen on the table lately."
+
+
+def test_covered_by_a_nameless_thing_is_just_covered_up():
+    fw = _things(FakeWorld([Entity("keys", "target", Status.UNDER, pos_cm=(10.0, 10.0), parent="thing:4")]),
+                 {"thing:4": None}, {})
+    now = time.time()
+    fw.events.add(Event(t=1.0, wall=now - 60, obj="keys", type="COVERED", parent="thing:4"))
+    assert changed(fw, now) == "The keys were covered up a minute ago."
 
 
 def test_teach_intent_never_mentions_taking_pills(w):
