@@ -276,7 +276,7 @@ def test_something_similar_coming_back_is_hedged_and_pointed_at(scene, world):
     assert [n for n, _ in world.get('thing:2').maybe_same_as] == ['thing:1']
     a = ask(world, "where is my charger")
     spoken_ok(a)
-    assert a.text.startswith("Your charger was carried off the left side of the table")
+    assert a.text.startswith("Your charger was carried off the table on your left")
     assert "Something similar came back" in a.text and "it might be yours" in a.text
     assert (a.point_at, a.action) == ('thing:2', 'point')
 

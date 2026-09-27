@@ -50,11 +50,72 @@ def test_clock_format():
 
 
 def test_area():
-    assert area((5, 5), CFG) == "near the top left"
+    assert area((5, 5), CFG) == "at the far left"
     assert area((45, 30), CFG) == "in the middle"
-    assert area((85, 55), CFG) == "near the bottom right"
-    assert area((5, 30), CFG) == "on the left side"
-    assert area((45, 55), CFG) == "near the bottom edge"
+    assert area((85, 55), CFG) == "on your right, near you"
+    assert area((5, 30), CFG) == "on your left"
+    assert area((45, 55), CFG) == "on the side nearest you"
+    assert area((45, 5), CFG) == "on the far side"
+    assert area(None, CFG) == "somewhere on the table"
+
+
+def seat(front):
+    """CFG with a 100 x 60 cm camera table and the user at the camera-frame side front."""
+    return {**CFG, "table": {**CFG["table"], "size_cm": [100, 60]}, "table_area": {"polygon_cm": []},
+            "viewer": {"front": front}}
+
+
+# Camera points: top left, top right, bottom left, bottom right, left middle, top middle, centre.
+CAM = [(5, 5), (90, 5), (5, 55), (95, 55), (5, 30), (50, 5), (50, 30)]
+AREAS = {
+    "bottom": ["at the far left", "at the far right", "on your left, near you", "on your right, near you",
+               "on your left", "on the far side", "in the middle"],
+    "top": ["on your right, near you", "on your left, near you", "at the far right", "at the far left",
+            "on your right", "on the side nearest you", "in the middle"],
+    "right": ["at the far right", "on your right, near you", "at the far left", "on your left, near you",
+              "on the far side", "on your right", "in the middle"],
+    "left": ["on your left, near you", "at the far left", "on your right, near you", "at the far right",
+             "on the side nearest you", "on your left", "in the middle"],
+}
+# Camera edge -> what follows 'carried off', per seat.
+OFF = {
+    "bottom": {"left": "the table on your left", "right": "the table on your right",
+               "top": "the far side of the table", "bottom": "the side of the table nearest you"},
+    "top": {"left": "the table on your right", "right": "the table on your left",
+            "top": "the side of the table nearest you", "bottom": "the far side of the table"},
+    "right": {"left": "the far side of the table", "right": "the side of the table nearest you",
+              "top": "the table on your right", "bottom": "the table on your left"},
+    "left": {"left": "the side of the table nearest you", "right": "the far side of the table",
+             "top": "the table on your left", "bottom": "the table on your right"},
+}
+
+
+@pytest.mark.parametrize("front", AREAS)
+def test_area_is_said_from_the_users_seat(front):
+    assert [area(p, seat(front)) for p in CAM] == AREAS[front]
+
+
+@pytest.mark.parametrize("front,edge", [(f, e) for f in OFF for e in OFF[f]])
+def test_gone_says_the_side_from_the_seat_and_sweeps_the_camera_edge(w, front, edge):
+    w.set("phone", edge=edge)
+    a = answer(Intent("WHERE", "phone", "where is my phone"), w, w.events, seat(front))
+    assert a.text == f"Your phone was carried off {OFF[front][edge]} 2 minutes ago."
+    assert a.action == f"sweep:{edge}"
+
+
+@pytest.mark.parametrize("front", OFF)
+def test_history_and_lost_track_use_the_seat(front):
+    now = time.time()
+    fw = FakeWorld([Entity("phone", "target", Status.GONE, pos_cm=(3.0, 30.0), edge="top", last_seen=now - 60),
+                    Entity("glasses", "target", Status.UNKNOWN, pos_cm=(90.0, 5.0), last_seen=now - 600,
+                           confidence=0.2)])
+    fw.events.add(Event(t=0.0, wall=now - 60, obj="phone", type="EXITED_VIEW", edge="top"))
+    cfg = seat(front)
+    h = answer(Intent("HISTORY", "phone", "what happened to my phone"), fw, fw.events, cfg, now=now).text
+    assert f"carried off {OFF[front]['top']}" in h and "the top side" not in h
+    at = AREAS[front][1]
+    lost = answer(Intent("WHERE", "glasses", "where are my glasses"), fw, fw.events, cfg, now=now).text
+    assert lost == f"I lost track of your glasses. I last saw them {at}{',' if ',' in at else ''} 10 minutes ago."
 
 
 # ---------- WHERE, one per status (demo_world) ----------
@@ -117,14 +178,14 @@ def test_held_without_position():
 def test_gone(w):
     a = ask(w, "WHERE", "phone")
     spoken_ok(a)
-    assert a.text == "Your phone was carried off the left side of the table 2 minutes ago."
+    assert a.text == "Your phone was carried off the table on your left 2 minutes ago."
     assert (a.point_at, a.action) == ("phone", "sweep:left")
 
 
 def test_unknown_lost_track(w):
     a = ask(w, "WHERE", "glasses")
     spoken_ok(a)
-    assert a.text == "I lost track of your glasses. I last saw them near the bottom right 10 minutes ago."
+    assert a.text == "I lost track of your glasses. I last saw them on your right, near you, 10 minutes ago."
     assert (a.point_at, a.action) == ("glasses", "circle")
 
 

@@ -272,7 +272,7 @@ def test_equal_guesses_prefer_the_visible_one_else_both_places_are_said(scene, w
     namer.step()
     namer.step()
     a = ask(world, "where is my mug")                   # both in view: genuinely ambiguous
-    assert a.text == "Two things might be your mug: one is on the right side, the other is in the middle."
+    assert a.text == "Two things might be your mug: one is on your right, the other is in the middle."
     assert a.point_at == "thing:2"                      # the most recently seen of the two
     hide_under_notebook(scene, world, "m1", (40, 30))
     a = ask(world, "where is my mug")
@@ -281,7 +281,7 @@ def test_equal_guesses_prefer_the_visible_one_else_both_places_are_said(scene, w
     scene.run(world, 3.0)
     assert world.get("thing:2").status in (Status.UNKNOWN, Status.UNDER)
     a = ask(world, "where is my mug")
-    assert a.text == ("Two things might be your mug: one was last seen on the right side, "
+    assert a.text == ("Two things might be your mug: one was last seen on your right, "
                       "the other is under the notebook."), a.text
 
 

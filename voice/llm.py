@@ -31,6 +31,7 @@ from core.config import display_name, load_config
 from core.labels import thing_labels
 from core.narration_store import med_claim
 from core.types import Answer, Status
+from core.viewframe import View
 
 log = logging.getLogger(__name__)
 
@@ -50,14 +51,15 @@ Rules:
 - Use only facts from the world state and tool results below. Never guess or invent objects, people, or events.
 - Never say or imply that medication or pills were taken, swallowed, or missed. You can only report where the pill bottle is and when it was picked up, moved, or covered.
 - If an object's confidence is below {plain}, hedge with "probably". If its status is UNKNOWN, say "I lost track of" it and where it was last seen.
-- Status meanings: VISIBLE on the table; HELD in a hand; INSIDE a container (parent); UNDER a cover (parent); GONE left the camera view (edge tells which side); UNKNOWN lost track.
+- Status meanings: VISIBLE on the table; HELD in a hand; INSIDE a container (parent); UNDER a cover (parent); GONE carried off the table (edge tells which side); UNKNOWN lost track.
+- area and edge are from the person's seat: left and right are theirs, near is the side nearest them, far is across the table. Say it that way ("on your left", "the far side").
 - Say object names with spaces (pill bottle, not pill_bottle). Times: say "a minute ago", "about 5 minutes ago", etc.
 - The objects are: {objects}. Things the person named appear by that name; "unnamed object N" is one nobody has named yet (describe it by where it is, not by its number). maybe_same_as lists objects that may be the same physical object.
 - Always finish by calling respond(text, point_at). Set point_at to the object the answer is about when pointing at it helps (for hidden objects, point at the object itself; the laser follows it to its container), otherwise leave it empty.
 - You may call locate, history, or changes_since first, but only if the state below is not enough. Be quick.
 
 Current local time: {now_iso}
-World state (JSON; area = which third of the table, seen_s_ago = seconds since last seen):
+World state (JSON; area = where on the table from the person's seat, seen_s_ago = seconds since last seen):
 {state}"""
 
 
@@ -90,11 +92,7 @@ def _tools(names: list[str]) -> list[dict]:
 # ---------------------------------------------------------------- world -> compact facts
 
 def _area(cfg: dict, pos) -> Optional[str]:
-    if not pos:
-        return None
-    width = float(((cfg.get("table") or {}).get("size_cm") or [90, 60])[0])
-    x = float(pos[0])
-    return "left" if x < width / 3 else ("right" if x > 2 * width / 3 else "middle")
+    return View.from_cfg(cfg).area_word(pos)
 
 
 def _ago(wall: Optional[float], now: float) -> Optional[int]:
@@ -108,6 +106,7 @@ def compact_state(world, cfg: dict) -> list[dict]:
     out = []
     st = world.state_json()
     labels = thing_labels(st)
+    view = View.from_cfg(cfg)
     room = st.get("room") or {}                # spec 0009: entities in a room zone (none when it's off)
     for e in st.get("entities", []):
         d: dict[str, Any] = {"name": labels.get(e["name"], e["name"]), "status": e["status"]}
@@ -126,7 +125,7 @@ def compact_state(world, cfg: dict) -> list[dict]:
         if e.get("candidates"):
             d["candidates"] = [labels.get(c, c) for c in e["candidates"]]
         if e.get("edge"):
-            d["edge"] = e["edge"]
+            d["edge"] = view.edge_word(e["edge"])
         if len(e.get("aliases") or []) > 1:
             d["also_called"] = e["aliases"][1:]
         if e.get("maybe_same_as"):
@@ -138,7 +137,8 @@ def compact_state(world, cfg: dict) -> list[dict]:
     return out
 
 
-def _event_dict(ev, now: float, with_obj: bool, labels: Optional[dict] = None) -> dict:
+def _event_dict(ev, now: float, with_obj: bool, labels: Optional[dict] = None,
+                cfg: Optional[dict] = None) -> dict:
     labels = labels or {}
     d: dict[str, Any] = {}
     if with_obj:
@@ -148,7 +148,7 @@ def _event_dict(ev, now: float, with_obj: bool, labels: Optional[dict] = None) -
     if ev.parent:
         d["parent"] = labels.get(ev.parent, ev.parent)
     if ev.edge:
-        d["edge"] = ev.edge
+        d["edge"] = View.from_cfg(cfg or {}).edge_word(ev.edge)
     if ev.confidence is not None and ev.confidence < 1.0:
         d["confidence"] = round(ev.confidence, 2)
     return d
@@ -202,7 +202,7 @@ class _Tools:
         if e.candidates:
             d["candidates"] = [self._say(c) for c in e.candidates]
         if e.edge:
-            d["edge"] = e.edge
+            d["edge"] = View.from_cfg(self.cfg).edge_word(e.edge)
         if e.last_seen is not None:
             d["seen_s_ago"] = _ago(e.last_seen, time.time())
         return d
@@ -212,7 +212,7 @@ class _Tools:
         n = max(1, min(10, int(limit or 3)))
         now = time.time()
         return {"object": self._say(name),
-                "events": [_event_dict(ev, now, False, self.labels) for ev in self.world.history(name, n)]}
+                "events": [_event_dict(ev, now, False, self.labels, self.cfg) for ev in self.world.history(name, n)]}
 
     def changes_since(self, iso_time: str) -> dict:
         t = _parse_iso(iso_time)
@@ -220,7 +220,7 @@ class _Tools:
         evs = sorted(log_.since(t), key=lambda ev: ev.wall) if log_ is not None else []
         now = time.time()
         return {"since_s_ago": _ago(t, now), "count": len(evs),
-                "events": [_event_dict(ev, now, True, self.labels) for ev in evs[-MAX_EVENTS:]]}
+                "events": [_event_dict(ev, now, True, self.labels, self.cfg) for ev in evs[-MAX_EVENTS:]]}
 
     def call(self, name: str, args: dict) -> dict:
         try:

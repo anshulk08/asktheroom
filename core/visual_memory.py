@@ -390,19 +390,20 @@ def digest(world, cfg: dict) -> dict:
     """What the world model believed when the frame was saved: visible entities by spoken name and
     rough area, and the hidden ones with where they are."""
     from core.config import display_name
+    from core.viewframe import View
     try:
         st = world.state_json()
     except Exception:
         return {}
     labels = st.get("aliases") or {}
-    w = float(((cfg.get("table") or {}).get("size_cm") or [90, 60])[0])
+    view = View.from_cfg(cfg)
     vis, hid = [], []
     for e in st.get("entities", []):
         n = e.get("name", "")
         name = e.get("label") or (labels.get(n) if n.startswith("thing:") else None) or \
             ("unnamed object" if n.startswith("thing:") else display_name(cfg, n))
         pos = e.get("resolved_cm") or e.get("pos_cm")
-        area = None if not pos else ("left" if pos[0] < w / 3 else "right" if pos[0] > 2 * w / 3 else "middle")
+        area = view.area_word(pos)
         if e.get("status") == "VISIBLE":
             vis.append({"name": name, "area": area})
         elif e.get("status") in ("INSIDE", "UNDER") and e.get("parent"):
