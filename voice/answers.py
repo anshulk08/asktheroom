@@ -472,11 +472,14 @@ def _resolve(intent: Intent, world, cfg: dict) -> tuple[Optional[str], list[str]
     if obj is None or not (intent.name or intent.obj):
         return obj, []
     if obj in (cfg.get("objects") or {}):
-        # A configured prop the detector has never labelled (a new camera angle it wasn't trained on)
-        # may still be tracked as an unnamed thing that Grok named: answer through that guess, hedged.
-        if _never_seen(world, obj):
+        # A configured prop the detector doesn't label from this camera (or labels only now and then)
+        # is usually tracked as an unnamed thing that Grok named: while the prop itself is not in view
+        # and not placed in a room zone, a fresh Grok-named match answers, hedged. (Rig, Sat 26 Sep: the
+        # detector caught the wallet once at 0.9, and "where is my wallet" then said "I lost track" from
+        # the prop while the Grok-named wallet sat on the side table.)
+        if not _prop_in_view(world, obj):
             guessed = _prop_guesses(obj, intent, world, cfg)
-            if guessed:
+            if guessed and _guess_beats_prop(world, obj, guessed[0]):
                 return guessed[0], guessed
         return obj, []
     try:
@@ -489,14 +492,25 @@ def _resolve(intent: Intent, world, cfg: dict) -> tuple[Optional[str], list[str]
     return (guessed[0] if guessed else None), guessed
 
 
-def _never_seen(world, obj: str) -> bool:
-    """Never observed on the table and not placed in a room zone (spec 0009)."""
+def _prop_in_view(world, obj: str) -> bool:
+    """The prop entity itself is VISIBLE (on the table or in a room zone) or believed hidden on the table
+    (UNDER / INSIDE / HELD): then it, not a look-alike thing, is the answer."""
     try:
         e = world.get(obj)
-        if e.last_seen is not None or e.status != Status.UNKNOWN:
-            return False
+        if e.status in (Status.VISIBLE, Status.UNDER, Status.INSIDE, Status.HELD):
+            return True
         place = world.place(obj) if hasattr(world, "place") else None
-        return place is None or place.kind != "room"
+        return place is not None and place.kind == "room" and not place.absent
+    except Exception:
+        return True
+
+
+def _guess_beats_prop(world, obj: str, thing: str) -> bool:
+    """A Grok-named thing answers for a prop that is UNKNOWN / GONE only if the thing was seen at least as
+    recently as the prop (never seen: always)."""
+    try:
+        e, t = world.get(obj), world.get(thing)
+        return e.last_seen is None or (t.last_seen or 0.0) >= (e.last_seen or 0.0)
     except Exception:
         return False
 
