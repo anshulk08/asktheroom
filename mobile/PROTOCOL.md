@@ -106,7 +106,7 @@ A 414-byte state snapshot at MTU 185 is 3 chunks: `03 00 00 …179 B`, `03 01 00
 ## 5a. voice settings (write to question)
 
 ```json
-{"voice": {"e": "grok", "v": "ara", "s": 1.1}}
+{"voice": {"e": "grok", "s": 1.1, "v": "ara"}}
 ```
 
 The phone's helper voice settings, written to the **question** characteristic (a write without `q` is not a
@@ -114,7 +114,7 @@ question). The rig's speaker then uses the same voice as the phone would.
 
 | Key | Meaning |
 |---|---|
-| `e` | engine, the app's `Speaker.Engine` raw value: `grok` (default), `rig` ("Same as the rig", ElevenLabs), `builtin` (the iPhone's own voice, which the rig can't make: it uses Piper) |
+| `e` | engine, the app's `Speaker.Engine` raw value: `grok` (default), `rigVoice` ("Same as the rig", ElevenLabs), `builtIn` (the iPhone's own voice, which the rig can't make: it uses Piper) |
 | `v` | the Grok voice id (`eve` when empty) |
 | `s` | speed, 0.7 to 1.5 (clamped) |
 

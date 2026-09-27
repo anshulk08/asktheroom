@@ -486,6 +486,7 @@ def test_voice_settings_are_validated():
     assert V("nonsense", "", "fast") == tts.VoiceChoice("grok", "eve", 1.0)
     assert V("rig", "Rex!!", 9) == tts.VoiceChoice("rig", "rex", 1.5)
     assert V("builtin", None, 0.1).speed == 0.7 and V(speed=float("nan")).speed == 1.0
+    assert V("rigVoice").engine == "rig" and V("builtIn").engine == "builtin"          # the app's raw values
 
 
 def test_grok_failing_falls_back_to_piper(monkeypatch, audio, piper):

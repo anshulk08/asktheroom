@@ -1,8 +1,8 @@
 """Speech out (spec V9): the voice the phone app picked when online (Grok or ElevenLabs), Piper offline.
 
 The voice follows the iPhone app's helper settings (sent over Bluetooth, mobile/PROTOCOL.md): engine
-"grok" (the app's default, voice "eve"), "rig" (ElevenLabs, "Same as the rig" in the app) or "builtin"
-(the iPhone's own voice, which the rig can't make: Piper). TTS.set_voice stores it in data/voice.json.
+grok (the app's default, voice "eve"), rig (the app's rigVoice, "Same as the rig": ElevenLabs) or builtin
+(the app's builtIn, the iPhone's own voice, which the rig can't make: Piper). TTS.set_voice stores it in data/voice.json.
 
 Grok (xAI, checked 2026-09-26): POST https://api.x.ai/v1/tts with Bearer XAI_API_KEY, body {"text",
 "voice_id", "language", "speed" (0.7-1.5), "output_format": {"codec": "pcm", "sample_rate": 24000}}:
@@ -64,7 +64,9 @@ GROK_TTS_URL = "https://api.x.ai/v1/tts"
 GROK_RATE = 24000
 GROK_DEFAULT_VOICE = "eve"  # the iPhone app's default (Speaker.swift Grok.defaultVoice)
 GROK_SPEEDS = (0.7, 1.5)
-ENGINES = ("grok", "rig", "builtin")    # the app's Speaker.Engine raw values
+ENGINES = ("grok", "rig", "builtin")
+# the phone sends its Speaker.Engine raw value (grok | rigVoice | builtIn); older names are taken too
+ENGINE_NAMES = {"grok": "grok", "rigvoice": "rig", "rig": "rig", "builtin": "builtin"}
 VOICE_PATH = "data/voice.json"          # the phone's voice settings (tts.voice_path overrides)
 SPEAKER_CHECK_S = 3.0                   # how long a speaker check is reused (GET /state polls often)
 EXTERNAL_SINK = re.compile(r"^bluez_sink\.|usb", re.I)   # a PulseAudio sink that is a speaker, not the Jetson's own outputs
@@ -346,7 +348,7 @@ class VoiceChoice:
     @classmethod
     def make(cls, engine=None, grok_voice=None, speed=None) -> "VoiceChoice":
         """Validated: an unknown engine is grok, an empty voice the default, speed clamped to GROK_SPEEDS."""
-        e = str(engine or "grok").strip().lower()
+        e = ENGINE_NAMES.get(str(engine or "grok").strip().lower(), "grok")
         v = re.sub(r"[^a-z0-9_-]", "", str(grok_voice or "").strip().lower())[:32]
         try:
             sp = float(speed) if speed is not None else 1.0
@@ -354,7 +356,7 @@ class VoiceChoice:
             sp = 1.0
         if sp != sp:                            # NaN
             sp = 1.0
-        return cls(e if e in ENGINES else "grok", v or GROK_DEFAULT_VOICE,
+        return cls(e, v or GROK_DEFAULT_VOICE,
                    round(min(max(sp, GROK_SPEEDS[0]), GROK_SPEEDS[1]), 2))
 
     @classmethod
