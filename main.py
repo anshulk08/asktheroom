@@ -162,6 +162,8 @@ class Room:
         self.detector, self.hands = detector, hands
         self.room_memory = None                    # core.room.RoomMemory when room_memory.enabled (build)
         self._room_err_t = float("-inf")
+        self.permanence = None                     # core.permanence.Permanence with permanence.mode: registry
+        self.room_rect = None                      # table view rect in full-frame px (open_frames)
         info = getattr(getattr(detector, "backend", None), "info", None)
         if info is not None and isinstance(getattr(world, "perception", None), dict):
             world.perception["model"] = info       # which weights loaded, on /state
@@ -487,6 +489,8 @@ class Room:
                     self.room_memory.reset()
                 except Exception:              # the room must never cost the table
                     log.exception("room memory reset failed; table perception goes on")
+            if self.permanence is not None:    # forget where things are, keep what they look like
+                self.permanence.reset()
             if self.hands is not None:
                 self.hands.reset()
         dets = self.detector.detect(frame)
@@ -496,7 +500,29 @@ class Room:
         events = self.world.update(dets, frame)
         if self.room_memory is not None:
             events = events + self._room_step(frame)
+        if self.permanence is not None:
+            events = events + self._permanence_step(frame, dets)
         return dets, events
+
+    def _permanence_step(self, frame, dets) -> list:
+        """The object registry's slow loop (spec 0011): one view of the native full frame this table frame was
+        cut from, with the table's hands as contact evidence. Never costs table perception."""
+        full_at = getattr(self.frames, "full_at", None)
+        if full_at is None or self.room_rect is None:
+            return []
+        try:
+            from core.permanence import table_to_full
+            full = full_at(frame.t)
+            if full is None:
+                return []
+            hands = [table_to_full(h.box_px, self.room_rect) for h in (dets.hands or [])]
+            return list(self.permanence.step(full.img, full.wall, hands) or [])
+        except Exception:                   # the registry must never cost the table
+            now = time.monotonic()
+            if now - self._room_err_t > 10:
+                log.exception("object registry step failed; table perception goes on")
+                self._room_err_t = now
+            return []
 
     def _room_step(self, frame) -> list:
         """Room memory (spec 0009 M0) on the full camera frame this table frame was cut from. Its errors are
@@ -935,7 +961,7 @@ def open_frames(cfg: dict, camera) -> tuple[object, Optional[tuple[int, int, int
     from core.room_types import RoomConfig
     rc = RoomConfig.from_dict(cfg.get("room_memory"))
     decode_fps = (cfg.get("capture") or {}).get("decode_fps")      # grab every frame, decode only this many
-    if not rc.enabled:
+    if not (rc.enabled or registry_on(cfg)):     # the object registry (spec 0011) needs the full frame too
         return core.capture.FrameBuffer(camera, decode_fps=decode_fps), None
     from core.room_view import TableView, default_rect
     out = tuple(cfg.get("frame_size_px", (1280, 720)))
@@ -949,6 +975,27 @@ def open_frames(cfg: dict, camera) -> tuple[object, Optional[tuple[int, int, int
                                   opener=lambda src: core.capture.open_camera(src, w, h), decode_fps=decode_fps)
     log.info("room memory: camera at %dx%d, table view %s", w, h, list(rect))
     return TableView(fb, rect, out), rect
+
+
+def registry_on(cfg: dict) -> bool:
+    """permanence.mode: registry (spec 0011): the object registry replaces room memory's zone handoff."""
+    return str((cfg.get("permanence") or {}).get("mode", "off")) == "registry"
+
+
+def make_registry(cfg: dict, room, world, detector, events, table, rect):
+    """core.permanence on the detector's already-loaded YOLOE model, attached to the world, with teaching
+    hooked in; None (logged) when it can't start: the table runs without it."""
+    try:
+        from core.permanence import hook_teach, make_permanence
+        p = make_permanence(cfg, world, detector, events, online=lambda: bool(getattr(world, "online", False)))
+        if p is None:
+            log.warning("permanence.mode is registry but the registry didn't start (no re-ID model?)")
+            return None
+        hook_teach(p, world, room.frames, table, rect)
+        return p
+    except Exception:
+        log.exception("object registry failed to start; the table runs without it")
+        return None
 
 
 def make_room_memory(cfg: dict, world, detector, rect):
@@ -1136,15 +1183,22 @@ def build(cfg: dict, fake: bool = False, camera: int = 0, with_voice: bool = Tru
                 clicker=clicker, detector=detector, hands=hands, interpret=interpret)
     cleanup.append(room.indicator.close)
     room.cleanup = cleanup
-    if room_rect is not None:
+    room.room_rect = room_rect
+    if room_rect is not None and registry_on(cfg):     # spec 0011: no zone round-robin, no handoff
+        room.permanence = make_registry(cfg, room, world, detector, events, table, room_rect)
+        if room.permanence is not None:
+            cleanup.append(room.permanence.stop)
+            if visual is not None:
+                visual.room_zones = [(r.name, r.say) for r in room.permanence.places.regions]
+    elif room_rect is not None:
         room.room_memory = make_room_memory(cfg, world, detector, room_rect)
         if room.room_memory is not None:
             cleanup.append(room.room_memory.stop)          # its Grok naming worker
         if room.room_memory is not None and visual is not None:     # room questions: Grok sees the whole view
             visual.room_zones = [(z.name, z.say) for z in room.room_memory.zones.zones.values()]
-        if room.room_enabled:      # 0006 room pointing reads frames.latest(), now the table view (spec 0009 M5)
-            log.error("room pointing (room.enabled) does not work with room_memory yet: room pointing is off")
-            room.room_enabled = False
+    if room_rect is not None and room.room_enabled:   # 0006 room pointing reads frames.latest(), now the table view
+        log.error("room pointing (room.enabled) does not work with room_memory yet: room pointing is off")
+        room.room_enabled = False
     if (cfg.get("care") or {}).get("enabled", True):     # reminders, reports, follow-ups, profile (voice/care.py)
         from voice.care import attach_care
         cleanup.append(attach_care(room, cfg).stop)

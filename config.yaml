@@ -652,3 +652,35 @@ presence:
 # null decodes every frame (the old behaviour).
 capture:
   decode_fps: 20
+
+# Object permanence (spec 0011, core/permanence.py): a registry of the objects that matter (the configured props
+# and taught things), each with reference crops and DINOv2 embeddings (the reid: model, used for the registry
+# only), re-found anywhere in the native full frame by a slow loop over tiles and zoomed zone views, with people
+# as blockers and a closed Grok question at a new spot. States: visible, hidden, carried, last seen, found
+# again. Replaces room memory's zone handoff when on; needs room_memory.capture_size and table_view_rect (the
+# full frame) but not room_memory.enabled. Off by default: the rig runs as before. Thresholds are from offline
+# measurement on rig crops (docs/specs/0011-object-permanence.md), not live tuning.
+permanence:
+  mode: "off"                 # off | registry
+  objects: null               # names registered at start; null = every configured object
+  every_n: 1                  # one view every N perception frames (6 tiles + zone views: ~2 sweeps a second at 15 fps)
+  tiles: [3, 2]               # grid over the native full frame
+  tile_overlap: 0.15
+  zoom: zones                 # zoomed native views: each drawn zone's box ('zones'), or [] or [[x1, y1, x2, y2], ...]
+  # Measured on 4,000 rig room crops (DINOv2-S/14): the same prop at the same spot ~0.85, the same prop elsewhere
+  # as low as 0.1-0.3, clutter at one spot up to 0.9. Appearance keeps an object at its spot; a new spot needs a
+  # new arrival and Grok picking it among numbered marks (set-of-marks).
+  sim_accept: 0.55            # appearance similarity: still the object at its last spot
+  sim_accept_far: 0.88        # ... anywhere else without asking Grok (rare)
+  sim_backstop: 0.35          # an object never seen, or nothing new arrived: its best matches are asked about
+  ask_every_s: 5.0            # a missing object is asked about at most this often
+  refs_dir: data/registry     # <refs_dir>/<name>/*.jpg reference crops (python -m core.permanence enroll ...)
+  hidden_overlap: 0.3         # a person box covering this much of its last spot: hidden, not gone
+  contact_s: 3.0              # a person or hand at it this recently before it went: carried
+  miss_visits: 2              # valid views without it, and ...
+  miss_s: 3.0                 # ... this long unseen: carried or last seen
+  verify_per_minute: 20
+  backstop_s: 180             # carried or last seen this long with nothing new arriving: ask about its best matches (0: off)
+  places: []                  # extra spoken places after the zones: [{name: floor, say: the floor by the doorway, poly: [[x, y], ...]}]
+  table_say: the table
+  hide_unnamed: true          # /state leaves out unnamed things that aren't visible now

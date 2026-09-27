@@ -246,6 +246,7 @@ def _where_room(obj: str, place, cfg: dict, now: float, world=None) -> Answer:
     n, be, It, it, Y = _dn(cfg, obj), _be(pk), _It(pk), _it(pk), _your(cfg, obj)
     say, arrived, last = place.say, place.arrived_wall, place.last_seen_wall
     at = f" at {clock(last)}" if last is not None else ""
+    on = _on(say)
     if place.via and place.via != obj:               # seen only through its outermost container
         pn = _pn(cfg, place.via)
         try:
@@ -253,18 +254,29 @@ def _where_room(obj: str, place, cfg: dict, now: float, world=None) -> Answer:
         except Exception:
             prep = "in"
         if place.fresh:
-            return Answer(f"{Y} {n} {be} {prep} {pn}. {pn[:1].upper()}{pn[1:]} is on {say}.")
-        return Answer(f"{Y} {n} {be} {prep} {pn}, which I last saw on {say}{at}.")
+            return Answer(f"{Y} {n} {be} {prep} {pn}. {pn[:1].upper()}{pn[1:]} is {on}.")
+        return Answer(f"{Y} {n} {be} {prep} {pn}, which I last saw {on}{at}.")
+    state = getattr(place, "state", None)            # the object registry's states (spec 0011)
+    if state == "hidden":
+        return Answer(f"Someone is in front of {Y.lower()} {n} right now. I last saw {it} {on}{at}.")
+    if state == "carried":
+        src = say if say.startswith("near ") else f"from {say}"
+        return Answer(f"Someone picked up {Y.lower()} {n} {src}{at}. I haven't seen where {It.lower()} went yet.")
     if place.absent:
-        return Answer(f"I last saw {Y.lower()} {n} on {say}{at}. I can't see {it} there now.")
+        return Answer(f"I last saw {Y.lower()} {n} {on}{at}. I can't see {it} there now.")
     if not place.fresh:
-        return Answer(f"I last saw {Y.lower()} {n} on {say}{at}.")
-    text = f"{Y} {n} {be} on {say}."
+        return Answer(f"I last saw {Y.lower()} {n} {on}{at}.")
+    text = f"{Y} {n} {be} {on}."
     if place.arrival_observed:
         text += f" {It} appeared there {ago(arrived, now)}."
     elif arrived is not None or last is not None:
         text += f" I've seen {it} there since {clock(arrived if arrived is not None else last)}."
     return Answer(text)
+
+
+def _on(say: str) -> str:
+    """'on the couch', but 'near the couch' as is (the object registry's places, spec 0011)."""
+    return say if say.startswith(("near ", "by ", "in ", "under ")) else f"on {say}"
 
 
 def _tentative(ans: Answer, place, cfg: dict, obj: str) -> Answer:
