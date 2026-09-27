@@ -210,3 +210,34 @@ def test_level_meter_prints_level_and_speech(monkeypatch):
     assert stt.level_meter(s, 1.0, out=lines.append) == 0
     assert lines[0].startswith("input at 48000 Hz") and len(lines) == 4    # 0.5 s lines up to 1 s
     assert "-20.0 dBFS" in lines[1] and "SPEECH" in lines[1]
+
+
+# -- the askroom:audio image: the host PulseAudio through ALSA's pulse plugin (a Bluetooth speaker)
+
+PULSE_DEVICES = [
+    {"name": "NVIDIA Jetson HDA: HDMI 0 (hw:0,3)", "max_input_channels": 0, "max_output_channels": 8,
+     "default_samplerate": 44100.0},
+    {"name": "sysdefault", "max_input_channels": 128, "max_output_channels": 128, "default_samplerate": 48000.0},
+    {"name": "pulse", "max_input_channels": 32, "max_output_channels": 32, "default_samplerate": 44100.0},
+    {"name": "default", "max_input_channels": 32, "max_output_channels": 32, "default_samplerate": 44100.0},
+]
+
+
+@pytest.fixture
+def pulse_sd(monkeypatch, sd):
+    monkeypatch.setattr(sys.modules[__name__], "DEVICES", PULSE_DEVICES)
+    return sd
+
+
+def test_pulse_and_default_are_whole_names_not_sysdefault(pulse_sd, caplog):
+    assert stt.find_input_device("default") == (3, "match", [dict(PULSE_DEVICES[3], index=3)])
+    assert stt.find_input_device("pulse")[:2] == (2, "match")
+    assert stt.find_input_device("Default")[:2] == (3, "match")                # case insensitive
+    assert stt.find_input_device(None)[:2] == (None, "default")                # PortAudio's default: pulse here
+    assert stt.find_input_device("sys")[:2] == (1, "match")
+
+
+def test_the_pulse_plugin_records_16k_directly(pulse_sd):
+    stt._DEVICE_RATE.clear()
+    src = stt.AudioIn(RATE, BLOCK, 2)                    # PulseAudio resamples; no fallback needed
+    assert (src.device_rate, pulse_sd.streams[-1].samplerate) == (RATE, RATE)

@@ -180,3 +180,19 @@ def test_devices_listing(sd, capsys):
     assert "Jabra SPEAK 410" in out and "HDMI" in out
     assert "C920" not in out                                # input-only devices are not listed
     assert "tts.output_device" in out
+
+
+def test_pulse_and_default_outputs_are_whole_names(monkeypatch, sd):
+    """The askroom:audio image (a Bluetooth speaker through the host PulseAudio): PortAudio lists ALSA's
+    sysdefault before default, and a name search for 'default' must not pick it."""
+    devices = [
+        {"name": "NVIDIA Jetson HDA: HDMI 0 (hw:0,3)", "max_output_channels": 8, "default_samplerate": 44100.0},
+        {"name": "sysdefault", "max_output_channels": 128, "default_samplerate": 48000.0},
+        {"name": "pulse", "max_output_channels": 32, "default_samplerate": 44100.0},
+        {"name": "default", "max_output_channels": 32, "default_samplerate": 44100.0},
+    ]
+    monkeypatch.setattr(tts, "output_devices", lambda: [dict(d, index=i) for i, d in enumerate(devices)])
+    assert tts.resolve_output_device("default") == 3
+    assert tts.resolve_output_device("pulse") == 2
+    assert tts.resolve_output_device(None) is None                 # PortAudio's default device: pulse here
+    assert tts.resolve_output_device("HDMI") == 0

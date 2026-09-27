@@ -165,3 +165,55 @@ With Wi-Fi off, repeat step 8 once. Good: the same answers (room places and wher
 network), in Piper's voice. Misheard names still work offline ("wears my wall it" is the wallet). Open
 questions answer "I'm offline". If there is no voice at all offline, Piper's voice file is missing
 (`scripts/get_piper_voice.sh`); the log says so, and `espeak-ng`, if installed, speaks meanwhile.
+
+## 11. Bluetooth speaker via PulseAudio
+
+A Bluetooth speaker isn't an ALSA device the container can open: it lives in the host's PulseAudio. The
+`askroom:audio` image routes ALSA's `default` device to PulseAudio, and `scripts/dock.sh` passes the host's
+socket in (`/run/user/<uid>/pulse/native` plus a copy of the cookie). The speaker is then chosen **on the
+host**, and the rig just plays to `default`.
+
+**Host: pair it and make it the default sink.**
+
+```bash
+bluetoothctl                       # power on / scan on / pair <MAC> / trust <MAC> / connect <MAC>
+pactl list short sinks             # bluez_sink.<MAC>.a2dp_sink (or bluez_output.<MAC>... on PipeWire)
+pactl set-default-sink <that sink>
+pactl info | grep "Default Sink"   # check this again before each judging block: a dropped speaker
+                                   # silently falls back to HDMI
+```
+
+**Container (`askroom:audio`, started with `scripts/dock.sh`):**
+
+```bash
+python -m voice.tts --devices      # shows "pulse" and "default" among the ALSA devices
+python -m voice.tts --say "Your wallet, I think, is on the kitchen counter."
+```
+
+In `config.local.yaml` use `tts.output_device: default` (or leave it null, which is PortAudio's default:
+the same thing here). `pulse` works too. Both are matched as whole names, so `default` is never
+`sysdefault`, which PortAudio lists first and which bypasses PulseAudio. Don't put the speaker's Bluetooth
+name here: the container never sees it.
+
+**The mic with PulseAudio on the host.** The host's PulseAudio also takes over USB sound cards, and then
+opening the mic's `hw:` device from the container fails ("Device or resource busy"). Either record through
+PulseAudio too (`stt.input_device: pulse` or `default`, with the mic picked on the host by
+`pactl set-default-source <alsa_input....>`), or keep the mic out of PulseAudio. Through PulseAudio the rig
+records at 16 kHz directly (PulseAudio resamples). Run the 2 m check (step 4) again after switching.
+
+**Latency and the deadline.** Bluetooth adds about 0.15-0.3 s. The rig's playback deadline (0.1 s per
+character + 3 s) leaves at least 4 s over Piper's measured speaking rate (16-19 characters a second), so a
+Bluetooth speaker never trips it. The deadline only fires on a hung sink, and then the mic reopens.
+
+**Echo.** The rig's stream closes when PulseAudio has taken the last audio, but the Bluetooth speaker plays
+it ~0.3 s later. Start `listen.echo_tail_s` at **0.7** for a Bluetooth speaker and redo the echo check
+(step 6).
+
+**First word cut off.** PulseAudio suspends idle sinks, and many Bluetooth speakers sleep, so the first
+syllable after a quiet minute can be lost. On the host: `pactl unload-module module-suspend-on-idle` (until
+the next PulseAudio restart), and turn off the speaker's own auto-off if it has one. Check it: wait two
+minutes, then `python -m voice.tts --say "Your wallet is on the table."` and listen for "Your".
+
+**One Bluetooth adapter, two jobs.** The phone's BLE bridge (step 9) and the speaker share the Jetson's
+Bluetooth adapter. Test them together: a phone question while the speaker plays an answer. If the audio
+stutters or the phone drops, use a USB speaker for the rig's voice, or the phone alone.
