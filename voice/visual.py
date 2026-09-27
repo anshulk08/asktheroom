@@ -660,6 +660,12 @@ class VisualQA:
         # "Your pill bottle, I think, is on the table, on the wooden table."
         head = re.escape(on.split()[-1])
         where = re.sub(rf"^(?:on|at|in)\s+(?:the\s+|a\s+)?(?:[\w-]+\s+){{0,2}}{head}\b,?\s*", "", where, flags=re.I)
+        # 'middle of the wooden table' (rig 05:50): a part of the place itself is said as 'in the middle'
+        part = re.match(rf"^(?:(?:in|at|on|near)\s+)?(?:the\s+)?(middle|center|centre|edge|corner|end|front|back|far side|near side)"
+                        rf"\s+of\s+(?:the\s+|a\s+)?(?:[\w-]+\s+){{0,2}}{head}\b[.,]?\s*(.*)$", where, flags=re.I)
+        if part:
+            where = (f"{'at' if part.group(1).lower() in ('edge', 'corner', 'end') else 'in'} the {part.group(1).lower()}"
+                     + (f", {part.group(2)}" if part.group(2) else ""))
         if (not where or _conf(d) < self.c.abstain_below or SIDE_WORDS.search(where.lower())
                 or len(where.split()) > 12 or where == PILLS_SAFE.rstrip(".")):
             return None
