@@ -5,7 +5,8 @@ with it, with the rules only (understand.enabled false): Whisper's fillers dropp
 wake word opens the mic (voice.understand.bare_wake) and the next line is the question (Understander.after_wake),
 anything else must pass Understander.screen and the overheard reading. stt.min_speech_ms needs the audio, so it
 isn't replayed. Prints how many of the labelled lines went the right way and every unlabelled line (chatter)
-that was answered or woke the rig. Target: no false line answered, every genuine one answered, every wake
+that was answered or woke the rig. Target: no false line answered (a fragment like "Room that person." may
+open the mic, as the wake word alone), every genuine one answered, every wake
 line opens the mic.
 
     python scripts/eval_wake.py                 # listen.mode wake, as on the rig
@@ -45,13 +46,13 @@ def replay(cfg: dict, sessions: list[dict]) -> list[dict]:
         for e in s["lines"]:
             text = "" if filler_only(e["text"]) else e["text"]
             ack = False
-            if woke and text and bare_wake(text, cfg):   # said again: main.Room._asked listens again (twice at most)
+            if woke and text and (bare_wake(text, cfg) or u.fragment(text)):   # said again: main.Room._asked listens again (twice at most)
                 got = "woke"
             elif woke:                          # main.Room._asked(after_wake=True)
                 woke, got = False, "answered" if text and u.after_wake(text) else "-"
             elif not text:
                 got = "-"
-            elif bare_wake(text, cfg):
+            elif bare_wake(text, cfg) or u.fragment(text):   # main.Room._bare_wake
                 woke, got = True, "woke"
             elif u.screen(text) and u(text, overheard=True).kind != IGNORE:
                 got, ack = "answered", has_wake_word(text, cfg)
@@ -63,7 +64,7 @@ def replay(cfg: dict, sessions: list[dict]) -> list[dict]:
 
 def score(lines: list[dict]) -> dict[str, tuple[int, int]]:
     """label -> (lines that went the right way, lines with that label)."""
-    return {k: (sum(1 for e in lines if e.get("label") == k and e["got"] == want),
+    return {k: (sum(1 for e in lines if e.get("label") == k and (e["got"] == want if k != "false" else e["got"] != "answered")),
                 sum(1 for e in lines if e.get("label") == k)) for k, want in WANT.items()}
 
 
@@ -80,7 +81,8 @@ def main(argv=None) -> int:
     before = sum(1 for e in lines if e.get("answered"))
     now = sum(1 for e in lines if e["got"] == "answered")
     print(f"  answered: {now} (the rig then: {before}); woke: {sum(1 for e in lines if e['got'] == 'woke')}")
-    bad = [e for e in lines if (e.get("label") in WANT and e["got"] != WANT[e["label"]])
+    bad = [e for e in lines if (e.get("label") in WANT and e["got"] != WANT[e["label"]]
+                                and not (e["label"] == "false" and e["got"] == "woke"))
            or (e.get("label") is None and e["got"] != "-")]   # always mode answers real questions without "room"
     for e in bad:
         print(f"  MISS {e.get('label') or 'chatter':8} got {e['got']:8} {e['log']} {e['t']}  {e['text']!r}")

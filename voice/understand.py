@@ -217,6 +217,35 @@ def bare_wake(text: str, cfg: dict) -> bool:
     return False
 
 
+# "Room" opening a fragment with nothing to answer: "Room that person." was answered through Grok in room
+# chatter (rig, 01:09 Sun 27 Sep). Taken as the wake word alone (main.Room._bare_wake): a chime, and the
+# question is listened for. Asking or telling the rig something keeps its answer ("room, describe the couch").
+REQUEST_VERBS = {"describe", "look", "count", "list", "say", "explain", "check", "see", "identify", "spot",
+                 "locate", "read", "help", "guess", "remember", "forget", "repeat", "stop", "give", "call"}
+
+
+def wake_fragment(text: str, cfg: dict, aliases=()) -> bool:
+    """The wake word opens the utterance but what follows is a fragment: no question word, no request or
+    command, no object or taught name, nothing to teach or reset ("Room that person.", "Room, the guy.",
+    "Room over there"). "Room, keys?" and "Room, what changed" are questions."""
+    words = [w for w, _ in _words(text)]
+    for p in _phrases(cfg):
+        i = next((k for k in range(len(words) - len(p) + 1) if words[k:k + len(p)] == p), None)
+        if i is None or not all(w in OPENERS for w in words[:i]):
+            continue
+        rest = words[i + len(p):]
+        while rest and (rest[0] in OPENERS or rest[0] in set(wake_words(cfg))):
+            rest.pop(0)                          # "room, room, ..."
+        if not rest or set(rest) & (ASKS | COMMAND_WORDS | REQUEST_VERBS):
+            return False
+        if rest[0].isdigit() or (len(rest[0]) == 1 and rest[0] not in ("a", "i")):
+            return False                         # "room b", "room 204": a room's name, not the rig's
+        said = " ".join(rest)
+        rules = parse(said, cfg, aliases=aliases)
+        return rules.kind == "OTHER" and rules.obj is None and rules.name is None and not names_object(said, cfg)
+    return False
+
+
 def names_object(text: str, cfg: dict) -> bool:
     return bool(_vocab(cfg)[1].search(normalize(text)))
 
@@ -465,6 +494,11 @@ class Understander:
         blocks); False means IGNORE. The voice loop calls it before starting the thinking cue."""
         with self._lock:
             return self._screen(text)
+
+    def fragment(self, text: str) -> bool:
+        """wake_fragment with the taught names ("room, my charger" names a thing)."""
+        with self._lock:
+            return wake_fragment(text, self.cfg, self._taught())
 
     def after_wake(self, text: str) -> bool:
         """The question after a bare wake word ("Room!" ... "what do you see?"): it needs no wake word of its

@@ -664,9 +664,20 @@ class Room:
         """The wake word on its own ("Room!", "hey room", a misheard "Hey, bro!"): people pause after it, so the
         VAD ends the utterance before the question. Treated like a clicker press: the next thing said is for
         the rig (rig run, Sat 26 Sep: "Room!" then "where is my wallet?" as two utterances, neither answered).
-        voice.understand.bare_wake has the rules."""
+        voice.understand.bare_wake has the rules. So is the wake word opening a fragment with nothing to answer
+        ("Room that person.": Understander.fragment)."""
         from voice.understand import bare_wake
-        return bare_wake(text, self.cfg)
+        if bare_wake(text, self.cfg):
+            return True
+        fragment = getattr(self.interpret, "fragment", None)
+        try:
+            frag = fragment is not None and bool(fragment(text))
+        except Exception:
+            log.exception("fragment() failed")
+            frag = False
+        if frag:
+            log.info("the wake word opened a fragment with no question; taking it as the wake word alone")
+        return frag
 
     def _log_wake(self, text: str, again: bool = False) -> None:
         """Log a bare wake word with the clip's speech span, its length and whether it is the Whisper prompt
