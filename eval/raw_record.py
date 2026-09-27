@@ -5,7 +5,7 @@
 Runs in the Jetson container (scripts/dock.sh: OpenCV with ffmpeg). Writes <out>/video.mp4 (raw
 1280x720 frames, no overlay), <out>/frames.json ({"wall": [...], "t": [...]}: per-frame wall time and
 seconds since the first frame) and <out>/meta.json (camera device and controls, calibration, the
-effective config, models, git commit). <out>/READY appears when the first frame is written, so the
+effective config, models, git commit), the table calibration and its outline. <out>/READY appears when the first frame is written, so the
 driver can start its cues; <out>/STOP ends the recording early.
 """
 from __future__ import annotations
@@ -34,7 +34,12 @@ def meta_for(cfg: dict, device: str, controls: dict, git: str, clock_offset_s: f
         table_cal = json.loads(cal_path.read_text())
     except (OSError, ValueError):
         table_cal = None
-    return {"camera": {"device": device, "controls": controls}, "table_cal": table_cal, "config": cfg,
+    try:                                            # the tabletop outline (core/table_area.py), set with that calibration
+        table_area = json.loads(cal_path.with_name("table_area.json").read_text())
+    except (OSError, ValueError):
+        table_area = None
+    return {"camera": {"device": device, "controls": controls}, "table_cal": table_cal, "table_area": table_area,
+            "config": cfg,
             "git": git, "models": {"detect": (cfg.get("detect") or {}).get("model"),
                                    "proposals": {"kind": kind,
                                                  "model": (p.get(kind) or {}).get("model") if kind else None}},

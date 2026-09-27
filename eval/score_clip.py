@@ -189,7 +189,7 @@ def make_model_free_detector(cfg: dict, table):
 
 
 def prepare_config(clip: Clip, cfg: Optional[dict], workdir: str) -> dict:
-    """The recorded config (or cfg), writing its paths into workdir: table_cal from meta.json, an
+    """The recorded config (or cfg), writing its paths into workdir: table_cal (and the outline) from meta.json, an
     in-memory event log, snapshots in workdir. Re-ID loads up front so every replay is the same."""
     from core.config import load_config
     base = cfg if cfg is not None else (clip.meta.get("config") or load_config())
@@ -197,6 +197,8 @@ def prepare_config(clip: Clip, cfg: Optional[dict], workdir: str) -> dict:
     cal = Path(workdir) / "table_cal.json"
     if clip.meta.get("table_cal"):
         cal.write_text(json.dumps(clip.meta["table_cal"]))
+    if clip.meta.get("table_area"):                  # the outline recorded with it (clips before Sep 26: none)
+        cal.with_name("table_area.json").write_text(json.dumps(clip.meta["table_area"]))
     snaps = Path(workdir) / "snapshots"
     snaps.mkdir(exist_ok=True)
     cfg["paths"] = dict(cfg.get("paths") or {}, table_cal=str(cal), events_db=":memory:", snapshots=str(snaps),
@@ -212,6 +214,7 @@ def replay_clip(clip: Clip, cfg: Optional[dict] = None, detector=None, max_fps: 
     """Every frame the live perception loop would have taken, through Room.perceive; truth.commands and
     truth.questions through Room.ask at their t. Returns what the world believed after each frame."""
     import core.table
+    import core.table_area
     from core.embed import make_embedder
     from core.events import EventLog
     from core.hands import HandTracker
@@ -223,6 +226,7 @@ def replay_clip(clip: Clip, cfg: Optional[dict] = None, detector=None, max_fps: 
     with tempfile.TemporaryDirectory(prefix="askroom_clip_") as tmp:
         cfg = prepare_config(clip, cfg, tmp)
         core.table.apply_saved_size(cfg)            # one-tag mode: the saved tracked area (main.build)
+        core.table_area.apply_saved_area(cfg)       # the tabletop outline recorded with the clip (main.build)
         table = core.table.Table(cfg)
         events = EventLog(":memory:", cfg["paths"]["snapshots"])
         try:
