@@ -743,7 +743,7 @@ def test_bridge_questions_are_spoken_and_aimed():
 
     responded = []
     room = SimpleNamespace(ask=lambda text, source: Answer("ok", point_at="keys", action="point"),
-                           respond=responded.append, _phone_qs=__import__("collections").deque())
+                           respond=lambda ans, text=None: responded.append(ans), _phone_qs=__import__("collections").deque())
     main.Room.ask_and_act(room, "where are my keys?", seen[0])
     assert responded, f"source {seen[0]!r} is answered as text only"
 

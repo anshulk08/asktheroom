@@ -758,6 +758,10 @@ def test_with_aim_cue_point_only_a_question_that_asks_to_point_moves_the_laser(t
         _, aim = room.respond(room.ask(q, "voice"), q)
         aim.join(2)
     assert aimed == ["wallet"] * 4
+    for q in ("don't point at my wallet", "stop pointing at the wallet", "never point at people"):
+        _, aim = room.respond(room.ask(q, "voice"), q)
+        aim.join(2)
+    assert len(aimed) == 4                                             # WS8: a negated request never aims
     _, aim = room.respond(room.ask("point to my wallet", "voice"))       # no question (proactive): no laser
     aim.join(2)
     assert len(aimed) == 4

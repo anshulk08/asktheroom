@@ -96,11 +96,16 @@ SHOW = re.compile(r"\b(?:show|point|pointing|light up|highlight|shine|flash|aim|
 # 'point it out', 'show me X', 'where is X, point to it'. Matched on normalize()d text.
 POINT_CUE = re.compile(r"\bpoint(?:ing)?\s+(?:to|at|out|towards?)\b|\bpoint\s+(?:it|them|that|those)\s+out\b"
                        r"|\bshow\s+me\b")
+# 'don't point at my keys', 'stop pointing at the remote', 'never point at people': never a cue (fails closed:
+# 'no, point to the remote' doesn't aim either)
+NO_POINT = re.compile(r"\b(?:dont|do not|never|stop|no|quit|cease|not)\b")
 
 
 def asks_to_point(text: str) -> bool:
-    """The question asks for the laser ('point to the remote', 'show me my keys'), not just where."""
-    return bool(POINT_CUE.search(normalize(text or "")))
+    """The question asks for the laser ('point to the remote', 'show me my keys'), not just where, and says no
+    negation or stop word anywhere."""
+    t = normalize(text or "")
+    return bool(POINT_CUE.search(t)) and not NO_POINT.search(t)
 
 
 GENERAL = re.compile(r"\b(?:anything|something|everything|stuff|things|what happened"
