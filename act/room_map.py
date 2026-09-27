@@ -179,7 +179,7 @@ def sweep(laser, grid: tuple[int, int] = (20, 15), n_pairs: int = 2, refine: boo
             raise SweepAborted("person in view")
         laser.move_to(p, t, duration_s=0.1)
         laser.clock.sleep(laser.settle_s)
-        d = laser.find_dot_px(n_pairs)
+        d = laser.find_dot_px(n_pairs, src=getattr(laser, "px_source", None))
         f = laser.last_frames[1]
         if f is not None and f.img is not None:
             size = (f.img.shape[1], f.img.shape[0])
@@ -296,14 +296,18 @@ def _sim_main(args: argparse.Namespace) -> int:
     return 0
 
 
-def _real_rig(cfg: dict, camera: int):
-    """Actuator + camera for a sweep on the rig (no table needed)."""
+def _real_rig(cfg: dict, camera):
+    """Actuator + camera for a sweep on the rig (no table needed), opened as the app opens it: with room
+    memory on, the full camera frame (room_memory.capture_size, 2560x1440 on the rig), so the map is in the
+    full-frame px room aims use. Returns (laser, the frames the dot is looked for in)."""
     from act.actuator import make_actuator
-    from act.laser import Laser
-    from core.capture import FrameBuffer
-    frames = FrameBuffer(camera)
+    from act.laser import FullFrames, Laser
+    from main import open_frames
+    frames, rect = open_frames(cfg, camera)
     laser = Laser(make_actuator(cfg), frames, None, "", cfg=cfg)  # type: ignore[arg-type]
-    return laser, frames
+    if rect is not None:
+        laser.px_frames = FullFrames(frames)
+    return laser, laser.px_source
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -318,7 +322,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--b-cm", type=float, default=3.0, help="--sim: pivot offset from the lens")
     ap.add_argument("--aims", type=int, default=20)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--camera", type=int, default=0, help="--sweep: camera index")
+    ap.add_argument("--camera", help="--sweep: camera index or /dev/v4l/by-id path (default: as main.py)")
     ap.add_argument("--room-is-clear", action="store_true",
                     help="--sweep without a person detector (OpenCV 5): you checked nobody is in view")
     ap.add_argument("--out", help="where to write the map (default: config room_map)")
@@ -332,7 +336,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     room = cfg.get("room") or {}
     path = args.out or cfg.get("room_map", "room_map.json")
     if args.sweep:
-        laser, frames = _real_rig(cfg, args.camera)
+        from main import camera_source, default_camera
+        laser, frames = _real_rig(cfg, camera_source(args.camera) if args.camera else default_camera(cfg))
         clear_s = float(room.get("person_clear_s", 5))
         last = [time.monotonic() - clear_s]
         if people_boxes_hog(np.zeros((128, 64, 3), np.uint8)) is None and not args.room_is_clear:

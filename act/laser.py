@@ -260,6 +260,25 @@ def _in_box(p, box, shrink: float = 0.2) -> bool:
     return x1 + mx <= p[0] <= x2 - mx and y1 + my <= p[1] <= y2 - my
 
 
+class FullFrames:
+    """The full camera frames behind a core.room_view.TableView (latest_full / full_at) as a FrameSource: room
+    pointing (aim_px, the dot sweep) works in full-frame px, while table aims keep the table view."""
+
+    def __init__(self, view):
+        self.view = view
+
+    def latest(self) -> Optional[Frame]:
+        return self.view.latest_full()
+
+    def at(self, t: float) -> Optional[Frame]:
+        return self.view.full_at(t)
+
+    def stop(self) -> None:
+        stop = getattr(self.view, "stop", None)
+        if stop is not None:
+            stop()
+
+
 class Laser:
     """Points the laser at table positions. Holds act.lock (if any) for each high-level action."""
 
@@ -284,6 +303,7 @@ class Laser:
         self.table_size = tuple((cfg.get("table") or {}).get("size_cm", (90, 60)))
         room = cfg.get("room") or {}
         self.room_map = None            # act.room_map.RoomMap, set by the caller (main.py) when enabled
+        self.px_frames: Optional[FrameSource] = None   # room pointing's frames (FullFrames); None: self.frames
         self.room_n_pairs = int(room.get("n_pairs", 3))
         self.tol_px = float(room.get("tol_px", 12))
         self.deadband_us = float(room.get("deadband_us", 8))
@@ -346,7 +366,12 @@ class Laser:
         else:
             self.act.move(pan, tilt, duration_s=duration_s)
 
-    def _grab(self, on: bool) -> Optional[Frame]:
+    @property
+    def px_source(self) -> FrameSource:
+        """Where room pointing looks for the dot: the full camera frame when the app runs a table view."""
+        return self.px_frames if self.px_frames is not None else self.frames
+
+    def _grab(self, on: bool, src: Optional[FrameSource] = None) -> Optional[Frame]:
         """Switch the laser, then return the first frame captured after the switch + camera latency.
         Frame.t is stamped when the frame leaves the pipeline, which lags the scene by ~2-3 frames,
         so a fixed short sleep would return a frame that still shows the old laser state."""
@@ -354,7 +379,7 @@ class Laser:
         t_cmd = self.clock.now()
         deadline = t_cmd + self.latency_s + self.frame_timeout_s
         while True:
-            f = self.frames.latest()
+            f = (src or self.frames).latest()
             if f is not None and f.t > t_cmd + self.latency_s:
                 return f
             if self.clock.now() > deadline:
@@ -365,18 +390,19 @@ class Laser:
     # -- spec API
     def find_dot_px(self, n_pairs: int = 1, gate: bool = True,
                     roi: Optional[tuple[int, int, int, int]] = None,
-                    unique: bool = False) -> Optional[tuple[float, float]]:
+                    unique: bool = False, src: Optional[FrameSource] = None) -> Optional[tuple[float, float]]:
         """Blink the laser n_pairs times and return the dot in image px (None if not seen). Laser ends on.
         The pairs' scores are averaged, which lifts a dim far dot out of sensor noise (SNR ~ sqrt(n));
         the threshold drops by sqrt(n) to keep the false-alarm rate. gate: pick the brightest
         dot-shaped blob instead of the largest one. roi: (x0, y0, x1, y1) px; only look inside it.
         unique (with gate): None unless exactly one dot-shaped blob shows (faint specks under half the
-        brightest one's peak don't count)."""
+        brightest one's peak don't count). src: the frames to look in (default self.frames, the table view;
+        room pointing passes px_source, the full frame)."""
         with self._locked():
             acc, n, off, on = None, 0, None, None
             for _ in range(max(1, n_pairs)):
-                off = self._grab(False)
-                on = self._grab(True)
+                off = self._grab(False) if src is None else self._grab(False, src)
+                on = self._grab(True) if src is None else self._grab(True, src)
                 if on is None:
                     break
                 if off is not None:
@@ -532,7 +558,7 @@ class Laser:
             self.move_to(*cmd)
             for i in range(self.max_tries):
                 self.clock.sleep(self.settle_s)
-                d = self.find_dot_px(pairs)
+                d = self.find_dot_px(pairs, src=self.px_source)
                 n += 1
                 if d is None:
                     dot, misses = None, misses + 1

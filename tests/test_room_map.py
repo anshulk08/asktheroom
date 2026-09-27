@@ -237,6 +237,7 @@ def room_main(tmp_path, monkeypatch):
     room = main.Room(cfg, demo_world(events), events, None, rig.frames, laser,
                      lambda text, source: Answer("x"))
     room.laser_timeout_s = 60
+    room._people_now = lambda img: []           # a person detector that sees nobody (this OpenCV may have no HOG)
     return room, rig, Answer
 
 
@@ -308,3 +309,68 @@ def test_visual_point_off_the_table_becomes_a_room_action():
 def tempfile_dir():
     import tempfile
     return tempfile.mkdtemp(prefix="askroom_room_")
+
+
+# ----- room pointing on the room build (WS10): safety gates, routing from place(), the on-time cap
+
+def test_a_person_near_the_target_or_the_beam_refuses_the_aim(room_main):
+    room, rig, Answer = room_main
+    t = center(rig.box_px("table"))
+    n = len(rig.act.calls)
+    room._people_now = lambda img: [(t[0] + 30, t[1] - 200, t[0] + 120, t[1] + 20)]    # someone beside it
+    room.aim(Answer("x", action=f"room:{t[0]:.0f},{t[1]:.0f}"))
+    assert len(rig.act.calls) == n and room.world.laser["on"] is False
+
+
+def test_no_person_detector_able_to_look_means_no_aim(room_main):
+    room, rig, Answer = room_main
+    t = center(rig.box_px("table"))
+    n = len(rig.act.calls)
+    room._people_now = lambda img: None
+    room.aim(Answer("x", action=f"room:{t[0]:.0f},{t[1]:.0f}"))
+    assert len(rig.act.calls) == n and room.world.laser["on"] is False
+
+
+def test_a_point_at_an_object_with_a_full_frame_box_is_a_room_aim_at_its_centre(room_main):
+    from types import SimpleNamespace
+    room, rig, Answer = room_main
+    b = rig.box_px("table")
+    room.world.place = lambda name: SimpleNamespace(kind="room", box_px=b, pos_cm=None, via=name)
+    room.aim(Answer("Your keys are on the side table.", point_at="keys"))
+    assert room.world.laser["on"] is True and room.world.laser["target"] == "keys"
+    assert dist(rig.true_dot_px(), center(b)) < 13
+
+
+def test_hand_boxes_in_the_table_view_are_mapped_into_the_full_frame(room_main):
+    room, _, _ = room_main
+    room.view_rect = (0, 980, 817, 1440)                               # the rig's table view in 2560x1440
+    assert room._view_to_full((0, 0)) == (0, 980)
+    assert room._view_to_full((1280, 720)) == pytest.approx((817, 1440))
+
+
+def test_no_aim_stays_on_longer_than_max_on_s(room_main):
+    room, rig, Answer = room_main
+    room.max_on_s, room.room_dwell_s = 0.2, 30
+    t = center(rig.box_px("table"))
+    room.aim(Answer("x", action=f"room:{t[0]:.0f},{t[1]:.0f}"))
+    assert room.world.laser["on"] is True
+    assert wait_for(lambda: room.world.laser["on"] is False, 1.5) and rig.act.laser_on is False
+
+
+def test_people_are_looked_for_on_the_perception_thread(room_main):
+    """YOLOE isn't thread-safe: the aim asks, the perception thread runs the model on the newest full frame."""
+    import threading
+    room, _, _ = room_main
+    seen = []
+
+    class Prop:
+        def people(self, img):
+            seen.append(threading.current_thread().name)
+            return [(1, 2, 3, 4)]
+
+    room.detector = type("D", (), {"proposer": Prop()})()
+    del room._people_now                                 # the real one
+    t = threading.Thread(target=lambda: [room._people_want.wait(2), room._serve_people()], name="perception")
+    t.start()
+    assert room._people_now(None) == [(1, 2, 3, 4)] and seen == ["perception"]
+    t.join(2)

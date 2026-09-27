@@ -662,6 +662,23 @@ class YOLOEProposer:
     def reset(self) -> None:
         pass
 
+    def people(self, img: np.ndarray) -> list[BoxPx]:
+        """Person boxes (people, hands, arms, and what they wear next to them) in img px: the room laser's
+        safety gate (main.Room). Same model, so call it on the thread that runs propose()."""
+        c = self.cfg
+        kw = dict(imgsz=c.imgsz, conf=c.conf, iou=c.iou, agnostic_nms=True, max_det=c.max_det, verbose=False)
+        if c.half:
+            kw['half'] = True
+        r = self.model.predict(img, **kw)[0]
+        names = getattr(r, 'names', None) or getattr(self.model, 'names', {}) or {}
+        xyxy, conf, cls = _np(r.boxes.xyxy), _np(r.boxes.conf), _np(r.boxes.cls)
+        label = [str(names.get(int(k), '')).lower() for k in cls]
+        people = [tuple(float(v) for v in b) for b, s, n in zip(xyxy, conf, label) if s >= c.conf and n in PEOPLE]
+        g = c.worn_near_px
+        people += [tuple(float(v) for v in b) for b, s, n in zip(xyxy, conf, label) if s >= c.conf and n in WORN
+                   and any(geom.intersection((b[0] - g, b[1] - g, b[2] + g, b[3] + g), p) for p in people)]
+        return [tuple(int(round(v)) for v in b) for b in people]
+
     def propose(self, img: Optional[np.ndarray], known: list[BoxPx], hands: list[BoxPx]) -> list[Proposal]:
         if img is None:
             return []

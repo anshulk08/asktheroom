@@ -182,6 +182,15 @@ class Room:
         self.room_hand_s = float(room.get("hand_recent_s", 2))
         self.room_person_check = bool(room.get("person_check", True))
         self._hand_boxes: deque = deque(maxlen=64)   # (monotonic t, box_px): recent hands block room aims
+        lr = cfg.get("laser_room") or {}
+        self.person_margin_px = float(lr.get("person_margin_px", 60))   # full-frame px around a person or hand
+        self.people_wait_s = float(lr.get("people_wait_s", 1.0))        # the perception thread's person look
+        self.max_on_s = float(lr.get("max_on_s", 4.0))                  # the laser is never on longer, any aim
+        self.view_rect: Optional[tuple] = None     # the table view's rect in the full frame (room memory on)
+        self.fw, self.fh = (float(v) for v in cfg.get("frame_size_px", (1280, 720)))    # the table view's size
+        self._people_want = threading.Event()      # an aim asks the perception thread for person boxes ...
+        self._people_done = threading.Event()
+        self._people: Optional[list] = None        # ... full-frame px, or None: no person detector there
         n8n = cfg.get("n8n") or {}
         self.webhook_url = str(n8n.get("webhook_url") or "")
         self.webhook_token = str(n8n.get("token") or "")
@@ -323,6 +332,12 @@ class Room:
                     self.world.laser = dict(self.laser.state)
                     self._schedule_off(min(self.laser_timeout_s, self.room_dwell_s))
                     return None
+                elif ans.point_at is not None and (target := self._room_target(ans.point_at)) is not None:
+                    if not self._aim_room_px(*target, name=ans.point_at):
+                        return None
+                    self.world.laser = dict(self.laser.state)
+                    self._schedule_off(min(self.laser_timeout_s, self.room_dwell_s))
+                    return None
                 else:
                     if ans.point_at is None and ans.target_cm is not None:   # visual Q&A: a raw table spot
                         pos, chain = tuple(ans.target_cm), ["table"]
@@ -340,20 +355,92 @@ class Room:
                              ">".join(chain), f", err {err:.1f} cm" if err is not None else "")
             except (RuntimeError, ValueError) as ex:
                 log.warning("laser not aimed: %s", ex)
+                self._safe_off()
                 return None
             except Exception:
                 log.exception("laser failed")
+                self._safe_off()
                 return None
             self.world.laser = dict(self.laser.state)
             self._schedule_off()
         return err
 
     def _aim_room(self, action: str) -> bool:
-        """'room:u,v' or 'room:u,v,x1,y1,x2,y2' (image px, optional object box): the gates, then
-        Laser.aim_px (spec 0006). True if the dot is on target; otherwise the laser is off."""
-        from act.room_map import beam_blocked, people_boxes_hog
+        """'room:u,v' or 'room:u,v,x1,y1,x2,y2' (image px, optional object box): _aim_room_px."""
         v = [float(x) for x in action.split(":", 1)[1].split(",")]
-        uv, box = (v[0], v[1]), (tuple(v[2:6]) if len(v) >= 6 else None)
+        return self._aim_room_px((v[0], v[1]), tuple(v[2:6]) if len(v) >= 6 else None)
+
+    def _room_target(self, name: str) -> Optional[tuple]:
+        """(uv, box) in full-frame px to point at `name` through the room map, or None for the table path.
+        A place with a full-frame box (a room zone, or the permanence registry) is aimed at its box centre.
+        A table place goes through the room map too when there is no table laser fit: its table cm, mapped
+        into the table view and then into the full frame (one calibration for the whole room)."""
+        rm = getattr(self.laser, "room_map", None)
+        place_fn = getattr(self.world, "place", None)
+        if not self.room_enabled or rm is None or place_fn is None:
+            return None
+        try:
+            p = place_fn(name)
+        except Exception:
+            log.exception("place(%s) failed; table laser path", name)
+            return None
+        box = getattr(p, "box_px", None)
+        if box is not None:
+            box = tuple(float(v) for v in box)
+            return ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2), box
+        pos = getattr(p, "pos_cm", None)
+        if getattr(p, "kind", None) != "table" or pos is None or getattr(self.laser, "fit", None) is not None:
+            return None
+        try:
+            ent = self.world.get(getattr(p, "via", name))
+            pts = [pos] + ([[ent.box_cm[0], ent.box_cm[1]], [ent.box_cm[2], ent.box_cm[3]]] if ent.box_cm else [])
+            px = [self._view_to_full(tuple(q)) for q in np.asarray(self.table.cm_to_px(pts), dtype=float)]
+        except Exception:
+            log.exception("mapping %s's table spot into the full frame failed", name)
+            return None
+        box = (min(px[1][0], px[2][0]), min(px[1][1], px[2][1]), max(px[1][0], px[2][0]),
+               max(px[1][1], px[2][1])) if len(px) == 3 else None
+        return px[0], box
+
+    def _view_to_full(self, pt) -> tuple:
+        """A table-view px point into full-frame px (identity without room memory: the view is the frame)."""
+        if self.view_rect is None:
+            return float(pt[0]), float(pt[1])
+        x1, y1, x2, y2 = self.view_rect
+        return x1 + pt[0] * (x2 - x1) / self.fw, y1 + pt[1] * (y2 - y1) / self.fh
+
+    def _full_frame(self):
+        latest_full = getattr(self.frames, "latest_full", None)
+        return latest_full() if latest_full is not None else (self.frames.latest() if self.frames is not None else None)
+
+    def _serve_people(self) -> None:
+        """On the perception thread (YOLOE isn't thread-safe): person boxes on the newest full frame."""
+        self._people_want.clear()
+        people = None
+        try:
+            prop = getattr(self.detector, "proposer", None)
+            f = self._full_frame()
+            if prop is not None and hasattr(prop, "people") and f is not None and f.img is not None:
+                people = prop.people(f.img)
+        except Exception:
+            log.exception("person check failed")
+        self._people = people
+        self._people_done.set()
+
+    def _people_now(self, img) -> Optional[list]:
+        """Person boxes (full-frame px) for an aim: the perception thread's YOLOE when it answers within
+        people_wait_s, else OpenCV HOG on this frame; None when neither can look."""
+        from act.room_map import people_boxes_hog
+        self._people, self._people_done = None, threading.Event()
+        self._people_want.set()
+        if self._people_done.wait(self.people_wait_s) and self._people is not None:
+            return list(self._people)
+        return people_boxes_hog(img) if img is not None else None
+
+    def _aim_room_px(self, uv, box=None, name: Optional[str] = None) -> bool:
+        """The gates (zone, a person or hand near the target or the beam), then Laser.aim_px (spec 0006) in
+        full-frame px. True if the dot is on target; otherwise the laser is off."""
+        from act.room_map import beam_blocked
         rm = getattr(self.laser, "room_map", None)
         why = None
         if not self.room_enabled or rm is None:
@@ -362,23 +449,29 @@ class Room:
             why = f"({uv[0]:.0f}, {uv[1]:.0f}) is outside every room zone"
         else:
             now = time.monotonic()
-            blockers = [b for t, b in list(self._hand_boxes) if now - t <= self.room_hand_s]
-            f = self.frames.latest() if self.frames is not None else None
+            blockers = []
+            for t, b in list(self._hand_boxes):      # table-view px -> full frame
+                if now - t <= self.room_hand_s:
+                    (ax, ay), (bx, by) = self._view_to_full(b[:2]), self._view_to_full(b[2:])
+                    blockers.append((ax, ay, bx, by))
+            f = self._full_frame()
             if f is not None and f.img is not None and (f.img.shape[1], f.img.shape[0]) != rm.size_px:
                 why = f"the room map was recorded at {rm.size_px[0]}x{rm.size_px[1]}; sweep again"
-            elif self.room_person_check and f is not None and f.img is not None:
-                people = people_boxes_hog(f.img)
+            elif self.room_person_check:
+                people = self._people_now(f.img if f is not None else None)
                 if people is None:
-                    log.warning("no person detector in this OpenCV; room aim gated by hands and zones only")
+                    why = "no person detector could look (never aimed blind)"
                 blockers += people or []
-            if why is None and beam_blocked(uv, box, blockers, self.room_head_px):
-                why = "a person or hand is in the way"
+            if why is None and beam_blocked(uv, box, blockers, self.room_head_px, self.person_margin_px):
+                why = "a person or hand is near the target or the beam"
         if why is not None:
             log.info("room aim refused: %s", why)
             return False
         r = self.laser.aim_px(uv, box)
-        log.info("laser -> room px (%.0f, %.0f): %s after %d tries, err %.1f px", uv[0], uv[1], r.reason,
-                 r.tries, r.err_px)
+        log.info("laser -> %sroom px (%.0f, %.0f): %s after %d tries, err %.1f px", f"{name} at " if name else "",
+                 uv[0], uv[1], r.reason, r.tries, r.err_px)
+        if r.on_target and name:
+            self.laser.state["target"] = name
         if not r.on_target:                   # never leave the dot somewhere it wasn't confirmed
             self.laser.off()
             self.world.laser = dict(OFF)
@@ -403,9 +496,19 @@ class Room:
                     log.exception("laser off failed")
                 self.world.laser = dict(OFF)
 
-        self._off_timer = threading.Timer(self.laser_timeout_s if timeout_s is None else timeout_s, off)
+        t = min(self.laser_timeout_s if timeout_s is None else timeout_s, self.max_on_s)   # never longer
+        self._off_timer = threading.Timer(t, off)
         self._off_timer.daemon = True
         self._off_timer.start()
+
+    def _safe_off(self) -> None:
+        """The laser off after a failed aim, whatever failed (never left on where it wasn't confirmed)."""
+        try:
+            if self.laser is not None:
+                self.laser.off()
+        except Exception:
+            log.exception("laser off failed")
+        self.world.laser = dict(OFF)
 
     def recalibrate(self, timeout_s: Optional[float] = None) -> bool:
         """Refit the table frame from fresh frames. One-tag mode averages the tag over table_tag.frames
@@ -547,6 +650,8 @@ class Room:
                 continue
             n += 1
             now = self._perceived_t = time.monotonic()
+            if self._people_want.is_set():
+                self._serve_people()
             if now - t_win >= 2.0:
                 self.world.fps = round(n / (now - t_win), 1)
                 n, t_win = 0, now
@@ -1066,6 +1171,10 @@ def make_laser(cfg: dict, frames, table):
                     "(or serial/bus) in config.local.yaml")
     laser = act.laser.Laser(actuator, frames, table, cfg["paths"]["laser_cal"], cfg=cfg)
     laser.disabled = why
+    try:
+        laser.off()                                     # off at startup, whatever the switch was left at
+    except Exception:
+        log.exception("laser off at startup failed")
     if why is not None:
         pass                                            # make_actuator_or_fake logged it
     elif laser.fit is None:
@@ -1211,9 +1320,10 @@ def build(cfg: dict, fake: bool = False, camera: int = 0, with_voice: bool = Tru
             cleanup.append(room.room_memory.stop)          # its Grok naming worker
         if room.room_memory is not None and visual is not None:     # room questions: Grok sees the whole view
             visual.room_zones = [(z.name, z.say) for z in room.room_memory.zones.zones.values()]
-        if room.room_enabled:      # 0006 room pointing reads frames.latest(), now the table view (spec 0009 M5)
-            log.error("room pointing (room.enabled) does not work with room_memory yet: room pointing is off")
-            room.room_enabled = False
+        room.view_rect = tuple(room_rect)
+        if laser is not None and not fake:     # room pointing (0006) looks for the dot in the full frame
+            from act.laser import FullFrames
+            laser.px_frames = FullFrames(frames)
     if (cfg.get("care") or {}).get("enabled", True):     # reminders, reports, follow-ups, profile (voice/care.py)
         from voice.care import attach_care
         cleanup.append(attach_care(room, cfg).stop)
