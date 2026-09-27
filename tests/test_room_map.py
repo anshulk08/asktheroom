@@ -470,3 +470,11 @@ def test_a_laser_beside_the_lens_checks_the_target_with_a_wider_margin(room_main
     assert room._unsafe(t, None) is None
     room.room_head_px = "ceiling"
     assert "neither" in room._unsafe(t, None)
+
+
+def test_the_sweep_moves_between_points_dark():
+    rig = RoomRig(b_cm=3.0, seed=6)
+    laser = rig.make_laser()
+    t0 = rig.clock.now()
+    sweep(laser, grid=(6, 4), n_pairs=1)
+    assert lit_moves(rig.act, t0) == [] and rig.act.laser_on is False

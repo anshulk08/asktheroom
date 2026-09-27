@@ -177,6 +177,7 @@ def sweep(laser, grid: tuple[int, int] = (20, 15), n_pairs: int = 2, refine: boo
         nonlocal size
         if stop is not None and stop():
             raise SweepAborted("person in view")
+        laser.act.laser(False)                   # every move dark: the last look left the laser on
         laser.move_to(p, t, duration_s=0.1)
         laser.clock.sleep(laser.settle_s)
         d = laser.find_dot_px(n_pairs, src=getattr(laser, "px_source", None))
