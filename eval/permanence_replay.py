@@ -231,8 +231,12 @@ def main(argv=None) -> int:
             if o.state == UNKNOWN:
                 continue
             born.setdefault(o.name, t)
-            zone = o.zone if o.zone and ":" not in o.zone else None
-            e = {"id": o.name, "state": TRACK_STATE.get(o.state, "unknown"), "zone": zone, "place": o.say,
+            # a drawn zone or the table; 'near the couch' is the couch; elsewhere (the floor, a side of the
+            # room) no zone and no place, so the scorer never reads a made-up zone as a handoff
+            zone = (o.zone.split(":", 1)[1] if o.zone and o.zone.startswith("near:") else
+                    o.zone if o.zone and ":" not in o.zone else None)
+            e = {"id": o.name, "state": TRACK_STATE.get(o.state, "unknown"), "zone": zone,
+                 "place": o.say if zone else None,
                  "table_cm": to_cm(o.box) if zone == "table" else None}
             if o.state == HIDDEN:
                 e["hidden_in"] = "occluded"
