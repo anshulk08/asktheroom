@@ -23,7 +23,9 @@ actuator: pca9685            # the committed default is fake, which never moves 
 # demo:
 #   hold_notices: true
 # Mic and speaker at chest height near the judge (docs/runbooks/room-voice.md), by part of the device name:
+# (python -m voice.stt --devices / python -m voice.tts --devices list them; pick a part only that device has,
+# not "USB Audio", which the Brio, a USB mic and a USB speaker all share)
 # stt:
-#   input_device: "USB PnP"
+#   input_device: "<part of your mic's name>"
 # tts:
-#   output_device: "USB Audio"
+#   output_device: "<part of your speaker's name>"

@@ -280,7 +280,9 @@ n8n:
 
 listen:
   mode: always                # always: answer what's meant for the rig | wake: only "room, ..." | click: clicker only
-  wake_words: [room]          # also lets overheard speech reset or ask open questions ("room, reset")
+  wake_words: [room, ask the room]   # also lets overheard speech reset or ask open questions ("room, reset",
+                              # "ask the room, reset"; the wake word must open a reset). Room demo: see
+                              # config.local.yaml.example
   idle_s: 8                   # reopen the mic after this long with nobody talking
   echo_tail_s: 0.4            # keep the mic shut this long after the rig stops speaking
 
