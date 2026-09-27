@@ -73,7 +73,7 @@ def things(rm):
 # ---------------------------------------------------------------- 1. hot cadence
 
 def test_hot_mode_visits_a_zone_every_frame_while_a_handoff_is_open():
-    rm, backend, world = make(zones=(SHELF, COUCH))
+    rm, backend, world = make(zones=(SHELF, COUCH), room_every_n_hot=1)
     for i in range(1, 16):
         rm.step(frame(i))
     assert len(backend.shapes) == 3 and [v.frame_idx for v in world.visits] == [5, 10, 15]
@@ -96,11 +96,21 @@ def test_hot_cadence_is_configurable():
     assert len(backend.shapes) == 5 and [v.frame_idx for v in world.visits] == [2, 4, 6, 8, 10]
 
 
-def test_hot_defaults_to_every_frame_and_is_in_config_yaml(monkeypatch):
+def test_hot_defaults_to_every_second_frame_and_is_in_config_yaml(monkeypatch):
+    """Every frame halved the table's fps on the rig (a foot at the table edge kept it hot for 2 min):
+    every second frame, for hot_max_s only, with a dwell gate (core/room_world.room_hot)."""
     monkeypatch.setenv("ASKROOM_NO_LOCAL_CONFIG", "1")
-    assert RoomConfig().room_every_n_hot == 1
+    assert RoomConfig().room_every_n_hot == 2
     rc = RoomConfig.from_dict(load_config().get("room_memory"))
-    assert rc.room_every_n_hot == 1 and rc.names_per_minute == 60 and rc.confirm_visits_arrival == 1
+    assert (rc.room_every_n_hot, rc.names_per_minute, rc.confirm_visits_arrival) == (2, 60, 1)
+    assert (rc.hot_max_s, rc.handoff_min_dwell_s) == (30.0, 4.0)
+
+
+def test_hot_is_never_slower_than_cold():
+    rm, backend, world = make(world=HintWorld([REMOTE]), room_every_n=1, room_every_n_hot=2)
+    for i in range(1, 5):
+        rm.step(frame(i))
+    assert len(backend.shapes) == 4
 
 
 def test_a_world_that_cannot_say_keeps_the_cold_cadence():

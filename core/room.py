@@ -456,7 +456,8 @@ class RoomMemory:
         if not names or full is None or full.img is None:
             return out
         hints = self._hints(full.t)
-        every = self.cfg.room_every_n_hot if hints else self.cfg.room_every_n
+        every = (min(self.cfg.room_every_n_hot, self.cfg.room_every_n) if self._hot(full.t, hints)
+                 else self.cfg.room_every_n)          # hot is never slower than cold
         if self._since < max(1, int(every)):
             return out
         self._since = 0
@@ -584,6 +585,17 @@ class RoomMemory:
                         tr.name_asked = True
                         self.namer.submit(tr, img, hints)
         return visit
+
+    def _hot(self, t: float, hints: Optional[list]) -> bool:
+        """The fast cadence: the world's room_hot (a named departure within hot_max_s), else hints non-empty
+        for a world without it."""
+        fn = getattr(self.world, "room_hot", None)
+        if callable(fn):
+            try:
+                return bool(fn(t))
+            except Exception:
+                log.debug("room_hot failed", exc_info=True)
+        return bool(hints)
 
     def _hints(self, t: float) -> Optional[list]:
         """Grok names of things that left the table and could still be handed off, or None when the world
