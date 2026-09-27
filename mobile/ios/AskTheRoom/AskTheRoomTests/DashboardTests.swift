@@ -6,8 +6,9 @@ final class DashboardTests: XCTestCase {
 
     func testThingsAreTargetsAndNamedUnknowns() {
         let names = Dashboard.things(in: sample).map(\.name)
-        // In sight first, with the room's guesses (thing:11, thing:12); never-seen props (glasses) left out.
-        XCTAssertEqual(names, ["keys", "pill_bottle", "wallet", "remote", "thing:7", "thing:11", "thing:12", "phone"])
+        // Every configured object as a fixed tile (box and notebook too), a named thing, then the room's guesses.
+        XCTAssertEqual(names, ["keys", "box", "pill_bottle", "notebook", "wallet", "phone", "glasses", "remote",
+                               "thing:7", "thing:11", "thing:12"])
     }
 
     func testWhereaboutsInPlainWords() {

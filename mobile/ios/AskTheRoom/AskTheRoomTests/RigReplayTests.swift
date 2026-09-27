@@ -238,17 +238,24 @@ final class RigReplayTests: XCTestCase {
         XCTAssertEqual(store.activity.map(\.text), ["What looks like a coffee mug appeared on the table"])
     }
 
-    /// Home's "Your things" with the rig's real data: the things in sight with the room's guesses,
-    /// never the eight configured props it has never seen ("Can't see it right now" x 8 read as broken).
-    func testHomeListsTheGuessedThingsInSightAndNotNeverSeenProps() throws {
+    /// Home's "Your things" with the rig's real data: the 8 fixed demo tiles, then the things in sight with
+    /// the room's guesses; no status line on a tile the rig can't see, a short place on one it can.
+    func testHomeShowsTheFixedTilesThenGuessesAndNoStatusForUnseen() throws {
         for payload in try payloads() { try deliver(payload) }
         let snapshot = try XCTUnwrap(store.snapshot)
         let home = Dashboard.things(in: snapshot)
-        XCTAssertEqual(Set(home.map(\.name)), ["thing:50", "thing:51", "thing:52", "thing:53", "thing:54", "thing:56", "thing:57"])
-        XCTAssertFalse(home.contains { $0.name == "keys" })
+        XCTAssertEqual(Array(home.map(\.name).prefix(8)),
+                       ["keys", "pill_bottle", "wallet", "glasses", "phone", "remote", "box", "notebook"])
+        XCTAssertEqual(Set(home.map(\.name).dropFirst(8)),
+                       ["thing:50", "thing:51", "thing:52", "thing:53", "thing:54", "thing:56", "thing:57"])
+        for prop in home.prefix(8) { XCTAssertNil(Dashboard.tileLine(prop, in: snapshot), prop.name) }
         let remote = try XCTUnwrap(home.first { $0.name == "thing:50" })
         XCTAssertEqual(remote.displayName, "remote control?")
+        XCTAssertEqual(Dashboard.tileLine(remote, in: snapshot), "On the table")
+        XCTAssertEqual(Dashboard.tileLine(try XCTUnwrap(home.first { $0.name == "thing:54" }), in: snapshot),
+                       "On the side table")
         XCTAssertEqual(Dashboard.question(for: remote), "Where is the remote control?")
+        XCTAssertEqual(Dashboard.question(for: home[0]), "Where are my keys?")
     }
 
     // MARK: Helpers

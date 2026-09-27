@@ -84,15 +84,20 @@ enum Dashboard {
     static let activityLimit = 50
     static let recentHour: TimeInterval = 60 * 60
 
-    /// Home's "Your things": targets, unknown objects someone has named, and things in sight the room
-    /// has a guess for ("remote control?"), in sight first. Containers and covers are furniture here;
-    /// they show up in "where" words instead. A configured prop the room has never seen is left out:
-    /// eight "Can't see it right now" tiles read as broken (rig, 27 Sep 06:40).
+    /// Home's "Your things": the demo's fixed tiles (every configured object, in config order, seen or
+    /// not), things someone has named, then the things in sight the room has a guess for ("remote
+    /// control?"). The user asked for the fixed tiles back, 27 Sep 06:55.
     static func things(in snapshot: Snapshot) -> [Entity] {
-        let shown = snapshot.entities.filter { (isTheirs($0) || isGuessedInSight($0)) && !neverSeen($0) }
-        return shown.enumerated()
-            .sorted { (inSight($0.element) ? 0 : 1, $0.offset) < (inSight($1.element) ? 0 : 1, $1.offset) }
-            .map(\.element)
+        snapshot.entities.filter { !$0.isThing || ($0.kind == .target && $0.hasTaughtName) || isGuessedInSight($0) }
+    }
+
+    /// The one line under a Home tile: where it is, only while the rig has it in sight ("On the table",
+    /// "Inside the box", "On the couch"); nothing for a thing it can't see now (no "Can't see it", no
+    /// "Last seen …").
+    static func tileLine(_ e: Entity, in snapshot: Snapshot) -> String? {
+        if sightingWhereabouts(e, in: snapshot) != nil { return whereabouts(e, in: snapshot) }
+        if e.zone != nil && e.zone != "table" { return e.presence == .lastSeen ? nil : whereabouts(e, in: snapshot) }
+        return inSight(e) ? whereabouts(e, in: snapshot) : nil
     }
 
     /// A thing the room only has a guess for, somewhere it can be shown now.
@@ -102,11 +107,6 @@ enum Dashboard {
 
     static func inSight(_ e: Entity) -> Bool {
         [.visible, .held, .inside, .under].contains(e.status)
-    }
-
-    /// A configured prop with no sighting at all yet.
-    static func neverSeen(_ e: Entity) -> Bool {
-        !e.isThing && e.status == .lost && e.lastSeen == nil && e.zone == nil
     }
 
     /// Something the person owns and named: "your keys", never "your tape roll" from Grok.

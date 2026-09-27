@@ -179,7 +179,6 @@ private struct ThingTile: View {
     /// Grows with the text so big icons stay inside their circle.
     @ScaledMetric(relativeTo: .title2) private var well: CGFloat = 44
 
-    private var isAway: Bool { [.gone, .lost].contains(thing.status) }
     private var isHidden: Bool { [.inside, .under, .held].contains(thing.status) }
 
     var body: some View {
@@ -190,8 +189,8 @@ private struct ThingTile: View {
                         .frame(width: well, height: well)
                         .background(Circle().fill(Theme.iconWell))
                     Spacer()
-                    if isHidden || isAway {
-                        Image(systemName: isAway ? "questionmark.circle" : "eye.slash")
+                    if isHidden {
+                        Image(systemName: "eye.slash")
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -199,14 +198,11 @@ private struct ThingTile: View {
                     .font(.title3.bold())
                     .foregroundStyle(.primary)
                     .lineLimit(2)
-                Text(Dashboard.whereabouts(thing, in: snapshot))
-                    .font(.body)
-                    .foregroundStyle(.primary)
-                    .fixedSize(horizontal: false, vertical: true)
-                if let seen = Dashboard.lastSeen(thing, now: snapshot.time ?? Date()) {
-                    Text(seen)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                if let line = Dashboard.tileLine(thing, in: snapshot) {      // only while it's in sight
+                    Text(line)
+                        .font(.body)
+                        .foregroundStyle(.primary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .multilineTextAlignment(.leading)
