@@ -114,6 +114,26 @@ Rules:
 - confidence: 0 to 1.
 Reply with the JSON object only."""
 
+# A question about the room around the table (with room memory on, spec 0009): its words, or a drawn zone's.
+ROOM_Q = re.compile(r"\b(?:room|couch|sofa|shelf|bookshelf|bed|floor|chair|dresser|counter|cabinet|windowsill"
+                    r"|around|anywhere|elsewhere|in here)\b")
+
+ROOM_SYSTEM = """You answer spoken questions about a room seen by one camera mounted high in it, looking down at an angle. Image 1 is the camera's whole view right now: a table near the middle and parts of the room around it. The text names the areas of the room the rig knows (for example "the couch") and what an object tracker believes about known objects, including ones it saw moved off the table into those areas.
+
+Rules:
+- Answer in one or two short spoken sentences: plain words, no lists, no coordinates, no markdown.
+- Say where things are using the named areas or plain room words ("on the couch", "on the floor by the table"), never positions in the image.
+- Say only what you can see or what the tracker states. If you can't tell, say so and set confidence below 0.5. Small things far from the camera are hard to see: don't guess.
+- Don't describe people beyond "someone"; never guess who they are.
+- Never state or imply that medication was taken, swallowed, skipped or missed.
+- confidence: 0 to 1.
+Reply with the JSON object only."""
+
+ROOM_SCHEMA = {
+    "type": "object", "additionalProperties": False, "required": ["answer", "confidence"],
+    "properties": {"answer": {"type": "string"}, "confidence": {"type": "number"}},
+}
+
 LOOK_SCHEMA = {
     "type": "object", "additionalProperties": False, "required": ["answer", "confidence", "mark", "point"],
     "properties": {
@@ -433,6 +453,7 @@ class VisualQA:
         self._calls: deque = deque()
         self.last: Optional[dict] = None
         self.grok_check = None          # core.grok_check.GrokCheck when on (main.build sets it)
+        self.room_zones: Optional[list] = None   # [(name, spoken)] when room memory is on (main.build): room look
 
     # -- the VLM call
 
@@ -499,7 +520,9 @@ class VisualQA:
                 s = f"{spoken}: {d['status'].lower()}"
                 if d.get("parent"):
                     s += f" ({names.get(d['parent'], d['parent'])})"
-                if d.get("area"):
+                if d.get("room_zone"):
+                    s += f", in {d['room_zone']}" + (" (not seen there now)" if d.get("not_seen_there_now") else "")
+                elif d.get("area"):
                     s += f", {d['area']} of the table"
                 rows.append(s)
             return "; ".join(rows) or "nothing tracked"
@@ -507,6 +530,55 @@ class VisualQA:
             return "unavailable"
 
     # -- A: the table now
+
+    def _room_frame(self):
+        """The camera's whole view when room memory is on (TableView.latest_full), else None."""
+        full = getattr(self.frames, "latest_full", None)
+        if full is None or not getattr(self, "room_zones", None):
+            return None
+        try:
+            return full()
+        except Exception:
+            log.debug("full frame unavailable", exc_info=True)
+            return None
+
+    def _about_room(self, t: str) -> bool:
+        """Whether a question (t normalized) is about the room around the table: room words, or a drawn
+        zone's name or spoken name. Only with room memory on (a full frame to look at)."""
+        if getattr(self.frames, "latest_full", None) is None or not getattr(self, "room_zones", None):
+            return False
+        from voice.intents import normalize
+        if ROOM_Q.search(t):
+            return True
+        low = f" {t} "
+        for name, say in self.room_zones:
+            for w in (name.replace("_", " "), say):
+                w = normalize(w)
+                w = re.sub(r"^(?:the|a|an) ", "", w)
+                if w and re.search(rf"\b{re.escape(w)}\b", low):
+                    return True
+        return False
+
+    def look_room(self, question: str) -> Answer:
+        """A question about the room: Grok gets the camera's whole view, the zone names and the tracker's
+        beliefs. Spoken only: the laser never aims off the table from this."""
+        f = self._room_frame()
+        if f is None or getattr(f, "img", None) is None:
+            return Answer("I can't see the room right now.")
+        img, _ = _jpeg(f.img, self.c.look_px)
+        zones = ", ".join(say for _, say in self.room_zones)
+        parts: list = [("text", "Image 1: the camera's whole view of the room now."), ("image", img),
+                       ("text", f"Areas the rig knows: {zones}.\nTracker: {self._state_text()}.\n"
+                                f"Question: {question}")]
+        try:
+            d = self._vlm(ROOM_SYSTEM, parts, ROOM_SCHEMA)
+        except (ProviderError, NarrationError) as ex:
+            log.warning("room look failed: %s", ex)
+            return Answer("Sorry, I couldn't look at the room just now.")
+        text = _spoken(_unmark(str(d.get("answer") or "")))
+        if not text or _conf(d) < self.c.abstain_below:
+            return Answer(ABSTAIN)
+        return Answer(text)
 
     def look(self, question: str, intent: Optional[Intent] = None) -> Answer:
         obs = self._observe(question, intent)
@@ -803,9 +875,12 @@ class VisualQA:
         t = normalize(text)
         past = bool(PAST.search(t))
         if k == "OTHER":
-            if not self._about_table(intent, t):
+            if not past and self._about_room(t):
+                how = "room"
+            elif not self._about_table(intent, t):
                 return None
-            how = "recall" if past else "look"
+            else:
+                how = "recall" if past else "look"
         elif k in ("WHERE", "HISTORY", "HANDLED") and (intent.name or intent.obj):
             try:
                 target = _target(intent, self.world, self.cfg)
@@ -833,6 +908,8 @@ class VisualQA:
             return None
         if how == "pick":
             return self.pick(text, said[0])
+        if how == "room":
+            return self.look_room(text)
         return self.look(text, intent) if how == "look" else self.recall(text)
 
     def _sighting(self, ent: Optional[str] = None, said: Optional[str] = None) -> Optional[Answer]:
@@ -883,8 +960,9 @@ class VisualQA:
         arch = self.archive.store.stats() if self.archive is not None else None
         return {"enabled": True, "provider": self.provider.name, "model": self.provider.model,
                 "archive": arch,
-                "disclosure": (f"Visual questions are on: the current camera frame of the table and, for "
-                               f"questions about earlier, up to {self.c.recall_frames} saved frames are sent to "
+                "disclosure": (f"Visual questions are on: the current camera frame of the table"
+                               f"{', the whole room view for questions about the room' if self._room_frame() is not None else ''}"
+                               f" and, for questions about earlier, up to {self.c.recall_frames} saved frames are sent to "
                                f"{self.provider.name} ({self.provider.model}). Saved frames stay on this "
                                f"device for {self.c.keep_h:g} h.")}
 
