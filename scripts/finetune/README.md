@@ -2,6 +2,9 @@
 
 ## Fast path (no hand labelling)
 
+**Room demo (Brio in the corner):** follow `docs/corner_retrain.md` instead: `capture.py --room table` captures
+exactly what the room build's detector sees, and the go/no-go runs on the Mac.
+
 Labels come from background subtraction: each object lies **alone** on the empty table, so what changed
 is that object (`bglabel.py`). YOLO-World isn't used (it scored the wallet 0.00 and glasses <0.2 from
 overhead). `synthesize.py` then pastes the cutouts into multi-object, occluded, hand-over-object scenes
