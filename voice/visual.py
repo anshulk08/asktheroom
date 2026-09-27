@@ -117,6 +117,8 @@ Reply with the JSON object only."""
 # A question about the room around the table (with room memory on, spec 0009): its words, or a drawn zone's.
 ROOM_Q = re.compile(r"\b(?:room|couch|sofa|shelf|bookshelf|bed|floor|chair|dresser|counter|cabinet|windowsill"
                     r"|around|anywhere|elsewhere|in here)\b")
+# With room memory on the whole room is the default view; a question that says "table" keeps the table look.
+TABLE_Q = re.compile(r"\b(?:table|desk)\b")
 
 ROOM_SYSTEM = """You answer spoken questions about a room seen by one camera mounted high in it, looking down at an angle. Image 1 is the camera's whole view right now: a table near the middle and parts of the room around it. The text names the areas of the room the rig knows (for example "the couch") and what an object tracker believes about known objects, including ones it saw moved off the table into those areas.
 
@@ -542,12 +544,18 @@ class VisualQA:
             log.debug("full frame unavailable", exc_info=True)
             return None
 
+    def _room_on(self) -> bool:
+        """Room memory is on: a full frame to look at and the drawn zones."""
+        return getattr(self.frames, "latest_full", None) is not None and bool(getattr(self, "room_zones", None))
+
     def _about_room(self, t: str) -> bool:
         """Whether a question (t normalized) is about the room around the table: room words, or a drawn
-        zone's name or spoken name. Only with room memory on (a full frame to look at)."""
-        if getattr(self.frames, "latest_full", None) is None or not getattr(self, "room_zones", None):
+        zone's name or spoken name. Only with room memory on (a full frame to look at). The wake word
+        ("room, what's on the table?") is not a room word."""
+        if not self._room_on():
             return False
-        from voice.intents import normalize
+        from voice.intents import _without_wake_word, normalize
+        t = _without_wake_word(t, self.cfg)
         if ROOM_Q.search(t):
             return True
         low = f" {t} "
@@ -558,6 +566,11 @@ class VisualQA:
                 if w and re.search(rf"\b{re.escape(w)}\b", low):
                     return True
         return False
+
+    def _room_default(self, t: str) -> bool:
+        """With room memory on, a question the camera answers looks at the whole room unless it says
+        "table" (and names no zone: "the side table" is the room). t normalized."""
+        return self._room_on() and (self._about_room(t) or not TABLE_Q.search(t))
 
     def look_room(self, question: str) -> Answer:
         """A question about the room: Grok gets the camera's whole view, the zone names and the tracker's
@@ -613,12 +626,16 @@ class VisualQA:
         """'Where is my red mug?' for a name the world doesn't know: Grok only says which mark shows it and
         what it is; the world model says where (the WHERE template). A picked unnamed thing keeps the
         name, so the next question needs no Grok call. No marks to pick from: the full look. Pointing is
-        verified like look()'s: an entity that moved or merged during the call is not pointed at."""
+        verified like look()'s: an entity that moved or merged during the call is not pointed at.
+        With room memory on, a thing not picked on the table (or no marks there) is looked for in the
+        whole room, unless the question says "table"."""
+        from voice.intents import normalize
+        room = self._room_default(normalize(question))
         ob = self._observe(question, None)
         if ob is None:
-            return Answer(CANT_SEE)
+            return self.look_room(question) if room else Answer(CANT_SEE)
         if not ob.marks:
-            return self.look(question)
+            return self.look_room(question) if room else self.look(question)
         names = dict(ob.names)
         full, _ = _jpeg(draw_marks(ob.img, [mk.box_px for mk in ob.marks]), self.c.look_px)
         listed = ", ".join(f"{i} = {names.get(mk.name) or 'unnamed object'}" for i, mk in enumerate(ob.marks, 1))
@@ -629,7 +646,10 @@ class VisualQA:
             log.warning("pick failed: %s", ex)
             return Answer("Sorry, I couldn't look at the table just now.")
         m, conf = d.get("mark"), _conf(d)
-        if not (isinstance(m, int) and not isinstance(m, bool) and 1 <= m <= len(ob.marks)):
+        picked = isinstance(m, int) and not isinstance(m, bool) and 1 <= m <= len(ob.marks)
+        if room and (not picked or conf < self.c.abstain_below):
+            return self.look_room(question)
+        if not picked:
             return Answer(f"I can't see your {said} on the table right now." if conf >= self.c.abstain_below
                           else ABSTAIN)
         if conf < self.c.abstain_below:
@@ -879,8 +899,12 @@ class VisualQA:
                 how = "room"
             elif not self._about_table(intent, t):
                 return None
+            elif past:
+                how = "recall"
+            elif intent.obj or intent.name or not self._room_default(t):
+                how = "look"            # "table" said, or a tracked prop named: the table look and its close-ups
             else:
-                how = "recall" if past else "look"
+                how = "room"            # "what do you see?" with room memory on: the whole room
         elif k in ("WHERE", "HISTORY", "HANDLED") and (intent.name or intent.obj):
             try:
                 target = _target(intent, self.world, self.cfg)
@@ -961,7 +985,7 @@ class VisualQA:
         return {"enabled": True, "provider": self.provider.name, "model": self.provider.model,
                 "archive": arch,
                 "disclosure": (f"Visual questions are on: the current camera frame of the table"
-                               f"{', the whole room view for questions about the room' if self._room_frame() is not None else ''}"
+                               f"{', the whole room view (the default view for questions with room memory on)' if self._room_frame() is not None else ''}"
                                f" and, for questions about earlier, up to {self.c.recall_frames} saved frames are sent to "
                                f"{self.provider.name} ({self.provider.model}). Saved frames stay on this "
                                f"device for {self.c.keep_h:g} h.")}
