@@ -14,15 +14,19 @@
     VISIBLE: C.visible, HELD: C.held, INSIDE: C.hidden, UNDER: C.hidden, GONE: C.gone, UNKNOWN: C.gone,
   };
 
-  // Open-world things go by their taught name, or "unnamed object 7", never "thing:7" (core/labels.py).
+  // Open-world things go by their taught name, else Grok's guess ("mug?"), else "something new"; never
+  // "thing:7" or its number. A name two things share gets " (2)", " (3)" (core/labels.py).
   let thingNames = new Map(); // thing:N (merged ids too) -> name, from the latest state
   const nice = (n) => thingNames.get(n) ||
-    (n || "").replace(/^thing:(\d+)$/, "unnamed object $1").replace(/^hand:(\d+)$/, "hand $1").replace(/_/g, " ");
+    (n || "").replace(/^thing:\d+$/, "something new").replace(/^hand:(\d+)$/, "hand $1").replace(/_/g, " ");
   function learnNames(state) {
-    const m = new Map();
+    const m = new Map(), taken = new Map();
     for (const e of state.entities || []) {
-      if (String(e.name).indexOf("thing:") === 0) m.set(e.name, e.label || (String(e.name).replace(/^thing:/, "unnamed object ")
-        + (e.guess && e.guess.name ? " (" + e.guess.name + "?)" : "")));
+      if (String(e.name).indexOf("thing:") !== 0) continue;
+      const label = e.label || (e.guess && e.guess.name ? e.guess.name + "?" : "something new");
+      const k = (taken.get(label.toLowerCase()) || 0) + 1;
+      taken.set(label.toLowerCase(), k);
+      m.set(e.name, k === 1 ? label : label + " (" + k + ")");
     }
     const merged = state.merged || {};
     for (const old of Object.keys(merged)) {

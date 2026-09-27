@@ -217,13 +217,13 @@ def _hms(wall: float) -> str:
 
 def _name(obj: Optional[str], names: Optional[dict], cfg: Optional[dict] = None) -> str:
     """How an entity is written for the VLM: its display name or taught alias; an unnamed thing is
-    'unnamed object' (never a thing:N id)."""
+    'something new' (never a thing:N id or its number)."""
     if obj is None:
         return "something"
     if names and obj in names:
-        return names[obj] or "unnamed object"
+        return names[obj] or "something new"
     if obj.startswith("thing:"):
-        return "unnamed object"
+        return "something new"
     return display_name(cfg or {}, obj)
 
 
