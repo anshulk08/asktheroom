@@ -18,6 +18,20 @@ create_app(cfg, world, events, frames=None, ask_fn=None, table=None, care=None) 
                          view {"front", "table", "m", "outline"}
   POST /sms              Twilio webhook (signature checked, whitelist only)
 
+Demo view (WS9, the filmed page; everything is drawn in the browser, the rig only serves JSON and JPEGs):
+  GET  /demo             the page (server/web/demo.html, demo.js, demo.css)
+  GET  /demo/meta        what the page needs to draw on the camera frame: the image it polls and its size,
+                         "cm_to_img" (3x3 homography table cm -> that image's px), the table view rect, the drawn
+                         zones (full-frame px) and the viewer frame
+  GET  /demo/boxes       {"t", "boxes": {entity: [x1, y1, x2, y2]}} each entity's last observed box, in the
+                         image's px (a table box_cm through cm_to_img)
+  GET  /demo/evidence?obj=NAME   the newest event of obj with a snapshot: {obj, type, t, snapshot_url} or {}
+  GET  /room_layout      the room map (config room_layout:, camera table axes) turned to the user's seat:
+                         {"v": 1, "size", "front", "table": {"rect", "origin"}, "zones": [{id, say, rect, kind}],
+                         "you"}; a table point's map position is View.m . pos_cm + table.origin (the phone too)
+  /full.jpg?raw=1&w=N    the full frame shrunk to N px wide before encoding (less CPU and Wi-Fi than 2560 px)
+/state and /ws also carry "listening": true while the rig listens for a question after the wake word (main.py).
+
 /state and /ws also carry "view": the user's frame (core/viewframe.py View.to_json(): {"front", "table": [w, h]
 cm from the seat, "m": 2x3 affine camera table cm -> viewer cm, "outline"}) and, when config viewer.sides is
 set, "sides": {camera side: label}. Positions in "state" stay camera-frame; the BLE bridge turns them.
@@ -172,7 +186,8 @@ def canned_ask(cfg: dict, world) -> AskFn:
 # ---------------------------------------------------------------- app
 
 def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = None,
-               table=None, care=None, voice_fn: Optional[Callable[..., Any]] = None) -> FastAPI:
+               table=None, care=None, voice_fn: Optional[Callable[..., Any]] = None,
+               listening_fn: Optional[Callable[[], bool]] = None) -> FastAPI:
     apply_saved(cfg)                     # the seat the phone chose last time (data/viewer.json), into cfg
     scfg = cfg.get("server") or {}
     push_period = 1.0 / float(scfg.get("push_hz", 5) or 5)
@@ -234,6 +249,11 @@ def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = 
                 out["notices"] = care.notices_json()
             except Exception:
                 log.exception("care notices failed")
+        if listening_fn is not None:                           # the listening light (voice/cues.ListenIndicator)
+            try:
+                out["listening"] = bool(listening_fn())
+            except Exception:
+                out["listening"] = False
         return out
 
     # -- pages
@@ -297,14 +317,18 @@ def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = 
                      "X-Accel-Buffering": "no"},
         )
 
-    def render_raw(full: bool) -> Optional[bytes]:
+    def render_raw(full: bool, width: Optional[int] = None) -> Optional[bytes]:
         """The camera frame as captured, nothing drawn (?raw=1): the table view, or the full frame at capture
-        size. For reading tabletop corners (python -m core.table --outline-full) and demo_check's view check."""
+        size. For reading tabletop corners (python -m core.table --outline-full) and demo_check's view check.
+        width: shrink to this many px wide first (the demo page polls a 1600 px frame, not 2560)."""
         get = getattr(frames, "latest_full" if full else "latest", None)
         f = get() if callable(get) else None
         if f is None or getattr(f, "img", None) is None:
             return None
-        ok, buf = cv2.imencode(".jpg", f.img, [cv2.IMWRITE_JPEG_QUALITY, 92])
+        img = f.img
+        if width and 64 <= width < img.shape[1]:
+            img = cv2.resize(img, (int(width), round(img.shape[0] * width / img.shape[1])), interpolation=cv2.INTER_AREA)
+        ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 92 if img is f.img else 85])
         return buf.tobytes() if ok else None
 
     @app.get("/frame.jpg")
@@ -356,8 +380,8 @@ def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = 
         return buf.tobytes() if ok else None
 
     @app.get("/full.jpg")
-    async def full_jpg(raw: bool = False):
-        jpg = await asyncio.to_thread(render_raw, True) if raw else await asyncio.to_thread(render_full)
+    async def full_jpg(raw: bool = False, w: Optional[int] = None):
+        jpg = await asyncio.to_thread(render_raw, True, w) if raw else await asyncio.to_thread(render_full)
         if jpg is None:
             raise HTTPException(404, "no full camera frame (room memory is off)")
         return Response(jpg, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
@@ -554,8 +578,151 @@ def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = 
         runs = await asyncio.to_thread(scoreboard.load_runs, score_dir)
         return {"ok": True, "saved": path.name, "runs": len(records), "today": scoreboard.summarize(runs)}
 
+    # -- demo view (WS9): the page draws everything; these routes only hand it geometry and boxes
+    @app.get("/demo", response_class=HTMLResponse)
+    def demo_page():
+        return FileResponse(WEB_DIR / "demo.html", media_type="text/html", headers={"Cache-Control": "no-cache"})
+
+    @app.get("/demo/meta")
+    async def demo_meta():
+        return Response(dumps(await asyncio.to_thread(demo_geometry, cfg, frames, table)),
+                        media_type="application/json", headers={"Cache-Control": "no-store"})
+
+    @app.get("/demo/boxes")
+    async def demo_boxes():
+        def boxes() -> dict:
+            m = demo_geometry(cfg, frames, table).get("cm_to_img")
+            out = {}
+            if m is not None:
+                M = np.asarray(m, float)
+                for e in (world.state_json() or {}).get("entities") or []:
+                    try:
+                        ent = world.get(e["name"])
+                    except Exception:
+                        continue
+                    b = getattr(ent, "box_cm", None)
+                    if b is None or getattr(ent, "zone", "table") != "table":
+                        continue
+                    out[e["name"]] = box_through(M, b)
+            return {"t": time.time(), "boxes": out}
+        return Response(dumps(await asyncio.to_thread(boxes)), media_type="application/json",
+                        headers={"Cache-Control": "no-store"})
+
+    @app.get("/demo/evidence")
+    async def demo_evidence(obj: str = ""):
+        def find() -> dict:
+            for ev in events.last(obj, 8) if obj else []:
+                url = snapshot_url(ev.snapshot)
+                if url:
+                    return {"obj": ev.obj, "type": str(getattr(ev.type, "value", ev.type)), "t": ev.wall,
+                            "snapshot_url": url}
+            return {}
+        return JSONResponse(await asyncio.to_thread(find), headers={"Cache-Control": "no-store"})
+
+    @app.get("/room_layout")
+    async def room_layout_route():
+        lay = await asyncio.to_thread(room_layout, cfg)
+        if lay is None:
+            raise HTTPException(404, "no room map (room_memory off or no room_layout: section)")
+        return JSONResponse(lay, headers={"Cache-Control": "no-store"})
+
     app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
     return app
+
+
+# ---------------------------------------------------------------- demo view geometry
+
+def box_through(M: np.ndarray, box) -> list:
+    """A cm box's four corners through the homography M, as the px box around them (rounded)."""
+    x1, y1, x2, y2 = (float(v) for v in box)
+    p = cv2.perspectiveTransform(np.float64([[[x1, y1]], [[x2, y1]], [[x2, y2]], [[x1, y2]]]), M).reshape(-1, 2)
+    return [round(float(p[:, 0].min()), 1), round(float(p[:, 1].min()), 1),
+            round(float(p[:, 0].max()), 1), round(float(p[:, 1].max()), 1)]
+
+
+def _zones(cfg: dict) -> list:
+    try:
+        from core.room_zones import Zones
+        path = (cfg.get("room_memory") or {}).get("zones_path", "room_zones.json")
+        return [{"name": z.name, "say": z.say, "poly": [[float(x), float(y)] for x, y in z.poly]}
+                for z in Zones.load(path).zones.values()]
+    except Exception:
+        return []
+
+
+def demo_geometry(cfg: dict, frames, table) -> dict:
+    """/demo/meta: the image the demo polls (the full frame when room memory runs, else the table view) and
+    the homography from table cm to its px: the table's cm -> table-view px (Hinv), then the table view's
+    place in the full frame (TableView.rect / out_size)."""
+    rect = getattr(frames, "rect", None)
+    out_size = getattr(frames, "out_size", None) or tuple(cfg.get("frame_size_px") or (1280, 720))
+    full = rect is not None and callable(getattr(frames, "latest_full", None))
+    cap = (cfg.get("room_memory") or {}).get("capture_size") or [2560, 1440]
+    img_size = [int(cap[0]), int(cap[1])] if full else [int(out_size[0]), int(out_size[1])]
+    M = None
+    Hinv = getattr(table, "Hinv", None) if table is not None else None
+    if Hinv is not None:
+        M = np.asarray(Hinv, float)
+        if full:
+            sx = (rect[2] - rect[0]) / float(out_size[0])
+            sy = (rect[3] - rect[1]) / float(out_size[1])
+            M = np.array([[sx, 0.0, rect[0]], [0.0, sy, rect[1]], [0.0, 0.0, 1.0]]) @ M
+    out = {"image": "/full.jpg?raw=1" if full else "/frame.jpg?raw=1", "image_size": img_size, "full": full,
+           "cm_to_img": M.tolist() if M is not None else None,
+           "table_view_rect": [float(v) for v in rect] if rect is not None else None,
+           "table_size_cm": list((cfg.get("table") or {}).get("size_cm") or []),
+           "zones": _zones(cfg) if full else []}
+    try:
+        out["view"] = View.from_cfg(cfg).to_json()
+    except Exception:
+        out["view"] = None
+    return out
+
+
+def room_layout(cfg: dict) -> Optional[dict]:
+    """GET /room_layout: config room_layout: (camera table axes, cm) turned to the user's seat with the viewer
+    frame's affine (core/viewframe.py), each rect re-boxed after turning, all shifted to start at 0. None
+    (a 404: the phone's bridge then sends no map) when room memory is off or there is no layout."""
+    rl = cfg.get("room_layout") or {}
+    if not (cfg.get("room_memory") or {}).get("enabled") or not rl.get("zones"):
+        return None
+    view = View.from_cfg(cfg).to_json()
+    m = np.asarray(view["m"], float)
+    size = (cfg.get("table") or {}).get("size_cm") or [100, 70]
+
+    def turn(x, y):
+        return m @ np.array([x, y, 1.0])
+
+    def rbox(r):
+        x, y, w, h = (float(v) for v in r)
+        pts = np.array([turn(x, y), turn(x + w, y), turn(x + w, y + h), turn(x, y + h)])
+        return pts.min(axis=0), pts.max(axis=0)
+
+    says = {z["name"]: z["say"] for z in _zones(cfg)}
+    raw = []
+    for zid, z in (rl.get("zones") or {}).items():
+        lo, hi = rbox(z["rect"])
+        raw.append((zid, z, lo, hi))
+    tlo, thi = rbox([0, 0, size[0], size[1]])
+    tw, th = view["table"]
+    you = np.array([tw / 2.0, th + float(rl.get("seat_cm", 45))])       # viewer frame: y grows toward the seat
+    los = [tlo, you] + [lo for _, _, lo, _ in raw]
+    his = [thi, you] + [hi for _, _, _, hi in raw]
+    pad = float(rl.get("pad_cm", 20))
+    o = np.min(los, axis=0) - pad
+    W, H = (np.max(his, axis=0) - o + pad).tolist()
+
+    def rect(lo, hi):
+        return [round(float(lo[0] - o[0]), 1), round(float(lo[1] - o[1]), 1),
+                round(float(hi[0] - lo[0]), 1), round(float(hi[1] - lo[1]), 1)]
+
+    zones = [{"id": zid, "say": says.get(zid) or z.get("say") or zid.replace("_", " "), "rect": rect(lo, hi),
+              "kind": z.get("kind", "surface")} for zid, z, lo, hi in raw]
+    sides = (cfg.get("viewer") or {}).get("sides")
+    return {"v": 1, "size": [round(W, 1), round(H, 1)], "front": view["front"],
+            "sides": {str(k): str(v) for k, v in sides.items()} if isinstance(sides, dict) else {},
+            "table": {"rect": rect(tlo, thi), "origin": [round(float(tlo[0] - o[0]), 1), round(float(tlo[1] - o[1]), 1)]},
+            "zones": zones, "you": [round(float(you[0] - o[0]), 1), round(float(you[1] - o[1]), 1)]}
 
 
 # ---------------------------------------------------------------- --fake dev run

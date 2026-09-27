@@ -687,3 +687,18 @@ capture:
 viewer:
   front: bottom
   sides: {}                   # optional labels per CAMERA side for the phone's "I sit here", e.g. {right: couch}
+
+# The room map (GET /room_layout: the /demo page and the phone, WS9/WS6): a hand-drawn top-down schematic in
+# the CAMERA's table axes, cm (x left to right across the table view, y from its far top edge toward the
+# camera; the table is [0, 0, table.size_cm]). The server turns it to the user's seat (viewer.front) and
+# shifts it to start at 0. Zone ids are room_zones.json's (their spoken names come from there); kind is
+# seat | surface | door. Positions read off the rig's 1440p frame, Sun 27 Sep; only the layout, not scale,
+# matters. Served only while room_memory is enabled.
+room_layout:
+  seat_cm: 45                 # the YOU marker: this far past the table's side nearest the seat
+  pad_cm: 20
+  zones:
+    couch: {rect: [130, -40, 80, 160], kind: seat}
+    side_table: {rect: [-90, -70, 65, 70], kind: surface}
+    doorway: {rect: [190, -260, 100, 50], kind: door}
+    counter: {rect: [320, -230, 70, 190], kind: surface}

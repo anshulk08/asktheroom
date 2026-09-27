@@ -364,3 +364,112 @@ def test_canned_gone_answer_is_worded_from_the_seat_and_sweeps_the_camera_edge(t
         c.post("/orientation", json={"front": "right"})
         r = c.post("/ask", json={"text": "where is my phone?"}).json()
         assert r["text"] == "The phone was carried off the far side of the table." and r["action"] == "sweep:left"
+
+
+# -- the demo view (WS9): /demo, /demo/meta, /demo/boxes, /demo/evidence, /room_layout, ?w=, listening
+
+class TableStub:
+    Hinv = np.diag([10.0, 10.0, 1.0])            # 10 table-view px per cm, origin at the view's corner
+
+
+class FullView:
+    """room memory's TableView: the table view is the 817 x 460 region at (0, 980) of a 2560 x 1440 frame."""
+    rect, out_size = (0, 980, 817, 1440), (1280, 720)
+
+    def latest(self):
+        return Frame(t=1.0, wall=1.0, img=np.zeros((720, 1280, 3), np.uint8), idx=1)
+
+    def latest_full(self):
+        return Frame(t=1.0, wall=1.0, img=np.full((1440, 2560, 3), 60, np.uint8), idx=1)
+
+
+def _demo_app(tmp_path, **kw):
+    cfg = load_config()
+    cfg["paths"] = dict(cfg["paths"], viewer=str(tmp_path / "viewer.json"))
+    cfg["room_memory"] = dict(cfg.get("room_memory") or {}, enabled=True, capture_size=[2560, 1440],
+                              zones_path=str(tmp_path / "none.json"))
+    events = EventLog(str(tmp_path / "e.db"), str(tmp_path / "snaps"))
+    world = demo_world(events)
+    return cfg, events, world, create_app(cfg, world, events, frames=FullView(), table=TableStub(), **kw)
+
+
+def test_demo_page_is_served_offline(env):
+    r = env["client"].get("/demo")
+    assert r.status_code == 200 and "text/html" in r.headers["content-type"]
+    for asset in ("/static/demo.js", "/static/demo.css"):
+        assert asset in r.text and env["client"].get(asset).status_code == 200, asset
+    assert "googleapis" not in r.text and "cdn" not in r.text.lower()
+    assert 'src="http' not in r.text and 'href="http' not in r.text              # nothing from off the rig
+    js = env["client"].get("/static/demo.js").text
+    assert "http://" not in js and "https://" not in js
+
+
+def test_demo_meta_and_boxes_put_table_cm_on_the_full_frame(tmp_path):
+    cfg, events, world, app = _demo_app(tmp_path)
+    world.get("wallet").box_cm = (10.0, 10.0, 20.0, 20.0)
+    with TestClient(app) as c:
+        meta = c.get("/demo/meta").json()
+        assert meta["full"] is True and meta["image"] == "/full.jpg?raw=1" and meta["image_size"] == [2560, 1440]
+        assert meta["table_view_rect"] == [0, 980, 817, 1440] and meta["view"]["front"] in ("bottom", "right", "top", "left")
+        M = np.asarray(meta["cm_to_img"])
+        p = M @ np.array([10.0, 10.0, 1.0])
+        assert p[:2] / p[2] == pytest.approx([100 * 817 / 1280, 980 + 100 * 460 / 720])
+        boxes = c.get("/demo/boxes").json()["boxes"]
+        assert boxes["wallet"] == pytest.approx([63.8, 1043.9, 127.7, 1107.8], abs=0.1)
+    with TestClient(create_app(cfg, world, events, frames=Frames(), table=TableStub())) as c:
+        meta = c.get("/demo/meta").json()           # no full frame: the table view itself, Hinv as it is
+        assert meta["full"] is False and meta["image"] == "/frame.jpg?raw=1" and meta["image_size"] == [1280, 720]
+        assert c.get("/demo/boxes").json()["boxes"]["wallet"] == [100.0, 100.0, 200.0, 200.0]
+
+
+def test_demo_evidence_is_the_newest_event_with_a_snapshot(tmp_path):
+    cfg, events, world, app = _demo_app(tmp_path)
+    snaps = tmp_path / "snaps"
+    snaps.mkdir(exist_ok=True)
+    (snaps / "111_wallet_MOVED.jpg").write_bytes(b"\xff\xd8jpeg")
+    events.add(Event(t=1.0, wall=111.0, obj="wallet", type="MOVED", snapshot=str(snaps / "111_wallet_MOVED.jpg")))
+    events.add(Event(t=2.0, wall=222.0, obj="wallet", type="LOST_TRACK"))              # no picture: skipped
+    with TestClient(app) as c:
+        got = c.get("/demo/evidence?obj=wallet").json()
+        assert got == {"obj": "wallet", "type": "MOVED", "t": 111.0, "snapshot_url": "/snapshots/111_wallet_MOVED.jpg"}
+        assert c.get("/demo/evidence?obj=nothing").json() == {} and c.get("/demo/evidence").json() == {}
+
+
+def test_room_layout_is_turned_to_the_seat_and_404_without_room_memory(tmp_path):
+    cfg, events, world, app = _demo_app(tmp_path)
+    cfg["table"] = dict(cfg["table"], size_cm=[100, 70])
+    cfg["table_area"] = dict(cfg.get("table_area") or {}, polygon_cm=[])
+    with TestClient(app) as c:
+        lay = {}
+        for front in ("bottom", "right"):
+            assert c.post("/orientation", json={"front": front}).status_code == 200
+            lay[front] = c.get("/room_layout").json()
+        for front, got in lay.items():
+            couch = next(z for z in got["zones"] if z["id"] == "couch")
+            x, y, w, h = couch["rect"]
+            tx, ty, tw, th = got["table"]["rect"]
+            assert got["front"] == front and got["v"] == 1
+            assert all(v >= 0 for z in got["zones"] for v in z["rect"]) and got["table"]["origin"] == [tx, ty]
+            if front == "right":                     # the couch is the seat's side: nearest the user, below the table
+                assert y >= ty + th - 1 and x <= got["you"][0] <= x + w and y <= got["you"][1] <= y + h
+                assert (tw, th) == (70, 100)
+            else:                                    # from the camera's side the couch is on the table's right
+                assert x >= tx + tw - 1 and (tw, th) == (100, 70)
+    cfg["room_memory"] = dict(cfg["room_memory"], enabled=False)
+    with TestClient(create_app(cfg, world, events, frames=FullView())) as c:
+        assert c.get("/room_layout").status_code == 404
+
+
+def test_full_raw_frame_shrinks_to_w_and_listening_is_in_state(tmp_path):
+    lit = {"on": True}
+    cfg, events, world, app = _demo_app(tmp_path, listening_fn=lambda: lit["on"])
+    with TestClient(app) as c:
+        img = cv2.imdecode(np.frombuffer(c.get("/full.jpg?raw=1&w=1600").content, np.uint8), cv2.IMREAD_COLOR)
+        assert img.shape[:2] == (900, 1600)
+        full = cv2.imdecode(np.frombuffer(c.get("/full.jpg?raw=1").content, np.uint8), cv2.IMREAD_COLOR)
+        assert full.shape[:2] == (1440, 2560)
+        assert c.get("/state").json()["listening"] is True
+        lit["on"] = False
+        assert c.get("/state").json()["listening"] is False
+    with TestClient(create_app(cfg, world, events, frames=FullView())) as c:
+        assert "listening" not in c.get("/state").json()
