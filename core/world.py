@@ -523,11 +523,37 @@ class World(ThingRules, RoomRules):
             return None
         verdict = self._covered(name, ent.box_cm, self._now)
         if verdict is None:
-            return None
+            return self._thing_put_over(name, ent, hands, since)
         cover = self._covers.state(verdict[1])
         on_cover = all(geom.overlap_frac(cover.box_cm, self._hands[h][2]) >= self.cfg.contact_overlap
                        for h in hands)
         return verdict if on_cover else None
+
+    def _thing_put_over(self, name: str, ent: Entity, hands: list[str], since: float):
+        """WS2, room mode (prop labels off, so a notebook or a cup is an unlabelled thing:N; additive to
+        the named-cover rule above): a thing in view now lying over the object's box (cover_overlap of it,
+        THING_COVER_AREA times its footprint), held by a hand that touched the object or touched by one
+        since just before the object was last seen, was put over it by that hand: UNDER it, not picked up. A
+        real pick-up leaves nothing lying there. A cup is too small for the band rule (_laid_over: it
+        leaves most of the band bare), so without this the shell game read as the keys carried off."""
+        box = ent.box_cm
+        if box is None:
+            return None
+        best = []
+        for n in self._things:
+            e = self.entities[n]
+            if n == name or e.merged_into is not None or e.box_cm is None or self._seen_t.get(n, -1e18) < since \
+                    or e.status not in (Status.VISIBLE, Status.HELD) \
+                    or geom.area(e.box_cm) < THING_COVER_AREA * geom.area(box):
+                continue
+            by_hand = (e.parent in hands if e.status == Status.HELD
+                       else any(self._contacts[n].get(h, -1e18) >= since for h in hands))
+            ov = geom.overlap_frac(e.box_cm, box)
+            if by_hand and ov >= self.cfg.cover_overlap:
+                best.append((ov, n))
+        if not best:
+            return None
+        return (Status.UNDER, max(best)[1], self.cfg.conf_under, EventType.COVERED)
 
     def _hidden_by(self, name, ent, box_cm, now, frame):
         """Cover rule, then background-change rule. Returns a verdict (see NO_CHANGE) when the
@@ -767,12 +793,44 @@ class World(ThingRules, RoomRules):
             if cover not in self.entities or not self._cover_lifted(cover, ent):
                 self._lifted_at.pop(name, None)
                 continue
+            if self._cover_in_hand(cover):  # WS2: a cover still in a hand is decided once it is put down
+                self._lifted_at.pop(name, None)
+                continue
             since = self._lifted_at.setdefault(name, self._now)
             if self._now - since >= self.cfg.reappear_wait_s and not self._reappearing(name):
                 del self._lifted_at[name]
+                went = self._went_with_cover(name, ent, cover)
+                if went:
+                    out += went
+                    continue
                 ent.confidence *= self.cfg.lifted_cover_penalty
                 out += self._lose(name, ent)
         return out
+
+    def _cover_in_hand(self, cover: str) -> bool:
+        return self.entities[cover].status == Status.HELD or cover in self._carry
+
+    def _went_with_cover(self, name: str, child: Entity, cover: str) -> list[Event]:
+        """WS2 (the shell game): a thing cover (a cup, an unlabelled notebook; configured covers keep their
+        rule) moved off the child's spot and now rests elsewhere on the table,
+        the child was not seen again, and nothing is at its spot (neither its remembered pixels nor any
+        proposal): it went along under the cover (a cup slid across the table takes the keys with it). It
+        stays UNDER, now where the cover is (MOVED). Anything else, or no cover on the table: lost, as
+        before."""
+        c = self.entities[cover]
+        if not is_thing(cover) or c.status != Status.VISIBLE or not self._present[cover] or c.box_cm is None \
+                or child.box_cm is None:
+            return []                       # a configured cover keeps its rule: lifted, not seen, lost
+        if self._still_there(name) or any(geom.overlap_frac(d.box_cm, child.box_cm) >= 0.5
+                                          for d in getattr(self, '_batch_things', ())):
+            return []                       # something is at the old spot: not a slide-along
+        frm = child.pos_cm
+        cx, cy = geom.center(c.box_cm)
+        w, h = child.box_cm[2] - child.box_cm[0], child.box_cm[3] - child.box_cm[1]
+        child.box_cm, child.pos_cm = (cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2), (cx, cy)
+        self._box_px.pop(name, None)        # its old pixels are not where it is now
+        child.confidence *= self.cfg.ambiguity_penalty      # inferred, not seen: answers hedge
+        return [self._emit(name, EventType.MOVED, from_cm=frm, to_cm=child.pos_cm, parent=cover)]
 
     def _cover_lifted(self, cover: str, child: Entity) -> bool:
         if is_thing(cover):                 # a thing laid over it: its box is the cover's
