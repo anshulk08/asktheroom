@@ -279,4 +279,6 @@ def attach_care(room, cfg: dict) -> Care:
     room.base_ask = care.ask
     room.care = care
     care.on_notice = room.respond
+    if hasattr(room.interpret, "followup"):      # always-on mic: "where is it now" follows up a live turn
+        room.interpret.followup = lambda: bool(care.conversation.turns("voice", care.clock()))
     return care

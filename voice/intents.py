@@ -6,13 +6,16 @@ order. Priority (first match wins), chosen so overlaps resolve sensibly:
 
   RECAL  > RESET                    'reset the calibration' is a recalibration
   WHERE ('where...')                'where did anyone move my wallet' is a location question
-  HANDLED (did/has <someone> <touch verb>, or passive 'been moved')
+  HISTORY ('who' / 'when' opening the question)
+                                    'when did somebody last grab the pills' asks when, not yes or no
+  HANDLED (did/has <someone> <touch verb>, or passive 'been moved' / 'was the remote touched')
                                     'did I move my keys' -> HANDLED; 'who moved the box' -> HISTORY
   CHANGES (changed/different/while I was gone); with an object it becomes HISTORY
   HISTORY (what happened / who / when)
                                     'when did I last see my keys' -> HISTORY (the answer's event
                                     times say when; a 'where' in the question would win instead)
-  WHERE (find/seen/lost/locate, or 'is/are my X', 'did I leave X', or just 'my X')
+  WHERE (find/seen/lost/locate, or 'is/are my X', 'did I leave X', or just 'my X'; with a thing
+         named: show / point at / light up / highlight, which want the laser)
   OTHER                             open-ended; routed to the LLM when online
 
 TEACH ('this is my X', 'remember this as X', 'call this my X') is checked first, on the words as
@@ -23,6 +26,12 @@ configured object, Intent.name keeps the spoken noun phrase after my/the ('where
 name 'charger', obj None); answers resolve it through world.find. parse(..., aliases=[...]) matches
 taught aliases like object names (longest phrase first), with obj = the alias.
 
+Mishearings: Whisper turns 'where's my wallet' into 'wears my wall it'. A leading 'wear(s)' before
+my/the/is/are reads as 'where', and when no name matches exactly, a 1-2 word span after my/the/your/our
+that sounds like an object or synonym (fuzzy_match: same spelling without spaces, close spelling, or the
+same consonants) stands for it: 'wall it' -> wallet, 'kiss' -> keys, 'note book' -> notebook.
+matched_exactly() tells the interpreter (voice.understand) which it was, so a model can overrule a guess.
+
 HISTORY/HANDLED with no object but a general word ('anything', 'stuff', 'what happened')
 become CHANGES: 'what happened while I was away', 'did anyone touch anything'.
 
@@ -32,6 +41,7 @@ HANDLED, so 'did I take my pills this morning' stays HANDLED.
 """
 from __future__ import annotations
 
+import difflib
 import re
 from typing import Optional
 
@@ -39,21 +49,28 @@ from core.config import display_name
 from core.narration_store import has_time_phrase
 from core.types import Intent
 
-__all__ = ["Intent", "parse", "normalize"]
+__all__ = ["Intent", "parse", "normalize", "fuzzy_match", "matched_exactly", "firm_question", "names_a_person"]
 
 FILLER = {"um", "umm", "uh", "uhh", "uhm", "er", "erm", "ah", "eh", "hmm", "hm", "hey", "hi",
           "okay", "ok", "so", "like", "please", "well", "oh", "actually", "yo"}
 
 _SUBJ = r"(?:i|anyone|anybody|someone|somebody|you|we|they|he|she)"
 _VERB = (r"(?:take|takes|took|taken|taking|touch\w*|pick\w*|move[ds]?|moving|grab\w*|"
-         r"handle[ds]?|handling|use[ds]?|using|open\w*)\b")
+         r"handle[ds]?|handling|use[ds]?|using|open\w*|mess\w*|fiddl\w*|tamper\w*|disturb\w*|"
+         r"been (?:near|at|into|in|through)|g[eo]t into)\b")
+_DONE = r"(?:touched|moved|picked|taken|handled|grabbed|used|opened|messed|disturbed|tampered)"
 
 RECAL = re.compile(r"\b(?:re)?calibrat\w*")
 RESET = re.compile(r"\breset\b|\bstart (?:over|fresh)\b")
 WHERE = re.compile(r"\bwhere")  # where, whered, wheres, whereabouts (not 'anywhere')
-HANDLED = re.compile(
-    rf"\b(?:(?:did|have|has|had)\s+{_SUBJ}|ive|weve)\b(?:\s+\w+){{0,2}}?\s+{_VERB}"
-    r"|\b(?:been|get|got|gotten|was|were)\s+(?:touched|moved|picked|taken|handled|grabbed|used|opened)\b")
+HANDLED_ASKED = re.compile(                      # 'did anyone move', 'has it been touched'
+    rf"\b(?:(?:did|have|has|had)\s+(?:{_SUBJ}|(?:my|the|our|your)\s+[a-z]+)|ive|weve)\b(?:\s+\w+){{0,2}}?\s+{_VERB}"
+    rf"|\b(?:been|get|got|gotten|was|were)\s+{_DONE}\b")
+HANDLED_PASSIVE = re.compile(                    # 'was the remote touched' (also 'were the posters moved')
+    rf"\b(?:was|were|is|are|has|have)\s+(?:my|the|our|your)\s+[a-z_]+(?:\s+[a-z_]+)?\s+(?:been\s+)?{_DONE}\b")
+HANDLED = re.compile(f"{HANDLED_ASKED.pattern}|{HANDLED_PASSIVE.pattern}")
+# 'who ...' / 'when ...' opening the question asks for the history, even with a touch verb in it.
+ASKS_WHO_WHEN = re.compile(r"^(?:and\s+|now\s+|then\s+)?(?:who|whos|when|whens)\b")
 CHANGES = re.compile(r"\bchang(?:e|ed|es|ing)\b|\bdifferent\b|\bwhat did i miss\b|\bmissed\b"
                      r"|\bwhile i was (?:gone|away|out)\b|\banything new\b|\bwhats new\b")
 AWAY = re.compile(r"\bwhile i was (?:gone|away|out)\b|\bwhat did i miss\b|\bsince i left\b")
@@ -62,9 +79,12 @@ AWAY = re.compile(r"\bwhile i was (?:gone|away|out)\b|\bwhat did i miss\b|\bsinc
 WHAT_DOING = re.compile(r"\bwhat (?:was|were|am|have|had) (?:i|we)(?: been)? (?:doing|up to|working on|busy with)\b"
                         r"|\bwhat did (?:i|we) (?:do|get up to|work on|get done)\b(?!\s+with\b)"
                         r"|\bwhat (?:went on|was going on|was happening)\b|\bsummar(?:y|ize|ise)\b")
-HISTORY = re.compile(r"\bwhat(?:s| has| had)? happen\w*|\bhappened to\b|\bwho\b|\bwhen\b"
+HISTORY = re.compile(r"\bwhat(?:s| has| had)? happen\w*|\bhappened to\b|\bwho\b|\bwhos\b|\bwhen\b"
+                     r"|\b(?:story|deal|going on) with\b"
                      r"|\bhistory\b|\blast time\b|\bwhat did (?:i|you|someone|somebody|anyone) do with\b")
 WHERE2 = re.compile(r"\b(?:find|found|seen|locate\w*|lost|misplaced|look(?:ing)? for|spot(?:ted)?)\b")
+# Wants the laser on a named thing: 'show me my keys', 'point at the pills', 'light up the remote'.
+SHOW = re.compile(r"\b(?:show|point|pointing|light up|highlight|shine|flash|aim|where\s*abouts)\b")
 GENERAL = re.compile(r"\b(?:anything|something|everything|stuff|things|what happened"
                      r"|whats happened|while i was)\b")
 ARTICLES = {"my", "the", "a", "your", "our"}
@@ -94,15 +114,108 @@ NAME_STOP = {
     "middle", "anything", "something", "everything", "stuff", "things", "thing", "one", "ones",
     "weather", "time", "please", "day", "calibration", "laser", "for", "of", "about", "lately",
     "show", "showed", "shown", "appear", "appeared", "arrive", "arrived", "turn", "turned", "come", "came",
+    # participles end a name too: 'was my charger moved' -> 'charger'
+    "moved", "touched", "taken", "took", "grabbed", "picked", "handled", "used", "opened", "messed",
+    "disturbed", "tampered", "gone", "missing", "lost", "stolen",
 }
 _POSS = re.compile(r"\b(?:my|the|your|our)\s+([a-z0-9]+(?:\s+[a-z0-9]+){0,3})")
 
 
+# Whisper's 'where' mishearings, only as the question's first word: 'wears my wall it'.
+_MISHEARD_WHERE = re.compile(r"^(?:wear|wears|ware|wares|wheres?e)\b(?=\s+(?:my|the|your|our|is|are|did|do|does|has|have)\b)")
+
+
 def normalize(text: str) -> str:
-    """Lowercase, drop apostrophes ('where'd' -> 'whered'), punctuation -> space, drop fillers."""
+    """Lowercase, drop apostrophes ('where'd' -> 'whered'), punctuation -> space, drop fillers, and
+    read a leading 'wears my' as 'wheres my'."""
     t = re.sub(r"['’`]", "", text.lower())
     t = re.sub(r"[^a-z0-9\s]", " ", t)
-    return " ".join(w for w in t.split() if w not in FILLER)
+    t = " ".join(w for w in t.split() if w not in FILLER)
+    return _MISHEARD_WHERE.sub("wheres", t)
+
+
+FUZZY_RATIO = 0.8                       # difflib ratio of the spans without spaces ('wall it' ~ wallet)
+_SOUNDS = [(r"ph", "f"), (r"ck", "k"), (r"[cq]", "k"), (r"x", "ks"), (r"z", "s")]
+
+
+def _consonants(s: str) -> str:
+    """A rough sound key: first letter, then the consonants, with look-alike letters merged and
+    repeats collapsed. 'kiss' and 'keys' -> 'ks'; 'wall it' and 'wallet' -> 'wlt'."""
+    s = re.sub(r"[^a-z]", "", s)
+    if not s:
+        return ""
+    for a, b in _SOUNDS:
+        s = re.sub(a, b, s)
+    key = s[0] + re.sub(r"[aeiouyhw]", "", s[1:])
+    return re.sub(r"(.)\1+", r"\1", key)
+
+
+def _stem(s: str) -> str:
+    return re.sub(r"(?:es|s)$", "", s) if len(s) > 3 else s
+
+
+def fuzzy_match(span: str, name: str) -> float:
+    """How much a heard span sounds like a name, 0..1 (0: not a match). The same letters without
+    spaces ('note book'), a close spelling (ratio >= FUZZY_RATIO), or the same consonant key with the
+    same first letter and half the letters in common, for short words only ('kiss' ~ 'keys'; 'kids',
+    'case' and 'papers' ~ 'purse' are not)."""
+    a, b = span.replace(" ", ""), name.replace(" ", "").replace("_", "")
+    if len(a) < 3 or len(b) < 3:
+        return 0.0
+    if a == b or _stem(a) == _stem(b):
+        return 1.0
+    if _stem(a).startswith(_stem(b)) and len(_stem(a)) - len(_stem(b)) >= 2:
+        return 0.0                      # a longer word: 'pillow' is not the pills, 'keyboard' not the keys
+    r = difflib.SequenceMatcher(None, _stem(a), _stem(b)).ratio()
+    if r >= FUZZY_RATIO:
+        return r
+    ka, kb = _consonants(a), _consonants(b)
+    raw = difflib.SequenceMatcher(None, a, b).ratio()
+    if len(kb) >= 2 and ka == kb and a[0] == b[0] and raw >= 0.5 and max(len(a), len(b)) <= 4:
+        return 0.5 + raw / 4
+    return 0.0
+
+
+def _join_split(t: str, phrases: dict[str, str]) -> str:
+    """Rejoin a name Whisper split in two: 'the note book' -> 'the notebook'."""
+    words = t.split()
+    out, i = [], 0
+    while i < len(words):
+        if i + 1 < len(words) and words[i] + words[i + 1] in phrases:
+            out.append(words[i] + words[i + 1])
+            i += 2
+        else:
+            out.append(words[i])
+            i += 1
+    return " ".join(out)
+
+
+_DET_SPAN = re.compile(r"\b(?:my|the|your|our)\s+([a-z]+)(?:\s+([a-z]+))?")
+
+
+def _fuzzy(t: str, phrases: dict[str, str]) -> Optional[tuple[str, str]]:
+    """(heard span, phrase) for the best 1-2 word span after my/the/your/our that sounds like an
+    object name or synonym, or None. The span must cover the whole spoken noun phrase: in 'my wall
+    charger', 'wall' is part of a longer name, not a misheard wallet ('wall it' is: 'it' ends a name)."""
+    best, score = None, 0.0
+    for m in _DET_SPAN.finditer(t):
+        one = m.group(1)
+        if one in NAME_STOP or one in ARTICLES:
+            continue
+        noun = 0                        # words in the spoken noun phrase after the determiner
+        for w in t[m.start(1):].split()[:4]:
+            if w in NAME_STOP or w in ARTICLES:
+                break
+            noun += 1
+        spans = [one] + ([f"{one} {m.group(2)}"] if m.group(2) else [])
+        for span in spans:
+            if len(span.split()) < noun:
+                continue
+            for p in phrases:
+                sc = fuzzy_match(span, p)
+                if sc > score:
+                    best, score = (span, p), sc
+    return best
 
 
 def _vocab(cfg: dict, aliases=()) -> tuple[dict[str, str], re.Pattern]:
@@ -162,10 +275,55 @@ def _spoken_name(t: str) -> Optional[str]:
     return None
 
 
+def firm_question(text: str) -> bool:
+    """Phrased as a question about a thing, not just with a show verb or a passive ('show me the money',
+    'were the posters moved' are just as likely said to a person). Overheard speech about a name nobody
+    taught needs this (voice.understand.screen)."""
+    t = normalize(text)
+    return bool(WHERE.search(t) or WHERE2.search(t) or HANDLED_ASKED.search(t) or HISTORY.search(t)
+                or ASKS_WHO_WHEN.search(t))
+
+
+# 'this is my wife Karen' introduces a person; overheard, it isn't teaching a thing's name.
+PEOPLE = {"wife", "husband", "partner", "friend", "friends", "girlfriend", "boyfriend", "fiance", "fiancee",
+          "son", "daughter", "kid", "kids", "child", "children", "mom", "mum", "mother", "dad", "father",
+          "brother", "sister", "sibling", "cousin", "aunt", "uncle", "grandma", "grandpa", "grandmother",
+          "grandfather", "family", "boss", "manager", "colleague", "coworker", "teammate", "team", "mentor",
+          "roommate", "buddy", "pal", "classmate", "professor", "teacher", "advisor", "neighbor", "neighbour",
+          "guy", "guys", "man", "woman", "baby", "dog", "cat", "group", "project", "demo", "startup", "hack"}
+
+
+def names_a_person(name: Optional[str], raw: str = "") -> bool:
+    """A TEACH name that is a person, pet or the project ('wife karen', 'friend', 'team'), not a thing
+    ('friend's mug', said with the possessive, is a mug)."""
+    words = (name or "").split()
+    if not words or words[0] not in PEOPLE:
+        return False
+    stem = words[0][:-1] if words[0].endswith("s") else words[0]    # normalize drops the apostrophe
+    return not re.search(rf"\b{re.escape(stem)}['’]s\b", raw.lower())
+
+
+def matched_exactly(text: str, obj: Optional[str], cfg: dict, aliases=()) -> bool:
+    """Was obj (a parse() result) named in text as spoken, not guessed from a mishearing?"""
+    if obj is None:
+        return False
+    phrases, rx = _vocab(cfg, aliases)
+    return any(phrases[m.group(1)] == obj for m in rx.finditer(_join_split(normalize(text), phrases)))
+
+
+def _without_wake_word(t: str, cfg: dict) -> str:
+    """'room this is my mug' -> 'this is my mug': a teaching sentence may open with the wake word."""
+    for w in (cfg.get("listen") or {}).get("wake_words") or ["room"]:
+        w = normalize(str(w))
+        if w and (t == w or t.startswith(w + " ")):
+            return t[len(w):].strip()
+    return t
+
+
 def parse(text: str, cfg: dict, aliases=()) -> Intent:
     """Classify a transcript into an Intent with a canonical object name (or None). aliases: names
     taught for things (world.alias_phrases()), matched like object names."""
-    taught = _teach_name(normalize(text))
+    taught = _teach_name(_without_wake_word(normalize(text), cfg))
     if taught:
         return Intent(kind="TEACH", obj=taught, raw=text, name=taught)
     phrases, rx = _vocab(cfg, aliases)
@@ -175,7 +333,12 @@ def parse(text: str, cfg: dict, aliases=()) -> Intent:
         found.append(phrases[m.group(1)])
         return found[-1]
 
-    t = rx.sub(sub, normalize(text))
+    t = rx.sub(sub, _join_split(normalize(text), phrases))
+    if not found:
+        heard = _fuzzy(t, phrases)
+        if heard is not None:           # 'wears my wall it' -> 'wheres my wallet'
+            found.append(phrases[heard[1]])
+            t = re.sub(rf"\b{re.escape(heard[0])}\b", found[-1], t, count=1)
     obj = _pick(found, cfg)
     spoken = _spoken_name(t)
     if obj is not None and (cfg.get("objects") or {}).get(obj, "target") != "target" \
@@ -188,6 +351,8 @@ def parse(text: str, cfg: dict, aliases=()) -> Intent:
         kind = "RESET"
     elif WHERE.search(t):
         kind = "WHERE"
+    elif ASKS_WHO_WHEN.search(t):
+        kind = "HISTORY"
     elif HANDLED.search(t):
         kind = "HANDLED"
     elif WHAT_DOING.search(t):
@@ -196,7 +361,7 @@ def parse(text: str, cfg: dict, aliases=()) -> Intent:
         kind = "HISTORY" if obj else "CHANGES"
     elif HISTORY.search(t):
         kind = "HISTORY"
-    elif WHERE2.search(t):
+    elif WHERE2.search(t) or (SHOW.search(t) and (obj or spoken)):
         kind = "WHERE"
     elif obj and (re.search(rf"\b(?:is|are)\s+(?:my|the|your|our)?\s*{re.escape(obj)}\b", t)
                   or re.search(r"\b(?:leave|left)\b", t)

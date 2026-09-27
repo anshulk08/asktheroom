@@ -917,3 +917,26 @@ def test_pick_never_names_over_a_name_taught_during_the_call(log):
     during_call(q, json.dumps({"mark": 2, "label": "red mug", "confidence": 0.9}), teach)
     q.pick("Where is my red mug?", "red mug")
     assert q.world.labels == {"thing:3": "souvenir"}
+
+
+def test_a_stalled_grok_call_is_cut_at_its_wall_clock_deadline(log, monkeypatch):
+    """requests' timeout is per phase, so a trickling connection can run far past visual_memory.timeout_s;
+    look and pick give their usual failure answer once timeout_s + VLM_MARGIN_S has passed."""
+    import threading
+
+    import voice.visual as visual
+    monkeypatch.setattr(visual, "VLM_MARGIN_S", 0.1)
+    release = threading.Event()
+
+    def stalled(job):
+        release.wait(5)
+        return look_reply(mark=1)
+
+    try:
+        q, prov = qa(log, stalled, timeout_s=0.1)
+        t0 = time.perf_counter()
+        assert q.look("what's on the table?").text == "Sorry, I couldn't look at the table just now."
+        assert q.pick("where is my red mug?", "red mug").text == "Sorry, I couldn't look at the table just now."
+        assert time.perf_counter() - t0 < 1.0 and len(prov.calls) == 2
+    finally:
+        release.set()

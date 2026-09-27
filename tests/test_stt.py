@@ -521,3 +521,51 @@ def test_prompt_can_include_synonyms():
     assert "meds" not in stt.initial_prompt(CFG)
     assert STT(CFG, backend=FakeBackend(), vad=AmpVAD()).prompt == stt.initial_prompt(
         CFG, synonyms=bool(CFG["stt"].get("prompt_synonyms")))
+
+
+# ---------------------------------------------------------------- the rig's own voice
+
+class Speaking:
+    """Stands in for voice.tts.TTS: .speaking follows a script, one entry per mic block read."""
+
+    def __init__(self, script):
+        self.script, self.i = list(script), 0
+
+    @property
+    def speaking(self):
+        v = self.script[min(self.i, len(self.script) - 1)]
+        self.i += 1
+        return v
+
+
+def test_tts_starting_mid_recording_discards_the_clip(monkeypatch):
+    s, mic = make(monkeypatch, loud(20) + quiet(100))
+    s.tts = Speaking([False] * 11 + [True])          # a care notice starts 10 blocks into the question
+    audio = s.record_until_silence()
+    assert len(audio) == 0 and s.last_stop == "tts" and not s.last_speech
+    assert mic.closed == 1 and len(mic.blocks) == 109   # stopped at block 11, not after max_s
+
+
+def test_hear_returns_nothing_when_the_rig_talks_over_it(monkeypatch):
+    s, _ = make(monkeypatch, quiet(5) + loud(40) + quiet(100))
+    s.tts = Speaking([False] * 20 + [True])
+    assert s.hear(idle_s=8) == "" and s.backend.calls == []
+
+
+def test_speech_already_playing_at_the_start_only_counts_once_it_stopped(monkeypatch):
+    """A click cuts the answer and listens at once: the cut answer's tail doesn't end the question,
+    but a new answer starting later does."""
+    s, _ = make(monkeypatch, loud(40) + quiet(100))
+    s.tts = Speaking([True] * 3 + [False])
+    assert len(s.record_until_silence()) > 0 and s.last_stop == "silence"
+    s2, _ = make(monkeypatch, loud(40) + quiet(100))
+    s2.tts = Speaking([True] * 3 + [False] * 5 + [True])
+    assert len(s2.record_until_silence()) == 0 and s2.last_stop == "tts"
+
+
+def test_tts_passed_to_the_constructor(monkeypatch):
+    mic = FakeMic(loud(10) + quiet(100))
+    monkeypatch.setattr(stt, "open_input", mic)
+    tts = Speaking([False, True])
+    s = STT(CFG, backend=FakeBackend(), vad=AmpVAD(), tts=tts)
+    assert s.tts is tts and s.listen() == "" and s.last_stop == "tts"

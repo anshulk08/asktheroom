@@ -293,7 +293,7 @@ def test_always_listening_waits_while_the_rig_speaks(tmp_path, cal_path):
 
 def test_clicker_is_listen_now_in_always_mode(tmp_path, cal_path):
     clicker = FakeClicker()
-    room, _ = make_room(tmp_path, cal_path, stt=FakeSTT("show me my keys"), clicker=clicker)
+    room, _ = make_room(tmp_path, cal_path, stt=FakeSTT("tell me a joke"), clicker=clicker)
     clicker.press()
     t = always_on(room)
     assert wait_for(lambda: room.tts.said)
@@ -655,3 +655,228 @@ def test_a_recalibrate_that_keeps_the_size_says_nothing_more(tmp_path):
     room.table.size_cm = (80.0, 50.0)
     room.recalibrate = lambda timeout_s=None: True
     assert room._recalibrate_and_tell(speak=True) is None and room.tts.said == []
+
+
+# -- voice path robustness: the mic never dies, and a stall still gets an answer
+
+def test_an_error_answering_says_sorry_and_the_loop_keeps_listening(tmp_path, cal_path):
+    """One exception in interpret / ask used to end voice_loop for good: the rig went deaf."""
+    stt = FakeSTT("", overheard=["where is my wallet", "where are my keys"])
+    room, _ = make_room(tmp_path, cal_path, stt=stt, clicker=FakeClicker())
+    fast, calls = room.base_ask, []
+
+    def flaky(text, source):
+        calls.append(text)
+        if len(calls) == 1:
+            raise RuntimeError("boom")
+        return fast(text, source)
+
+    room.base_ask = flaky
+    real_answer = room._answer
+    blown = []
+
+    def answer_once_broken(*a, **k):            # the whole turn raising, not just ask
+        if not blown:
+            blown.append(1)
+            raise RuntimeError("turn failed")
+        return real_answer(*a, **k)
+
+    room._answer = answer_once_broken
+    t = always_on(room)
+    assert wait_for(lambda: any("keys" in s.lower() for s in room.tts.said))
+    assert room.tts.said[0].startswith("Sorry") and t.is_alive()
+    stop_voice(room, t)
+
+
+def test_a_failed_ask_is_answered_from_the_rules(tmp_path, cal_path):
+    room, _ = make_room(tmp_path, cal_path)
+
+    def broken(text, source):
+        raise RuntimeError("router failed")
+
+    room.base_ask = broken
+    ans, _ = room._ask_with_cue("where is my wallet")
+    assert ans.point_at == "wallet" and room._answer_late
+
+
+def test_click_mode_survives_an_error_too(tmp_path, cal_path):
+    clicker = FakeClicker()
+    room, _ = make_room(tmp_path, cal_path, stt=FakeSTT("where is my wallet"), clicker=clicker)
+    real, n = room._asked, []
+
+    def asked(t):
+        n.append(t)
+        if len(n) == 1:
+            raise RuntimeError("clicker path failed")
+        real(t)
+
+    room._asked = asked
+    t = threading.Thread(target=room.voice_loop, daemon=True)
+    t.start()
+    clicker.press()
+    assert wait_for(lambda: room.tts.said)
+    clicker.press()
+    assert wait_for(lambda: any("wallet" in s.lower() for s in room.tts.said)) and t.is_alive()
+    room.stop_ev.set()
+    t.join(2)
+
+
+def test_the_watchdog_restarts_a_dead_voice_loop(tmp_path, cal_path):
+    room, _ = make_room(tmp_path, cal_path)
+    runs = []
+
+    def dies():
+        runs.append(1)
+        if len(runs) == 1:
+            return                              # died early, however (a BaseException, a bug in the guard)
+        room.stop_ev.wait()
+
+    room.voice_loop = dies
+    w = threading.Thread(target=room.voice_watchdog, kwargs={"check_s": 0.05}, daemon=True)
+    w.start()
+    assert wait_for(lambda: len(runs) == 2, 4.0) and room.voice_restarts == 1
+    room.stop_ev.set()
+    w.join(2)
+    assert not w.is_alive()
+
+
+def test_a_stalled_answer_falls_back_to_the_rules_within_the_limit(tmp_path, cal_path):
+    """Wi-Fi stalls mid-answer: done.wait() used to wait forever with the mic shut."""
+    room, _ = make_room(tmp_path, cal_path)
+    room.cue_after_s, room.answer_limit_s = 0.05, 0.4
+    room.base_ask = lambda text, source: time.sleep(30)
+    t0 = time.monotonic()
+    ans, cued = room._ask_with_cue("where is my wallet")
+    assert time.monotonic() - t0 < 1.0 and cued and ans.point_at == "wallet"
+    assert room._answer_late
+    ans, _ = room._ask_with_cue("tell me a joke")          # OTHER: the offline sentence, not silence
+    assert ans.text and ans.point_at is None
+
+
+def test_a_slow_model_reading_overheard_speech_starts_the_cue_first(tmp_path, cal_path):
+    """The model's reading of overheard speech used to run before the cue timer: seconds of silence."""
+    room, _ = make_room(tmp_path, cal_path)
+    room.cue_after_s = 0.05
+    rules = room.interpret
+
+    class SlowReader:
+        last_by, last_ms = "grok", 0.0
+
+        def screen(self, text):
+            return True
+
+        def __call__(self, text, overheard=False):
+            if overheard:
+                time.sleep(0.3)
+            return rules(text)
+
+    room.interpret = SlowReader()
+    assert room._answer("where is my wallet", time.monotonic(), time.monotonic(), {"mode": "overheard"})
+    assert room.tts.said[0] == "Let me look." and "wallet" in room.tts.said[1].lower()
+
+
+def test_overheard_speech_the_model_ignores_is_dropped_quietly(tmp_path, cal_path):
+    room, _ = make_room(tmp_path, cal_path)
+    rules = room.interpret
+
+    class Ignores:
+        def screen(self, text):
+            return True
+
+        def __call__(self, text, overheard=False):
+            return main.Intent(kind="IGNORE", obj=None, raw=text) if overheard else rules(text)
+
+    room.interpret = Ignores()
+    assert room._answer("where is my wallet", time.monotonic(), time.monotonic(), {"mode": "overheard"}) is False
+    assert room.tts.said == [] and room.world.laser["on"] is False
+
+
+@pytest.mark.parametrize("text, target", [("show me my keys", "keys"), ("can you point at the pill bottle", "pill_bottle"),
+                                          ("light up my wallet", "wallet"), ("wears my wall it", "wallet")])
+def test_offline_show_and_point_aim_the_laser(tmp_path, cal_path, text, target):
+    """Offline (no model), 'show me my keys' was OTHER: "I'm offline", and the laser never moved."""
+    stt = FakeSTT("", overheard=[text])
+    room, _ = make_room(tmp_path, cal_path, stt=stt, clicker=FakeClicker())
+    assert not room.world.online
+    t = always_on(room)
+    assert wait_for(lambda: room.world.laser.get("target") == target), room.tts.said
+    assert room.tts.said and "offline" not in room.tts.said[0].lower()
+    stop_voice(room, t)
+
+
+def test_overheard_where_with_nothing_to_find_is_ignored(tmp_path, cal_path):
+    stt = FakeSTT("", overheard=["where are you guys from", "where are my keys"])
+    room, _ = make_room(tmp_path, cal_path, stt=stt, clicker=FakeClicker())
+    t = always_on(room)
+    assert wait_for(lambda: room.tts.said)
+    assert len(room.tts.said) == 1 and "keys" in room.tts.said[0].lower()
+    stop_voice(room, t)
+
+
+class SlowGrokOther:
+    """A model that takes 0.3 s and reads everything as OTHER (what Grok says to chatter)."""
+    url, name, local = "stub", "grok", False
+
+    def __init__(self):
+        self.asked = []
+
+    def ask(self, text, timeout):
+        import json
+        self.asked.append(text)
+        time.sleep(0.3)
+        return json.dumps({"kind": "OTHER", "object": "none"})
+
+    def health(self, timeout=1.0):
+        return True
+
+
+def test_no_thinking_cue_for_chatter_the_model_then_rejects(tmp_path, cal_path):
+    """'Let me look.' used to start before the overheard verdict: the rig said it, then nothing."""
+    from voice.understand import Understander
+    room, _ = make_room(tmp_path, cal_path)
+    room.cue_after_s = 0.05
+    room.interpret = Understander(CFG, model=SlowGrokOther())
+    assert room._for_rig("where's my stapler")                # passes the cheap checks; the model decides
+    assert room._answer("where's my stapler", time.monotonic(), time.monotonic(), {"mode": "overheard"}) is False
+    time.sleep(0.1)
+    assert room.tts.said == [] and room.interpret.model.asked == ["where's my stapler"]
+
+
+def test_a_sure_overheard_question_still_gets_the_cue_while_the_answer_is_slow(tmp_path, cal_path):
+    from voice.understand import Understander
+    room, _ = make_room(tmp_path, cal_path)
+    room.cue_after_s = 0.05
+    room.interpret = Understander(CFG, model=SlowGrokOther())
+    fast = room.base_ask
+    room.base_ask = lambda text, source: (time.sleep(0.3), fast(text, source))[1]
+    assert room._answer("room, where is my wallet", time.monotonic(), time.monotonic(), {"mode": "overheard"})
+    assert room.tts.said[0] == "Let me look." and "wallet" in room.tts.said[1].lower()
+
+
+def test_a_reset_that_comes_after_the_fallback_is_not_applied(tmp_path, cal_path):
+    """After answer_limit_s the rules answered, but the ask thread ran on and reset the world ~1 s later."""
+    room, _ = make_room(tmp_path, cal_path)
+    room.cue_after_s, room.answer_limit_s = 0, 0.2
+    routed = room.base_ask
+    room.base_ask = lambda text, source: (time.sleep(0.5), routed(text, source))[1]
+    resets = []
+    room.world.reset = lambda: resets.append(1)
+    ans, _ = room._ask_with_cue("reset everything")
+    assert room._answer_late and resets == []
+    time.sleep(0.6)
+    assert resets == []                                       # the late RESET was dropped
+    ans = room.ask("reset everything", "voice")               # on time, it still resets
+    assert resets == [1]
+
+
+def test_overheard_follow_up_reaches_the_conversation_memory(tmp_path, cal_path):
+    from voice.care import attach_care
+    from voice.understand import Understander
+    stt = FakeSTT("", overheard=["where is it now", "where are my keys", "where is it now"])
+    room, _ = make_room(tmp_path, cal_path, stt=stt, clicker=FakeClicker(),
+                        interpret=Understander(dict(CFG, understand={"enabled": False})))
+    attach_care(room, dict(CFG, care=dict(CFG.get("care") or {}, profile_llm=False)))
+    t = always_on(room)
+    assert wait_for(lambda: len(room.tts.said) == 2)
+    assert "keys" in room.tts.said[0].lower() and "keys" in room.tts.said[1].lower()   # the first 'it' was dropped
+    stop_voice(room, t)
