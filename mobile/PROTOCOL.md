@@ -195,6 +195,7 @@ is kept). Named things and the configured objects are always sent. When a stale 
 | `e[].r` | [x, y] | resolved position: where it is now, through the parent chain (keys → box → table). Draw hidden objects here |
 | `e[].c` | float | confidence 0–1, 2 decimals (a heuristic, not a probability) |
 | `e[].edge` | str | `left`/`right`/`top`/`bottom`: the edge a GONE object left by |
+| `e[].z` | str | room memory (specs 0009, 0010): the room zone the object is in (`couch`, `side_table`, `counter`), when it is off the table. Such an object has no `xy`/`r` (no table position): list it by zone, don't draw it on the table. The answer's `text` already says the place ("Your wallet, I think, is on the kitchen counter."). Optional |
 | `e[].a` | [str] | taught names (aliases), newest first. **Things only**, and present for every thing (may be `[]`) |
 | `e[].m` | [[name, score]] | "maybe the same as" an earlier thing (score 2 decimals). Optional |
 | `e[].g` | str | an automatic guess of what an unnamed thing is (`deodorant stick`): the server's `guess.name` (`core/auto_name.py`) or, failing that, `belief[0]` (Grok's fused guess across settle checks); with both, whichever has the higher confidence. Not a taught name: show it hedged ("deodorant stick?"). Optional |
