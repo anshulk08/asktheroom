@@ -580,3 +580,26 @@ def test_slow_embeddings_are_limited_to_the_time_budget():
         s.put(f"x{j}", colour, (100 + 150 * j, 300, 140 + 150 * j, 340))   # all moved: all need embedding
     run(p, s, clock)
     assert calls[0] == 4 and 1 <= calls[1] <= 2                      # 60 ms of ~30 ms crops
+
+
+def test_enroll_auto_saves_only_confirmed_picks_with_their_context(tmp_path):
+    from core.permanence import enroll_auto
+    s = Scene()
+    s.put("remote", REMOTE, (100, 500, 160, 540))
+    s.put("mug", MUG, (1000, 100, 1060, 160))
+    img = s.frame()
+
+    def ask(name, refs, marked, n):                                  # Grok says 'yes, mark 1' in every tile
+        return 1, 0.9
+
+    def is_a(name, patch):                                           # ... but only the red one is the remote
+        red = np.all(patch == REMOTE, axis=2).sum()
+        return red > 50, 0.9
+
+    res = enroll_auto(img, ["remote"], detect, ask, str(tmp_path), "still", is_a=is_a)
+    saved = res["remote"]
+    assert saved and saved.endswith("still_100_500.jpg")
+    assert (tmp_path / "remote" / "still_100_500.ctx.jpg").exists()
+    c = PermanenceConfig.from_dict({"mode": "registry", "tiles": [3, 2], "zoom": [], "verify": False})
+    p = Permanence(c, detect, embed, places=PLACES)
+    assert p.enroll_dir(str(tmp_path)) == 1 and p.objects["remote"].refs[0].shape[0] >= 160   # the context patch

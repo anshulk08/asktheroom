@@ -995,6 +995,33 @@ def grok_marks(cfg: dict, timeout_s: float = 8.0) -> Optional[Callable]:
     return ask
 
 
+IS_A_SYSTEM = ("You look at one object in a red box in a room photo and say whether it is the named kind of thing. "
+               "Only the exact kind counts: a pill bottle is a small medicine bottle, not a drink or soap bottle; a "
+               "wallet is a wallet, not a phone. Answer yes=false unless you are sure.")
+IS_A_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["yes", "confidence", "what"],
+               "properties": {"yes": {"type": "boolean"}, "confidence": {"type": "number"},
+                              "what": {"type": "string"}}}
+
+
+def grok_is_a(cfg: dict, timeout_s: float = 8.0) -> Optional[Callable]:
+    """is_a(name, patch) -> (yes, confidence): is the boxed object that kind of thing (enrollment check)."""
+    try:
+        from core.narration import _parse_json
+        from net import call_with_deadline
+        provider = _provider(cfg)
+    except Exception:
+        log.exception("permanence: no Grok provider")
+        return None
+
+    def is_a(name: str, patch: np.ndarray):
+        parts = [("text", f"Is the object in the red box a {name}?"), ("image", _jpg(patch))]
+        reply = call_with_deadline(provider.narrate, timeout_s, IS_A_SYSTEM, parts, IS_A_SCHEMA,
+                                   name="permanence-is-a")
+        d = _parse_json(reply.text) or {}
+        return bool(d.get("yes")), float(d.get("confidence") or 0.0)
+    return is_a
+
+
 def grok_same(cfg: dict, timeout_s: float = 8.0) -> Optional[Callable]:
     """confirm(name, refs, patch) -> (same, confidence): the closed question after a mark is picked."""
     try:
@@ -1114,10 +1141,12 @@ def save_ref(img: np.ndarray, box, name: str, refs_dir: str, stem: str) -> Path:
 
 
 def enroll_auto(img: np.ndarray, names: Sequence[str], detect: Callable, ask: Callable, refs_dir: str, stem: str,
-                display: Optional[dict] = None, tiles: tuple = (3, 2), sheet: Optional[str] = None) -> dict:
+                display: Optional[dict] = None, tiles: tuple = (3, 2), sheet: Optional[str] = None,
+                is_a: Optional[Callable] = None) -> dict:
     """Enroll each name from one raw still without typing boxes: YOLOE proposes over the tiles, Grok picks the
-    name among numbered marks (per tile, most likely tile first by box count), and the pick is saved with its
-    context. Returns name -> saved path (or None). sheet: a contact sheet of the picks, to check by eye."""
+    name among numbered marks in every tile, each pick is checked by a closed question (is_a(name, patch) ->
+    (yes, confidence): Grok says yes to the first bottle it sees), and the most confident confirmed pick is
+    saved with its context. Returns name -> saved path (or None). sheet: the picks, to check by eye."""
     c = PermanenceConfig(mode="registry", tiles=tiles, verify=False)
     p = Permanence(c, detect, lambda im, bs: [np.ones(4, np.float32) / 2] * len(bs))
     vs = p.views(img.shape[1], img.shape[0])
@@ -1129,7 +1158,8 @@ def enroll_auto(img: np.ndarray, names: Sequence[str], detect: Callable, ask: Ca
     for name in names:
         said = (display or {}).get(name, name.replace("_", " "))
         out[name] = None
-        for i in sorted(range(len(vs)), key=lambda j: -len(per_view[j])):
+        found = []
+        for i in range(len(vs)):
             boxes = per_view[i]
             keep = distinct(boxes)[:12]
             if not keep:
@@ -1139,11 +1169,23 @@ def enroll_auto(img: np.ndarray, names: Sequence[str], detect: Callable, ask: Ca
             view_img = img[vs[i][1]:vs[i][3], vs[i][0]:vs[i][2]]
             q, _ = question_image(view_img, local)
             r = ask(said, [], q, len(local))
-            if r and 1 <= int(r[0]) <= len(local) and float(r[1]) >= 0.7:
-                box = boxes[keep[int(r[0]) - 1]]
-                out[name] = str(save_ref(img, box, name, refs_dir, stem))
-                picks.append((said, ref_patch(img, box)))
-                break
+            if not r or not 1 <= int(r[0]) <= len(local) or float(r[1]) < 0.7:
+                continue
+            box = boxes[keep[int(r[0]) - 1]]
+            if any(geom.iou(box, b) >= 0.5 for b, _ in found):       # the same pick from an overlapping tile
+                continue
+            conf = float(r[1])
+            if is_a is not None:
+                patch, _ = question_image(view_img, [local[int(r[0]) - 1]], min_px=320, max_px=640, margin_px=60)
+                y = is_a(said, patch)
+                if not y or not y[0]:
+                    continue
+                conf = min(conf, float(y[1]))
+            found.append((box, conf))
+        if found:
+            box = max(found, key=lambda f: f[1])[0]
+            out[name] = str(save_ref(img, box, name, refs_dir, stem))
+            picks.append((said, ref_patch(img, box)))
     if sheet and picks:
         h = 240
         tiles_ = [cv2.putText(cv2.resize(pp, (round(pp.shape[1] * h / pp.shape[0]), h)), s_, (6, 22),
@@ -1181,7 +1223,8 @@ def main(argv: Optional[list] = None) -> int:
         ap.error("no Grok provider (XAI_API_KEY)")
     model = YOLOEProposer((cfg.get("proposals") or {}).get("yoloe")).model
     res = enroll_auto(img, a.names, yoloe_detect(model, c.imgsz, c.conf), ask, a.dir or c.refs_dir,
-                      Path(a.image).stem, cfg.get("display_names") or {}, c.tiles, a.sheet)
+                      Path(a.image).stem, cfg.get("display_names") or {}, c.tiles, a.sheet,
+                      is_a=grok_is_a(cfg, c.verify_timeout_s))
     for n, path in res.items():
         print(f"{n}: {path or 'NOT FOUND (enroll it with --box)'}")
     print(f"check the picks: {a.sheet}")
