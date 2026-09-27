@@ -141,4 +141,61 @@ final class MapLayoutTests: XCTestCase {
         calm.e = calm.e.filter { ["wallet", "box", "notebook"].contains($0.n) }
         XCTAssertEqual(MapLayout.legend(for: MapLayout.items(for: calm)), [])
     }
+
+    // MARK: the "You" marker
+
+    private func fitted(width: CGFloat = 394, showsYou: Bool) -> MapGeometry {
+        let size = CGSize(width: width, height: width / MapGeometry.aspectRatio(for: sample.tableSize, width: width, showsYou: showsYou))
+        return MapGeometry(table: sample.tableSize, size: size, showsYou: showsYou)
+    }
+
+    /// At the aspect ratio it asks for, the table fills the view but for its margins.
+    func testMarginsAndAspectAgree() {
+        for showsYou in [false, true] {
+            let geo = fitted(showsYou: showsYou)
+            let rect = geo.tableRect
+            XCTAssertEqual(rect.minX, MapGeometry.margin, accuracy: 0.001)
+            XCTAssertEqual(geo.size.width - rect.maxX, MapGeometry.margin, accuracy: 0.001)
+            XCTAssertEqual(rect.minY, MapGeometry.margin, accuracy: 0.001)
+            XCTAssertEqual(geo.size.height - rect.maxY, showsYou ? MapGeometry.youMargin : MapGeometry.margin, accuracy: 0.001)
+            XCTAssertEqual(rect.width / rect.height, 1.5, accuracy: 0.001)
+        }
+        XCTAssertLessThan(MapGeometry.aspectRatio(for: sample.tableSize, showsYou: true),
+                          MapGeometry.aspectRatio(for: sample.tableSize), "a little taller for the marker")
+    }
+
+    func testYouSitJustPastTheNearEdge() {
+        let geo = fitted(showsYou: true)
+        let rect = geo.tableRect
+        let you = geo.youPoint
+        XCTAssertEqual(you.x, rect.midX, accuracy: 0.001, "centred")
+        let top = you.y - MapGeometry.youHeight / 2
+        let bottom = you.y + MapGeometry.youHeight / 2
+        let arrowEnd = geo.exitPoint(from: CGPoint(x: rect.midX, y: rect.maxY - 10), through: .bottom)
+        XCTAssertGreaterThan(top, arrowEnd.y, "below the end of a 'left the table' arrow")
+        XCTAssertLessThanOrEqual(bottom, geo.size.height, "inside the view")
+    }
+
+    /// Where the view is taller than the table needs, the table stays centred between its margins.
+    func testTableStaysCentredInASpareView() {
+        let geo = MapGeometry(table: TablePoint(x: 90, y: 60), size: CGSize(width: 390, height: 500), showsYou: true)
+        let rect = geo.tableRect
+        XCTAssertEqual(rect.minY - MapGeometry.margin, geo.size.height - MapGeometry.youMargin - rect.maxY, accuracy: 0.001)
+        XCTAssertGreaterThan(geo.youPoint.y, rect.maxY)
+    }
+
+    /// The rig may report things in the band just past the tabletop; they stay on the map.
+    func testThingsPastTheEdgeStayOnTheTable() throws {
+        var s = sample
+        s.e.append(Entity(n: "mug", k: .target, s: .visible, xy: TablePoint(x: -8, y: 70), r: TablePoint(x: -8, y: 70)))
+        s.e.append(Entity(n: "tray", k: .container, s: .visible, xy: TablePoint(x: 96, y: -4), r: TablePoint(x: 96, y: -4)))
+        let geo = fitted(showsYou: true)
+        let points = MapLayout.placements(for: MapLayout.items(for: s), in: geo)
+        let rect = geo.tableRect
+        for name in ["mug", "tray"] {
+            let p = try XCTUnwrap(points[name])
+            XCTAssertTrue(rect.insetBy(dx: -0.5, dy: -0.5).contains(p), "\(name) at \(p) is on \(rect)")
+        }
+        XCTAssertTrue(rect.insetBy(dx: -0.5, dy: -0.5).contains(geo.pointOnTable(TablePoint(x: 200, y: -50))))
+    }
 }

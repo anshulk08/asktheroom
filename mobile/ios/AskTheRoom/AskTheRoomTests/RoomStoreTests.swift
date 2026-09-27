@@ -4,7 +4,9 @@ import XCTest
 @MainActor
 private final class FakeTransport: RoomTransport {
     var sent: [Question] = []
+    var orients: [OrientSettings] = []
     func send(_ question: Question) { sent.append(question) }
+    func send(orient: OrientSettings) { orients.append(orient) }
     func stop() {}
 }
 
@@ -22,6 +24,26 @@ final class RoomStoreTests: XCTestCase {
 
     private func answer(_ id: Int?, _ text: String = "Your keys are inside the box.") -> Answer {
         Answer(id: id, ok: true, text: text, point_at: "keys", action: "point", target: TablePoint(x: 70.4, y: 38.1))
+    }
+
+    private func sentOrients() -> [String] {
+        transport.orients.compactMap { $0.encoded() }.map { String(decoding: $0, as: UTF8.self) }
+    }
+
+    /// Helper settings' seat goes to the rig; going back to the default sends a reset; never
+    /// choosing sends nothing.
+    func testSeatAndResetAreSent() {
+        let defaults = UserDefaults.standard
+        let clear = { [Seat.savedKey, Seat.resetKey].forEach(defaults.removeObject(forKey:)) }
+        clear()
+        defer { clear() }
+        store.sendSeat()
+        XCTAssertEqual(sentOrients(), [])
+        Seat.choose(.right)
+        store.sendSeat()
+        Seat.choose(nil)
+        store.sendSeat()
+        XCTAssertEqual(sentOrients(), [#"{"orient":{"front":"right"}}"#, #"{"orient":{"front":null}}"#])
     }
 
     func testAskSendsAFreshID() {

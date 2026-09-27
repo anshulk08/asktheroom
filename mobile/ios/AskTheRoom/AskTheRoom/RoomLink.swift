@@ -77,6 +77,16 @@ final class RoomLink: NSObject, RoomTransport {
         peripheral.writeValue(data, for: characteristic, type: .withResponse)
     }
 
+    /// Where the person sits, written like the voice settings: raw JSON on the question
+    /// characteristic, no answer. The rig pushes a state with the new `view` instead.
+    /// Sent on every connect too, so a rig that restarted turns the map again; a reset to the
+    /// rig's default goes out on one connect only.
+    func send(orient: OrientSettings) {
+        guard let data = orient.encoded(), let peripheral, peripheral.state == .connected,
+              let characteristic = questionCharacteristic else { return }
+        peripheral.writeValue(data, for: characteristic, type: .withResponse)
+    }
+
     func stop() {
         stopped = true
         chooseTask?.cancel()
@@ -222,6 +232,7 @@ final class RoomLink: NSObject, RoomTransport {
         }
         store?.linkChanged(.connected)
         send(voice: Speaker.voiceSettings)
+        if let orient = Seat.orientForConnect() { send(orient: orient) }
         if let waiting { send(waiting) }
         watch(p)
     }

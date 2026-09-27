@@ -7,11 +7,14 @@ protocol RoomTransport: AnyObject {
     func send(_ question: Question)
     /// The helper's voice for the rig's speaker. Only the Bluetooth link carries it.
     func send(voice: VoiceSettings)
+    /// Where the person sits, so the rig turns the map to face them.
+    func send(orient: OrientSettings)
     func stop()
 }
 
 extension RoomTransport {
     func send(voice: VoiceSettings) {}
+    func send(orient: OrientSettings) {}
 }
 
 /// One question and, once it arrives, its answer.
@@ -261,6 +264,13 @@ final class RoomStore {
     /// Sends the helper's voice to the rig, after a change in helper settings.
     func sendVoiceSettings() {
         transport?.send(voice: Speaker.voiceSettings)
+    }
+
+    /// Tells the rig where the person sits, after a change in helper settings: the seat, or a
+    /// reset when they went back to the rig's default. Nothing if there's nothing to change.
+    func sendSeat() {
+        guard let orient = Seat.savedOrient else { return }
+        transport?.send(orient: orient)
     }
 
     func receive(status: RigStatus) {

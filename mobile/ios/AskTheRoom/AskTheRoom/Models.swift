@@ -47,6 +47,113 @@ enum Edge: String, Codable, CaseIterable {
     case left, right, top, bottom
 }
 
+/// A side of the table in the camera's frame, as the rig's calibration names it. Same four
+/// words as `Edge`, which in a snapshot with a `view` is already in the person's frame.
+typealias Side = Edge
+
+/// Which way the map faces (PROTOCOL.md, "view"). When a snapshot has one, its table size,
+/// positions, edges and answer targets are all in the person's frame: x runs their left to
+/// right, y far to near, and `bottom` is the side they sit at.
+struct ViewInfo: Codable, Equatable {
+    /// The camera-frame side of the table the person sits at.
+    var front: Side
+    /// The map is cropped to a real tabletop outline.
+    var outline: Bool
+    /// Names for camera sides, e.g. `right: "couch"`. Often empty.
+    var sides: [Side: String]
+
+    init(front: Side, outline: Bool = false, sides: [Side: String] = [:]) {
+        self.front = front
+        self.outline = outline
+        self.sides = sides
+    }
+
+    private enum CodingKeys: String, CodingKey { case f, o, s }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        // An unknown side reads as the camera's own, which is what an unturned map shows.
+        front = (try? c.decodeIfPresent(String.self, forKey: .f)).flatMap { Side(rawValue: $0) } ?? .bottom
+        outline = (try? c.decodeIfPresent(Bool.self, forKey: .o)) ?? false
+        let raw = (try? c.decodeIfPresent([String: String].self, forKey: .s)) ?? [:]
+        sides = Dictionary(uniqueKeysWithValues: raw.compactMap { key, name in
+            Side(rawValue: key).map { ($0, name) }
+        })
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(front.rawValue, forKey: .f)
+        try c.encode(outline, forKey: .o)
+        try c.encode(Dictionary(uniqueKeysWithValues: sides.map { ($0.key.rawValue, $0.value) }), forKey: .s)
+    }
+
+    /// Where a camera side shows on this map.
+    func viewerEdge(of side: Side) -> Edge { Seat.viewerEdge(of: side, front: front) }
+
+    /// The camera side drawn at a map edge.
+    func cameraSide(at edge: Edge) -> Side { Seat.cameraSide(at: edge, front: front) }
+
+    /// The rig's name for the side at a map edge ("couch"), if it has one.
+    func name(at edge: Edge) -> String? {
+        sides[cameraSide(at: edge)].flatMap { $0.isEmpty ? nil : $0 }
+    }
+}
+
+/// Turning between the camera's sides and the person's map edges. The rig turns camera
+/// coordinates so the side the person sits at (`front`) is the map's bottom; this is the
+/// same table, so the phone can say which camera side a tapped edge is.
+enum Seat {
+    /// Clockwise, as seen from above.
+    private static let clockwise: [Edge] = [.top, .right, .bottom, .left]
+
+    /// Quarter turns clockwise that bring `front` to the bottom.
+    private static func turns(for front: Side) -> Int {
+        (2 - clockwise.firstIndex(of: front)! + 4) % 4
+    }
+
+    /// The map edge a camera side lands on when the person sits at `front`.
+    static func viewerEdge(of side: Side, front: Side) -> Edge {
+        clockwise[(clockwise.firstIndex(of: side)! + turns(for: front)) % 4]
+    }
+
+    /// The camera side at a map edge when the person sits at `front`.
+    static func cameraSide(at edge: Edge, front: Side) -> Side {
+        clockwise[(clockwise.firstIndex(of: edge)! - turns(for: front) + 4) % 4]
+    }
+
+    /// Where helper settings keep the chosen seat: a camera side, or nothing for the rig's default.
+    static let savedKey = "seatFront"
+    /// Set when the person goes back to the rig's default, until the reset has gone out on a connect.
+    static let resetKey = "seatReset"
+
+    static var saved: Side? {
+        UserDefaults.standard.string(forKey: savedKey).flatMap(Side.init(rawValue:))
+    }
+
+    /// Chooses a seat, or nil for the rig's default. Going back to the default owes the rig one
+    /// reset, sent now and again on the next connect in case this one didn't reach it.
+    static func choose(_ side: Side?) {
+        let defaults = UserDefaults.standard
+        defaults.set(side?.rawValue ?? "", forKey: savedKey)
+        defaults.set(side == nil, forKey: resetKey)
+    }
+
+    /// What to write after a change: the seat, a reset if one is owed, or nothing.
+    static var savedOrient: OrientSettings? {
+        if let saved { return OrientSettings(front: saved) }
+        return UserDefaults.standard.bool(forKey: resetKey) ? .reset : nil
+    }
+
+    /// What to write on connect. A reset goes out on one connect only; after that the rig
+    /// already uses its default and nothing is sent.
+    static func orientForConnect() -> OrientSettings? {
+        let orient = savedOrient
+        if orient == .reset { UserDefaults.standard.set(false, forKey: resetKey) }
+        return orient
+    }
+}
+
 /// "Possibly the same as": an unconfirmed link to an older thing, sent as `[name, score]`.
 struct MaybeSame: Codable, Equatable, Hashable {
     var name: String
@@ -187,6 +294,9 @@ struct Snapshot: Codable, Equatable {
     var online: Bool?
     var laser: LaserState?
     var e: [Entity]
+    /// Present when the rig has turned the map to the person's frame. Missing from older rigs,
+    /// whose maps are in the camera's frame.
+    var view: ViewInfo?
 
     var entities: [Entity] { e }
     var tableSize: TablePoint { table ?? Self.defaultTable }
@@ -285,6 +395,47 @@ struct VoiceSettings: Codable, Equatable {
     var voice: Choice
 
     /// The JSON to write to the question characteristic, or nil if it can't fit one write.
+    func encoded() -> Data? {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        guard let data = try? encoder.encode(self), data.count <= Question.maxBytes else { return nil }
+        return data
+    }
+}
+
+/// Where the person sits, sent to the rig so it turns the map to face them. `front` is a
+/// camera side, or null to go back to the rig's configured seat. No answer comes back; the
+/// next state has the new `view`.
+struct OrientSettings: Codable, Equatable {
+    struct Orient: Codable, Equatable {
+        var front: String?
+
+        private enum CodingKeys: String, CodingKey { case front }
+
+        // Written out so a reset sends `"front":null`; the synthesized one would leave it out.
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            if let front {
+                try c.encode(front, forKey: .front)
+            } else {
+                try c.encodeNil(forKey: .front)
+            }
+        }
+    }
+
+    var orient: Orient
+
+    init(front: Side?) {
+        orient = Orient(front: front?.rawValue)
+    }
+
+    /// Back to the rig's configured seat; the rig forgets the saved one.
+    static let reset = OrientSettings(front: nil)
+
+    /// Nil for a reset (or a side this app doesn't know).
+    var front: Side? { orient.front.flatMap(Side.init(rawValue:)) }
+
+    /// The JSON to write to the question characteristic, like `VoiceSettings`.
     func encoded() -> Data? {
         let encoder = JSONEncoder()
         encoder.outputFormatting = .sortedKeys

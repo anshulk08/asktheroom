@@ -41,11 +41,16 @@ struct TableMapView: View {
     var body: some View {
         let items = MapLayout.items(for: snapshot)
         GeometryReader { proxy in
-            let geo = MapGeometry(table: snapshot.tableSize, size: proxy.size)
+            let geo = MapGeometry(table: snapshot.tableSize, size: proxy.size, showsYou: showsYou)
             let places = MapLayout.placements(for: items, in: geo)
 
             ZStack {
                 TableSurface(geo: geo)
+
+                if showsYou {
+                    YouMarker()
+                        .position(geo.youPoint)
+                }
 
                 ForEach(items.filter { $0.exitEdge != nil }) { item in
                     let from = places[item.id] ?? .zero
@@ -86,7 +91,7 @@ struct TableMapView: View {
             .animation(reduceMotion ? nil : .spring(duration: 0.3, bounce: 0.3), value: selected)
         }
         .sensoryFeedback(.selection, trigger: selected)
-        .aspectRatio(MapGeometry.aspectRatio(for: snapshot.tableSize), contentMode: .fit)
+        .aspectRatio(MapGeometry.aspectRatio(for: snapshot.tableSize, showsYou: showsYou), contentMode: .fit)
         .dynamicTypeSize(...DynamicTypeSize.xLarge)
         .saturation(greyed ? 0 : 1)
         .opacity(greyed ? 0.45 : 1)
@@ -94,9 +99,12 @@ struct TableMapView: View {
         .accessibilityLabel("Table map")
     }
 
+    /// Only a rig that turns the map to the person's frame (it sends a `view`) puts them at the bottom.
+    private var showsYou: Bool { snapshot.view != nil }
+
     private func highlightPoint(_ h: Highlight, places: [String: CGPoint], geo: MapGeometry) -> CGPoint? {
         if let name = h.entity, let p = places[name] { return p }
-        return h.target.map(geo.point)
+        return h.target.map(geo.pointOnTable)
     }
 }
 
@@ -197,6 +205,23 @@ private struct MapItemView: View {
         .frame(minWidth: 44, minHeight: d + MapLayout.pinLabelHeight, alignment: .top)
         .opacity(item.opacity)
         .contentShape(Rectangle())
+    }
+}
+
+/// Where the person sits: just past the near edge, since the map is turned to face them.
+private struct YouMarker: View {
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: "person.fill")
+                .font(.system(size: 11, weight: .semibold))
+            Text("You")
+                .font(.caption.weight(.semibold))
+        }
+        .foregroundStyle(.secondary)
+        .fixedSize()
+        .frame(height: MapGeometry.youHeight)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("You, at the near edge of the table")
     }
 }
 
