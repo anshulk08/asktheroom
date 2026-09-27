@@ -531,6 +531,10 @@ def answer(intent: Intent, world, events, cfg: Optional[dict] = None,
         if guessed:
             ans = _guessed_answer(k, intent, guessed, world, events, cfg, now, describe)
             obj = guessed[0]
+            from core.things import norm_name     # the receipt says what the person asked for, as the answer does
+            said = norm_name(intent.name or intent.obj)
+            if said:
+                cfg = {**cfg, "display_names": {**(cfg.get("display_names") or {}), obj: said}}
         elif k == "WHERE":
             ans = _maybe_back(obj, _where(obj, world, events, cfg, now, describe), world, cfg)
         elif k == "HISTORY":

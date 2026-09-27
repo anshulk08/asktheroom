@@ -503,3 +503,15 @@ def test_no_object_is_never_asked_again(scene, world, reply):
         scene.run(world, 0.5)
         namer.step()
     assert len(grok.calls) == 1 and namer.guess("thing:1") is None
+
+
+def test_a_guessed_answer_receipt_uses_the_asked_for_name(scene, world):
+    """Rig 27 Sep 04:34: 'Your remote, I think, is on the table…' came with the caption 'Your thing that looks
+    like a remote control, first seen…'; the receipt now says 'Your remote' like the answer."""
+    namer, _, _ = make(world)
+    put(scene, world, "deo", (40, 30))
+    namer.step()
+    world.events.flush()
+    a = ask(world, "where is my deodorant")
+    assert a.text.startswith("Your deodorant, I think,"), a.text
+    assert a.evidence and a.evidence[0]["caption"].startswith("Your deodorant, "), a.evidence
