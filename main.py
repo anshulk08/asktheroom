@@ -156,7 +156,7 @@ class Room:
         self._cues = 0
         self.stop_ev = threading.Event()
         self._acted = threading.local()            # .kind: RESET / RECAL if the router answered one
-        self._clear_ev = threading.Event()         # RESET: the perception thread resets proposals + crops
+        self._clear_ev = threading.Event()         # RESET: the perception thread resets proposals, crops, room memory
         self._cal_warned = False
         self._aim_lock = threading.Lock()
         self._aim_gen = 0
@@ -408,6 +408,11 @@ class Room:
         if self._clear_ev.is_set():        # here, not in ask: the proposer isn't thread-safe
             self._clear_ev.clear()
             self.detector.reset_proposals()
+            if self.room_memory is not None:   # same thread as its step: never concurrent with a visit
+                try:
+                    self.room_memory.reset()
+                except Exception:              # the room must never cost the table
+                    log.exception("room memory reset failed; table perception goes on")
         dets = self.detector.detect(frame)
         dets.hands = self.hands.update(dets.hands, dets.t)
         if self.room_enabled:

@@ -124,6 +124,15 @@ Today: couch 8-10 s, side table/counter 20-24 s. Target: <= 8 s everywhere. Leve
    confirmed, before the round-robin comes back.
 Done when: the 5-run check reports every handoff <= 8 s. Fallback: script the demo on the couch.
 
+Built Sat night (branch `p03-speed`, unit-tested in `tests/test_room_speed.py`, not yet measured on the rig):
+`room_every_n_hot` (1: a zone every frame while `room_handoff_hints()` is non-empty), `confirm_visits_arrival`
+(1: a track whose spot changed confirms on its first visit; static keeps 2), `names_per_minute` 60, verification
+jobs ahead of open naming and only arrivals sent to Grok while a handoff is open, and `RoomNamer.on_named`: the
+World decides the track the moment its name lands (a one-track visit of its zone), not on the zone's next visit.
+The verify call already runs at `reasoning_effort: none` (the auto-namer's provider is built from
+`visual_memory`). Rig to-do: measure fps with a handoff open (hot mode is one more prop + YOLOE pass per frame)
+and re-run the 5-run check.
+
 ### P0-4 Decoy and reset (est. 45 min)
 
 - **Decoy:** a second remote-like object already on the couch; carry the remote to the side table; ask.
