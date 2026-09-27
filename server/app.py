@@ -213,7 +213,8 @@ def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = 
             app.state.answer_seq += 1
             app.state.answers.append({"seq": app.state.answer_seq, "t": time.time(), "src": source,
                                       "q": question, "text": ans.text, "point_at": ans.point_at,
-                                      "action": ans.action, "evidence": list(getattr(ans, "evidence", None) or [])})
+                                      "action": ans.action, "obj": getattr(ans, "obj", None) or ans.point_at,
+                                      "evidence": list(getattr(ans, "evidence", None) or [])})
 
     app.state.record_answer = record_answer
     placeholder_img = overlay.placeholder()
@@ -450,7 +451,7 @@ def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = 
         ms = int((time.perf_counter() - t0) * 1000)
         app.state.last_answer = {"question": text, "text": ans.text, "point_at": ans.point_at,
                                  "action": ans.action, "latency_ms": ms, "source": source,
-                                 "t": time.time(), "evidence": list(ans.evidence or [])}
+                                 "t": time.time(), "obj": ans.obj or ans.point_at, "evidence": list(ans.evidence or [])}
         record_answer(text, ans, source)
         return ans, ms
 
@@ -466,7 +467,7 @@ def create_app(cfg: dict, world, events, frames=None, ask_fn: Optional[AskFn] = 
         source = body.get("source") if body.get("source") in ASK_SOURCES else "dashboard"
         ans, ms = await run_ask(text[:500], source, ASK_TIMEOUT_S)
         return JSONResponse({"text": ans.text, "point_at": ans.point_at, "action": ans.action,
-                             "latency_ms": ms, "evidence": list(ans.evidence or [])})
+                             "latency_ms": ms, "obj": ans.obj or ans.point_at, "evidence": list(ans.evidence or [])})
 
     # -- sms (Twilio)
     def _public_urls(request: Request) -> list[str]:

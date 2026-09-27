@@ -549,6 +549,7 @@ def answer(intent: Intent, world, events, cfg: Optional[dict] = None,
 
 def _with_proof(ans: Answer, k: str, obj: str, world, events, cfg: dict, now: float) -> Answer:
     """ans with its evidence (core/evidence.py): the moment behind the answer. Never costs the answer."""
+    ans.obj = ans.obj or obj
     try:
         ans.evidence = evidence.trim(_proof(k, obj, world, events, cfg, now))
     except Exception:
@@ -568,8 +569,8 @@ def _proof(k: str, obj: str, world, events, cfg: dict, now: float) -> list:
             place = world.place(obj, now) if hasattr(world, "place") else None
         except Exception:
             place = None
-        if place is not None and place.kind == "room":
-            ev = evidence.with_snapshot(events, obj, ["FOUND"])
+        if place is not None and place.kind == "room":        # its arrival: the FOUND nearest arrived_wall
+            ev = evidence.nearest(events, obj, ["FOUND"], place.arrived_wall)
             if ev is None:
                 return []
             rc = cfg.get("room_memory") or {}

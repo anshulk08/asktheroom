@@ -134,6 +134,7 @@ class Answer:
     # the proof pictures behind the answer (core/evidence.py): [{kind, snapshot_url, t, caption, box, ...}];
     # not part of equality, so an answer is the same answer with or without its pictures
     evidence: list = field(default_factory=list, compare=False)
+    obj: Optional[str] = field(default=None, compare=False)   # the entity the answer is about, room ones included
 
 
 def entity_json(e: Entity, resolved_cm: Optional[Point]) -> dict:

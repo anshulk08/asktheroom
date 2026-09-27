@@ -7,6 +7,8 @@ there), for the demo page and the phone. Answer.evidence is a list of items, mos
      "t": wall time the picture was taken, "caption": "Your keys, on the couch at 1:42 PM",
      "box": [x1, y1, x2, y2] | None,       # the object, in the snapshot image's own pixels
      "size": [w, h] | None,                # that image's size, to scale the box to a displayed <img>
+     "box_px": [x1, y1, x2, y2] | None,    # the same box in the camera's full-frame px (room places)
+     "clock": "1:42 PM",                   # t as the rig's own clock says it
      "obj": entity | None, "type": event type | None}
 
 Sources: a logged event's snapshot (EventLog: the table view for table events, the zone crop for room ones,
@@ -26,7 +28,7 @@ log = logging.getLogger(__name__)
 
 MAX_ITEMS = 3
 # what /snapshots serves: a plain file in the snapshot dir, or an archive frame
-SNAP_REL_RE = re.compile(r"^(?:archive/\d{8}-\d{2}/)?[A-Za-z0-9][A-Za-z0-9._-]*\.(?:jpg|jpeg|png)$")
+SNAP_REL_RE = re.compile(r"^(?:archive/\d{8}-\d{2}/)?[A-Za-z0-9][A-Za-z0-9._:-]*\.(?:jpg|jpeg|png)$")   # thing:N
 
 # The event that put an object where it is, by its status (WHERE); any logged event as a last resort.
 PLACED = ["PUT_BACK", "MOVED", "APPEARED", "FOUND", "CORRECTED", "TAKEN_OUT", "UNCOVERED"]
@@ -88,7 +90,9 @@ def item(kind: str, path: Optional[str], t: float, caption: str, snap_dir: Optio
         x1, y1, x2, y2 = (float(v) for v in box)
         out_box = [round(x1 * sx), round(y1 * sy), round(x2 * sx), round(y2 * sy)]
     return {"kind": kind, "snapshot_url": url, "closeup_url": snapshot_url(closeup, snap_dir), "t": round(t, 3),
-            "caption": caption, "box": out_box, "size": list(size) if out_box is not None else None,
+            "clock": clock(t), "caption": caption, "box": out_box,
+            "size": list(size) if out_box is not None else None,
+            "box_px": [round(float(v)) for v in box] if box is not None and box_space else None,
             "obj": obj, "type": type_}
 
 
@@ -123,6 +127,17 @@ def with_snapshot(events, obj: str, types: Optional[Iterable[str]] = None, n: in
         return None
     want = set(types) if types else None
     return next((e for e in evs if e.snapshot and (want is None or str(e.type) in want)), None)
+
+
+def nearest(events, obj: str, types: Iterable[str], wall: Optional[float], n: int = 50):
+    """The logged event of obj (of these types, with a snapshot) closest in time to wall (None: the newest)."""
+    try:
+        evs = [e for e in events.last(obj, n) if e.snapshot and str(e.type) in set(types)]
+    except Exception:
+        return None
+    if not evs:
+        return None
+    return evs[0] if wall is None else min(evs, key=lambda e: abs(e.wall - wall))
 
 
 def trim(items: Iterable[Optional[dict]]) -> list[dict]:

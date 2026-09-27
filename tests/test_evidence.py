@@ -185,13 +185,36 @@ def test_ask_last_answer_answers_and_archive_snapshots(tmp_path):
     item = {"kind": "recall", "snapshot_url": "/snapshots/archive/20260926-23/17.jpg", "t": NOW,
             "caption": "Saved picture", "box": None, "size": None, "closeup_url": None, "obj": None, "type": None}
     cfg = {**CFG, "paths": dict(CFG["paths"], viewer=str(tmp_path / "viewer.json"))}
-    app = create_app(cfg, demo_world(lg), lg, ask_fn=lambda text, src: Answer("There.", evidence=[item]))
+    app = create_app(cfg, demo_world(lg), lg, ask_fn=lambda text, src: Answer("There.", evidence=[item], obj="keys"))
     with TestClient(app) as c:
         r = c.post("/ask", json={"text": "where?"}).json()
-        assert r["evidence"] == [item]
+        assert r["evidence"] == [item] and r["obj"] == "keys"
         st = c.get("/state").json()
         assert st["last_answer"]["evidence"] == [item] and st["answers"][-1]["evidence"] == [item]
+        assert st["last_answer"]["obj"] == "keys" and st["answers"][-1]["obj"] == "keys"
         assert c.get(item["snapshot_url"]).status_code == 200
         assert c.get("/snapshots/archive/20260926-23/../../e.db").status_code in (400, 404)
         assert c.get("/snapshots/archive/x/17.jpg").status_code == 400
     lg.close()
+
+
+def test_a_room_place_cites_the_arrival_nearest_its_arrival_time_with_camera_px(log):
+    full = np.full((1440, 2560, 3), 40, np.uint8)
+    crop = np.full((30, 40, 3), 200, np.uint8)
+    first = logged(log, "keys", "FOUND", NOW - 900, fr=Frame(0.0, NOW - 900, crop, -1), context=full)
+    logged(log, "keys", "FOUND", NOW - 60, fr=Frame(0.0, NOW - 60, crop, -1), context=full)   # a re-find later
+    log.flush()
+    w = FakeWorld([Entity("keys", "target", Status.VISIBLE)], log)
+    w.set_place("keys", Place(kind="room", zone="couch", say="the couch", status=Status.VISIBLE, chain=["keys"],
+                              via="keys", box_px=(1000, 1100, 1100, 1180), observed_directly=True, fresh=True,
+                              arrived_wall=NOW - 890, last_seen_wall=NOW - 5, arrival_observed=True))
+    cfg = {**CFG, "room_memory": {**(CFG.get("room_memory") or {}), "capture_size": [2560, 1440]}}
+    a = answer(Intent("WHERE", "keys", ""), w, log, cfg, now=NOW)
+    [e] = a.evidence
+    assert e["t"] == round(first.wall, 3) and e["clock"] == clock(first.wall)
+    assert e["box_px"] == [1000, 1100, 1100, 1180] and e["box"] == [500, 550, 550, 590]
+    assert a.obj == "keys" and a.point_at is None                      # room answers never aim, but say what
+
+
+def test_thing_snapshots_have_urls():
+    assert evidence.snapshot_url("/s/1_thing:52_APPEARED.jpg", "/s") == "/snapshots/1_thing:52_APPEARED.jpg"

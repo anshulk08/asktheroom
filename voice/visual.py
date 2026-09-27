@@ -1101,6 +1101,7 @@ class VisualQA:
         k = intent.kind
         t = normalize(text)
         past = bool(PAST.search(t))
+        target = None
         if k == "OTHER":
             about_room = self._about_room(t)
             if not about_room and not self._about_table(intent, t):
@@ -1148,7 +1149,9 @@ class VisualQA:
         if how == "pick":
             return self.pick(text, said[0])
         if how == "room":
-            return self.look_room(text)
+            a = self.look_room(text)
+            a.obj = target                  # a known object looked for in the room (None for other questions)
+            return a
         return self.look(text, intent) if how == "look" else self.recall(text)
 
     def _sighting(self, ent: Optional[str] = None, said: Optional[str] = None) -> Optional[Answer]:
