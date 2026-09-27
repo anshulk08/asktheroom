@@ -130,6 +130,22 @@ def test_snapshots_rejects_traversal(env, path):
     assert "secret" not in r.text or r.status_code != 200
 
 
+def test_a_thing_snapshot_with_a_colon_in_its_name_is_served(env):
+    ev = Event(t=1.0, wall=time.time(), obj="thing:5210", type="APPEARED")
+    env["events"].add(ev, Frame(t=1.0, wall=ev.wall, img=np.full((20, 30, 3), 90, np.uint8), idx=1))
+    env["events"].flush()
+    [e] = [e for e in env["client"].get("/events", params={"since": ev.wall - 1}).json() if e["obj"] == "thing:5210"]
+    assert e["snapshot_url"].endswith("_thing:5210_APPEARED.jpg")
+    r = env["client"].get(e["snapshot_url"])
+    assert r.status_code == 200 and r.headers["content-type"] == "image/jpeg"
+
+
+@pytest.mark.parametrize("path", ["/snapshots/thing:1%2F..%2Fsecret.txt", "/snapshots/a:..:b.jpg"])
+def test_colons_open_no_way_out_of_the_snapshot_dir(env, path):
+    r = env["client"].get(path)
+    assert r.status_code in (400, 404)
+
+
 def test_ask_returns_answer(env):
     r = env["client"].post("/ask", json={"text": "where are my keys?"})
     assert r.status_code == 200
