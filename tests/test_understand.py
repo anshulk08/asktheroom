@@ -433,3 +433,55 @@ def test_an_overheard_teaching_sentence_after_the_wake_word_teaches():
     i = u("room, this is my wife's scarf", overheard=True)
     assert (i.kind, i.name) == ("TEACH", "wifes scarf")
     assert u("room, this is my wife Karen", overheard=True).kind == "TEACH"   # asked by wake word: the rig answers
+
+
+# -- the room demo (spec 0010)
+
+@pytest.mark.parametrize("text", ["let's reset the room", "can we reset the room after this one", "reset room b",
+                                  "the room needs a reset", "so recalibrate the room camera"])
+def test_overheard_reset_needs_the_wake_word_to_open_the_sentence(text):
+    """A room demo says 'room' all the time: the word anywhere must not unlock RESET / RECAL."""
+    u = Understander(dict(CFG, understand={"enabled": False}))
+    assert u(text, overheard=True).kind not in ("RESET", "RECAL"), text
+
+
+@pytest.mark.parametrize("text, kind", [("room, reset", "RESET"), ("okay room reset everything", "RESET"),
+                                        ("room, recalibrate", "RECAL")])
+def test_overheard_reset_with_the_wake_word_first_still_acts(text, kind):
+    u = Understander(dict(CFG, understand={"enabled": False}))
+    assert u(text, overheard=True).kind == kind
+
+
+def test_a_distinctive_wake_phrase_ignores_room_in_chatter():
+    cfg = dict(CFG, understand={"enabled": False}, listen=dict(CFG["listen"], wake_words=["ask the room", "askroom"]))
+    u = Understander(cfg)
+    assert u("the living room looks great, reset it", overheard=True).kind == IGNORE
+    assert u("ask the room, reset", overheard=True).kind == "RESET"
+    assert u("hey askroom, where's the couch", overheard=True).kind == "OTHER"      # woke: for the rig
+    assert u("where's the couch", overheard=True).kind == IGNORE
+
+
+def test_overheard_place_follow_up_while_a_turn_is_live():
+    live = {"on": True}
+    u = Understander(dict(CFG, understand={"enabled": False}), followup=lambda: live["on"])
+    assert u("is it on the counter?", overheard=True).kind == "WHERE"
+    live["on"] = False
+    u._last = None
+    assert u("is it on the counter?", overheard=True).kind == IGNORE
+    assert u("where's the couch", overheard=True).kind == IGNORE
+
+
+ROOM_DEMO_WAKE = ["ask the room", "askroom", "ask room"]
+
+
+@pytest.mark.parametrize("text", [
+    "where's the kitchen", "is the couch comfy", "let's sit on the couch", "put it on the counter",
+    "where did you get that side table", "show me the living room", "the remote car was so cool",
+    "is that the kitchen counter", "where do these chairs go", "is this room b",
+])
+def test_room_chatter_is_ignored(text):
+    """With the room demo's wake phrase (config.local.yaml.example): the default 'room' is in half of these."""
+    cfg = dict(CFG, listen=dict(CFG["listen"], wake_words=ROOM_DEMO_WAKE))
+    rules = Understander(dict(cfg, understand={"enabled": False}))
+    grok = Understander(cfg, model=OtherGrok())
+    assert rules(text, overheard=True).kind == IGNORE and grok(text, overheard=True).kind == IGNORE, text

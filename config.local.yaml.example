@@ -14,3 +14,16 @@ actuator: pca9685            # the committed default is fake, which never moves 
 # room_memory:
 #   enabled: true
 #   table_view_rect: [x1, y1, x2, y2]
+
+# The room demo (spec 0010): 'room' is said all the time in a room demo, so use a wake phrase nobody says by
+# accident. Overheard RESET / RECAL also need it to open the sentence ("ask the room, reset"). Whisper writes
+# the phrase several ways; list them. hold_notices: nothing speaks unasked while judges are at the rig.
+# listen:
+#   wake_words: [ask the room, askroom, ask room]
+# demo:
+#   hold_notices: true
+# Mic and speaker at chest height near the judge (docs/runbooks/room-voice.md), by part of the device name:
+# stt:
+#   input_device: "USB PnP"
+# tts:
+#   output_device: "USB Audio"

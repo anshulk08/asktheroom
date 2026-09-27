@@ -42,8 +42,8 @@ Overheard: decide "was that for me?" without the model, then read it like an ask
     "show", after fillers like "okay so"). "I'll grab my keys on the way out" and "put the wallet
     in the box" aren't -> IGNORE.
   - Then the asked path (rules, then Qwen). Two more guards, because a wrong answer to people
-    talking to each other breaks the illusion more than silence: RESET/RECAL need the wake word
-    ("let's reset after this" must not wipe the world), and OTHER needs the wake word or an
+    talking to each other breaks the illusion more than silence: RESET/RECAL need the utterance to
+    open with the wake word ("room, reset"; "let's reset the room" must not wipe the world), and OTHER needs the wake word or an
     object ("where are you guys from" is for the team, "what's in the box" is for the rig), and so
     does a WHERE with nothing to look for. screen() makes every check that needs no model, so the
     voice loop can drop chatter before starting its thinking cue.
@@ -136,6 +136,17 @@ def gate(text: str, cfg: dict) -> bool:
     """Cheap first check for overheard speech: an object (or synonym), a command word or the wake word."""
     return bool(names_object(text, cfg) or COMMAND_WORDS & set(normalize(text).split())
                 or has_wake_word(text, cfg))
+
+
+def opens_with_wake_word(text: str, cfg: dict) -> bool:
+    """The wake word starts the utterance, after fillers ("okay room, reset"). Overheard RESET / RECAL need
+    this: "let's reset the room" and "room b reset their laptops" name the wake word, but aren't said to the
+    rig, and a room demo is full of the word."""
+    t = normalize(text).split()
+    while t and t[0] in FILLERS:
+        t.pop(0)
+    t = " ".join(t) + " "
+    return any(t.startswith(w + " ") for w in wake_words(cfg) if w)
 
 
 def addressed(text: str, cfg: dict) -> bool:
@@ -404,10 +415,10 @@ class Understander:
             # (idioms like "call it a day" don't), and it has no question opening or known object for the
             # gate; "this is my wife Karen" introduces a person
             return woke or not names_a_person(rules.name, text)
-        if (not text.strip() or not gate(text, self.cfg) or not addressed(text, self.cfg)
-                or (self.wake_only and not woke)):
+        if (not text.strip() or not (gate(text, self.cfg) or self._followup(text, rules))
+                or not addressed(text, self.cfg) or (self.wake_only and not woke)):
             return False
-        if rules.kind in ACTS and not woke:    # "let's reset after this"
+        if rules.kind in ACTS and not opens_with_wake_word(text, self.cfg):   # "let's reset the room"
             return False
         if woke or rules.obj is not None:      # a configured object (or a taught name, or one it sounds like)
             return True
@@ -435,7 +446,7 @@ class Understander:
         i = self._interpret(text, veto=not woke)
         if i.kind == "TEACH":
             return i
-        if i.kind in ACTS and not woke:
+        if i.kind in ACTS and not opens_with_wake_word(text, self.cfg):
             return ignore
         if i.kind in ("OTHER", "WHERE") and not (woke or i.obj or i.name or names_object(text, self.cfg)):
             return ignore
